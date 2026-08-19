@@ -1,0 +1,154 @@
+# =============================================================================
+# Forward Testing Simulator — Slippage Configuration
+# =============================================================================
+#
+# Loaded by backtest.simulator.slippage.load_slippage_config().
+#
+#   from backtest.simulator import SlippageCalculator
+#   calc = SlippageCalculator.from_config()                  # active_profile
+#   calc = SlippageCalculator.from_config(profile="pessimistic")
+#
+# Defaults target NSE large caps. Every number below is a modelling choice,
+# not a fact — re-estimate them against your own fill data once you have some.
+# =============================================================================
+
+active_profile: realistic
+
+
+# -----------------------------------------------------------------------------
+# Shared settings. Profiles override individual keys.
+# -----------------------------------------------------------------------------
+default:
+
+  # ---- Session (NSE) ----
+  # Slippage is scaled by time of day. Store/compare in this timezone; the
+  # engine works in UTC and converts.
+  session_open: "09:15"
+  session_close: "15:30"
+  session_timezone: "Asia/Kolkata"
+
+  # The intraday U-shape: spreads and volatility are widest in the first and
+  # last half hour. The open is worse than the close because price discovery
+  # after an overnight gap is genuinely expensive.
+  open_window_minutes: 30
+  open_multiplier: 2.0
+  close_window_minutes: 30
+  close_multiplier: 1.5
+
+  # ---- Liquidity tiers ----
+  # Multiplier applied to the base estimate. Roughly: a small cap costs about
+  # 2.5x a large cap to trade, an illiquid name far more.
+  tier_multipliers:
+    large_cap: 1.0
+    mid_cap: 1.5
+    small_cap: 2.5
+    illiquid: 5.0
+
+  default_tier: large_cap
+
+  # Map symbols to tiers. Anything unlisted uses default_tier.
+  symbol_tiers:
+    RELIANCE: large_cap
+    TCS: large_cap
+    INFY: large_cap
+    HDFCBANK: large_cap
+    ICICIBANK: large_cap
+    SBIN: large_cap
+    ITC: large_cap
+    LT: large_cap
+    WIPRO: mid_cap
+    TATAMOTORS: mid_cap
+    ADANIENT: mid_cap
+
+  # Per-symbol multiplier applied last, for names you know behave badly.
+  # Leave empty until your own fill data justifies an entry.
+  symbol_overrides: {}
+
+  # Absolute safety ceiling. A 10% haircut is almost certainly a bug, not a
+  # market condition — better to clamp and investigate than to silently book
+  # a catastrophic fill.
+  max_bps: 1000
+
+
+# -----------------------------------------------------------------------------
+# Profiles
+# -----------------------------------------------------------------------------
+profiles:
+
+  # No slippage. The baseline for measuring what execution actually costs:
+  # run a strategy with this and with `realistic`, and the difference is the
+  # execution drag your backtest was hiding.
+  backtest:
+    model:
+      model: zero
+    open_multiplier: 1.0
+    close_multiplier: 1.0
+    tier_multipliers:
+      large_cap: 1.0
+      mid_cap: 1.0
+      small_cap: 1.0
+      illiquid: 1.0
+
+  # Flat 5 bps. Crude but predictable — useful when you want one number you
+  # can reason about, or when your data has no quotes at all.
+  simple:
+    model:
+      model: fixed
+      bps: 5
+
+  # The default. Spread + market impact + volatility, all three of which are
+  # separate real costs that add rather than substitute.
+  realistic:
+    model:
+      model: hybrid
+      # Crossing from mid costs half the spread; above 0.5 models queue
+      # losses and quote fade.
+      spread:
+        spread_fraction: 0.5
+        # Daily bars carry no quotes. Falling back to zero would make
+        # execution look free, so charge a floor instead.
+        fallback_bps: 5
+      # Square-root law: cost of consuming a full day's volume, in bps.
+      # 100 => 1% participation costs ~10 bps, 25% costs ~50 bps.
+      volume:
+        coefficient_bps: 100
+        max_participation: 1.0
+      # Charge 10% of one ATR unit, scaled up with participation.
+      volatility:
+        atr_fraction: 0.1
+        size_scaling: true
+      spread_weight: 1.0
+      volume_weight: 1.0
+      volatility_weight: 1.0
+      # Never report a completely free fill.
+      floor_bps: 1
+      cap_bps: 500
+
+  # Stress case. Use this to check a strategy's edge survives bad execution —
+  # if it only works at `realistic`, the margin is too thin to trade.
+  pessimistic:
+    model:
+      model: hybrid
+      spread:
+        spread_fraction: 1.0
+        fallback_bps: 15
+      volume:
+        coefficient_bps: 200
+        max_participation: 1.0
+      volatility:
+        atr_fraction: 0.25
+        size_scaling: true
+      floor_bps: 5
+      cap_bps: 1000
+    open_multiplier: 3.0
+    close_multiplier: 2.0
+
+  # Best case: tight spreads, no impact. Not realistic — an upper bound on
+  # what a strategy could earn, useful only as a sanity bracket.
+  optimistic:
+    model:
+      model: spread
+      spread_fraction: 0.25
+      fallback_bps: 1
+    open_multiplier: 1.2
+    close_multiplier: 1.1
