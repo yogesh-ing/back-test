@@ -52,7 +52,24 @@ from backtest.simulator.portfolio import (
     PortfolioStatus,
     PositionCheck,
 )
+from backtest.simulator.enums import (
+    TERMINAL_STATUSES,
+    VALID_TRANSITIONS,
+    WORKING_STATUSES,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TimeInForce,
+)
 from backtest.simulator.lots import CostBasisMethod, Lot, LotBook, LotConsumption
+from backtest.simulator.order import (
+    FillLike,
+    InvalidTransitionError,
+    Order,
+    OrderEvent,
+    OrderValidationError,
+    StatusChange,
+)
 from backtest.simulator.position import (
     DividendResult,
     Position,
@@ -74,6 +91,20 @@ __all__ = [
     "ReduceResult",
     "SplitResult",
     "DividendResult",
+    # Order
+    "Order",
+    "OrderEvent",
+    "StatusChange",
+    "FillLike",
+    "OrderValidationError",
+    "InvalidTransitionError",
+    "OrderSide",
+    "OrderType",
+    "OrderStatus",
+    "TimeInForce",
+    "TERMINAL_STATUSES",
+    "WORKING_STATUSES",
+    "VALID_TRANSITIONS",
     # Tax lots
     "CostBasisMethod",
     "Lot",

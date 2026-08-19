@@ -333,10 +333,10 @@ class Portfolio:
         """Positions retained as history after being fully closed."""
 
         self.pending_orders: list[Any] = []
-        """Working orders. Populated once Step 5 lands the Order model."""
+        """Working orders — see :meth:`sync_orders`."""
 
         self.filled_orders: list[Any] = []
-        """Completed orders, most recent last."""
+        """Terminal orders (filled, cancelled or rejected), oldest first."""
 
         self.equity_history: list[EquityPoint] = []
         """Mark-to-market snapshots appended by :meth:`record_equity`."""
@@ -763,6 +763,65 @@ class Portfolio:
         self.positions.pop(position.symbol, None)
         self.closed_positions.append(position)
 
+    # -- orders ------------------------------------------------------------
+    #
+    # The portfolio only *tracks* orders. Deciding when one fills is the
+    # Step 9 execution simulator's job; routing them is Step 20's.
+
+    def add_order(self, order: Any) -> Any:
+        """Track an order, stamping it with this portfolio's id.
+
+        Terminal orders go straight to :attr:`filled_orders`; everything else
+        starts in :attr:`pending_orders`.
+        """
+        if getattr(order, "portfolio_id", None) is None:
+            order.portfolio_id = self.portfolio_id
+        if getattr(order, "is_terminal", False):
+            self.filled_orders.append(order)
+        else:
+            self.pending_orders.append(order)
+        logger.debug("tracking order %s", getattr(order, "order_id", "?"))
+        return order
+
+    def get_order(self, order_id: str) -> Any | None:
+        """Find a tracked order by id, working or terminal."""
+        for order in (*self.pending_orders, *self.filled_orders):
+            if getattr(order, "order_id", None) == order_id:
+                return order
+        return None
+
+    def orders_for(self, symbol: str) -> list[Any]:
+        """Every working order for one symbol."""
+        wanted = str(symbol).strip().upper()
+        return [o for o in self.pending_orders if getattr(o, "symbol", None) == wanted]
+
+    def sync_orders(self) -> int:
+        """Move newly-terminal orders out of :attr:`pending_orders`.
+
+        Call after a fill sweep. Returns how many orders moved.
+
+        Reclassifying on demand rather than relying on a callback keeps the
+        portfolio correct even when an order is filled by code that never
+        registered one.
+        """
+        still_working = [o for o in self.pending_orders if not getattr(o, "is_terminal", False)]
+        moved = [o for o in self.pending_orders if getattr(o, "is_terminal", False)]
+        self.pending_orders = still_working
+        self.filled_orders.extend(moved)
+        return len(moved)
+
+    def cancel_all_orders(self, reason: str = "portfolio shutdown") -> int:
+        """Cancel every working order. Used by the Step 20 shutdown path."""
+        cancelled = 0
+        for order in list(self.pending_orders):
+            try:
+                order.cancel(reason)
+                cancelled += 1
+            except Exception:  # noqa: BLE001 - one bad order must not block the rest
+                logger.exception("could not cancel order %s", getattr(order, "order_id", "?"))
+        self.sync_orders()
+        return cancelled
+
     # -- lifecycle ---------------------------------------------------------
 
     def pause(self) -> None:
@@ -1030,6 +1089,7 @@ class Portfolio:
             "total_return_pct": self.total_return_pct,
             "open_positions": len(self.positions),
             "closed_positions": len(self.closed_positions),
+            "pending_orders": len(self.pending_orders),
             "total_commission": self.total_commission,
             "drawdown": self.current_drawdown(),
         }
