@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 6** (Phase 2 complete).
+Updated at the end of every step. Last updated: **Step 7**.
 
 ---
 
@@ -23,6 +23,9 @@ Start here. Symptom → most likely cause → where to look.
 | Money values slightly wrong on SQLite only | SQLite stores `NUMERIC` as float | Expected. Use PostgreSQL for anything you report on |
 | Partial close realises the wrong amount | Cost-basis method not what you assumed | `position.cost_basis_method`; FIFO/LIFO/AVERAGE give **different** answers (§2.3) |
 | Split appears to create profit | Split logic wrong | `apply_split` must leave `market_value` and `unrealized_pnl` unchanged |
+| Strategy profitable in backtest, loses live | Execution friction | Compare `backtest` vs `realistic` slippage profiles (§2.8). Slippage typically dwarfs commission |
+| Limit order reported filling worse than its limit | Slippage cap bypassed | `SlippageCalculator` caps against `order.limit_price` and sets `estimate.capped` |
+| Slippage looks free on daily bars | No bid/ask in the data | `SpreadSlippage.fallback_bps` covers this; check it is non-zero |
 
 ### Database
 
@@ -138,6 +141,26 @@ deliberately excludes it; `total_cost_of_trading` includes it and is for
 
 Signed slippage is positive when **adverse**: a buy above the reference or a
 sell below it. "Higher is worse" holds for both sides.
+
+### 2.8 Slippage dominates commission
+
+Measured on 40 round-trip legs of 300 shares at an unchanged ₹1,500 market:
+
+| Profile | Slippage cost | Commission | Ratio |
+|---|---|---|---|
+| `backtest` | ₹0 | ₹800 | — |
+| `optimistic` | ₹3,060 | ₹800 | 4x |
+| `realistic` | ₹40,244 | ₹800 | **50x** |
+| `pessimistic` | ₹104,285 | ₹800 | 130x |
+
+Commission is the visible cost; slippage is the one that actually decides
+whether a strategy survives contact with the market. Always sanity-check a
+strategy at `pessimistic` — if the edge only exists at `realistic`, it is too
+thin to trade.
+
+Note the hybrid default is **volatility-dominated** at typical NSE parameters
+(ATR 1.5% contributes ~15 of ~22 bps). That is a modelling choice, not a law;
+re-estimate `atr_fraction` against your own fill data once you have some.
 
 ### 2.7 Database write order
 
@@ -315,6 +338,19 @@ split, because that hides a sizing bug and breaks per-trade attribution.
 `from_dict` recomputes slippage from `reference_price` rather than trusting
 the payload.
 
+### `simulator/slippage.py`
+Slippage is signed **adverse-positive** for both sides, matching
+`Fill.slippage_bps`. Limit orders are capped at their limit price — a limit
+order that fills worse than its limit is impossible, and `estimate.capped`
+records when the cap bit. `SpreadSlippage` falls back to a fixed bps when the
+snapshot has no quotes, because daily-bar data would otherwise make execution
+look free. `max_bps` (default 1000) is a hard ceiling: a 10% haircut is a bug,
+not a market condition.
+
+Market impact follows the square-root law, so cost grows *sub*-linearly with
+size — doubling an order does not double impact, which is why splitting helps
+but only up to a point.
+
 ### `db/manager.py`
 Retries are **disabled inside an explicit transaction** — replaying a
 statement whose predecessors already applied would corrupt data. Pool choice:
@@ -375,6 +411,7 @@ Python API rather than the CLI when using it.
 | `test_simulator_position.py` | FIFO/LIFO/average, splits, dividends | 77 |
 | `test_simulator_order.py` | State machine, 5 order types, triggers, callbacks | 115 |
 | `test_simulator_fill.py` | Commission models, slippage, position impact, graph persistence | 106 |
+| `test_simulator_slippage.py` | 5 slippage models, tiers, time-of-day, limit caps, statistics | 101 |
 | Pre-existing | Backtest engine, mStock | 25 (+4 skipped) |
 
 **Drift guards** — these fail loudly if two sources of truth diverge:

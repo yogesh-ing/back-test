@@ -11,13 +11,13 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 
 ## Progress
 
-`█████████████░░░░░░░░░░░` **6 / 24 steps complete** (25%)
+`██████████████░░░░░░░░░░` **7 / 24 steps complete** (29%)
 
 | Phase | Steps | Status |
 |---|---|---|
 | 1 · Database | 1–2 | ✅ **Complete** |
 | 2 · Core models | 3–6 | ✅ **Complete** |
-| 3 · Execution | 7–9 | ⬜ Not started |
+| 3 · Execution | 7–9 | 🟡 In progress (1/3) |
 | 4 · Live data | 10–12 | ⬜ Not started |
 | 5 · Strategy | 13–14 | ⬜ Not started |
 | 6 · Risk | 15–16 | ⬜ Not started |
@@ -53,7 +53,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 
 | # | Step | Status | Deliverables |
 |---|---|---|---|
-| 7 | Slippage Model | ⬜ | 5 slippage models, `SlippageCalculator` |
+| 7 | Slippage Model | ✅ | `src/backtest/simulator/slippage.py`, `config/slippage.yaml` — 5 models, 4 profiles, tiers, time-of-day · **101 tests** |
 | 8 | Commission Calculator | ⬜ | Extends `commission.py` from Step 6 — **NSE stack**: STT, stamp duty, SEBI, GST |
 | 9 | Order Execution Simulator | ⬜ | `OrderExecutor`, latency, partial fills, rejections |
 
@@ -163,6 +163,7 @@ src/backtest/
 │   ├── order.py         #   Order            ✅ Step 5
 │   ├── commission.py    #   5 fee models       ✅ Step 6
 │   ├── fill.py          #   Fill (immutable)   ✅ Step 6
+│   ├── slippage.py      #   5 slippage models  ✅ Step 7
 │   └── fill.py          #   Fill             ⬜ Step 6
 │
 ├── data/ engine/ forward/ live/ strategies/ strategy/   # pre-existing
@@ -185,4 +186,5 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_simulator_position.py` (Step 4) | 77 |
 | `test_simulator_order.py` (Step 5) | 115 |
 | `test_simulator_fill.py` (Step 6) | 106 |
-| **Total** | **604 passing, 4 skipped** |
+| `test_simulator_slippage.py` (Step 7) | 101 |
+| **Total** | **705 passing, 4 skipped** |

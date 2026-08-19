@@ -77,6 +77,23 @@ from backtest.simulator.fill import (
     PositionImpact,
 )
 from backtest.simulator.lots import CostBasisMethod, Lot, LotBook, LotConsumption
+from backtest.simulator.slippage import (
+    DEFAULT_SLIPPAGE_CONFIG_PATH,
+    FixedBpsSlippage,
+    HybridSlippage,
+    LiquidityTier,
+    MarketSnapshot,
+    SlippageCalculator,
+    SlippageConfig,
+    SlippageEstimate,
+    SlippageModel,
+    SpreadSlippage,
+    VolatilitySlippage,
+    VolumeImpactSlippage,
+    ZeroSlippage,
+    load_slippage_config,
+    resolve_slippage_model,
+)
 from backtest.simulator.order import (
     FillLike,
     InvalidTransitionError,
@@ -133,6 +150,22 @@ __all__ = [
     "PercentageCommission",
     "TieredCommission",
     "resolve_commission_model",
+    # Slippage
+    "SlippageCalculator",
+    "SlippageConfig",
+    "SlippageEstimate",
+    "SlippageModel",
+    "ZeroSlippage",
+    "FixedBpsSlippage",
+    "SpreadSlippage",
+    "VolumeImpactSlippage",
+    "VolatilitySlippage",
+    "HybridSlippage",
+    "LiquidityTier",
+    "MarketSnapshot",
+    "resolve_slippage_model",
+    "load_slippage_config",
+    "DEFAULT_SLIPPAGE_CONFIG_PATH",
     # Tax lots
     "CostBasisMethod",
     "Lot",
