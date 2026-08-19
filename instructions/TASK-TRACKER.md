@@ -11,12 +11,12 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 
 ## Progress
 
-`███████████░░░░░░░░░░░░░` **5 / 24 steps complete** (21%)
+`█████████████░░░░░░░░░░░` **6 / 24 steps complete** (25%)
 
 | Phase | Steps | Status |
 |---|---|---|
 | 1 · Database | 1–2 | ✅ **Complete** |
-| 2 · Core models | 3–6 | 🟡 In progress (3/4) |
+| 2 · Core models | 3–6 | ✅ **Complete** |
 | 3 · Execution | 7–9 | ⬜ Not started |
 | 4 · Live data | 10–12 | ⬜ Not started |
 | 5 · Strategy | 13–14 | ⬜ Not started |
@@ -47,14 +47,14 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 | 3 | Portfolio Model | ✅ | `src/backtest/simulator/portfolio.py`, `position.py` (base), `errors.py`, `money.py` | 130 |
 | 4 | Position Model | ✅ | `src/backtest/simulator/lots.py` (LotBook), FIFO/LIFO/average, splits, dividends, `save_to_db` | 77 |
 | 5 | Order Model | ✅ | `src/backtest/simulator/order.py`, `enums.py` — state machine, 5 order types, triggers, callbacks | 115 |
-| 6 | Fill Model | ⬜ | `src/backtest/simulator/fill.py` — immutable executions, commission models | — |
+| 6 | Fill Model | ✅ | `src/backtest/simulator/fill.py`, `commission.py` — immutable fills, 5 commission models, `Portfolio.apply_fill` | 106 |
 
 ### Phase 3 — Order Execution Simulation
 
 | # | Step | Status | Deliverables |
 |---|---|---|---|
 | 7 | Slippage Model | ⬜ | 5 slippage models, `SlippageCalculator` |
-| 8 | Commission Calculator | ⬜ | Broker fee models — **adapt to NSE**: STT, stamp duty, SEBI, GST |
+| 8 | Commission Calculator | ⬜ | Extends `commission.py` from Step 6 — **NSE stack**: STT, stamp duty, SEBI, GST |
 | 9 | Order Execution Simulator | ⬜ | `OrderExecutor`, latency, partial fills, rejections |
 
 ### Phase 4 — Live Data Integration
@@ -161,6 +161,8 @@ src/backtest/
 │   ├── portfolio.py     #   Portfolio        ✅
 │   ├── enums.py         #   Order enums + FSM  ✅ Step 5
 │   ├── order.py         #   Order            ✅ Step 5
+│   ├── commission.py    #   5 fee models       ✅ Step 6
+│   ├── fill.py          #   Fill (immutable)   ✅ Step 6
 │   └── fill.py          #   Fill             ⬜ Step 6
 │
 ├── data/ engine/ forward/ live/ strategies/ strategy/   # pre-existing
@@ -182,4 +184,5 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_simulator_portfolio.py` (Step 3) | 130 |
 | `test_simulator_position.py` (Step 4) | 77 |
 | `test_simulator_order.py` (Step 5) | 115 |
-| **Total** | **498 passing, 4 skipped** |
+| `test_simulator_fill.py` (Step 6) | 106 |
+| **Total** | **604 passing, 4 skipped** |

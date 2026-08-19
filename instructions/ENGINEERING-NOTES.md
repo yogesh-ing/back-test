@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 5**.
+Updated at the end of every step. Last updated: **Step 6** (Phase 2 complete).
 
 ---
 
@@ -35,6 +35,8 @@ Start here. Symptom → most likely cause → where to look.
 | `ck_orders_rejection_reason` violation | Rejected without a reason | `Order.reject` requires a non-empty reason |
 | Retry storm on a typo'd table name | Transient classification too broad | `manager._is_transient` — message-based, not type-based (§4.2) |
 | `IntegrityError` on duplicate `client_order_id` | Working as intended — idempotency key | Generate a fresh id per submission attempt |
+| `ForeignKeyViolation` on `fk_fills_position` | Saving out of dependency order | Use `Portfolio.save_to_db()` — it writes portfolios→positions→orders→fills atomically (§4.7) |
+| Cash off by exactly the fee amount | Fees counted twice, or slippage added to cash | Fees are applied **once**, by whoever moves the cash. Slippage is *never* cash (§2.6) |
 
 ### Orders
 
@@ -121,6 +123,32 @@ second half holds by construction.
   transitions. `from_dict` restores status directly rather than replaying it.
 - **Callbacks are isolated.** A handler that raises is logged and swallowed —
   a broken alert hook must not roll back a fill that genuinely happened.
+
+### 2.6 Fees vs slippage
+
+| | Paid to someone? | In `fill_price`? | Moves cash? |
+|---|---|---|---|
+| `commission`, `exchange_fees`, `regulatory_fees` | yes | no | **yes** |
+| `slippage_amount` | no | **yes** | no |
+
+Slippage is execution shortfall versus the decision price — it is already
+inside `fill_price`. Adding it to cash double-counts. `calculate_total_cost()`
+deliberately excludes it; `total_cost_of_trading` includes it and is for
+**attribution only** (Step 22).
+
+Signed slippage is positive when **adverse**: a buy above the reference or a
+sell below it. "Higher is worse" holds for both sides.
+
+### 2.7 Database write order
+
+Foreign keys impose a strict order:
+
+```
+portfolios -> positions -> orders -> fills
+```
+
+`Portfolio.save_to_db()` does this atomically in one transaction. Prefer it
+over saving objects individually.
 
 ### 2.5 No-lookahead
 
@@ -216,6 +244,23 @@ exactly when you least want it.
 **Lesson:** every Decimal field must be in the `__post_init__` coercion loop.
 There is now a test asserting that for all of them.
 
+### 4.7 Fills saved before their positions existed (Step 6)
+
+**Symptom:** a wall of `ForeignKeyViolation: fk_fills_position` traceback
+during an end-to-end run against real PostgreSQL.
+
+**Cause:** `Fill.save_to_db()` was called before the position row existed.
+The FK order is portfolios → positions → orders → fills, and every caller was
+expected to know it.
+
+**Fix:** `Portfolio.save_to_db(include_orders=True)` now writes the entire
+graph in dependency order inside one transaction. The standalone
+`Fill.save_to_db()` also pre-checks and raises an actionable `ValidationError`
+naming the required order instead of letting the driver's FK error escape.
+
+**Lesson:** if correct use requires knowing an ordering constraint, provide an
+API that encodes it — and make the low-level path fail with an explanation.
+
 ### 4.6 Test-only mistakes worth remembering
 
 - `pgserver.psql()` **prints** errors instead of raising — an early constraint
@@ -253,6 +298,22 @@ values the CHECK constraint allows; use `is_submitted` to distinguish.
 `is_fillable` checks trigger *then* limit. Limit orders fill at the **better**
 of limit and market (price improvement). `calculate_fill_price` raises if the
 order is not fillable, so a caller cannot book a fill that should not happen.
+
+### `simulator/commission.py`
+Five models: zero, flat, per-share, percentage, tiered. `PercentageCommission`
+rejects a rate above 1 because `0.03` meaning "0.03%" rather than 3% is a
+classic units slip. `TieredCommission` is a **selected-rate** model (whole
+trade at one rate), not marginal — the retail convention; say so loudly if
+that ever changes. All models return non-negative amounts, because
+`ck_fills_fees_nonneg` forbids rebates; model those in Step 8's fee stack.
+
+### `simulator/fill.py`
+Frozen dataclass — an execution is a historical fact. Normalisation in
+`__post_init__` goes through `object.__setattr__`, the standard escape hatch.
+A fill that would reverse a position through zero is refused rather than
+split, because that hides a sizing bug and breaks per-trade attribution.
+`from_dict` recomputes slippage from `reference_price` rather than trusting
+the payload.
 
 ### `db/manager.py`
 Retries are **disabled inside an explicit transaction** — replaying a
@@ -313,6 +374,7 @@ Python API rather than the CLI when using it.
 | `test_simulator_portfolio.py` | Cash accounting, limits, exposure, persistence | 130 |
 | `test_simulator_position.py` | FIFO/LIFO/average, splits, dividends | 77 |
 | `test_simulator_order.py` | State machine, 5 order types, triggers, callbacks | 115 |
+| `test_simulator_fill.py` | Commission models, slippage, position impact, graph persistence | 106 |
 | Pre-existing | Backtest engine, mStock | 25 (+4 skipped) |
 
 **Drift guards** — these fail loudly if two sources of truth diverge:

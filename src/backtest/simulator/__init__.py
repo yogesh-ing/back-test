@@ -61,6 +61,21 @@ from backtest.simulator.enums import (
     OrderType,
     TimeInForce,
 )
+from backtest.simulator.commission import (
+    CommissionModel,
+    FlatCommission,
+    PercentageCommission,
+    PerShareCommission,
+    TieredCommission,
+    ZeroCommission,
+    resolve_commission_model,
+)
+from backtest.simulator.fill import (
+    Fill,
+    LiquidityFlag,
+    PositionAction,
+    PositionImpact,
+)
 from backtest.simulator.lots import CostBasisMethod, Lot, LotBook, LotConsumption
 from backtest.simulator.order import (
     FillLike,
@@ -105,6 +120,19 @@ __all__ = [
     "TERMINAL_STATUSES",
     "WORKING_STATUSES",
     "VALID_TRANSITIONS",
+    # Fill
+    "Fill",
+    "LiquidityFlag",
+    "PositionImpact",
+    "PositionAction",
+    # Commission
+    "CommissionModel",
+    "ZeroCommission",
+    "FlatCommission",
+    "PerShareCommission",
+    "PercentageCommission",
+    "TieredCommission",
+    "resolve_commission_model",
     # Tax lots
     "CostBasisMethod",
     "Lot",

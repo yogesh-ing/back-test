@@ -56,6 +56,7 @@ from backtest.simulator.money import (
     quantize_money,
     to_decimal,
 )
+from backtest.simulator.fill import PositionImpact as PositionImpactResult
 from backtest.simulator.position import Position
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -822,6 +823,98 @@ class Portfolio:
         self.sync_orders()
         return cancelled
 
+    # -- fills ---------------------------------------------------------------
+
+    def apply_fill(self, fill: Any, validate: bool = True) -> Any:
+        """Route a fill to the right position and settle the cash.
+
+        This is the single entry point that keeps positions, cash and realised
+        P&L consistent. It opens a position when none exists, increases one in
+        the same direction, and reduces or closes an opposing one.
+
+        Cash comes from the fill's own ``calculate_cash_delta`` when opening
+        (so fees are counted exactly once), and from the position's returned
+        delta when adjusting an existing one.
+
+        Parameters
+        ----------
+        validate:
+            When ``True`` (default), opening a new position is checked against
+            the portfolio's limits. Pass ``False`` when replaying known-good
+            history, where the limits at the time may no longer apply.
+
+        Returns
+        -------
+        PositionImpact
+            What actually happened.
+
+        Raises
+        ------
+        ValidationError
+            If the fill would reverse a position through zero, or (when
+            validating) would breach a limit.
+        """
+        from backtest.simulator.fill import PositionAction
+
+        symbol = fill.symbol
+        position = self.get_position(symbol)
+        impact = fill.impact_on_position(position)
+
+        if impact.action is PositionAction.REVERSE:
+            raise ValidationError(
+                "fill would reverse the position through zero; "
+                "close it and open a new one instead",
+                code="position_reversal",
+                symbol=symbol,
+                fill_quantity=str(fill.quantity),
+                open_quantity=str(abs(position.quantity)) if position else "0",
+            )
+
+        if position is None:
+            signed = fill.signed_quantity
+            if validate:
+                self.can_open_position(symbol, signed, fill.fill_price).raise_if_denied()
+            opened = Position(
+                symbol=symbol,
+                quantity=signed,
+                average_entry_price=fill.fill_price,
+                current_price=fill.fill_price,
+                portfolio_id=self.portfolio_id,
+                commission_total=fill.total_fees,
+                strategy_name=getattr(fill, "strategy_name", None),
+            )
+            self.positions[symbol] = opened
+            object.__setattr__(fill, "position_id", opened.position_id)
+
+            self.current_cash = quantize_money(
+                self.current_cash + fill.calculate_cash_delta()
+            )
+            self.total_commission = quantize_money(self.total_commission + fill.total_fees)
+            logger.info(
+                "fill opened %s %s %s @ %s", opened.position_type, fill.quantity,
+                symbol, fill.fill_price,
+            )
+            return PositionImpactResult(
+                action=PositionAction.OPEN,
+                quantity=fill.quantity,
+                cash_delta=fill.calculate_cash_delta(),
+                resulting_quantity=opened.quantity,
+            )
+
+        applied = fill.apply_to_position(position)
+        self.current_cash = quantize_money(self.current_cash + applied.cash_delta)
+        self.realized_pnl = quantize_money(self.realized_pnl + applied.realized_pnl)
+        self.total_commission = quantize_money(self.total_commission + fill.total_fees)
+
+        if applied.fully_closed:
+            self._retire(position)
+
+        logger.info(
+            "fill %s %s %s @ %s -> cash %s",
+            applied.action, fill.quantity, symbol, fill.fill_price, self.current_cash,
+        )
+        return applied
+
     # -- lifecycle ---------------------------------------------------------
 
     def pause(self) -> None:
@@ -937,19 +1030,35 @@ class Portfolio:
 
     # -- persistence -------------------------------------------------------
 
-    def save_to_db(self, db: "DatabaseManager") -> str:
-        """Upsert the portfolio and its positions, returning the portfolio id.
+    def save_to_db(self, db: "DatabaseManager", include_orders: bool = True) -> str:
+        """Upsert the whole portfolio graph, returning the portfolio id.
 
-        Runs in a single transaction: either the portfolio row and every
-        position land together, or nothing does. A partially-written portfolio
-        would misreport equity on the next restart.
+        Writes in **foreign-key dependency order** inside a single
+        transaction::
+
+            portfolios -> positions -> orders -> fills
+
+        Getting that order wrong produces a bare ``ForeignKeyViolation`` from
+        the driver (a fill referencing a position row that does not exist yet),
+        so the ordering lives here rather than in every caller.
+
+        Either the entire graph lands or none of it does. A partially-written
+        portfolio would misreport equity on the next restart.
 
         Position rows are reconciled rather than blindly inserted — a position
         closed in memory is updated in place, preserving its ``position_id``
         and satisfying the one-open-position-per-symbol index.
+
+        Parameters
+        ----------
+        include_orders:
+            Also persist every tracked order and the fills attached to them.
+            Set ``False`` to write only cash and positions.
         """
         from sqlalchemy import select
 
+        from backtest.db.models import Fill as FillRow
+        from backtest.db.models import Order as OrderRow
         from backtest.db.models import Portfolio as PortfolioRow
         from backtest.db.models import Position as PositionRow
 
@@ -987,6 +1096,20 @@ class Portfolio:
                     self._upsert_position(session, PositionRow, position)
             session.flush()
 
+            if include_orders:
+                # Orders reference positions; fills reference both. Flush
+                # between the two so each FK target already exists.
+                with session.no_autoflush:
+                    for order in (*self.pending_orders, *self.filled_orders):
+                        self._upsert_order(session, OrderRow, order)
+                session.flush()
+
+                with session.no_autoflush:
+                    for order in (*self.pending_orders, *self.filled_orders):
+                        for fill in getattr(order, "fills", []):
+                            self._insert_fill(session, FillRow, fill)
+                session.flush()
+
         logger.info("portfolio %s saved (%s)", self.name, self.portfolio_id)
         return self.portfolio_id
 
@@ -1010,6 +1133,60 @@ class Portfolio:
         row.closed_at = position.closed_at
         row.last_updated = position.last_updated
         row.status = position.status
+
+    def _upsert_order(self, session: Any, OrderRow: Any, order: Any) -> None:
+        """Insert or update one order row."""
+        row = session.get(OrderRow, order.order_id)
+        if row is None:
+            row = OrderRow(order_id=order.order_id)
+            session.add(row)
+        row.portfolio_id = self.portfolio_id
+        row.symbol = order.symbol
+        row.exchange = order.exchange
+        row.side = str(order.side)
+        row.order_type = str(order.order_type)
+        row.quantity = order.quantity
+        row.filled_quantity = order.filled_quantity
+        row.limit_price = order.limit_price
+        row.stop_price = order.stop_price
+        row.trailing_amount = order.trailing_amount
+        row.average_fill_price = order.average_fill_price
+        row.time_in_force = str(order.time_in_force)
+        row.status = str(order.status)
+        row.rejection_reason = order.reason_for_rejection
+        row.client_order_id = order.client_order_id
+        row.broker_order_id = order.broker_order_id
+        row.submitted_at = order.submitted_at or order.created_at
+        row.filled_at = order.filled_at
+        row.cancelled_at = order.cancelled_at
+
+    def _insert_fill(self, session: Any, FillRow: Any, fill: Any) -> None:
+        """Insert one fill row, skipping any that already exists.
+
+        Fills are append-only and immutable, so an existing row is never
+        rewritten — which also makes a retried batch idempotent.
+        """
+        if session.get(FillRow, fill.fill_id) is not None:
+            return
+        session.add(
+            FillRow(
+                fill_id=fill.fill_id,
+                order_id=fill.order_id,
+                position_id=fill.position_id,
+                symbol=fill.symbol,
+                side=str(fill.side),
+                quantity=fill.quantity,
+                fill_price=fill.fill_price,
+                commission=fill.commission,
+                slippage_bps=fill.slippage_bps,
+                slippage_amount=fill.slippage_amount,
+                exchange_fees=fill.exchange_fees,
+                regulatory_fees=fill.regulatory_fees,
+                liquidity_flag=fill.liquidity_flag,
+                reference_price=fill.reference_price,
+                filled_at=fill.filled_at,
+            )
+        )
 
     @classmethod
     def load_from_db(cls, db: "DatabaseManager", portfolio_id: str) -> "Portfolio":
