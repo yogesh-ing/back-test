@@ -52,7 +52,14 @@ from backtest.simulator.portfolio import (
     PortfolioStatus,
     PositionCheck,
 )
-from backtest.simulator.position import Position, PositionType, ReduceResult
+from backtest.simulator.lots import CostBasisMethod, Lot, LotBook, LotConsumption
+from backtest.simulator.position import (
+    DividendResult,
+    Position,
+    PositionType,
+    ReduceResult,
+    SplitResult,
+)
 
 __all__ = [
     # Portfolio
@@ -65,6 +72,13 @@ __all__ = [
     "Position",
     "PositionType",
     "ReduceResult",
+    "SplitResult",
+    "DividendResult",
+    # Tax lots
+    "CostBasisMethod",
+    "Lot",
+    "LotBook",
+    "LotConsumption",
     # Errors
     "SimulatorError",
     "ValidationError",

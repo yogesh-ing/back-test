@@ -1,11 +1,16 @@
 """Position model for the forward testing simulator.
 
-.. note::
-   This is the **base** implementation introduced in Step 3, covering what
-   :class:`~backtest.simulator.portfolio.Portfolio` needs: signed quantity,
-   weighted-average entry price, mark-to-market, partial reduction and
-   realised P&L. Step 4 extends it with explicit FIFO/LIFO lot accounting and
-   split/dividend adjustment. Nothing here is throwaway — Step 4 is additive.
+Introduced in Step 3 and completed in Step 4, which added tax-lot accounting
+(FIFO / LIFO / average), corporate-action adjustment and persistence.
+
+Cost basis
+----------
+Every position owns a :class:`~backtest.simulator.lots.LotBook`. The method
+chosen at construction decides which lots a partial close consumes, and
+therefore both the realised P&L of that close and the cost basis of the
+remainder. ``AVERAGE`` is the default because it matches the vectorised
+backtest engine; ``FIFO`` is what Indian equity delivery requires. See
+:mod:`backtest.simulator.lots` for a worked comparison.
 
 Sign convention
 ---------------
@@ -28,19 +33,24 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any, Sequence
 
 from backtest.simulator.errors import ValidationError
+from backtest.simulator.lots import CostBasisMethod, Lot, LotBook, LotConsumption
 from backtest.simulator.money import (
     ZERO,
     is_zero,
     money,
     price as to_price,
     quantize_money,
+    quantize_price,
     to_decimal,
 )
 
-__all__ = ["Position", "PositionType", "ReduceResult"]
+if TYPE_CHECKING:  # pragma: no cover
+    from backtest.db.manager import DatabaseManager
+
+__all__ = ["Position", "PositionType", "ReduceResult", "SplitResult", "DividendResult"]
 
 logger = logging.getLogger("backtest.simulator.position")
 
@@ -67,6 +77,29 @@ class ReduceResult:
     cash_delta: Decimal
     """Signed change to portfolio cash, commission already applied."""
     fully_closed: bool
+    consumed_lots: tuple[LotConsumption, ...] = ()
+    """Which tax lots this close consumed, in consumption order."""
+
+
+@dataclass(frozen=True)
+class SplitResult:
+    """Outcome of :meth:`Position.apply_split`."""
+
+    ratio: Decimal
+    quantity_before: Decimal
+    quantity_after: Decimal
+    price_before: Decimal
+    price_after: Decimal
+
+
+@dataclass(frozen=True)
+class DividendResult:
+    """Outcome of :meth:`Position.apply_dividend`."""
+
+    per_share: Decimal
+    cash_amount: Decimal
+    """Signed: positive when received (long), negative when paid (short)."""
+    cost_basis_reduced: bool
 
 
 @dataclass
@@ -111,6 +144,11 @@ class Position:
     closed_at: datetime | None = None
     last_updated: datetime = field(default_factory=_utcnow)
     strategy_name: str | None = None
+    cost_basis_method: str = CostBasisMethod.AVERAGE
+    """FIFO, LIFO or AVERAGE. Decides what a partial close realises."""
+
+    lot_book: LotBook = field(default=None, repr=False)  # type: ignore[assignment]
+    """Open tax lots. Seeded from the opening quantity when not supplied."""
 
     def __post_init__(self) -> None:
         self.symbol = str(self.symbol).strip().upper()
@@ -137,6 +175,18 @@ class Position:
                 symbol=self.symbol,
                 price=str(self.average_entry_price),
             )
+
+        self.cost_basis_method = CostBasisMethod.validate(self.cost_basis_method)
+
+        if self.lot_book is None:
+            # A position opened in one go is a single lot.
+            self.lot_book = LotBook(method=self.cost_basis_method)
+            self.lot_book.add(
+                abs(self.quantity), self.average_entry_price, self.opened_at
+            )
+        else:
+            self.cost_basis_method = self.lot_book.method
+            self._sync_average_from_lots()
 
     # -- direction ---------------------------------------------------------
 
@@ -289,11 +339,13 @@ class Position:
         signed = qty if self.is_long else -qty
         old_qty = self.quantity
 
-        # Weighted average over absolute sizes; signs cancel otherwise.
-        total_cost = (abs(old_qty) * self.average_entry_price) + (qty * px)
-        new_abs = abs(old_qty) + qty
-        self.average_entry_price = to_price(total_cost / new_abs, "average_entry_price")
+        # The lot book is authoritative for cost basis. Under AVERAGE it
+        # collapses to a single pooled lot, so the weighted average it reports
+        # is exactly the running average; under FIFO/LIFO the tranche is kept
+        # separate so a later partial close can consume it individually.
+        self.lot_book.add(qty, px, _utcnow())
         self.quantity = to_price(old_qty + signed, "quantity")
+        self._sync_average_from_lots()
         self.commission_total = quantize_money(self.commission_total + fee)
         self.last_updated = _utcnow()
 
@@ -350,15 +402,18 @@ class Position:
         qty = min(qty, open_qty)
 
         was_long = self.is_long
-        # Direction-aware realised P&L.
+
+        # Consume tax lots first: which ones go determines both the realised
+        # P&L of this close and the cost basis left behind.
+        consumed = self.lot_book.consume(qty)
         realized = quantize_money(
-            (px - self.average_entry_price) * qty
-            if was_long
-            else (self.average_entry_price - px) * qty
+            sum((c.realized_pnl(px, was_long) for c in consumed), ZERO)
         )
 
         signed_remaining = self.quantity - (qty if was_long else -qty)
         self.quantity = to_price(signed_remaining, "quantity")
+        if self.lot_book:
+            self._sync_average_from_lots()
         self.realized_pnl = quantize_money(self.realized_pnl + realized)
         self.commission_total = quantize_money(self.commission_total + fee)
         self.current_price = px
@@ -381,11 +436,224 @@ class Position:
             commission=fee,
             cash_delta=cash_delta,
             fully_closed=fully_closed,
+            consumed_lots=tuple(consumed),
         )
 
     def close(self, at_price: Any, commission: Any = ZERO) -> ReduceResult:
         """Close the entire position at ``at_price``."""
         return self.reduce_shares(abs(self.quantity), at_price, commission)
+
+    #: Spelling required by the Step 4 specification.
+    close_position = close
+
+    # -- cost basis --------------------------------------------------------
+
+    def _sync_average_from_lots(self) -> None:
+        """Re-derive ``average_entry_price`` from the open lots.
+
+        Keeps the position and its lot book from ever disagreeing. Skipped
+        when the book is empty (a fully closed position keeps its last entry
+        price for reporting).
+        """
+        if not self.lot_book:
+            return
+        average = self.lot_book.weighted_average_price
+        if average > ZERO:
+            self.average_entry_price = average
+
+    def calculate_average_price(self) -> Decimal:
+        """Weighted-average entry price of the currently open lots.
+
+        Under ``AVERAGE`` this equals the running pooled cost. Under
+        ``FIFO``/``LIFO`` it reflects only the lots that remain, so it moves
+        after a partial close.
+        """
+        return self.lot_book.weighted_average_price
+
+    @property
+    def lots(self) -> Sequence[Lot]:
+        """Open tax lots, oldest first."""
+        return self.lot_book.lots
+
+    @property
+    def lot_count(self) -> int:
+        return len(self.lot_book)
+
+    @property
+    def entry_date(self) -> datetime:
+        """Alias for ``opened_at``, matching the Step 4 specification."""
+        return self.opened_at
+
+    def oldest_lot_age(self, now: datetime | None = None) -> Any:
+        """``timedelta`` since the oldest open lot was acquired.
+
+        Drives holding-period rules such as India's 12-month long-term
+        capital gains threshold, and the Step 16 time-based stop.
+        """
+        if not self.lot_book:
+            return (now or _utcnow()) - self.opened_at
+        oldest = min(lot.acquired_at for lot in self.lot_book)
+        return (now or _utcnow()) - oldest
+
+    # -- corporate actions -------------------------------------------------
+
+    def apply_split(self, ratio: Any) -> SplitResult:
+        """Adjust the position for a stock split.
+
+        ``ratio`` is new shares per old share: ``2`` for 2-for-1,
+        ``Decimal("0.5")`` for a 1-for-2 reverse split. Quantity scales up and
+        prices scale down, so market value and unrealised P&L are unchanged —
+        a split creates no profit, and a model that pretends otherwise will
+        invent P&L out of thin air.
+
+        ``realized_pnl`` from earlier closes is deliberately left alone: it is
+        already banked in currency and is not affected by a later split.
+
+        Raises
+        ------
+        ValidationError
+            If the position is closed or ``ratio`` is not positive.
+        """
+        if not self.is_open:
+            raise ValidationError(
+                "cannot split a closed position",
+                code="position_closed",
+                symbol=self.symbol,
+            )
+        factor = to_decimal(ratio, "split ratio")
+        if factor <= ZERO:
+            raise ValidationError(
+                "split ratio must be positive",
+                code="invalid_split_ratio",
+                ratio=str(factor),
+            )
+
+        qty_before = self.quantity
+        price_before = self.average_entry_price
+
+        self.lot_book.apply_split(factor)
+        self.quantity = quantize_price(self.quantity * factor)
+        self._sync_average_from_lots()
+        if self.current_price is not None:
+            self.current_price = quantize_price(self.current_price / factor)
+        self.last_updated = _utcnow()
+
+        logger.info(
+            "split %s %s-for-1: %s -> %s shares @ %s -> %s",
+            self.symbol, factor, qty_before, self.quantity,
+            price_before, self.average_entry_price,
+        )
+        return SplitResult(
+            ratio=factor,
+            quantity_before=qty_before,
+            quantity_after=self.quantity,
+            price_before=price_before,
+            price_after=self.average_entry_price,
+        )
+
+    def apply_dividend(
+        self, per_share: Any, reduce_cost_basis: bool = False
+    ) -> DividendResult:
+        """Account for a cash dividend.
+
+        Parameters
+        ----------
+        per_share:
+            Dividend per share. Must not be negative.
+        reduce_cost_basis:
+            When ``True``, lower the entry price instead of treating the
+            dividend as separate income. Use this for total-return
+            comparisons against a price-only benchmark.
+
+        Returns
+        -------
+        DividendResult
+            ``cash_amount`` is **signed**: a long receives it, a short **pays**
+            it. Short sellers owing the dividend is a real cost that a naive
+            model silently omits.
+        """
+        if not self.is_open:
+            raise ValidationError(
+                "cannot apply a dividend to a closed position",
+                code="position_closed",
+                symbol=self.symbol,
+            )
+        amount = to_decimal(per_share, "dividend")
+        if amount < ZERO:
+            raise ValidationError(
+                "dividend must not be negative", code="invalid_dividend"
+            )
+
+        cash = quantize_money(self.quantity * amount)  # signed by quantity
+        if reduce_cost_basis:
+            self.lot_book.reduce_cost_basis(amount)
+            self._sync_average_from_lots()
+        self.last_updated = _utcnow()
+
+        logger.info(
+            "dividend %s %s/share -> cash %s (cost basis %s)",
+            self.symbol, amount, cash, "reduced" if reduce_cost_basis else "unchanged",
+        )
+        return DividendResult(
+            per_share=amount, cash_amount=cash, cost_basis_reduced=reduce_cost_basis
+        )
+
+    # -- persistence -------------------------------------------------------
+
+    def save_to_db(self, db: "DatabaseManager", portfolio_id: str | None = None) -> str:
+        """Upsert this single position, returning its ``position_id``.
+
+        Saving a whole portfolio is usually what you want —
+        :meth:`backtest.simulator.portfolio.Portfolio.save_to_db` wraps every
+        position in one transaction and orders closed rows before open ones so
+        the one-open-position-per-symbol index is never momentarily violated.
+        Use this method for a targeted single-row update.
+
+        Note that ``lot_book`` is **not** persisted: the schema has no lots
+        table. A reloaded position therefore collapses to a single lot at the
+        stored average price, which is exact for ``AVERAGE`` and an
+        approximation for ``FIFO``/``LIFO``. That limitation is recorded in
+        the task tracker.
+
+        Raises
+        ------
+        ValidationError
+            If no portfolio id is available to attach the row to.
+        """
+        from backtest.db.models import Position as PositionRow
+
+        owner = portfolio_id or self.portfolio_id
+        if not owner:
+            raise ValidationError(
+                "portfolio_id is required to save a position",
+                code="missing_portfolio_id",
+                symbol=self.symbol,
+            )
+        self.portfolio_id = owner
+
+        with db.session() as session:
+            row = session.get(PositionRow, self.position_id)
+            if row is None:
+                row = PositionRow(position_id=self.position_id)
+                session.add(row)
+            row.portfolio_id = owner
+            row.symbol = self.symbol
+            row.exchange = self.exchange
+            row.position_type = self.position_type
+            row.quantity = self.quantity
+            row.average_entry_price = self.average_entry_price
+            row.current_price = self.current_price
+            row.unrealized_pnl = self.unrealized_pnl
+            row.realized_pnl = self.realized_pnl
+            row.commission_total = self.commission_total
+            row.opened_at = self.opened_at
+            row.closed_at = self.closed_at
+            row.last_updated = self.last_updated
+            row.status = self.status
+            session.flush()
+
+        logger.debug("position %s saved (%s)", self.symbol, self.position_id)
+        return self.position_id
 
     # -- serialisation -----------------------------------------------------
 
@@ -408,6 +676,8 @@ class Position:
             "last_updated": self.last_updated.isoformat(),
             "status": self.status,
             "strategy_name": self.strategy_name,
+            "cost_basis_method": self.cost_basis_method,
+            "lot_book": self.lot_book.to_dict(),
         }
 
     @classmethod
@@ -420,6 +690,9 @@ class Position:
         raw_qty = to_decimal(payload["quantity"], "quantity")
         bootstrap = raw_qty if not is_zero(raw_qty) else Decimal("1")
 
+        raw_book = payload.get("lot_book")
+        book = LotBook.from_dict(raw_book) if raw_book else None
+
         pos = cls(
             symbol=payload["symbol"],
             quantity=bootstrap,
@@ -431,6 +704,8 @@ class Position:
             realized_pnl=payload.get("realized_pnl", ZERO),
             commission_total=payload.get("commission_total", ZERO),
             strategy_name=payload.get("strategy_name"),
+            cost_basis_method=payload.get("cost_basis_method", CostBasisMethod.AVERAGE),
+            lot_book=book,
         )
         if is_zero(raw_qty):
             pos.quantity = ZERO

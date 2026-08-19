@@ -8,12 +8,12 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 
 ## Progress
 
-`███████░░░░░░░░░░░░░░░░░` **3 / 24 steps complete** (13%)
+`█████████░░░░░░░░░░░░░░░` **4 / 24 steps complete** (17%)
 
 | Phase | Steps | Status |
 |---|---|---|
 | 1 · Database | 1–2 | ✅ **Complete** |
-| 2 · Core models | 3–6 | 🟡 In progress (1/4) |
+| 2 · Core models | 3–6 | 🟡 In progress (2/4) |
 | 3 · Execution | 7–9 | ⬜ Not started |
 | 4 · Live data | 10–12 | ⬜ Not started |
 | 5 · Strategy | 13–14 | ⬜ Not started |
@@ -42,7 +42,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 | # | Step | Status | Deliverables | Tests |
 |---|---|---|---|---|
 | 3 | Portfolio Model | ✅ | `src/backtest/simulator/portfolio.py`, `position.py` (base), `errors.py`, `money.py` | 130 |
-| 4 | Position Model | ⬜ | Expand `position.py`: FIFO/LIFO, partial closes, split/dividend adjustment | — |
+| 4 | Position Model | ✅ | `src/backtest/simulator/lots.py` (LotBook), FIFO/LIFO/average, splits, dividends, `save_to_db` | 77 |
 | 5 | Order Model | ⬜ | `src/backtest/simulator/order.py` — lifecycle state machine, 5 order types | — |
 | 6 | Fill Model | ⬜ | `src/backtest/simulator/fill.py` — immutable executions, commission models | — |
 
@@ -131,6 +131,17 @@ Recorded so the divergence is deliberate and reviewable, not accidental drift.
 
 ---
 
+## Known limitations
+
+Deliberate gaps, recorded so they are not mistaken for oversights.
+
+| # | Limitation | From | Impact |
+|---|---|---|---|
+| 1 | Tax lots are **not** persisted — the schema has no `lots` table. A FIFO position reloaded from the database collapses to one lot at the stored average price. | Step 4 | Restart mid-run loses FIFO granularity. Workaround: the `to_dict()`/`from_dict()` JSON snapshot **is** lossless; the Step 20 state manager should use it. Revisit if per-lot tax reporting is needed. |
+| 2 | `Portfolio.pending_orders` / `filled_orders` are untyped placeholders. | Step 3 | Populated in Step 5 when the Order model lands. |
+
+---
+
 ## Architecture as built
 
 ```
@@ -142,7 +153,8 @@ src/backtest/
 ├── simulator/           # Steps 3–6 🟡  (forward testing domain models)
 │   ├── money.py         #   Decimal helpers  ✅
 │   ├── errors.py        #   Domain exceptions ✅
-│   ├── position.py      #   Position         ✅ base (Step 4 expands)
+│   ├── lots.py          #   LotBook, FIFO/LIFO ✅ Step 4
+│   ├── position.py      #   Position         ✅ Steps 3+4
 │   ├── portfolio.py     #   Portfolio        ✅
 │   ├── order.py         #   Order            ⬜ Step 5
 │   └── fill.py          #   Fill             ⬜ Step 6
@@ -164,4 +176,5 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_db_schema.py` (Step 1) | 44 |
 | `test_db_manager.py` (Step 2) | 107 |
 | `test_simulator_portfolio.py` (Step 3) | 130 |
-| **Total** | **306 passing, 4 skipped** |
+| `test_simulator_position.py` (Step 4) | 77 |
+| **Total** | **383 passing, 4 skipped** |
