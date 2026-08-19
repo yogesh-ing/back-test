@@ -13,3 +13,6 @@ alembic>=1.13
 # libpq/compiler; switch to plain `psycopg2` if you build from source in prod.
 psycopg2-binary>=2.9
 # SQLite needs no driver — it is in the Python standard library.
+# Reads config/database.yaml. Optional: the connection manager falls back to
+# environment variables alone if the file is absent.
+PyYAML>=6.0
