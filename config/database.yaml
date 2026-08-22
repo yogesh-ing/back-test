@@ -1,0 +1,110 @@
+# =============================================================================
+# Forward Testing Simulator — Database Configuration
+# =============================================================================
+#
+# Loaded by backtest.db.config.load_config().
+#
+# PRECEDENCE (highest wins):
+#   1. Explicit keyword arguments to load_config(...)
+#   2. Environment variables (FORWARD_TEST_DB_*)   <-- use these for secrets
+#   3. The active profile in this file
+#   4. The `default` block in this file
+#   5. Built-in defaults in config.py
+#
+# NEVER put real passwords in this file — it is committed to version control.
+# Production credentials belong in FORWARD_TEST_DB_URL, supplied via .env or
+# your secret manager.
+#
+# Select a profile with FORWARD_TEST_DB_PROFILE, e.g.
+#   export FORWARD_TEST_DB_PROFILE=production
+# =============================================================================
+
+# Profile used when FORWARD_TEST_DB_PROFILE is unset.
+active_profile: development
+
+
+# -----------------------------------------------------------------------------
+# Settings shared by every profile. Profiles override individual keys.
+# -----------------------------------------------------------------------------
+default:
+  # ---- Connection pool ----
+  # pool_min_size maps to SQLAlchemy's pool_size (connections kept open),
+  # pool_max_size is the hard ceiling (pool_size + max_overflow).
+  pool_min_size: 5
+  pool_max_size: 20
+
+  # Seconds to wait for a free connection before raising TimeoutError.
+  pool_timeout: 30
+
+  # Recycle connections older than this (seconds). Must be LOWER than any
+  # idle timeout imposed by the database, a proxy such as PgBouncer, or a
+  # cloud load balancer — otherwise you hand out sockets the server already
+  # closed. 1800s (30 min) is safely under the common 3600s defaults.
+  pool_recycle: 1800
+
+  # Issue a lightweight SELECT 1 before handing out a pooled connection.
+  # This is what makes recovery from a database restart automatic. Costs a
+  # sub-millisecond round trip per checkout; worth it.
+  pool_pre_ping: true
+
+  # ---- Retries ----
+  # Applies ONLY to transient connection faults (server restart, network
+  # blip, SQLite lock contention). Constraint violations and SQL errors are
+  # never retried — they are deterministic and would fail identically.
+  retry_attempts: 3
+  retry_base_delay: 0.5      # seconds; doubles each attempt, with jitter
+  retry_max_delay: 5.0
+
+  # ---- Logging ----
+  # echo=true dumps every statement via SQLAlchemy's own logger. Extremely
+  # noisy; prefer log_queries below.
+  echo: false
+  # Log each statement and its duration at DEBUG level.
+  log_queries: false
+  # Emit a WARNING for any statement slower than this (milliseconds).
+  # Set to 0 to disable.
+  slow_query_ms: 500
+
+  # ---- Timeouts ----
+  connect_timeout: 10        # seconds to establish a TCP connection
+  # PostgreSQL only: server-side cap on a single statement. Prevents one
+  # runaway query from occupying a pool slot forever. 0 disables.
+  statement_timeout_ms: 30000
+
+  # Shows up in pg_stat_activity.application_name — makes it obvious which
+  # process is holding a connection.
+  application_name: forward_test
+
+
+# -----------------------------------------------------------------------------
+# Profiles
+# -----------------------------------------------------------------------------
+profiles:
+
+  # Local development. SQLite needs no server and no credentials.
+  development:
+    url: "sqlite:///forward_test.db"
+    # SQLite serialises writes, so a large pool buys nothing.
+    pool_min_size: 1
+    pool_max_size: 5
+    log_queries: true
+    slow_query_ms: 200
+
+  # Automated tests. In-memory, discarded when the process exits.
+  testing:
+    url: "sqlite:///:memory:"
+    pool_min_size: 1
+    pool_max_size: 1
+    log_queries: false
+    slow_query_ms: 0
+    retry_attempts: 1          # fail fast; retries only slow the suite down
+
+  # Production. The URL is intentionally absent — it MUST come from
+  # FORWARD_TEST_DB_URL so credentials never enter the repository.
+  production:
+    pool_min_size: 5
+    pool_max_size: 20
+    pool_pre_ping: true
+    log_queries: false
+    slow_query_ms: 1000
+    statement_timeout_ms: 60000

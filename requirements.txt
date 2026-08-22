@@ -5,3 +5,14 @@ python-dotenv>=1.0
 matplotlib>=3.7
 pyarrow>=14.0
 pytest>=8.0
+
+# --- Forward testing database layer (Step 1+) ---
+SQLAlchemy>=2.0
+alembic>=1.13
+# PostgreSQL driver. psycopg2-binary ships prebuilt wheels and needs no local
+# libpq/compiler; switch to plain `psycopg2` if you build from source in prod.
+psycopg2-binary>=2.9
+# SQLite needs no driver — it is in the Python standard library.
+# Reads config/database.yaml. Optional: the connection manager falls back to
+# environment variables alone if the file is absent.
+PyYAML>=6.0

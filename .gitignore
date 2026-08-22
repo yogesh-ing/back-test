@@ -1,14 +1,37 @@
+# Python
 __pycache__/
-.env
-.mstock_token.json
-data-cache/
-charts/
-*.png
-equity*.csv
-compare*.csv
+*.py[cod]
+*.egg-info/
 .pytest_cache/
-!images/*.png
-reference-code
-instructions
-docs
-data
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets — never commit real credentials
+.env
+.env.local
+*.session.json
+
+# Local databases (SQLite dev files)
+*.db
+*.sqlite
+*.sqlite3
+
+# Build / run artefacts
+charts/
+dist/
+build/
+htmlcov/
+.coverage
+coverage.xml
+
+# Tooling output
+graphify-out/
+
+# OS noise
+.DS_Store
+Thumbs.db
