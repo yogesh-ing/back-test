@@ -5,7 +5,7 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-19 · **Branch:** `arena/01a01ae2-back-test` · **PR:** [#3](https://github.com/yogesh-ing/back-test/pull/3)
+**Last updated:** 2026-08-19 · **Branch:** `arena/01a01ae2-back-test` · **PR [#3](https://github.com/yogesh-ing/back-test/pull/3) merged** into `main` (Steps 1–7)
 
 ---
 
@@ -114,7 +114,7 @@ Things the agent cannot do; tracked so nothing is silently skipped.
 | 2 | Run `db/verify_schema.sql`, confirm all PASS | Step 1 | ⬜ Pending |
 | 3 | Set `FORWARD_TEST_DB_URL` in `.env` (never commit it) | Step 1/2 | ⬜ Pending |
 | 4 | `pip install -r requirements.txt` (adds SQLAlchemy, Alembic, psycopg2, PyYAML) | Step 1/2 | ⬜ Pending |
-| 5 | Review & merge PR #3 | — | ⬜ Pending |
+| 5 | Review & merge PR #3 | — | ✅ Merged 2026-08-19 (`4e01d65`) |
 
 ---
 
