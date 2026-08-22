@@ -1099,3 +1099,4 @@ class SlippageCalculator:
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"<SlippageCalculator {self.config.model.name} n={len(self._history)}>"
+

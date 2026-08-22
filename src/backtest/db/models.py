@@ -836,3 +836,4 @@ class SystemLog(Base):
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<SystemLog {self.log_level} {self.component}: {self.message[:40]}>"
+

@@ -353,3 +353,4 @@ def load_config(
         )
 
     return DatabaseConfig(profile=chosen, _source=source, **parsed).validated()
+

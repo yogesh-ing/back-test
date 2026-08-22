@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 7**.
+Updated at the end of every step. Last updated: **Step 9** (Phase 3 complete).
 
 ---
 
@@ -26,6 +26,14 @@ Start here. Symptom → most likely cause → where to look.
 | Strategy profitable in backtest, loses live | Execution friction | Compare `backtest` vs `realistic` slippage profiles (§2.8). Slippage typically dwarfs commission |
 | Limit order reported filling worse than its limit | Slippage cap bypassed | `SlippageCalculator` caps against `order.limit_price` and sets `estimate.capped` |
 | Slippage looks free on daily bars | No bid/ask in the data | `SpreadSlippage.fallback_bps` covers this; check it is non-zero |
+| Fees ~8x too high or low on a round trip | Wrong `TradeSegment` | Delivery pays STT both sides at 0.1%; intraday sell-only at 0.025% (§2.9) |
+| "Zero brokerage" run still loses money | Correct — statutory charges remain | A ₹1L Indian delivery round trip costs ~₹238 with zero brokerage |
+| Fee totals don't match the `fills` table | Bucket mapping | brokerage→`commission`, exchange/IPFT/DP→`exchange_fees`, STT/SEBI/stamp/GST→`regulatory_fees` |
+| Large order only partly fills | Working as intended — liquidity cap | `ExecutionConfig.max_participation` (10% of bar volume by default) |
+| Limit order at the touch didn't fill | Queue position | `touch_fill_probability` (0.5 realistic). Trading *through* the limit always fills |
+| Order died when it should have rested | no-fill vs rejection confusion | `NO_FILL` keeps the order working; `REJECTED` is terminal (§2.10) |
+| Execution results differ between identical runs | RNG not seeded | `ExecutionConfig.seed` (default 42); `executor.reset()` replays identically |
+| Everything rejected as `market_closed` | `enforce_market_hours` on with daily bars | Off by default for exactly this reason |
 
 ### Database
 
@@ -161,6 +169,38 @@ thin to trade.
 Note the hybrid default is **volatility-dominated** at typical NSE parameters
 (ATR 1.5% contributes ~15 of ~22 bps). That is a modelling choice, not a law;
 re-estimate `atr_fraction` against your own fill data once you have some.
+
+### 2.9 Indian fee stack: segment matters
+
+| Charge | Delivery | Intraday |
+|---|---|---|
+| STT | 0.1% **both sides** | 0.025% **sell only** |
+| Stamp duty | 0.015% buy only | 0.003% buy only |
+| DP charges | flat, sell only | none |
+
+Measured on ₹1,00,000, zero brokerage: delivery round trip **₹237.82**,
+intraday **₹82.68**. Setting `TradeSegment` wrong misprices by ~3x overall
+and ~8x on STT alone.
+
+GST (18%) applies to brokerage + exchange + SEBI charges — **not** to STT or
+stamp duty, which are themselves taxes and are not taxed again.
+
+Rates are FY 2024-25 and **do change**. Verify against a recent contract note
+before trusting a cost-sensitive result; override in `config/brokers.yaml`.
+
+### 2.10 Execution outcomes are not all failures
+
+| Status | Order afterwards | Meaning |
+|---|---|---|
+| `FILLED` / `PARTIAL` | filled / still working | traded |
+| `NO_FILL` | **still working** | limit away from market, queue miss — normal |
+| `REJECTED` | terminal | market closed, halted, no liquidity |
+| `CANCELLED` | terminal | IOC remainder, or FOK that couldn't fill whole |
+
+Conflating `NO_FILL` and `REJECTED` either strands orders that should have
+died or kills orders that should still be working. FOK is **cancelled**, not
+rejected — matching exchange semantics — but still carries a
+`rejection_code` so it shows up in the report.
 
 ### 2.7 Database write order
 
@@ -351,6 +391,30 @@ Market impact follows the square-root law, so cost grows *sub*-linearly with
 size — doubling an order does not double impact, which is why splitting helps
 but only up to a point.
 
+### `simulator/fees.py`
+Two regulatory regimes: `IndiaEquityFees` (default) and `USEquityFees` (SEC
+Section 31 + FINRA TAF, both sell-side). Fees round to 2dp like a real
+contract note. `FeeBreakdown.as_fill_kwargs()` maps straight onto the three
+`fills` cost columns. Tiered brokerage prices off **monthly volume** once any
+has been recorded, otherwise off the single trade's value.
+
+`PaymentForOrderFlowCommission` returns zero commission but exposes
+`hidden_cost()` — PFOF is funded by worse fills, and reporting it as free is
+the most misleading thing a fee model can do. Represent the real cost with a
+wider slippage profile, not a fee.
+
+### `simulator/execution.py`
+Three realism levers, in order of impact: `max_participation` (forces partial
+fills), `touch_fill_probability` (queue risk on resting limits), and latency.
+Latency is *reported*, never slept on — a simulator that actually waited
+500 ms per order would take hours to replay a day.
+
+All randomness goes through one seeded generator. An execution simulator that
+answers differently each run cannot be used to compare strategies.
+
+`enforce_market_hours` is **off** by default: a daily-bar backtest has no
+meaningful intraday clock, and rejecting everything would make it useless.
+
 ### `db/manager.py`
 Retries are **disabled inside an explicit transaction** — replaying a
 statement whose predecessors already applied would corrupt data. Pool choice:
@@ -412,6 +476,8 @@ Python API rather than the CLI when using it.
 | `test_simulator_order.py` | State machine, 5 order types, triggers, callbacks | 115 |
 | `test_simulator_fill.py` | Commission models, slippage, position impact, graph persistence | 106 |
 | `test_simulator_slippage.py` | 5 slippage models, tiers, time-of-day, limit caps, statistics | 101 |
+| `test_simulator_fees.py` | NSE + US fee stacks, 10 broker presets, volume tiers, FX | 109 |
+| `test_simulator_execution.py` | Liquidity caps, queue position, rejections, TIF, determinism | 99 |
 | Pre-existing | Backtest engine, mStock | 25 (+4 skipped) |
 
 **Drift guards** — these fail loudly if two sources of truth diverge:
