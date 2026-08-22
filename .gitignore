@@ -1,0 +1,14 @@
+__pycache__/
+.env
+.mstock_token.json
+data-cache/
+charts/
+*.png
+equity*.csv
+compare*.csv
+.pytest_cache/
+!images/*.png
+reference-code
+instructions
+docs
+data
