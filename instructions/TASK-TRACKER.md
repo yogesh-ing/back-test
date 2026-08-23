@@ -11,14 +11,14 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 
 ## Progress
 
-`████████████████████░░░░` **10 / 24 steps complete** (42%)
+`██████████████████████░░` **11 / 24 steps complete** (46%)
 
 | Phase | Steps | Status |
 |---|---|---|
 | 1 · Database | 1–2 | ✅ **Complete** |
 | 2 · Core models | 3–6 | ✅ **Complete** |
 | 3 · Execution | 7–9 | ✅ **Complete** |
-| 4 · Live data | 10–12 | 🟡 **In progress** (10 ✅) |
+| 4 · Live data | 10–12 | 🟡 **In progress** (10–11 ✅) |
 | 5 · Strategy | 13–14 | ⬜ Not started |
 | 6 · Risk | 15–16 | ⬜ Not started |
 | 7 · Performance | 17–19 | ⬜ Not started |
@@ -62,7 +62,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 | # | Step | Status | Deliverables |
 |---|---|---|---|
 | 10 | Market Data Handler | ✅ | `src/backtest/marketdata/` (`ticks.py` normalization, `bars.py` NSE-anchored aggregation, `feed.py` mStock + mock feeds, `handler.py` hub), `config/marketdata.yaml` — wired to existing `live/mstock.py` · **173 tests** |
-| 11 | Data Quality Validator | ⬜ | Spike/gap detection, OHLC sanity |
+| 11 | Data Quality Validator | ✅ | `src/backtest/marketdata/quality.py`, `config/quality.yaml` — z-score spikes, gap/volume anomalies, 3 strictness levels, reject/repair, alerts + regime reset, handler integration · **114 tests** |
 | 12 | Time Synchronization Manager | ⬜ | **NSE calendar** (plan says NYSE), IST/UTC, bar alignment |
 
 ### Phase 5 — Strategy Integration
@@ -168,12 +168,13 @@ src/backtest/
 │   ├── fees.py          #   Full fee stack     ✅ Step 8
 │   ├── execution.py     #   OrderExecutor      ✅ Step 9
 │
-├── marketdata/          # Step 10 ✅  (live data layer)
+├── marketdata/          # Steps 10–11 ✅  (live data layer)
 │   ├── errors.py        #   MarketDataError hierarchy
 │   ├── ticks.py         #   Tick/Bar + broker payload normalization
 │   ├── bars.py          #   IST boundary alignment, BarAggregator
 │   ├── feed.py          #   DataFeed ABC, MStockFeed, MockFeed
-│   └── handler.py       #   MarketDataHandler: buffers, reconnect, cache
+│   ├── handler.py       #   MarketDataHandler: buffers, reconnect, cache
+│   └── quality.py       #   DataValidator: spikes, gaps, strictness  ✅ Step 11
 │
 ├── data/ engine/ forward/ live/ strategies/ strategy/   # pre-existing
 ```
@@ -199,5 +200,6 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_simulator_fees.py` (Step 8) | 109 |
 | `test_simulator_execution.py` (Step 9) | 99 |
 | `test_marketdata.py` (Step 10) | 173 |
-| **Total** | **1086 passing, 4 skipped** |
+| `test_marketdata_quality.py` (Step 11) | 114 |
+| **Total** | **1200 passing, 4 skipped** |
 

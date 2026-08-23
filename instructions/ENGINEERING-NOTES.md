@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 10** (Phase 4 started).
+Updated at the end of every step. Last updated: **Step 11**.
 
 ---
 
@@ -61,6 +61,10 @@ Start here. Symptom → most likely cause → where to look.
 | Duplicate rows feared in `market_data_cache` | They cannot happen | `persist_closed_bars` checks the `uq_mdc_bar` key first; replays write 0 rows |
 | `FeedConnectionError: after N attempt(s)` | Reconnect budget exhausted | `max_reconnect_attempts` / backoff in config; the handler retried with exponential backoff first |
 | Handler tests sleeping for real | Backoff not stubbed | Inject `handler._sleep`; the `testing` profile sets backoff to 0 |
+| Good-looking price rejected as a spike | Working as intended — z-score gate | `validator.check_for_spikes` returns the z-score; threshold in `config/quality.yaml`. Rejected prices never enter the window, so the gate cannot drift |
+| Every tick rejected after a big move | Regime change looked like a spike | The validator self-heals: after `alert_threshold` consecutive rejects it alerts and resets the window. If it keeps happening, raise `spike_zscore_threshold` or use the `lenient` profile |
+| Repaired tick has the "wrong" price | Interpolation is deliberate | `on_bad_data: repair` substitutes the previous *accepted* price. Bars are never repaired |
+| Same data, different verdicts across runs | Different strictness profile | `quality.yaml` severity table: spikes are errors at `normal`, warnings at `lenient` |
 
 ### Orders
 
@@ -454,6 +458,17 @@ cadence. On a transient `FeedError` it reconnects with exponential backoff
 `persist_closed_bars` is idempotent against `uq_mdc_bar` and keeps pending
 bars if the write fails.
 
+### `marketdata/quality.py`
+Two-layer defence: Step 10's normalizer rejects *structurally* broken
+payloads; this validator rejects well-formed data that is statistically
+**wrong** (spikes, stalls, volume anomalies). Severity depends on
+strictness, but hard violations (negative price, impossible OHLC, crossed
+quote) are errors at every level. Rejected data never enters the rolling
+windows; after `alert_threshold` consecutive rejects the validator alerts
+and resets the symbol's window so a genuine regime change self-heals.
+`on_bad_data: repair` interpolates price-level errors from the previous
+accepted price — bars are never repaired.
+
 ---
 
 ## 6. Known limitations
@@ -512,6 +527,7 @@ Python API rather than the CLI when using it.
 | `test_simulator_fees.py` | NSE + US fee stacks, 10 broker presets, volume tiers, FX | 109 |
 | `test_simulator_execution.py` | Liquidity caps, queue position, rejections, TIF, determinism | 99 |
 | `test_marketdata.py` | Normalization, IST alignment, gaps/late data, reconnect, cache idempotency | 173 |
+| `test_marketdata_quality.py` | Spikes, gaps, volume anomalies, strictness, repair, alerts, integration | 114 |
 | Pre-existing | Backtest engine, mStock | 25 (+4 skipped) |
 
 **Drift guards** — these fail loudly if two sources of truth diverge:

@@ -45,6 +45,7 @@ from backtest.marketdata.ticks import Bar, Tick, normalize_tick
 
 if TYPE_CHECKING:  # pragma: no cover
     from backtest.db.manager import DatabaseManager
+    from backtest.marketdata.quality import DataValidator
 
 logger = logging.getLogger("backtest.marketdata.handler")
 
@@ -163,9 +164,11 @@ class MarketDataHandler:
         self,
         config: MarketDataConfig | None = None,
         feed: DataFeed | None = None,
+        validator: "DataValidator | None" = None,
     ) -> None:
         self.config = config or MarketDataConfig()
         self.feed: DataFeed | None = None
+        self.validator = None
         self._subscribed: set[str] = set()
         self._quotes: dict[str, Tick] = {}
         self._ticks: dict[str, deque[Tick]] = {}
@@ -187,9 +190,13 @@ class MarketDataHandler:
             "ticks_received": 0,
             "invalid_payloads": 0,
             "ignored_unsubscribed": 0,
+            "quality_rejected": 0,
+            "quality_repaired": 0,
             "poll_errors": 0,
             "reconnects": 0,
         }
+        if validator is not None:
+            self.attach_validator(validator)
         if feed is not None:
             self.connect_to_feed(feed)
 
@@ -204,6 +211,22 @@ class MarketDataHandler:
         self.feed = feed
         if not feed.is_connected:
             self._reconnect(first_connect=True)
+
+    def attach_validator(self, validator: "DataValidator") -> None:
+        """Attach a Step 11 :class:`DataValidator` as the quality gate.
+
+        Every normalized tick passes through ``validator.validate_tick``
+        before it reaches buffers, observers or the aggregator. Rejected
+        ticks are counted in ``stats['quality_rejected']``; repaired ticks
+        replace the original and count in ``stats['quality_repaired']``.
+        """
+        from backtest.marketdata.quality import DataValidator
+
+        if not isinstance(validator, DataValidator):
+            raise TypeError(
+                f"validator must be a DataValidator, got {type(validator).__name__}"
+            )
+        self.validator = validator
 
     def disconnect(self) -> None:
         if self.feed is not None:
@@ -328,6 +351,14 @@ class MarketDataHandler:
             if tick.symbol not in self._subscribed:
                 self._stats["ignored_unsubscribed"] += 1
                 continue
+            if self.validator is not None:
+                result = self.validator.validate_tick(tick)
+                if result.rejected:
+                    self._stats["quality_rejected"] += 1
+                    continue
+                if result.repaired:
+                    self._stats["quality_repaired"] += 1
+                    tick = result.tick  # use the interpolated copy
             self._accept(tick)
             accepted.append(tick)
         return accepted

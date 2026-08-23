@@ -38,6 +38,18 @@ from backtest.marketdata.handler import (
     MarketDataHandler,
     load_marketdata_config,
 )
+from backtest.marketdata.quality import (
+    DEFAULT_QUALITY_CONFIG_PATH,
+    Action,
+    BadDataPolicy,
+    DataValidator,
+    QualityConfig,
+    Severity,
+    Strictness,
+    ValidationIssue,
+    ValidationResult,
+    load_quality_config,
+)
 from backtest.marketdata.ticks import Bar, Tick, normalize_tick, parse_timestamp
 
 __all__ = [
@@ -66,4 +78,15 @@ __all__ = [
     "MarketDataHandler",
     "load_marketdata_config",
     "DEFAULT_MARKETDATA_CONFIG_PATH",
+    # quality (Step 11)
+    "DataValidator",
+    "QualityConfig",
+    "ValidationIssue",
+    "ValidationResult",
+    "Action",
+    "Severity",
+    "Strictness",
+    "BadDataPolicy",
+    "load_quality_config",
+    "DEFAULT_QUALITY_CONFIG_PATH",
 ]

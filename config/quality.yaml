@@ -1,0 +1,100 @@
+# =============================================================================
+# Forward Testing Simulator — Data Quality Validation (Step 11)
+# =============================================================================
+#
+# Loaded by backtest.marketdata.load_quality_config().
+#
+#   from backtest.marketdata import DataValidator, load_quality_config
+#   validator = DataValidator(config=load_quality_config())              # active_profile
+#   validator = DataValidator(config=load_quality_config(profile="strict"))
+#
+# Severity depends on strictness. Hard structural violations (negative
+# price, impossible OHLC, crossed quote) are errors at EVERY level; the
+# statistical checks (spikes, gaps, volume anomalies) escalate with
+# strictness:
+#
+#   check                 lenient    normal     strict
+#   price_out_of_range    warning    error      error
+#   price_spike           warning    error      error
+#   last_outside_spread   info       warning    error
+#   out_of_order          warning    warning    error
+#   data_gap              info       warning    error
+#   volume_anomaly        info       warning    error
+# =============================================================================
+
+active_profile: normal
+
+
+# -----------------------------------------------------------------------------
+# Shared settings. Profiles override individual keys.
+# -----------------------------------------------------------------------------
+default:
+
+  # lenient | normal | strict — see the severity table above.
+  strictness: normal
+
+  # reject | repair.
+  # reject: drop the datum, keep counting (alert after repeated failures).
+  # repair: for price-level errors only, substitute the previous observed
+  #         price (interpolation). Bars are never repaired.
+  on_bad_data: reject
+
+  # ---- Absolute price sanity (NSE equities: paise to lakhs) ----
+  min_price: 0.01
+  max_price: 10000000
+
+  # ---- Spike detection ----
+  # A price more than this many standard deviations from the rolling mean
+  # is a spike. The window only ever contains ACCEPTED prices, so one
+  # spike cannot widen the deviation that would hide the next one.
+  spike_zscore_threshold: 3.0
+  spike_window: 50
+  spike_min_samples: 10
+
+  # ---- Feed-stall detection ----
+  # Seconds between consecutive ticks of one symbol before flagging a gap.
+  # NSE trades 09:15-15:30; 300s of silence in a liquid name means the
+  # feed stalled, not the market.
+  max_gap_seconds: 300
+
+  # ---- Volume anomaly ----
+  volume_anomaly_multiple: 5.0
+  volume_window: 50
+  volume_min_samples: 5
+
+  # ---- Alerting and regime reset ----
+  # After this many CONSECUTIVE rejections for one symbol the validator
+  # fires its alert callbacks and resets that symbol's rolling window —
+  # a genuine gap-up keeps looking like a spike, and without the reset it
+  # would be rejected forever.
+  alert_threshold: 5
+
+  # ---- Cross-source comparison ----
+  # compare_sources() flags divergence beyond this percent of price.
+  source_divergence_pct: 0.5
+
+
+# -----------------------------------------------------------------------------
+# Profiles
+# -----------------------------------------------------------------------------
+profiles:
+
+  # Balanced live defaults.
+  normal: {}
+
+  # Noisy feeds / illiquid symbols: only structural violations reject.
+  lenient:
+    strictness: lenient
+    spike_zscore_threshold: 5.0
+    volume_anomaly_multiple: 10.0
+
+  # Clean-room replays and reconciliation: everything suspicious rejects.
+  strict:
+    strictness: strict
+    spike_zscore_threshold: 2.5
+    max_gap_seconds: 120
+
+  # Live trading with self-healing: interpolate price-level errors instead
+  # of dropping the update.
+  repair:
+    on_bad_data: repair
