@@ -161,6 +161,16 @@ from backtest.simulator.risk_manager import (
     RiskManager,
     load_risk_config,
 )
+from backtest.simulator.stop_manager import (
+    DEFAULT_STOP_CONFIG_PATH,
+    Stop,
+    StopConfig,
+    StopHit,
+    StopManager,
+    StopType,
+    TakeProfitType,
+    load_stop_config,
+)
 
 __all__ = [
     # Portfolio
@@ -288,4 +298,13 @@ __all__ = [
     "RiskCheckResult",
     "load_risk_config",
     "DEFAULT_RISK_CONFIG_PATH",
+    # Stop manager (Step 16)
+    "StopManager",
+    "StopConfig",
+    "Stop",
+    "StopHit",
+    "StopType",
+    "TakeProfitType",
+    "load_stop_config",
+    "DEFAULT_STOP_CONFIG_PATH",
 ]

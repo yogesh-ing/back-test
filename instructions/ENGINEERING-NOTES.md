@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 15** (Risk Manager complete).
+Updated at the end of every step. Last updated: **Step 16** (Stop Loss & Take Profit complete).
 
 ---
 
@@ -374,6 +374,24 @@ degradation when the operational rows have not been flushed yet.
 **Fix:** Removed ``allow_short`` from ExecutionConfig init; executor now uses default config loaded from file/profile.
 
 **Lesson:** Check constructor signatures; portfolio limits vs execution config are separate concerns.
+
+### 4.10 ONE not imported in stop_manager (Step 16)
+
+**Symptom:** ``NameError: name 'ONE' is not defined`` when calculating percentage stops.
+
+**Cause:** ``stop_manager.py`` imported ``ZERO`` but not ``ONE`` from ``money.py``, but used ``ONE`` in ``entry_price * (ONE - pct)``.
+
+**Fix:** Import ``ONE`` alongside ``ZERO``.
+
+**Lesson:** When using Decimal constants, import all needed (ZERO, ONE) – grep for usage.
+
+### 4.11 Breakeven not triggered for non-trailing stops (Step 16)
+
+**Symptom:** ``test_breakeven_move`` failed – trailing update returned 0 for percentage stop with breakeven.
+
+**Cause:** ``update_trailing_stops`` had early ``if not is_trailing: continue`` that skipped breakeven logic for non-trailing stops. Breakeven is a feature for any stop, not just trailing.
+
+**Fix:** Removed early continue, handle trailing updates only if ``is_trailing``, but always check breakeven for any active stop with ``move_to_breakeven``.
 
 ### 4.6 Test-only mistakes worth remembering
 

@@ -5,13 +5,13 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 10–15, 20 complete (Phase 4, 5, 6 partial, 8 done)**
+**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 10–16, 20 complete (Phase 4, 5, 6, 8 done)**
 
 ---
 
 ## Progress
 
-`███████████████████████████████░░` **16 / 24 steps complete** (67%)
+`████████████████████████████████░░` **17 / 24 steps complete** (71%)
 
 | Phase | Steps | Status |
 |---|---|---|
@@ -20,7 +20,7 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 | 3 · Execution | 7–9 | ✅ **Complete** |
 | 4 · Live data | 10–12 | ✅ **Complete** |
 | 5 · Strategy | 13–14 | ✅ **Complete** |
-| 6 · Risk | 15–16 | 🟡 **In progress** (15 ✅, 16 ⬜) |
+| 6 · Risk | 15–16 | ✅ **Complete** |
 | 7 · Performance | 17–19 | ⬜ Not started (placeholders in engine) |
 | 8 · Orchestration | 20 | ✅ **Complete** |
 | Bonus | 21–24 | ⬜ Not started |
@@ -56,7 +56,8 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 │   ├── fees.py          #   Full fee stack     ✅ Step 8
 │   ├── execution.py     #   OrderExecutor      ✅ Step 9
 │   ├── position_sizing.py # PositionSizer, 6 methods, constraints ✅ Step 14
-│   └── risk_manager.py  # RiskManager, RiskConfig, circuit breakers ✅ Step 15
+│   ├── risk_manager.py  # RiskManager, RiskConfig, circuit breakers ✅ Step 15
+│   └── stop_manager.py  # StopManager, StopType, OCO, trailing ✅ Step 16
 ├── live/                # Steps 10–12 ✅ (live data)
 │   ├── market_data_handler.py # MarketDataHandler, BarBuilder, BrokerFeed ✅ Step 10
 │   ├── data_validator.py      # DataValidator, ValidationResult ✅ Step 11
@@ -77,6 +78,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 │   ├── forward_testing.yaml # Main engine config ✅ Step 20
 │   ├── position_sizing.yaml # 8 profiles for sizing ✅ Step 14
 │   ├── risk.yaml            # Risk limits, 5 profiles ✅ Step 15
+│   ├── stops.yaml           # Stop loss & TP, 7 profiles ✅ Step 16
 │   ├── market_data.yaml     # Market data handler config ✅ Step 10
 │   ├── data_quality.yaml    # Data validator config ✅ Step 11
 │   ├── time_sync.yaml       # Time manager config ✅ Step 12
@@ -121,5 +123,6 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_data_validator.py` (Step 11) | 18 |
 | `test_time_manager.py` (Step 12) | 18 |
 | `test_simulator_risk_manager.py` (Step 15) | 24 |
-| **Total** | **1050 passing, 4 skipped** |
+| `test_simulator_stop_manager.py` (Step 16) | 21 |
+| **Total** | **1071 passing, 4 skipped** |
 

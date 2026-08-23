@@ -897,7 +897,16 @@ class ForwardTestingEngine:
             logger.warning("Failed to init real RiskManager, using mock: %s", exc)
             self.risk_manager = MockRiskManager(portfolio=self.portfolio, risk_config=self.config.risk)
 
-        self.stop_manager = MockStopManager(portfolio=self.portfolio)
+        # Stop manager – try real implementation
+        try:
+            from backtest.simulator.stop_manager import StopManager as RealStopManager
+
+            self.stop_manager = RealStopManager(portfolio=self.portfolio, backtest_mode=self.config.system.backtest_mode)
+            logger.info("Using real StopManager (Step 16)")
+        except Exception as exc:
+            logger.warning("Failed to init real StopManager, using mock: %s", exc)
+            self.stop_manager = MockStopManager(portfolio=self.portfolio)
+
         self.performance = MockPerformanceCalculator(portfolio=self.portfolio)
 
         self._loop_count = 0

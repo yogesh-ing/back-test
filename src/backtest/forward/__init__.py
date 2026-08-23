@@ -22,6 +22,7 @@ from .engine import (
     load_forward_config,
 )
 from backtest.simulator.risk_manager import RiskConfig, RiskManager, RiskCheckResult, load_risk_config
+from backtest.simulator.stop_manager import StopManager, StopConfig, StopType, TakeProfitType
 
 __all__ = [
     "Portfolio",
@@ -50,4 +51,8 @@ __all__ = [
     "RiskConfig",
     "RiskCheckResult",
     "load_risk_config",
+    "StopManager",
+    "StopConfig",
+    "StopType",
+    "TakeProfitType",
 ]
