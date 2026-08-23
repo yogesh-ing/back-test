@@ -291,7 +291,7 @@ def test_engine_backtest_mode():
             config_dict={
                 "portfolio": {"name": "BacktestTest"},
                 "strategy": {"name": "dummy_test"},
-                "data": {"symbols": ["INFY"], "provider": "mock", "start_date": "2024-01-01", "end_date": "2024-01-10"},
+                "data": {"symbols": ["INFY"], "provider": "mock", "start_date": "2024-01-01", "end_date": "2024-01-10", "timeframe": "1day"},
                 "system": {"state_file": str(state_file), "loop_interval_seconds": 0, "backtest_mode": True, "save_state_interval_minutes": 0},
             },
             portfolio=portfolio,
@@ -300,6 +300,14 @@ def test_engine_backtest_mode():
         )
         engine.initialize_system()
         engine.adapter.min_bars = 2
+        # Disable gap and spike detection for daily backtest with random data
+        try:
+            engine.validator.config.gap_detection_enabled = False
+            engine.validator.config.spike_detection_enabled = False
+            engine.data_handler.validator.config.gap_detection_enabled = False
+            engine.data_handler.validator.config.spike_detection_enabled = False
+        except Exception:
+            pass
         engine._running = True
         engine._run_backtest_mode()
 

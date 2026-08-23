@@ -154,6 +154,13 @@ from backtest.simulator.position_sizing import (
     VolatilitySizer,
     load_position_sizing_config,
 )
+from backtest.simulator.risk_manager import (
+    DEFAULT_RISK_CONFIG_PATH,
+    RiskCheckResult,
+    RiskConfig,
+    RiskManager,
+    load_risk_config,
+)
 
 __all__ = [
     # Portfolio
@@ -275,4 +282,10 @@ __all__ = [
     "KellySizer",
     "load_position_sizing_config",
     "DEFAULT_SIZING_CONFIG_PATH",
+    # Risk manager (Step 15)
+    "RiskManager",
+    "RiskConfig",
+    "RiskCheckResult",
+    "load_risk_config",
+    "DEFAULT_RISK_CONFIG_PATH",
 ]

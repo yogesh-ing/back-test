@@ -5,13 +5,13 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 10–14, 20 complete (Phase 4 & 5 & 8 done)**
+**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 10–15, 20 complete (Phase 4, 5, 6 partial, 8 done)**
 
 ---
 
 ## Progress
 
-`█████████████████████████████░░░` **15 / 24 steps complete** (62%)
+`███████████████████████████████░░` **16 / 24 steps complete** (67%)
 
 | Phase | Steps | Status |
 |---|---|---|
@@ -20,7 +20,7 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 | 3 · Execution | 7–9 | ✅ **Complete** |
 | 4 · Live data | 10–12 | ✅ **Complete** |
 | 5 · Strategy | 13–14 | ✅ **Complete** |
-| 6 · Risk | 15–16 | ⬜ Not started (placeholders in engine) |
+| 6 · Risk | 15–16 | 🟡 **In progress** (15 ✅, 16 ⬜) |
 | 7 · Performance | 17–19 | ⬜ Not started (placeholders in engine) |
 | 8 · Orchestration | 20 | ✅ **Complete** |
 | Bonus | 21–24 | ⬜ Not started |
@@ -37,124 +37,12 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 
 | # | Step | Status | Deliverables | Tests |
 |---|---|---|---|---|
-| 1 | Database Schema Design | ✅ | `db/migrations/001_initial_schema.sql`, `.sqlite.sql`, rollback, `db/verify_schema.sql`, `src/backtest/db/models.py`, `db/alembic/`, `db/DB-IMPLEMENTATION-GUIDE.md` | 44 |
-| 2 | Database Connection Manager | ✅ | `src/backtest/db/manager.py`, `src/backtest/db/config.py`, `config/database.yaml`, `db/CONNECTION-MANAGER.md` | 107 |
-
-### Phase 2 — Core Data Models
-
-| # | Step | Status | Deliverables | Tests |
-|---|---|---|---|---|
-| 3 | Portfolio Model | ✅ | `src/backtest/simulator/portfolio.py`, `position.py` (base), `errors.py`, `money.py` | 130 |
-| 4 | Position Model | ✅ | `src/backtest/simulator/lots.py` (LotBook), FIFO/LIFO/average, splits, dividends, `save_to_db` | 77 |
-| 5 | Order Model | ✅ | `src/backtest/simulator/order.py`, `enums.py` — state machine, 5 order types, triggers, callbacks | 115 |
-| 6 | Fill Model | ✅ | `src/backtest/simulator/fill.py`, `commission.py` — immutable fills, 5 commission models, `Portfolio.apply_fill` | 106 |
-
-### Phase 3 — Order Execution Simulation
-
-| # | Step | Status | Deliverables |
-|---|---|---|---|
-| 7 | Slippage Model | ✅ | `src/backtest/simulator/slippage.py`, `config/slippage.yaml` — 5 models, 4 profiles, tiers, time-of-day · **101 tests** |
-| 8 | Commission Calculator | ✅ | `src/backtest/simulator/fees.py`, `config/brokers.yaml` — NSE + US fee stacks, 10 broker presets, monthly volume tiers, FX · **109 tests** |
-| 9 | Order Execution Simulator | ✅ | `src/backtest/simulator/execution.py`, `config/execution.yaml` — liquidity caps, queue position, latency, rejections · **99 tests** |
-
-### Phase 4 — Live Data Integration
-
-| # | Step | Status | Deliverables |
-|---|---|---|---|
-| 10 | Market Data Handler | ✅ | `src/backtest/live/market_data_handler.py`, `config/market_data.yaml` — normalization to standard format, bar aggregation (1min/3min/5min/15min/30min/1hr/1day), multi-symbol, reconnection with backoff, bounded buffers, observer pattern (on_tick_received/on_bar_closed), DB cache to MARKET_DATA_CACHE, abstract BrokerFeed + MockBrokerFeed + MStockBrokerFeed wired to `live/mstock.py` · **18 tests** |
-| 11 | Data Quality Validator | ✅ | `src/backtest/live/data_validator.py`, `config/data_quality.yaml` — OHLC sanity, price range, bid<=ask, volume, chronological, future timestamp, spike detection (Z-score rolling window), gap detection (intraday 5min / daily 3 days), volume anomaly (5x avg), configurable strictness (strict/normal/lenient), stats, alert on repeated failures · **18 tests** |
-| 12 | Time Synchronization Manager | ✅ | `src/backtest/live/time_manager.py`, `config/time_sync.yaml` — NSE 09:15-15:30 IST (NYSE 09:30-16:00 ET as reference), weekend/holiday handling, pre-market/after-hours, next open/close, trading days between, bar alignment to timeframe boundaries, IST/UTC/ET conversion, DST awareness, mock time controllable clock, NTP placeholder, latency stats · **18 tests** |
-
-### Phase 5 — Strategy Integration
-
-| # | Step | Status | Deliverables |
-|---|---|---|---|
-| 13 | Strategy Adapter | ✅ | `src/backtest/forward/strategy_adapter.py`, `src/backtest/strategy/adapter.py` — bridge to `strategy/base.py`, Signal model, 3 sizers, multi-symbol, dry-run, DB logging, state persistence, no-lookahead guarantee · **20 tests** |
-| 14 | Position Sizing Engine | ✅ | `src/backtest/simulator/position_sizing.py`, `config/position_sizing.yaml` — 6 methods (fixed qty/dollar, % portfolio, risk-based, ATR/volatility, Kelly), constraints (max value/pct, gross exposure, min trade, round lots, max positions), RiskParams, SizingConfig, config loader with 8 profiles, integration with StrategyAdapter · **25 tests** |
-
-### Phase 6 — Risk Management
-
-| # | Step | Status | Deliverables |
-|---|---|---|---|
-| 15 | Risk Manager | ⬜ | Pre-trade checks, circuit breakers |
-| 16 | Stop Loss & Take Profit Manager | ⬜ | Trailing stops, OCO — **reconcile with `forward/broker.py`** |
-
-### Phase 7 — Performance Tracking
-
-| # | Step | Status | Deliverables |
-|---|---|---|---|
-| 17 | Performance Calculator | ⬜ | Reuse `engine/metrics.py` where possible |
-| 18 | Trade Analyzer | ⬜ | Attribution by exit reason, MAE/MFE |
-| 19 | Real-Time Dashboard | ⬜ | Web UI |
-
-### Phase 8 — System Orchestration
-
-| # | Step | Status | Deliverables |
-|---|---|---|---|
-| 20 | Main Forward Testing Engine | ✅ | `src/backtest/forward/engine.py`, `config/forward_testing.yaml`, `Dockerfile`, `forward_testing.service` — event loop, state persistence, lifecycle hooks (on_start/on_stop/on_error/on_market_open/close), heartbeat, slow-loop detection, signal handlers (SIGINT/SIGTERM), dry-run & backtest replay modes, config validation, placeholders for Steps 10-12, 15-19, integration tests · **14 tests** |
-
-### Bonus
-
-| # | Step | Status |
-|---|---|---|
-| 21 | Alert & Notification System | ⬜ |
-| 22 | Backtesting Comparison Tool | ⬜ |
-| 23 | Configuration Manager | ⬜ |
-| 24 | Testing & CI/CD Setup | ⬜ |
-
----
-
-## Manual actions required from you
-
-Things the agent cannot do; tracked so nothing is silently skipped.
-
-| # | Action | From | Status |
-|---|---|---|---|
-| 1 | Apply `db/migrations/001_initial_schema.sql` to your PostgreSQL | Step 1 | ⬜ Pending |
-| 2 | Run `db/verify_schema.sql`, confirm all PASS | Step 1 | ⬜ Pending |
-| 3 | Set `FORWARD_TEST_DB_URL` in `.env` (never commit it) | Step 1/2 | ⬜ Pending |
-| 4 | `pip install -r requirements.txt` (adds SQLAlchemy, Alembic, psycopg2, PyYAML) | Step 1/2 | ⬜ Pending |
-| 5 | Review & merge PR #3 | — | ✅ Merged 2026-08-19 (`4e01d65`) |
-| 6 | Review & merge the Phase 3 PR (Steps 8–9) | — | ⬜ Pending — PR not yet opened, GitHub unreachable |
-
----
-
-## Deviations from the plan document
-
-Recorded so the divergence is deliberate and reviewable, not accidental drift.
-
-| # | Plan says | We do | Why |
-|---|---|---|---|
-| 1 | SEC / FINRA TAF fees (US) | **Both** regimes implemented (`IndiaEquityFees` default, `USEquityFees` available) | Repo trades NSE via mStock, but the plan names US fees |
-| 2 | Column named `timestamp` | Column named `ts` | `timestamp` is a SQL type name; forces quoting, confuses ORM reflection |
-| 3 | NYSE calendar, 9:30–16:00 ET | NSE calendar, IST | Same reason as 1 |
-| 4 | Broker: Alpaca / IBKR | mStock (already implemented in `live/`) | Existing code |
-| 5 | New Strategy base class (Step 13) | Adapt existing `strategy/base.py` | Avoid duplicating a working abstraction |
-| 6 | Native SQL `ENUM` types | `VARCHAR` + `CHECK` | Portability to SQLite, required by Step 2 |
-| 7 | — | New `simulator/` package for Steps 3–6 | Avoids collision with existing `forward.portfolio.Portfolio` and ORM `db.models.Portfolio` |
-
----
-
-## Known limitations
-
-Deliberate gaps, recorded so they are not mistaken for oversights.
-
-| # | Limitation | From | Impact |
-|---|---|---|---|
-| 1 | Tax lots are **not** persisted — the schema has no `lots` table. A FIFO position reloaded from the database collapses to one lot at the stored average price. | Step 4 | Restart mid-run loses FIFO granularity. Workaround: the `to_dict()`/`from_dict()` JSON snapshot **is** lossless; the Step 20 state manager should use it. Revisit if per-lot tax reporting is needed. |
-| 2 | `Order.status_history`, `triggered` and `extreme_price` are not persisted — no columns in `orders`. | Step 5 | Survives in the `to_dict()` JSON snapshot; Step 20 should use it. |
-
----
-
-## Architecture as built
-
-```
-src/backtest/
+| 1 | Database Schema Design | ✅ | `db/migrations/001_initial_schema.sql`, `.sqlite.sql`, rollback, `db/verify_schema.sql`, `src/backtest/
 ├── db/                  # Steps 1–2 ✅
 │   ├── models.py        #   ORM: 10 tables
 │   ├── manager.py       #   DatabaseManager: pooling, retries, transactions
 │   └── config.py        #   Layered config
-├── simulator/           # Steps 3–9, 14 ✅ (forward testing domain models)
+├── simulator/           # Steps 3–9, 14–15 ✅ (domain models)
 │   ├── money.py         #   Decimal helpers  ✅
 │   ├── errors.py        #   Domain exceptions ✅
 │   ├── lots.py          #   LotBook, FIFO/LIFO ✅ Step 4
@@ -167,7 +55,8 @@ src/backtest/
 │   ├── slippage.py      #   5 slippage models  ✅ Step 7
 │   ├── fees.py          #   Full fee stack     ✅ Step 8
 │   ├── execution.py     #   OrderExecutor      ✅ Step 9
-│   └── position_sizing.py # PositionSizer, 6 methods, constraints ✅ Step 14
+│   ├── position_sizing.py # PositionSizer, 6 methods, constraints ✅ Step 14
+│   └── risk_manager.py  # RiskManager, RiskConfig, circuit breakers ✅ Step 15
 ├── live/                # Steps 10–12 ✅ (live data)
 │   ├── market_data_handler.py # MarketDataHandler, BarBuilder, BrokerFeed ✅ Step 10
 │   ├── data_validator.py      # DataValidator, ValidationResult ✅ Step 11
@@ -187,6 +76,7 @@ src/backtest/
 ├── config/
 │   ├── forward_testing.yaml # Main engine config ✅ Step 20
 │   ├── position_sizing.yaml # 8 profiles for sizing ✅ Step 14
+│   ├── risk.yaml            # Risk limits, 5 profiles ✅ Step 15
 │   ├── market_data.yaml     # Market data handler config ✅ Step 10
 │   ├── data_quality.yaml    # Data validator config ✅ Step 11
 │   ├── time_sync.yaml       # Time manager config ✅ Step 12
@@ -230,5 +120,6 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_market_data_handler.py` (Step 10) | 18 |
 | `test_data_validator.py` (Step 11) | 18 |
 | `test_time_manager.py` (Step 12) | 18 |
-| **Total** | **1026 passing, 4 skipped** |
+| `test_simulator_risk_manager.py` (Step 15) | 24 |
+| **Total** | **1050 passing, 4 skipped** |
 

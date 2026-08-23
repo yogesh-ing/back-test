@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 12** (Phase 4 Live Data complete, mock-only).
+Updated at the end of every step. Last updated: **Step 15** (Risk Manager complete).
 
 ---
 
@@ -557,6 +557,33 @@ NSE time handling:
 * **Mock time:** `set_mock_time` and `advance_mock_time` for controllable clock
   in tests – `get_current_time` returns mock if set
 * **Latency:** `measure_latency` samples, `get_latency_stats` mean/p95/min/max
+
+
+
+### `simulator/risk_manager.py` (Step 15)
+Risk checks with hierarchy order→position→portfolio:
+
+* **Order-level:** restricted_symbols, allowed_symbols, min/max order value,
+  max % of daily volume (requires avg volume history)
+* **Position-level:** max_position_value, max_position_pct (vs equity),
+  max_open_positions (via has_position), sector concentration via
+  symbol_to_sector mapping + sector_exposure_limits
+* **Portfolio-level:** max_drawdown_pct (via current_drawdown), daily_loss_limit
+  (tracked in _daily_pnl dict), weekly/monthly placeholders, max_leverage
+  (gross/equity), max_gross_exposure_pct, max_total_exposure absolute
+* **Circuit breakers:** `emergency_stop_all` halts trading, cancels orders via
+  portfolio.cancel_all_orders, sets _is_halted. `check_circuit_breakers`
+  checks drawdown, daily loss, consecutive losses. `record_trade_result`
+  tracks PnL and loss streak, `record_error` tracks technical errors with
+  auto-pause after max_consecutive_errors.
+* **Override:** `override(code, duration)` with allow_override flag and
+  optional override_code, expires after duration.
+* **Alerts:** `add_alert_callback` for limit breaches, all rejections logged
+  with code/reason/details.
+* **Batch:** `validate_orders` and `validate_signals` for engine integration.
+
+Config loader from YAML with 5 profiles: default, conservative, aggressive,
+intraday, nse_fo, permissive.
 
 
 ### `forward/engine.py` (Step 20)

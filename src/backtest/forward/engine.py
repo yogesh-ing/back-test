@@ -879,7 +879,24 @@ class ForwardTestingEngine:
         if not hasattr(self, "time_manager") or self.time_manager is None:
             self.time_manager = MockTimeManager(market=self.config.system.market)
 
-        self.risk_manager = MockRiskManager(portfolio=self.portfolio, risk_config=self.config.risk)
+        # Risk manager – try real implementation
+        try:
+            from backtest.simulator.risk_manager import RiskManager as RealRiskManager, RiskConfig as RealRiskConfig
+
+            real_risk_cfg = RealRiskConfig(
+                max_position_value=self.config.risk.max_position_size,
+                max_position_pct=None,
+                max_open_positions=self.config.risk.max_positions,
+                max_drawdown_pct=self.config.risk.max_drawdown_pct,
+                daily_loss_limit_pct=self.config.risk.daily_loss_limit_pct,
+                max_leverage=self.config.risk.max_leverage,
+            )
+            self.risk_manager = RealRiskManager(portfolio=self.portfolio, config=real_risk_cfg)
+            logger.info("Using real RiskManager (Step 15)")
+        except Exception as exc:
+            logger.warning("Failed to init real RiskManager, using mock: %s", exc)
+            self.risk_manager = MockRiskManager(portfolio=self.portfolio, risk_config=self.config.risk)
+
         self.stop_manager = MockStopManager(portfolio=self.portfolio)
         self.performance = MockPerformanceCalculator(portfolio=self.portfolio)
 
