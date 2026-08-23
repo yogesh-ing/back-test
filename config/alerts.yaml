@@ -1,0 +1,181 @@
+# =============================================================================
+# Forward Testing Simulator — Alert & Notification Configuration (Step 21)
+# =============================================================================
+# Loaded by backtest.alerts.manager.AlertManager
+#
+#   from backtest.alerts.manager import AlertManager
+#   manager = AlertManager()  # loads this file + env overrides
+#   manager.send_alert("info", "Trade executed: INFY BUY 100 @ 1500", channels=["telegram"])
+#
+# Secrets (tokens, passwords) should be in .env, not here:
+#   TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+#   TELEGRAM_CHAT_ID=123456789
+#   SLACK_WEBHOOK_URL=https://hooks.slack.com/...
+#   DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+#
+# Telegram is preferred (fast, free, reliable) per user preference.
+# Email may be delayed, SMS costly – use Telegram for most alerts.
+# =============================================================================
+
+active_profile: default
+
+default:
+  enabled: true
+  min_level: info  # debug, info, warning, error, critical – minimum level to send
+
+  channels:
+    log:
+      enabled: true
+      log_file: "logs/alerts.log"
+
+    telegram:
+      enabled: false  # set true via env TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
+      telegram_bot_token: null
+      telegram_chat_id: null
+      telegram_parse_mode: "Markdown"
+
+    slack:
+      enabled: false
+      slack_webhook_url: null
+
+    discord:
+      enabled: false
+      discord_webhook_url: null
+
+    email:
+      enabled: false
+      smtp_host: null
+      smtp_port: 587
+      smtp_user: null
+      smtp_password: null  # from .env ALERT_EMAIL_PASSWORD
+      from_email: null
+      to_emails: []
+
+    sms:
+      enabled: false
+      twilio_account_sid: null
+      twilio_auth_token: null  # from .env TWILIO_AUTH_TOKEN
+      twilio_from_number: null
+      twilio_to_numbers: []
+
+    desktop:
+      desktop_enabled: false
+
+  # Routing: which channels for which level or alert type
+  # Priority: alert_type routing > level routing > default
+  routing:
+    # By level
+    critical: [telegram, slack, sms, log]
+    error: [telegram, slack, log]
+    warning: [telegram, log]
+    info: [telegram, log]
+    debug: [log]
+
+    # By alert type (overrides level routing)
+    trade_executed: [telegram, log]
+    stop_loss_hit: [telegram, log]
+    take_profit_hit: [telegram, log]
+    risk_limit_breach: [telegram, slack, log]
+    system_error: [telegram, slack, log]
+    position_opened: [telegram, log]
+    position_closed: [telegram, log]
+    daily_summary: [telegram, email, log]
+
+  # Quiet hours – suppress non-critical alerts during night (IST)
+  quiet_hours_enabled: false
+  quiet_start: "22:00"
+  quiet_end: "07:00"
+  quiet_timezone: "Asia/Kolkata"
+  quiet_allow_critical: true
+
+  # Rate limiting – prevent spam
+  rate_limit_enabled: true
+  max_alerts_per_hour: 20
+  max_alerts_per_hour_per_channel:
+    telegram: 30
+    slack: 20
+    email: 10
+    sms: 5
+
+  # Message templates – placeholders filled from context
+  templates:
+    trade_executed: "🔔 Trade executed: {symbol} {side} {quantity} @ {price} | PnL: {pnl} | {reason}"
+    stop_loss_hit: "🛑 Stop loss hit: {symbol} {side} {quantity} @ {price} | Loss: {pnl}"
+    take_profit_hit: "✅ Take profit hit: {symbol} {side} {quantity} @ {price} | Profit: {pnl}"
+    risk_limit_breach: "⚠️ Risk limit breached: {limit_type} for {symbol} | {reason}"
+    system_error: "❌ System error: {component} | {message}"
+    position_opened: "📈 Position opened: {symbol} {side} {quantity} @ {price}"
+    position_closed: "📉 Position closed: {symbol} {side} {quantity} @ {price} | PnL: {pnl}"
+    daily_summary: "📊 Daily Summary: Equity {equity} | P&L {pnl} | Trades {trades} | Win Rate {win_rate}%"
+
+  keep_history: true
+  max_history: 1000
+  persist_to_db: false
+
+profiles:
+
+  # Development – log only, no external channels
+  dev:
+    min_level: debug
+    routing:
+      critical: [log]
+      error: [log]
+      warning: [log]
+      info: [log]
+      debug: [log]
+
+  # Production – Telegram preferred, Slack for errors, SMS for critical
+  production:
+    min_level: info
+    channels:
+      telegram:
+        enabled: true
+      slack:
+        enabled: true
+      log:
+        enabled: true
+    routing:
+      critical: [telegram, slack, sms, log]
+      error: [telegram, slack, log]
+      warning: [telegram, log]
+      info: [telegram, log]
+    quiet_hours_enabled: true
+    rate_limit_enabled: true
+
+  # Telegram-only – simplest, free, fast (user preferred)
+  telegram_only:
+    min_level: info
+    channels:
+      telegram:
+        enabled: true
+      log:
+        enabled: true
+    routing:
+      critical: [telegram, log]
+      error: [telegram, log]
+      warning: [telegram, log]
+      info: [telegram, log]
+      trade_executed: [telegram, log]
+      risk_limit_breach: [telegram, log]
+      system_error: [telegram, log]
+      daily_summary: [telegram, log]
+
+  # All channels – for testing all integrations
+  all_channels:
+    min_level: info
+    channels:
+      telegram:
+        enabled: true
+      slack:
+        enabled: true
+      discord:
+        enabled: true
+      email:
+        enabled: true
+      log:
+        enabled: true
+    routing:
+      critical: [telegram, slack, discord, email, log]
+      error: [telegram, slack, discord, log]
+      warning: [telegram, log]
+      info: [telegram, log]

@@ -24,6 +24,10 @@ from .engine import (
 from backtest.simulator.risk_manager import RiskConfig, RiskManager, RiskCheckResult, load_risk_config
 from backtest.simulator.stop_manager import StopManager, StopConfig, StopType, TakeProfitType
 from backtest.simulator.performance import PerformanceCalculator, PerformanceConfig
+from backtest.simulator.trade_analyzer import TradeAnalyzer, AnalyzedTrade
+from backtest.dashboard.data_provider import DashboardDataProvider
+from backtest.dashboard.app import create_dashboard_app, run_dashboard
+from backtest.alerts.manager import AlertManager, AlertConfig, AlertLevel, AlertChannel
 
 __all__ = [
     "Portfolio",
@@ -58,4 +62,13 @@ __all__ = [
     "TakeProfitType",
     "PerformanceCalculator",
     "PerformanceConfig",
+    "TradeAnalyzer",
+    "AnalyzedTrade",
+    "DashboardDataProvider",
+    "create_dashboard_app",
+    "run_dashboard",
+    "AlertManager",
+    "AlertConfig",
+    "AlertLevel",
+    "AlertChannel",
 ]
