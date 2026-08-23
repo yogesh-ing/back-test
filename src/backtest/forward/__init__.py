@@ -23,6 +23,7 @@ from .engine import (
 )
 from backtest.simulator.risk_manager import RiskConfig, RiskManager, RiskCheckResult, load_risk_config
 from backtest.simulator.stop_manager import StopManager, StopConfig, StopType, TakeProfitType
+from backtest.simulator.performance import PerformanceCalculator, PerformanceConfig
 
 __all__ = [
     "Portfolio",
@@ -55,4 +56,6 @@ __all__ = [
     "StopConfig",
     "StopType",
     "TakeProfitType",
+    "PerformanceCalculator",
+    "PerformanceConfig",
 ]

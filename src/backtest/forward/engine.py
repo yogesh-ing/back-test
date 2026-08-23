@@ -907,7 +907,15 @@ class ForwardTestingEngine:
             logger.warning("Failed to init real StopManager, using mock: %s", exc)
             self.stop_manager = MockStopManager(portfolio=self.portfolio)
 
-        self.performance = MockPerformanceCalculator(portfolio=self.portfolio)
+        # Performance calculator – try real implementation
+        try:
+            from backtest.simulator.performance import PerformanceCalculator as RealPerfCalc
+
+            self.performance = RealPerfCalc(portfolio=self.portfolio, db_manager=self.db_manager)
+            logger.info("Using real PerformanceCalculator (Step 17)")
+        except Exception as exc:
+            logger.warning("Failed to init real PerformanceCalculator, using mock: %s", exc)
+            self.performance = MockPerformanceCalculator(portfolio=self.portfolio)
 
         self._loop_count = 0
         self._error_count = 0

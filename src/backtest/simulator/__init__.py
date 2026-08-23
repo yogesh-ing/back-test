@@ -171,6 +171,7 @@ from backtest.simulator.stop_manager import (
     TakeProfitType,
     load_stop_config,
 )
+from backtest.simulator.performance import PerformanceCalculator, PerformanceConfig
 
 __all__ = [
     # Portfolio
@@ -307,4 +308,7 @@ __all__ = [
     "TakeProfitType",
     "load_stop_config",
     "DEFAULT_STOP_CONFIG_PATH",
+    # Performance (Step 17)
+    "PerformanceCalculator",
+    "PerformanceConfig",
 ]

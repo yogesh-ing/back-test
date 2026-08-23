@@ -1,0 +1,38 @@
+# =============================================================================
+# Forward Testing Simulator — Performance Calculator Configuration (Step 17)
+# =============================================================================
+# Loaded by backtest.simulator.performance.PerformanceCalculator
+#
+#   from backtest.simulator.performance import PerformanceCalculator
+#   calc = PerformanceCalculator(portfolio, config={"risk_free_rate": 0.02})
+#
+# =============================================================================
+
+active_profile: default
+
+default:
+  risk_free_rate: 0.02        # 2% annual risk-free rate for Sharpe/Sortino
+  periods_per_year: 252       # Trading days per year (NSE ~252)
+  benchmark_symbol: "NIFTY"   # Benchmark for Information Ratio
+  calculate_var: true
+  var_confidences: [0.95, 0.99]
+
+profiles:
+
+  conservative:
+    risk_free_rate: 0.03
+    periods_per_year: 252
+
+  aggressive:
+    risk_free_rate: 0.01
+    periods_per_year: 252
+
+  intraday:
+    risk_free_rate: 0.02
+    periods_per_year: 252
+    # For intraday, periods per year is higher if using minute bars
+    # e.g. 252 days * 6.5 hours * 60 minutes = 98280 minutes
+
+  crypto:
+    risk_free_rate: 0.0
+    periods_per_year: 365
