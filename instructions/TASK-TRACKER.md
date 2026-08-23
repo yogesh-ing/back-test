@@ -116,6 +116,8 @@ Things the agent cannot do; tracked so nothing is silently skipped.
 | 4 | `pip install -r requirements.txt` (adds SQLAlchemy, Alembic, psycopg2, PyYAML) | Step 1/2 | ⬜ Pending |
 | 5 | Review & merge PR #3 | — | ✅ Merged 2026-08-19 (`4e01d65`) |
 | 6 | Review & merge the Phase 3 PR (Steps 8–9) | — | ✅ Merged 2026-08-23 as PR [#5](https://github.com/yogesh-ing/back-test/pull/5) (`43abb57`) — user pushed & merged manually |
+| 7 | Review & merge the Phase 4 PR (Steps 10–12) | — | ⬜ Pending — PR [#6](https://github.com/yogesh-ing/back-test/pull/6) open |
+| 8 | Verify `config/calendar.yaml` NSE holiday list against the official NSE circular; add each new year's list every December | Step 12 | ⬜ Ongoing |
 
 ---
 
