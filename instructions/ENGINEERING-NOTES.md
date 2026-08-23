@@ -49,6 +49,27 @@ Start here. Symptom → most likely cause → where to look.
 | `ForeignKeyViolation` on `fk_fills_position` | Saving out of dependency order | Use `Portfolio.save_to_db()` — it writes portfolios→positions→orders→fills atomically (§4.7) |
 | Cash off by exactly the fee amount | Fees counted twice, or slippage added to cash | Fees are applied **once**, by whoever moves the cash. Slippage is *never* cash (§2.6) |
 
+### Market data (Step 10)
+
+| Symptom | Likely cause | Check |
+|---|---|---|
+| Bars shifted by 5h30m | Naive timestamp treated as UTC | Feeds declare `naive_tz` (mStock: IST); `normalize_tick` applies it. Never strip tz before alignment |
+| Hourly bars open at :00 instead of 09:15/10:15 | Session anchor missing | `session_anchor: "09:15"` in `config/marketdata.yaml`; NSE hourly candles are anchored at the open |
+| A tick "disappeared" | It was late or invalid — both are counted, never silent | `handler.stats`: `late_dropped`, `invalid_payloads`, `ignored_unsubscribed` |
+| Bar close looks wrong after out-of-order data | Working as intended | A late tick may extend high/low and add volume, but never rewrites `close` — that would rewrite time |
+| Volume-0 flat bars in the stream | Synthetic gap fill | `fill_gaps: true` fabricates them; they carry `synthetic=True` and are **never persisted** |
+| Duplicate rows feared in `market_data_cache` | They cannot happen | `persist_closed_bars` checks the `uq_mdc_bar` key first; replays write 0 rows |
+| `FeedConnectionError: after N attempt(s)` | Reconnect budget exhausted | `max_reconnect_attempts` / backoff in config; the handler retried with exponential backoff first |
+| Handler tests sleeping for real | Backoff not stubbed | Inject `handler._sleep`; the `testing` profile sets backoff to 0 |
+| Good-looking price rejected as a spike | Working as intended — z-score gate | `validator.check_for_spikes` returns the z-score; threshold in `config/quality.yaml`. Rejected prices never enter the window, so the gate cannot drift |
+| Every tick rejected after a big move | Regime change looked like a spike | The validator self-heals: after `alert_threshold` consecutive rejects it alerts and resets the window. If it keeps happening, raise `spike_zscore_threshold` or use the `lenient` profile |
+| Repaired tick has the "wrong" price | Interpolation is deliberate | `on_bad_data: repair` substitutes the previous *accepted* price. Bars are never repaired |
+| Same data, different verdicts across runs | Different strictness profile | `quality.yaml` severity table: spikes are errors at `normal`, warnings at `lenient` |
+| "Market open" at 15:30:00 sharp | It is not — boundaries are half-open | `[open, close)`: 15:29:59 open, 15:30:00 closed. Closing session is 15:40–16:00 (`include_extended=True`) |
+| Every weekday looks like a trading day for some year | Holiday list missing for that year | `config/calendar.yaml` — lists must be added annually (exchanges publish each December) |
+| Session logic off by 5h30m | Naive datetime or UTC-as-IST confusion | `TimeManager` rejects naive datetimes; pass aware timestamps and let it convert |
+| NYSE tests flip between winter/summer | That is DST working | 09:30 ET = 14:30 UTC in January, 13:30 UTC in July; zoneinfo handles it |
+
 ### Orders
 
 | Symptom | Likely cause | Check |
@@ -694,6 +715,44 @@ works. The adapter's old minimal sizers now re-export from simulator for
 backward compatibility.
 
 
+### `marketdata/ticks.py` + `bars.py`
+One normalizer for every broker dialect (`ltp`/`last_price`/`c` → `last`);
+feeds return **raw payloads** and never parse. Bar `ts` is the **open** time,
+floored in the *exchange* timezone — IST is +05:30, so UTC-floored hourly
+bars would open at half past the local hour. `session_anchor` reproduces real
+NSE candles (09:15–10:15). Late ticks within `late_grace_seconds` add
+volume/extremes but never the close; synthetic gap-fill bars are flagged and
+never persisted.
+
+### `marketdata/handler.py`
+Owns **no event loop** — `poll_once()` does one round trip; Step 20 decides
+cadence. On a transient `FeedError` it reconnects with exponential backoff
+(injectable `_sleep`) and retries the poll once. Buffers are bounded deques
+(`tick_buffer_size`/`bar_buffer_size`) so a week-long run cannot leak.
+`persist_closed_bars` is idempotent against `uq_mdc_bar` and keeps pending
+bars if the write fails.
+
+### `marketdata/quality.py`
+Two-layer defence: Step 10's normalizer rejects *structurally* broken
+payloads; this validator rejects well-formed data that is statistically
+**wrong** (spikes, stalls, volume anomalies). Severity depends on
+strictness, but hard violations (negative price, impossible OHLC, crossed
+quote) are errors at every level. Rejected data never enters the rolling
+windows; after `alert_threshold` consecutive rejects the validator alerts
+and resets the symbol's window so a genuine regime change self-heals.
+`on_bad_data: repair` interpolates price-level errors from the previous
+accepted price — bars are never repaired.
+
+### `marketdata/timesync.py`
+`TimeManager` owns the market clock: NSE phases (pre-open 09:00–09:15,
+continuous 09:15–15:30, closing 15:40–16:00, **half-open boundaries**),
+holiday-aware next-open/next-close scans, trading-day ranges, and
+timeframe alignment delegated to the Step 10 aligner (session-anchored).
+The wall clock is injectable (`clock=`) and NTP sync applies a measured
+offset on top — a failed sync keeps the previous offset. Calendars are
+data (`config/calendar.yaml`); NYSE ships alongside NSE to prove
+multi-exchange support is a config entry, not a code change. Special
+sessions (Muhurat) are not modelled; holiday lists need annual upkeep.
 
 ---
 
@@ -754,6 +813,9 @@ Python API rather than the CLI when using it.
 | `test_simulator_execution.py` | Liquidity caps, queue position, rejections, TIF, determinism | 99 |
 | `test_strategy_adapter.py` | StrategyAdapter bridge, Signal model, sizers, multi-symbol, dry-run, DB logging, no-lookahead, state persistence | 20 |
 | `test_simulator_position_sizing.py` | PositionSizer 6 methods, constraints, risk params, config loader, adapter integration | 25 |
+| `test_marketdata.py` | Normalization, IST alignment, gaps/late data, reconnect, cache idempotency | 173 |
+| `test_marketdata_quality.py` | Spikes, gaps, volume anomalies, strictness, repair, alerts, integration | 114 |
+| `test_timesync.py` | NSE/NYSE sessions, holidays, DST, next open/close, NTP, latency | 96 |
 | Pre-existing | Backtest engine, mStock | 25 (+4 skipped) |
 
 **Drift guards** — these fail loudly if two sources of truth diverge:
@@ -761,4 +823,6 @@ Python API rather than the CLI when using it.
 - `test_enums_match_the_orm` / `test_enums_match_the_sql_check_constraints`
 - `test_sqlite_migration_file_matches_orm`
 - `test_simulator_does_not_import_engine_or_forward`
+- `test_marketdata_does_not_import_engine_or_forward`
+- `test_timeframe_values_match_db_schema` (marketdata ↔ ORM timeframes)
 - Alembic autogenerate produces no diff against the ORM
