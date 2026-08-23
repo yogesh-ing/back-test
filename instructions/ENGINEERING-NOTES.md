@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 9** (Phase 3 complete).
+Updated at the end of every step. Last updated: **Step 13** (Strategy Adapter complete).
 
 ---
 
@@ -59,6 +59,18 @@ Start here. Symptom → most likely cause → where to look.
 | `TypeError: '<' not supported between str and Decimal` | A Decimal field not coerced after `from_dict` | All Decimal fields coerce in `__post_init__`; add new ones to that loop |
 | Callback exception vanished | Deliberate — callbacks are isolated | Look for `order callback ... failed` in the `backtest.simulator.order` log |
 | Average fill price looks wrong | Expected: it is quantity-weighted across **all** fills | `Order.average_fill_price` |
+
+### Strategy Adapter (Step 13)
+
+| Symptom | Likely cause | Check |
+|---|---|---|
+| `HOLD` signals flooding DB | Logging HOLD twice (generate + execute) | `execute_signals` now skips HOLD logging; HOLD already logged in `generate_signals` |
+| `FOREIGN KEY constraint failed` on `strategy_signals.portfolio_id` | Portfolio row not yet persisted | Adapter auto-creates minimal portfolio row in `_save_signal_to_db` if missing |
+| `FOREIGN KEY constraint failed` on `strategy_signals.order_id` | Order row not yet persisted | Adapter drops FK (saves without order_id) when order not in DB |
+| Signal generated but no order created | Portfolio validation failed (insufficient funds, duplicate position, short disabled) | Check `skip_reason` in DB or logs; `portfolio.can_open_position` |
+| Short signal ignored | `allow_short=False` by default | Set `allow_short=True` for short strategies |
+| Lookahead bias suspicion | `bar_ts` >= `generated_at` | Adapter sets `bar_ts` from completed bar index, `generated_at` = now; assert `bar_ts < generated_at` |
+| Position not opened after signal | No executor, or executor without portfolio sync | Without executor, order stays pending; with executor, fill applied via `on_order_filled` |
 
 ### Environment
 
@@ -227,13 +239,17 @@ from the signal at bar *t−1* (`target.shift(1)`).
 ```
 simulator/   pure domain logic, no I/O    ──uses──>  db.DatabaseManager
 db/          ORM + connection management
-engine/ forward/ live/ strategy/          pre-existing, untouched
+forward/     orchestration + StrategyAdapter (may import simulator + strategy)
+strategy/    abstraction + registry + adapter re-export
+engine/ live/ data/                       pre-existing
 ```
 
 `simulator/` must **not** import from `engine/` or `forward/`. Enforced by
 `test_simulator_does_not_import_engine_or_forward`, which parses the AST (an
 earlier grep version false-positived on a docstring that merely *mentioned*
 the rule).
+`forward/` and `strategy/` are allowed to import from `simulator/` — the
+adapter bridges `strategy/base.py` (existing) into `simulator.Portfolio`.
 
 **Three different `Portfolio` classes exist.** Import the right one:
 
@@ -242,6 +258,13 @@ the rule).
 | `backtest.simulator.Portfolio` | Domain model — cash, positions, limits |
 | `backtest.db.models.Portfolio` | ORM row |
 | `backtest.forward.portfolio.Portfolio` | Legacy multi-strategy allocator (`paper.py`) |
+
+**Two different `Strategy` concepts exist.** Import the right one:
+
+| Class | Purpose |
+|---|---|
+| `backtest.strategy.base.Strategy` | Abstract base for all strategies (existing, reused in Step 13) |
+| `backtest.forward.strategy_adapter.StrategyAdapter` | Bridge that runs a Strategy in forward testing |
 
 ---
 
@@ -323,6 +346,24 @@ naming the required order instead of letting the driver's FK error escape.
 
 **Lesson:** if correct use requires knowing an ordering constraint, provide an
 API that encodes it — and make the low-level path fail with an explanation.
+
+### 4.8 Strategy signals FK failures (Step 13)
+
+**Symptom:** ``FOREIGN KEY constraint failed`` when logging to
+``strategy_signals`` — both ``portfolio_id`` and ``order_id`` FKs.
+
+**Cause:** The adapter's portfolio is a ``simulator.Portfolio`` (in-memory)
+that has never been persisted, so its ``portfolio_id`` does not exist in the
+``portfolios`` table. Similarly, the order row does not exist until
+``Portfolio.save_to_db()`` is called.
+
+**Fix:** ``_save_signal_to_db`` now auto-creates a minimal portfolio row if
+missing (using the simulator portfolio's name/capital) and drops the
+``order_id`` FK when the order is not yet in the DB. Logging must never block
+trading.
+
+**Lesson:** Audit-log tables with FKs to operational tables need graceful
+degradation when the operational rows have not been flushed yet.
 
 ### 4.6 Test-only mistakes worth remembering
 
@@ -421,6 +462,37 @@ statement whose predecessors already applied would corrupt data. Pool choice:
 `QueuePool` (5/20) for PostgreSQL, `NullPool` for SQLite files, `StaticPool`
 for in-memory SQLite (whose database *lives inside* one connection).
 
+### `forward/strategy_adapter.py` (Step 13)
+Bridges ``strategy/base.py`` (existing) into ``simulator.Portfolio`` and
+``simulator.execution.OrderExecutor``. Key invariants:
+
+* **No lookahead:** only completed bars are passed to ``Strategy.generate_signals``.
+  ``bar_ts`` is the timestamp of the completed bar, ``generated_at`` is now,
+  so ``bar_ts < generated_at`` always holds — the query Step 22 uses for bias
+  detection.
+* **Signal → Order:** ``Signal`` is a typed dataclass mirroring the plan's dict
+  shape (symbol, action BUY/SELL/HOLD, quantity, order_type, limit_price,
+  reason, indicators). ``execute_signals`` validates via
+  ``Portfolio.can_open_position``, sizes via ``PositionSizer``, and optionally
+  executes via ``OrderExecutor``.
+* **Multi-symbol:** per-symbol DataFrames in ``_bars``; supports dict of
+  strategies (one per symbol) or single strategy reused.
+* **Dry-run:** when ``dry_run=True`` signals are generated and logged but no
+  orders are created.
+* **DB logging:** ``_save_signal_to_db`` auto-creates portfolio row if missing
+  and drops order_id FK when order not yet persisted, so logging never blocks
+  trading. Logs to ``strategy_signals`` with ``executed`` flag and ``skip_reason``.
+* **State:** ``get_state``/``load_state`` snapshot bars, indicators, last targets
+  for Step 20 recovery. ``to_dict``/``from_dict`` are lossless for bars.
+* **Sizers:** ``FixedQuantitySizer``, ``FixedDollarSizer``,
+  ``PercentagePortfolioSizer`` are minimal implementations; Step 14 will expand
+  to risk-based/ATR/Kelly.
+
+Re-exported from ``strategy/adapter.py`` so both
+``from backtest.forward.strategy_adapter import StrategyAdapter`` and
+``from backtest.strategy.adapter import StrategyAdapter`` work.
+
+
 ---
 
 ## 6. Known limitations
@@ -478,6 +550,7 @@ Python API rather than the CLI when using it.
 | `test_simulator_slippage.py` | 5 slippage models, tiers, time-of-day, limit caps, statistics | 101 |
 | `test_simulator_fees.py` | NSE + US fee stacks, 10 broker presets, volume tiers, FX | 109 |
 | `test_simulator_execution.py` | Liquidity caps, queue position, rejections, TIF, determinism | 99 |
+| `test_strategy_adapter.py` | StrategyAdapter bridge, Signal model, sizers, multi-symbol, dry-run, DB logging, no-lookahead, state persistence | 20 |
 | Pre-existing | Backtest engine, mStock | 25 (+4 skipped) |
 
 **Drift guards** — these fail loudly if two sources of truth diverge:
