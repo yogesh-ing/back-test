@@ -318,92 +318,123 @@ class Signal:
 
 
 # ---------------------------------------------------------------------------
-# Position sizing
+# Position sizing — re-exported from simulator.position_sizing (Step 14)
 # ---------------------------------------------------------------------------
+# Keep backward compatibility: the adapter originally defined its own minimal
+# sizers. Step 14 introduces a full engine in simulator/position_sizing.py.
+# We re-export the new implementations here so existing code keeps working,
+# and add the richer sizers (risk, volatility, Kelly) as well.
 
+try:
+    from backtest.simulator.position_sizing import (
+        ATRBasedSizer,
+        FixedDollarSizer,
+        FixedQuantitySizer,
+        KellySizer,
+        PercentagePortfolioSizer,
+        PositionSizer as FullPositionSizer,
+        RiskBasedSizer,
+        VolatilitySizer,
+    )
 
-class PositionSizer(Protocol):
-    """Protocol for position sizing engines (Step 14 will expand this)."""
+    # Adapter's PositionSizer protocol is now the full engine
+    PositionSizer = FullPositionSizer  # type: ignore
 
-    def calculate_position_size(
-        self, signal: Signal, portfolio: Any, **kwargs: Any
-    ) -> Decimal:
-        ...
+except Exception:  # pragma: no cover - fallback if simulator not yet loaded
+    from typing import Protocol
 
+    class PositionSizer(Protocol):  # type: ignore[no-redef]
+        """Protocol for position sizing engines (Step 14 will expand this)."""
 
-class FixedQuantitySizer:
-    """Always return a fixed quantity."""
+        def calculate_position_size(
+            self, signal: Signal, portfolio: Any, **kwargs: Any
+        ) -> Decimal:
+            ...
 
-    def __init__(self, quantity: Any = 100):
-        self.quantity = to_price(quantity, "quantity")
-        if self.quantity <= ZERO:
-            raise ValidationError("fixed quantity must be positive")
+    class FixedQuantitySizer:  # type: ignore[no-redef]
+        """Always return a fixed quantity."""
 
-    def calculate_position_size(self, signal: Signal, portfolio: Any, **kwargs: Any) -> Decimal:
-        return self.quantity
+        def __init__(self, quantity: Any = 100):
+            self.quantity = to_price(quantity, "quantity")
+            if self.quantity <= ZERO:
+                raise ValidationError("fixed quantity must be positive")
 
+        def calculate_position_size(self, signal: Signal, portfolio: Any, **kwargs: Any) -> Decimal:
+            return self.quantity
 
-class FixedDollarSizer:
-    """Size to a fixed dollar amount at current price."""
+    class FixedDollarSizer:  # type: ignore[no-redef]
+        """Size to a fixed dollar amount at current price."""
 
-    def __init__(self, dollar_amount: Any = 10000):
-        self.dollar_amount = money(dollar_amount, "dollar_amount")
-        if self.dollar_amount <= ZERO:
-            raise ValidationError("dollar amount must be positive")
+        def __init__(self, dollar_amount: Any = 10000):
+            self.dollar_amount = money(dollar_amount, "dollar_amount")
+            if self.dollar_amount <= ZERO:
+                raise ValidationError("dollar amount must be positive")
 
-    def calculate_position_size(
-        self, signal: Signal, portfolio: Any, current_price: Any = None, **kwargs: Any
-    ) -> Decimal:
-        price = None
-        if current_price is not None:
-            try:
-                price = to_price(current_price, "current_price")
-            except Exception:
-                price = None
-        # try to get from indicators or signal
-        if price is None:
-            price = signal.indicators.get("close") or signal.indicators.get("last")
-            if price is not None:
+        def calculate_position_size(
+            self, signal: Signal, portfolio: Any, current_price: Any = None, **kwargs: Any
+        ) -> Decimal:
+            price = None
+            if current_price is not None:
                 try:
-                    price = to_price(price, "price")
+                    price = to_price(current_price, "current_price")
                 except Exception:
                     price = None
-        if price is None or price <= ZERO:
-            # fallback to fixed quantity
+            if price is None:
+                price = signal.indicators.get("close") or signal.indicators.get("last")
+                if price is not None:
+                    try:
+                        price = to_price(price, "price")
+                    except Exception:
+                        price = None
+            if price is None or price <= ZERO:
+                return Decimal("100")
+            qty = (self.dollar_amount / price).quantize(Decimal("1"))
+            return max(Decimal("1"), qty)
+
+    class PercentagePortfolioSizer:  # type: ignore[no-redef]
+        """Size as a percentage of total equity."""
+
+        def __init__(self, percentage: Any = Decimal("0.05")):
+            self.percentage = to_decimal(percentage, "percentage")
+            if self.percentage <= ZERO or self.percentage > Decimal("1"):
+                raise ValidationError("percentage must be in (0, 1]")
+
+        def calculate_position_size(
+            self, signal: Signal, portfolio: Any, current_price: Any = None, **kwargs: Any
+        ) -> Decimal:
+            try:
+                equity = portfolio.calculate_total_equity()
+            except Exception:
+                equity = money(100000)
+            target_value = equity * self.percentage
+            price = current_price
+            if price is None:
+                price = signal.indicators.get("close") or signal.indicators.get("last") or 100
+            try:
+                price = to_price(price, "price")
+            except Exception:
+                price = to_price(100, "price")
+            if price <= ZERO:
+                return Decimal("1")
+            qty = (target_value / price).quantize(Decimal("1"))
+            return max(Decimal("1"), qty)
+
+    # Minimal stubs for new sizers if import failed
+    class RiskBasedSizer:  # type: ignore[no-redef]
+        def __init__(self, *a, **k):
+            pass
+
+        def calculate_position_size(self, *a, **k):
             return Decimal("100")
-        qty = (self.dollar_amount / price).quantize(Decimal("1"))
-        return max(Decimal("1"), qty)
 
+    class VolatilitySizer(RiskBasedSizer):  # type: ignore[no-redef]
+        pass
 
-class PercentagePortfolioSizer:
-    """Size as a percentage of total equity."""
+    class ATRBasedSizer(VolatilitySizer):  # type: ignore[no-redef]
+        pass
 
-    def __init__(self, percentage: Any = Decimal("0.05")):
-        self.percentage = to_decimal(percentage, "percentage")
-        if self.percentage <= ZERO or self.percentage > Decimal("1"):
-            raise ValidationError("percentage must be in (0, 1]")
-
-    def calculate_position_size(
-        self, signal: Signal, portfolio: Any, current_price: Any = None, **kwargs: Any
-    ) -> Decimal:
-        try:
-            equity = portfolio.calculate_total_equity()
-        except Exception:
-            equity = money(100000)
-        target_value = equity * self.percentage
-
-        price = current_price
-        if price is None:
-            price = signal.indicators.get("close") or signal.indicators.get("last") or 100
-        try:
-            price = to_price(price, "price")
-        except Exception:
-            price = to_price(100, "price")
-
-        if price <= ZERO:
-            return Decimal("1")
-        qty = (target_value / price).quantize(Decimal("1"))
-        return max(Decimal("1"), qty)
+    class KellySizer(RiskBasedSizer):  # type: ignore[no-redef]
+        pass
 
 
 # ---------------------------------------------------------------------------

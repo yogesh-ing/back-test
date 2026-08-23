@@ -137,6 +137,23 @@ from backtest.simulator.position import (
     ReduceResult,
     SplitResult,
 )
+from backtest.simulator.position_sizing import (
+    ATRBasedSizer,
+    DEFAULT_SIZING_CONFIG_PATH,
+    FixedDollarSizer,
+    FixedQuantitySizer,
+    KellySizer,
+    PercentagePortfolioSizer,
+    PositionSizer,
+    RiskBasedSizer,
+    RiskParams,
+    SizingConfig,
+    SizingConstraints,
+    SizingMethod,
+    SizingResult,
+    VolatilitySizer,
+    load_position_sizing_config,
+)
 
 __all__ = [
     # Portfolio
@@ -242,4 +259,20 @@ __all__ = [
     "ZERO",
     "MONEY_PLACES",
     "PRICE_PLACES",
+    # Position sizing (Step 14)
+    "PositionSizer",
+    "SizingConfig",
+    "SizingConstraints",
+    "RiskParams",
+    "SizingMethod",
+    "SizingResult",
+    "FixedQuantitySizer",
+    "FixedDollarSizer",
+    "PercentagePortfolioSizer",
+    "RiskBasedSizer",
+    "VolatilitySizer",
+    "ATRBasedSizer",
+    "KellySizer",
+    "load_position_sizing_config",
+    "DEFAULT_SIZING_CONFIG_PATH",
 ]

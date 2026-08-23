@@ -5,13 +5,13 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Step 13 complete**
+**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 13–14 complete**
 
 ---
 
 ## Progress
 
-`████████████████████░░░░` **10 / 24 steps complete** (42%)
+`██████████████████████░░` **11 / 24 steps complete** (46%)
 
 | Phase | Steps | Status |
 |---|---|---|
@@ -19,7 +19,7 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 | 2 · Core models | 3–6 | ✅ **Complete** |
 | 3 · Execution | 7–9 | ✅ **Complete** |
 | 4 · Live data | 10–12 | ⬜ Not started |
-| 5 · Strategy | 13–14 | 🟡 **In progress** (13 ✅, 14 ⬜) |
+| 5 · Strategy | 13–14 | ✅ **Complete** |
 | 6 · Risk | 15–16 | ⬜ Not started |
 | 7 · Performance | 17–19 | ⬜ Not started |
 | 8 · Orchestration | 20 | ⬜ Not started |
@@ -70,7 +70,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 | # | Step | Status | Deliverables |
 |---|---|---|---|
 | 13 | Strategy Adapter | ✅ | `src/backtest/forward/strategy_adapter.py`, `src/backtest/strategy/adapter.py` — bridge to `strategy/base.py`, Signal model, 3 sizers, multi-symbol, dry-run, DB logging, state persistence, no-lookahead guarantee · **20 tests** |
-| 14 | Position Sizing Engine | ⬜ | Fixed / %-of-portfolio / risk-based / ATR / Kelly |
+| 14 | Position Sizing Engine | ✅ | `src/backtest/simulator/position_sizing.py`, `config/position_sizing.yaml` — 6 methods (fixed qty/dollar, % portfolio, risk-based, ATR/volatility, Kelly), constraints (max value/pct, gross exposure, min trade, round lots, max positions), RiskParams, SizingConfig, config loader with 8 profiles, integration with StrategyAdapter · **25 tests** |
 
 ### Phase 6 — Risk Management
 
@@ -154,7 +154,7 @@ src/backtest/
 │   ├── models.py        #   ORM: 10 tables
 │   ├── manager.py       #   DatabaseManager: pooling, retries, transactions
 │   └── config.py        #   Layered config
-├── simulator/           # Steps 3–9 ✅ (forward testing domain models)
+├── simulator/           # Steps 3–9, 14 ✅ (forward testing domain models)
 │   ├── money.py         #   Decimal helpers  ✅
 │   ├── errors.py        #   Domain exceptions ✅
 │   ├── lots.py          #   LotBook, FIFO/LIFO ✅ Step 4
@@ -166,16 +166,23 @@ src/backtest/
 │   ├── fill.py          #   Fill (immutable)   ✅ Step 6
 │   ├── slippage.py      #   5 slippage models  ✅ Step 7
 │   ├── fees.py          #   Full fee stack     ✅ Step 8
-│   └── execution.py     #   OrderExecutor      ✅ Step 9
-├── forward/             # Steps 13 ✅ (orchestration bridge)
+│   ├── execution.py     #   OrderExecutor      ✅ Step 9
+│   └── position_sizing.py # PositionSizer, 6 methods, constraints ✅ Step 14
+├── forward/             # Steps 13–14 ✅ (orchestration bridge)
 │   ├── strategy_adapter.py  # StrategyAdapter, Signal, sizers ✅ Step 13
 │   ├── broker.py        #   SimulatedBroker (legacy)
 │   ├── paper.py         #   Walk-forward + live papertrade
 │   └── portfolio.py     #   Legacy multi-strategy allocator
 ├── strategy/            # Strategy abstraction + adapter re-export
 │   ├── base.py          #   Strategy base (existing, reused) ✅
-│   ├── adapter.py       #   Re-export of forward.strategy_adapter ✅ Step 13
+│   ├── adapter.py       #   Re-export of forward + simulator sizers ✅ Steps 13–14
 │   └── registry.py      #   Strategy registry
+├── config/
+│   ├── position_sizing.yaml # 8 profiles for sizing ✅ Step 14
+│   ├── slippage.yaml
+│   ├── execution.yaml
+│   ├── brokers.yaml
+│   └── database.yaml
 │
 ├── data/ engine/ live/ strategies/   # pre-existing
 ```
@@ -203,5 +210,6 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_simulator_fees.py` (Step 8) | 109 |
 | `test_simulator_execution.py` (Step 9) | 99 |
 | `test_strategy_adapter.py` (Step 13) | 20 |
-| **Total** | **933 passing, 4 skipped** |
+| `test_simulator_position_sizing.py` (Step 14) | 25 |
+| **Total** | **958 passing, 4 skipped** |
 

@@ -1,0 +1,109 @@
+# =============================================================================
+# Forward Testing Simulator — Position Sizing Configuration
+# =============================================================================
+# Loaded by backtest.simulator.position_sizing.load_position_sizing_config()
+#
+#   from backtest.simulator.position_sizing import PositionSizer
+#   sizer = PositionSizer.from_config("config/position_sizing.yaml")
+#   sizer = PositionSizer.from_config(profile="conservative")
+#
+# Each profile defines one of six methods:
+#   fixed_quantity, fixed_dollar, percentage_portfolio, risk_based,
+#   volatility / atr_based, kelly
+#
+# Constraints are applied after raw sizing to enforce risk limits.
+# =============================================================================
+
+active_profile: default
+
+default:
+  method: fixed_quantity
+  fixed_quantity: 100
+
+  constraints:
+    # Max 20% of equity per position
+    max_position_pct: 0.2
+    # Max 100% gross exposure (1.0 = no leverage, 2.0 = 2x leverage)
+    max_gross_exposure_pct: 1.0
+    # Minimum notional to avoid dust trades
+    min_trade_value: 5000
+    # Round to lot size (false for equities, true for F&O)
+    round_lots: false
+    lot_size: 1
+    max_leverage: 1
+    max_open_positions: 10
+
+  risk_params:
+    max_risk_per_trade: 0.01
+    stop_loss_pct: 0.02
+    atr_multiplier: 2
+    kelly_fraction: 0.5
+
+profiles:
+
+  # Fixed 100 shares — simplest, predictable
+  fixed:
+    method: fixed_quantity
+    fixed_quantity: 100
+
+  # Fixed $10k per trade — adjusts quantity to price
+  fixed_dollar:
+    method: fixed_dollar
+    fixed_dollar_amount: 10000
+
+  # 5% of equity per trade — grows with account
+  percentage:
+    method: percentage_portfolio
+    percentage: 0.05
+
+  # Conservative: risk 1% per trade with 2% stop
+  # qty = (equity * 1%) / (price * 2%)
+  conservative:
+    method: risk_based
+    risk_per_trade: 0.01
+    stop_loss_pct: 0.02
+    constraints:
+      max_position_pct: 0.1
+      max_gross_exposure_pct: 0.5
+      min_trade_value: 5000
+
+  # Aggressive: risk 2% per trade with 1% stop (larger positions)
+  aggressive:
+    method: risk_based
+    risk_per_trade: 0.02
+    stop_loss_pct: 0.01
+    constraints:
+      max_position_pct: 0.25
+      max_gross_exposure_pct: 1.0
+
+  # Volatility-based: ATR 2x, risk $1000 per trade
+  # qty = risk_amount / (ATR * multiplier)
+  volatility:
+    method: atr_based
+    risk_amount: 1000
+    atr_multiplier: 2
+    constraints:
+      max_position_pct: 0.15
+
+  # Kelly Criterion: optimal growth, half-Kelly for safety
+  # f* = p - (1-p)/b, position = equity * f* * fraction / price
+  kelly:
+    method: kelly
+    win_rate: 0.55
+    avg_win: 150
+    avg_loss: 100
+    kelly_fraction: 0.5
+    constraints:
+      max_position_pct: 0.2
+      max_gross_exposure_pct: 1.0
+
+  # NSE F&O: round to lot size 50, min trade 1 lot
+  nse_fo:
+    method: risk_based
+    risk_per_trade: 0.01
+    stop_loss_pct: 0.02
+    constraints:
+      round_lots: true
+      lot_size: 50
+      max_position_pct: 0.2
+      min_trade_value: 10000

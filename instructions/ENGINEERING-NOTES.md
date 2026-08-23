@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 13** (Strategy Adapter complete).
+Updated at the end of every step. Last updated: **Step 14** (Position Sizing complete).
 
 ---
 
@@ -492,6 +492,37 @@ Re-exported from ``strategy/adapter.py`` so both
 ``from backtest.forward.strategy_adapter import StrategyAdapter`` and
 ``from backtest.strategy.adapter import StrategyAdapter`` work.
 
+### `simulator/position_sizing.py` (Step 14)
+Six methods, all pure Decimal:
+
+* **Fixed qty/dollar/%:** trivial division, but with equity and price resolution
+  from signal/portfolio.
+* **Risk-based:** ``qty = (equity * risk_per_trade) / (price * stop_loss_pct)``
+  — if stop is hit, loss equals risk fraction. The most common professional
+  method.
+* **Volatility/ATR:** ``qty = risk_amount / (ATR * multiplier)`` — higher ATR
+  => smaller position, keeping dollar volatility constant. ATR priority:
+  explicit param > signal indicators (``atr``/``ATR``) > instance default.
+* **Kelly:** ``f* = p - q/b`` where ``b=avg_win/avg_loss``, then
+  ``qty = equity * f* * kelly_fraction / price``. Negative Kelly => 0 (don't bet).
+  Half-Kelly (0.5) is default — full Kelly is too volatile for most.
+
+Constraints applied after raw sizing, in order: round lots (floor), min trade
+value (dust filter => 0), max position value, max position % of equity, max
+gross exposure %, max open positions. Each returns ``SizingResult`` with
+``constrained`` flag and reason for audit.
+
+Config loader: ``config/position_sizing.yaml`` with 8 profiles (fixed,
+fixed_dollar, percentage, conservative, aggressive, volatility, kelly, nse_fo).
+Profiles override default; unknown keys raise ValidationError.
+
+Integration: ``StrategyAdapter`` accepts any object with
+``calculate_position_size(signal, portfolio, ...)`` — the new ``PositionSizer``
+satisfies it, so ``adapter = StrategyAdapter(..., position_sizer=PositionSizer(...))``
+works. The adapter's old minimal sizers now re-export from simulator for
+backward compatibility.
+
+
 
 ---
 
@@ -551,6 +582,7 @@ Python API rather than the CLI when using it.
 | `test_simulator_fees.py` | NSE + US fee stacks, 10 broker presets, volume tiers, FX | 109 |
 | `test_simulator_execution.py` | Liquidity caps, queue position, rejections, TIF, determinism | 99 |
 | `test_strategy_adapter.py` | StrategyAdapter bridge, Signal model, sizers, multi-symbol, dry-run, DB logging, no-lookahead, state persistence | 20 |
+| `test_simulator_position_sizing.py` | PositionSizer 6 methods, constraints, risk params, config loader, adapter integration | 25 |
 | Pre-existing | Backtest engine, mStock | 25 (+4 skipped) |
 
 **Drift guards** — these fail loudly if two sources of truth diverge:

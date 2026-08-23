@@ -11,16 +11,38 @@ No logic is duplicated here; import the canonical module.
 """
 
 from backtest.forward.strategy_adapter import (
+    ATRBasedSizer,
     FixedDollarSizer,
     FixedQuantitySizer,
+    KellySizer,
     PercentagePortfolioSizer,
     PositionSizer,
+    RiskBasedSizer,
     Signal,
     SignalAction,
     SignalDirection,
     SignalType,
     StrategyAdapter,
+    VolatilitySizer,
 )
+
+# Also re-export the full engine from simulator for convenience
+try:
+    from backtest.simulator.position_sizing import (
+        PositionSizer as FullPositionSizer,
+        SizingConfig,
+        SizingConstraints,
+        RiskParams,
+        SizingResult,
+        load_position_sizing_config,
+    )
+except Exception:  # pragma: no cover
+    FullPositionSizer = PositionSizer  # type: ignore
+    SizingConfig = None  # type: ignore
+    SizingConstraints = None  # type: ignore
+    RiskParams = None  # type: ignore
+    SizingResult = None  # type: ignore
+    load_position_sizing_config = None  # type: ignore
 
 __all__ = [
     "StrategyAdapter",
@@ -29,7 +51,17 @@ __all__ = [
     "SignalType",
     "SignalDirection",
     "PositionSizer",
+    "FullPositionSizer",
     "FixedQuantitySizer",
     "FixedDollarSizer",
     "PercentagePortfolioSizer",
+    "RiskBasedSizer",
+    "VolatilitySizer",
+    "ATRBasedSizer",
+    "KellySizer",
+    "SizingConfig",
+    "SizingConstraints",
+    "RiskParams",
+    "SizingResult",
+    "load_position_sizing_config",
 ]
