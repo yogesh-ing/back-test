@@ -5,13 +5,13 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 10–17, 20 complete (Phase 4, 5, 6, 7 partial, 8 done)**
+**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 10–18, 20 complete (Phase 4, 5, 6, 7 partial, 8 done)**
 
 ---
 
 ## Progress
 
-`██████████████████████████████████░░` **18 / 24 steps complete** (75%)
+`████████████████████████████████████░░` **19 / 24 steps complete** (79%)
 
 | Phase | Steps | Status |
 |---|---|---|
@@ -21,7 +21,7 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 | 4 · Live data | 10–12 | ✅ **Complete** |
 | 5 · Strategy | 13–14 | ✅ **Complete** |
 | 6 · Risk | 15–16 | ✅ **Complete** |
-| 7 · Performance | 17–19 | 🟡 **In progress** (17 ✅, 18–19 ⬜) |
+| 7 · Performance | 17–19 | 🟡 **In progress** (17–18 ✅, 19 ⬜) |
 | 8 · Orchestration | 20 | ✅ **Complete** |
 | Bonus | 21–24 | ⬜ Not started |
 
@@ -58,7 +58,8 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 │   ├── position_sizing.py # PositionSizer, 6 methods, constraints ✅ Step 14
 │   ├── risk_manager.py  # RiskManager, RiskConfig, circuit breakers ✅ Step 15
 │   ├── stop_manager.py  # StopManager, StopType, OCO, trailing ✅ Step 16
-│   └── performance.py   # PerformanceCalculator, return/risk/ratios ✅ Step 17
+│   ├── performance.py   # PerformanceCalculator, return/risk/ratios ✅ Step 17
+│   └── trade_analyzer.py # TradeAnalyzer, MAE/MFE, attribution ✅ Step 18
 ├── live/                # Steps 10–12 ✅ (live data)
 │   ├── market_data_handler.py # MarketDataHandler, BarBuilder, BrokerFeed ✅ Step 10
 │   ├── data_validator.py      # DataValidator, ValidationResult ✅ Step 11
@@ -118,14 +119,15 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_simulator_slippage.py` (Step 7) | 101 |
 | `test_simulator_fees.py` (Step 8) | 109 |
 | `test_simulator_execution.py` (Step 9) | 99 |
-| `test_strategy_adapter.py` (Step 13) | 20 |
-| `test_simulator_position_sizing.py` (Step 14) | 25 |
-| `test_forward_engine.py` (Step 20) | 14 |
 | `test_market_data_handler.py` (Step 10) | 18 |
 | `test_data_validator.py` (Step 11) | 18 |
 | `test_time_manager.py` (Step 12) | 18 |
+| `test_strategy_adapter.py` (Step 13) | 20 |
+| `test_simulator_position_sizing.py` (Step 14) | 25 |
 | `test_simulator_risk_manager.py` (Step 15) | 24 |
 | `test_simulator_stop_manager.py` (Step 16) | 21 |
 | `test_simulator_performance.py` (Step 17) | 14 |
-| **Total** | **1085 passing, 4 skipped** |
+| `test_simulator_trade_analyzer.py` (Step 18) | 15 |
+| `test_forward_engine.py` (Step 20) | 14 |
+| **Total** | **1100 passing, 4 skipped** |
 

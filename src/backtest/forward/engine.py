@@ -616,6 +616,7 @@ class ForwardTestingEngine:
         self.risk_manager: Any = None
         self.stop_manager: Any = None
         self.performance: Any = None
+        self.trade_analyzer: Any = None
         self.state_manager: StateManager = StateManager(self.config.system.state_file)
 
         self._running = False
@@ -916,6 +917,16 @@ class ForwardTestingEngine:
         except Exception as exc:
             logger.warning("Failed to init real PerformanceCalculator, using mock: %s", exc)
             self.performance = MockPerformanceCalculator(portfolio=self.portfolio)
+
+        # Trade analyzer – Step 18
+        try:
+            from backtest.simulator.trade_analyzer import TradeAnalyzer as RealTradeAnalyzer
+
+            self.trade_analyzer = RealTradeAnalyzer(portfolio=self.portfolio)
+            logger.info("Using real TradeAnalyzer (Step 18)")
+        except Exception as exc:
+            logger.warning("Failed to init TradeAnalyzer: %s", exc)
+            self.trade_analyzer = None
 
         self._loop_count = 0
         self._error_count = 0

@@ -172,6 +172,7 @@ from backtest.simulator.stop_manager import (
     load_stop_config,
 )
 from backtest.simulator.performance import PerformanceCalculator, PerformanceConfig
+from backtest.simulator.trade_analyzer import AnalyzedTrade, TradeAnalyzer
 
 __all__ = [
     # Portfolio
@@ -311,4 +312,7 @@ __all__ = [
     # Performance (Step 17)
     "PerformanceCalculator",
     "PerformanceConfig",
+    # Trade Analyzer (Step 18)
+    "TradeAnalyzer",
+    "AnalyzedTrade",
 ]
