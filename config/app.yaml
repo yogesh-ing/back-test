@@ -1,0 +1,165 @@
+# =============================================================================
+# Forward Testing Simulator — Unified Application Configuration (Step 23)
+# =============================================================================
+# Loaded by backtest.config_manager.manager.ConfigManager
+#
+#   from backtest.config_manager.manager import ConfigManager
+#   manager = ConfigManager(config_file="config/app.yaml")
+#   manager.load_config()
+#   manager.get("risk.max_drawdown_pct")
+#
+# Precedence (highest wins):
+#   1. Explicit overrides
+#   2. Environment variables (FORWARD_TEST_*, MSTOCK_*, TELEGRAM_*, etc.)
+#   3. Active profile in this file
+#   4. Default block
+#
+# Secrets (API keys, passwords) should be in .env, not here.
+# This file is committed, .env is gitignored.
+# =============================================================================
+
+active_profile: development
+
+default:
+  # Portfolio
+  portfolio:
+    initial_capital: 100000
+    name: "Forward Test"
+    base_currency: INR
+    allow_short: false
+    max_open_positions: 10
+
+  # Strategy
+  strategy:
+    name: "sma_crossover"
+    parameters:
+      fast: 20
+      slow: 50
+
+  # Risk
+  risk:
+    max_position_value: 50000
+    max_position_pct: 0.2
+    max_open_positions: 10
+    max_gross_exposure_pct: 1.0
+    max_drawdown_pct: 0.10
+    daily_loss_limit_pct: 0.02
+    max_leverage: 1
+    max_consecutive_losses: 5
+
+  # Execution
+  execution:
+    realism: realistic
+    slippage_model: hybrid
+    commission_model: zerodha
+    segment: equity_delivery
+
+  # Position sizing
+  sizing:
+    method: risk_based
+    risk_per_trade: 0.01
+    stop_loss_pct: 0.02
+    fixed_quantity: 100
+    constraints:
+      max_position_pct: 0.2
+      min_trade_value: 5000
+
+  # Stops
+  stops:
+    stop_loss:
+      type: percentage
+      pct: 0.02
+    take_profit:
+      type: percentage
+      pct: 0.05
+
+  # Data
+  data:
+    provider: mock
+    symbols: ["INFY", "RELIANCE"]
+    timeframe: "1min"
+
+  # System
+  system:
+    loop_interval_seconds: 1
+    save_state_interval_minutes: 5
+    market: NSE
+    dry_run: false
+    backtest_mode: false
+    state_file: "state/forward_test_state.json"
+    log_level: INFO
+
+  # Alerts (Telegram preferred)
+  alerts:
+    enabled: true
+    min_level: info
+    channels:
+      log:
+        enabled: true
+      telegram:
+        enabled: false
+    routing:
+      info: [telegram, log]
+      error: [telegram, log]
+
+profiles:
+
+  development:
+    portfolio:
+      initial_capital: 100000
+      name: "Dev Test"
+    data:
+      provider: mock
+      symbols: ["INFY"]
+    system:
+      dry_run: true
+      log_level: DEBUG
+    alerts:
+      min_level: debug
+
+  testing:
+    portfolio:
+      initial_capital: 100000
+      name: "Test"
+    data:
+      provider: mock
+      symbols: ["MOCK1"]
+    system:
+      loop_interval_seconds: 0
+      save_state_interval_minutes: 0
+      dry_run: true
+    alerts:
+      min_level: debug
+      channels:
+        log:
+          enabled: true
+
+  production:
+    portfolio:
+      initial_capital: 1000000
+      name: "Production"
+      allow_short: false
+    risk:
+      max_position_pct: 0.1
+      max_drawdown_pct: 0.05
+      daily_loss_limit_pct: 0.01
+    data:
+      provider: mstock
+      symbols: ["INFY", "RELIANCE", "TCS", "HDFCBANK"]
+      timeframe: "1min"
+    system:
+      loop_interval_seconds: 1
+      save_state_interval_minutes: 5
+      market: NSE
+      dry_run: false
+      log_level: INFO
+    alerts:
+      min_level: info
+      channels:
+        telegram:
+          enabled: true
+        slack:
+          enabled: true
+        log:
+          enabled: true
+      quiet_hours_enabled: true

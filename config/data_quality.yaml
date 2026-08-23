@@ -1,0 +1,78 @@
+# =============================================================================
+# Forward Testing Simulator — Data Quality Validator Configuration (Step 11)
+# =============================================================================
+# Loaded by backtest.live.data_validator.DataValidator
+#
+#   from backtest.live.data_validator import DataValidator
+#   validator = DataValidator.from_config()  # or load_validator_config()
+#
+# Strictness levels:
+#   strict   – rejects more (2 std dev spike, 3x volume, checks bid/ask and last in spread)
+#   normal   – balanced (3 std dev, 5x volume)
+#   lenient  – allows more (4 std dev, 10x volume, no bid/ask checks)
+# =============================================================================
+
+active_profile: normal
+
+default:
+  strictness: normal
+
+  # Price range
+  min_price: 0.01
+  max_price: 1000000.0
+  allow_zero_volume: true
+
+  # OHLC checks
+  check_ohlc_consistency: true
+  check_bid_ask: true
+  check_last_between_bid_ask: false
+  bid_ask_tolerance_pct: 0.01
+
+  # Spike detection (Z-score)
+  spike_detection_enabled: true
+  spike_threshold_std: 3.0
+  spike_window: 20
+  spike_min_history: 10
+
+  # Gap detection
+  gap_detection_enabled: true
+  max_gap_seconds: 300.0          # 5 min for intraday
+  max_gap_seconds_daily: 259200.0 # 3 days for daily
+
+  # Volume anomaly
+  volume_anomaly_enabled: true
+  volume_threshold_multiplier: 5.0
+  volume_window: 20
+
+  # Timestamp
+  check_chronological: true
+  allow_future_timestamp: false
+  future_tolerance_seconds: 60.0
+
+  # Handling
+  on_failure: reject              # reject, warn, interpolate
+  max_consecutive_failures_before_alert: 10
+
+profiles:
+
+  strict:
+    strictness: strict
+    spike_threshold_std: 2.0
+    volume_threshold_multiplier: 3.0
+    check_last_between_bid_ask: true
+    on_failure: reject
+
+  normal:
+    strictness: normal
+    spike_threshold_std: 3.0
+    volume_threshold_multiplier: 5.0
+    check_last_between_bid_ask: false
+    on_failure: reject
+
+  lenient:
+    strictness: lenient
+    spike_threshold_std: 4.0
+    volume_threshold_multiplier: 10.0
+    check_bid_ask: false
+    check_last_between_bid_ask: false
+    on_failure: warn

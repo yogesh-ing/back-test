@@ -1,0 +1,103 @@
+# =============================================================================
+# Forward Testing Simulator — Stop Loss & Take Profit Configuration (Step 16)
+# =============================================================================
+# Loaded by backtest.simulator.stop_manager
+#
+#   from backtest.simulator.stop_manager import StopManager
+#   manager = StopManager(portfolio)
+#   manager.add_stop_loss(position, stop_type="percentage", params={"pct": 0.02})
+#
+# =============================================================================
+
+active_profile: default
+
+default:
+  # Default stop loss: 2% below entry for longs
+  stop_loss:
+    type: percentage
+    pct: 0.02
+    move_to_breakeven: false
+    breakeven_trigger_pct: 0.03
+
+  # Default take profit: 5% above entry
+  take_profit:
+    type: percentage
+    pct: 0.05
+    scale_out_pct: null
+    oco_group: null
+
+  # Trailing stops
+  trailing:
+    fixed_amount: 2.0
+    percentage: 0.02
+    atr_multiplier: 2
+
+profiles:
+
+  # Conservative: tight 1% stop, 2% target, breakeven at 1.5%
+  conservative:
+    stop_loss:
+      type: percentage
+      pct: 0.01
+      move_to_breakeven: true
+      breakeven_trigger_pct: 0.015
+    take_profit:
+      type: risk_reward
+      risk_reward_ratio: 2
+      pct: 0.01
+
+  # Aggressive: wide 3% stop, 6% target, no breakeven
+  aggressive:
+    stop_loss:
+      type: percentage
+      pct: 0.03
+      move_to_breakeven: false
+    take_profit:
+      type: percentage
+      pct: 0.06
+
+  # ATR-based: 2x ATR stop, 3x ATR target
+  atr_based:
+    stop_loss:
+      type: atr_based
+      atr_multiplier: 2
+    take_profit:
+      type: atr_based
+      atr_multiplier: 3
+
+  # Trailing: 2% trailing stop, no fixed target
+  trailing:
+    stop_loss:
+      type: trailing_percentage
+      pct: 0.02
+    take_profit:
+      type: trailing
+      pct: 0.03
+
+  # Time-based: exit after 20 bars
+  time_based:
+    stop_loss:
+      type: time_based
+      bars: 20
+
+  # OCO example: stop loss 2% and take profit 4% as OCO pair
+  oco_example:
+    stop_loss:
+      type: percentage
+      pct: 0.02
+      oco_group: "exit_pair"
+    take_profit:
+      type: percentage
+      pct: 0.04
+      oco_group: "exit_pair"
+
+  # Scale-out: take 50% at 3%, rest at 6%
+  scale_out:
+    take_profit:
+      - type: percentage
+        pct: 0.03
+        scale_out_pct: 0.5
+        oco_group: null
+      - type: percentage
+        pct: 0.06
+        scale_out_pct: 1.0

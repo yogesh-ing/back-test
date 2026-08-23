@@ -1,0 +1,72 @@
+# =============================================================================
+# Forward Testing Simulator — Main Engine Configuration (Step 20)
+# =============================================================================
+# Loaded by backtest.forward.engine.ForwardTestingEngine
+#
+#   from backtest.forward.engine import ForwardTestingEngine
+#   engine = ForwardTestingEngine(config_file="config/forward_testing.yaml")
+#   engine.initialize_system()
+#   engine.start()
+#
+# All sections are optional — defaults are used when missing.
+# =============================================================================
+
+portfolio:
+  initial_capital: 100000
+  name: "Forward Test 1"
+  base_currency: INR
+  allow_short: false
+  max_open_positions: 10
+
+strategy:
+  name: "sma_crossover"
+  parameters:
+    fast: 20
+    slow: 50
+
+risk:
+  max_position_size: 10000
+  max_positions: 5
+  max_drawdown_pct: 0.10
+  daily_loss_limit_pct: 0.02
+  max_leverage: 1
+
+execution:
+  realism: realistic
+  slippage_model: "hybrid"
+  commission_model: "zerodha"
+  segment: equity_delivery
+
+sizing:
+  method: risk_based
+  params:
+    risk_per_trade: 0.01
+    stop_loss_pct: 0.02
+    fixed_quantity: 100
+    fixed_dollar_amount: 10000
+    percentage: 0.05
+    atr: 2
+    atr_multiplier: 2
+    risk_amount: 1000
+    win_rate: 0.55
+    avg_win: 150
+    avg_loss: 100
+    kelly_fraction: 0.5
+
+data:
+  provider: "mock"   # mock, mstock, csv, synthetic
+  symbols: ["INFY", "RELIANCE", "TCS"]
+  timeframe: "1min"
+  start_date: "2024-01-01"
+  end_date: "2024-12-31"
+
+system:
+  loop_interval_seconds: 1
+  save_state_interval_minutes: 5
+  market: "NSE"
+  dry_run: false
+  backtest_mode: false
+  state_file: "state/forward_test_state.json"
+  log_level: "INFO"
+  max_errors_before_pause: 5
+  heartbeat_interval_seconds: 60

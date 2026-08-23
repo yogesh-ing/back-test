@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 12** (Phase 4 complete).
+Updated at the end of every step. Last updated: **Step 19** (Real-Time Dashboard complete).
 
 ---
 
@@ -80,6 +80,18 @@ Start here. Symptom → most likely cause → where to look.
 | `TypeError: '<' not supported between str and Decimal` | A Decimal field not coerced after `from_dict` | All Decimal fields coerce in `__post_init__`; add new ones to that loop |
 | Callback exception vanished | Deliberate — callbacks are isolated | Look for `order callback ... failed` in the `backtest.simulator.order` log |
 | Average fill price looks wrong | Expected: it is quantity-weighted across **all** fills | `Order.average_fill_price` |
+
+### Strategy Adapter (Step 13)
+
+| Symptom | Likely cause | Check |
+|---|---|---|
+| `HOLD` signals flooding DB | Logging HOLD twice (generate + execute) | `execute_signals` now skips HOLD logging; HOLD already logged in `generate_signals` |
+| `FOREIGN KEY constraint failed` on `strategy_signals.portfolio_id` | Portfolio row not yet persisted | Adapter auto-creates minimal portfolio row in `_save_signal_to_db` if missing |
+| `FOREIGN KEY constraint failed` on `strategy_signals.order_id` | Order row not yet persisted | Adapter drops FK (saves without order_id) when order not in DB |
+| Signal generated but no order created | Portfolio validation failed (insufficient funds, duplicate position, short disabled) | Check `skip_reason` in DB or logs; `portfolio.can_open_position` |
+| Short signal ignored | `allow_short=False` by default | Set `allow_short=True` for short strategies |
+| Lookahead bias suspicion | `bar_ts` >= `generated_at` | Adapter sets `bar_ts` from completed bar index, `generated_at` = now; assert `bar_ts < generated_at` |
+| Position not opened after signal | No executor, or executor without portfolio sync | Without executor, order stays pending; with executor, fill applied via `on_order_filled` |
 
 ### Environment
 
@@ -247,17 +259,18 @@ from the signal at bar *t−1* (`target.shift(1)`).
 
 ```
 simulator/   pure domain logic, no I/O    ──uses──>  db.DatabaseManager
-marketdata/  live data hub (Step 10)      ──uses──>  db.DatabaseManager, live/ (feed edge only)
 db/          ORM + connection management
-engine/ forward/ live/ strategy/          pre-existing, untouched
+forward/     orchestration + StrategyAdapter (may import simulator + strategy)
+strategy/    abstraction + registry + adapter re-export
+engine/ live/ data/                       pre-existing
 ```
 
 `simulator/` must **not** import from `engine/` or `forward/`. Enforced by
 `test_simulator_does_not_import_engine_or_forward`, which parses the AST (an
 earlier grep version false-positived on a docstring that merely *mentioned*
-the rule). `marketdata/` has the same guard
-(`test_marketdata_does_not_import_engine_or_forward`); its two allowed edges
-are the injected feed (`live/mstock.py`) and `db.DatabaseManager`.
+the rule).
+`forward/` and `strategy/` are allowed to import from `simulator/` — the
+adapter bridges `strategy/base.py` (existing) into `simulator.Portfolio`.
 
 **Three different `Portfolio` classes exist.** Import the right one:
 
@@ -266,6 +279,13 @@ are the injected feed (`live/mstock.py`) and `db.DatabaseManager`.
 | `backtest.simulator.Portfolio` | Domain model — cash, positions, limits |
 | `backtest.db.models.Portfolio` | ORM row |
 | `backtest.forward.portfolio.Portfolio` | Legacy multi-strategy allocator (`paper.py`) |
+
+**Two different `Strategy` concepts exist.** Import the right one:
+
+| Class | Purpose |
+|---|---|
+| `backtest.strategy.base.Strategy` | Abstract base for all strategies (existing, reused in Step 13) |
+| `backtest.forward.strategy_adapter.StrategyAdapter` | Bridge that runs a Strategy in forward testing |
 
 ---
 
@@ -347,6 +367,52 @@ naming the required order instead of letting the driver's FK error escape.
 
 **Lesson:** if correct use requires knowing an ordering constraint, provide an
 API that encodes it — and make the low-level path fail with an explanation.
+
+### 4.8 Strategy signals FK failures (Step 13)
+
+**Symptom:** ``FOREIGN KEY constraint failed`` when logging to
+``strategy_signals`` — both ``portfolio_id`` and ``order_id`` FKs.
+
+**Cause:** The adapter's portfolio is a ``simulator.Portfolio`` (in-memory)
+that has never been persisted, so its ``portfolio_id`` does not exist in the
+``portfolios`` table. Similarly, the order row does not exist until
+``Portfolio.save_to_db()`` is called.
+
+**Fix:** ``_save_signal_to_db`` now auto-creates a minimal portfolio row if
+missing (using the simulator portfolio's name/capital) and drops the
+``order_id`` FK when the order is not yet in the DB. Logging must never block
+trading.
+
+**Lesson:** Audit-log tables with FKs to operational tables need graceful
+degradation when the operational rows have not been flushed yet.
+
+### 4.9 ExecutionConfig unexpected kwarg (Step 20)
+
+**Symptom:** ``Failed to init executor: ExecutionConfig.__init__() got an unexpected keyword argument 'allow_short'``
+
+**Cause:** Engine passed ``allow_short`` to ``ExecutionConfig`` which doesn't accept it — short selling is controlled by ``PortfolioLimits``, not execution.
+
+**Fix:** Removed ``allow_short`` from ExecutionConfig init; executor now uses default config loaded from file/profile.
+
+**Lesson:** Check constructor signatures; portfolio limits vs execution config are separate concerns.
+
+### 4.10 ONE not imported in stop_manager (Step 16)
+
+**Symptom:** ``NameError: name 'ONE' is not defined`` when calculating percentage stops.
+
+**Cause:** ``stop_manager.py`` imported ``ZERO`` but not ``ONE`` from ``money.py``, but used ``ONE`` in ``entry_price * (ONE - pct)``.
+
+**Fix:** Import ``ONE`` alongside ``ZERO``.
+
+**Lesson:** When using Decimal constants, import all needed (ZERO, ONE) – grep for usage.
+
+### 4.11 Breakeven not triggered for non-trailing stops (Step 16)
+
+**Symptom:** ``test_breakeven_move`` failed – trailing update returned 0 for percentage stop with breakeven.
+
+**Cause:** ``update_trailing_stops`` had early ``if not is_trailing: continue`` that skipped breakeven logic for non-trailing stops. Breakeven is a feature for any stop, not just trailing.
+
+**Fix:** Removed early continue, handle trailing updates only if ``is_trailing``, but always check breakeven for any active stop with ``move_to_breakeven``.
 
 ### 4.6 Test-only mistakes worth remembering
 
@@ -445,6 +511,210 @@ statement whose predecessors already applied would corrupt data. Pool choice:
 `QueuePool` (5/20) for PostgreSQL, `NullPool` for SQLite files, `StaticPool`
 for in-memory SQLite (whose database *lives inside* one connection).
 
+### `forward/strategy_adapter.py` (Step 13)
+Bridges ``strategy/base.py`` (existing) into ``simulator.Portfolio`` and
+``simulator.execution.OrderExecutor``. Key invariants:
+
+* **No lookahead:** only completed bars are passed to ``Strategy.generate_signals``.
+  ``bar_ts`` is the timestamp of the completed bar, ``generated_at`` is now,
+  so ``bar_ts < generated_at`` always holds — the query Step 22 uses for bias
+  detection.
+* **Signal → Order:** ``Signal`` is a typed dataclass mirroring the plan's dict
+  shape (symbol, action BUY/SELL/HOLD, quantity, order_type, limit_price,
+  reason, indicators). ``execute_signals`` validates via
+  ``Portfolio.can_open_position``, sizes via ``PositionSizer``, and optionally
+  executes via ``OrderExecutor``.
+* **Multi-symbol:** per-symbol DataFrames in ``_bars``; supports dict of
+  strategies (one per symbol) or single strategy reused.
+* **Dry-run:** when ``dry_run=True`` signals are generated and logged but no
+  orders are created.
+* **DB logging:** ``_save_signal_to_db`` auto-creates portfolio row if missing
+  and drops order_id FK when order not yet persisted, so logging never blocks
+  trading. Logs to ``strategy_signals`` with ``executed`` flag and ``skip_reason``.
+* **State:** ``get_state``/``load_state`` snapshot bars, indicators, last targets
+  for Step 20 recovery. ``to_dict``/``from_dict`` are lossless for bars.
+* **Sizers:** ``FixedQuantitySizer``, ``FixedDollarSizer``,
+  ``PercentagePortfolioSizer`` are minimal implementations; Step 14 will expand
+  to risk-based/ATR/Kelly.
+
+Re-exported from ``strategy/adapter.py`` so both
+``from backtest.forward.strategy_adapter import StrategyAdapter`` and
+``from backtest.strategy.adapter import StrategyAdapter`` work.
+
+
+### `live/market_data_handler.py` (Step 10)
+Normalization and bar aggregation:
+
+* **Normalization:** Converts many broker formats (mStock uses `o/h/l/c/v/t`,
+  `tradingsymbol/ltp`, etc.) into standard `{symbol, timestamp, bid, ask,
+  last, open, high, low, close, volume, timeframe}`. Missing bid/ask estimated
+  from last with 0.1% spread.
+* **Bar aggregation:** `BarBuilder` per symbol/timeframe aggregates ticks into
+  OHLCV, aligns to boundaries via `TimeManager.align_to_timeframe`, closes bar
+  when aligned time advances. Supports 1min/3min/5min/15min/30min/1hr/1day.
+* **Multi-symbol:** `_bar_builders` dict symbol->timeframe->builder, `_tick_buffers`
+  bounded deques (prevents memory leaks).
+* **Observer:** `on_tick_received` and `on_bar_closed` callbacks with isolation
+  (one failing callback doesn't break others).
+* **Reconnection:** `connect_to_feed` with backoff (2^attempt, max 30s), max attempts,
+  auto-reconnect flag.
+* **DB cache:** `_store_bar_to_db` inserts into `market_data_cache` with unique
+  constraint handling (duplicate bars ignored).
+* **Feeds:** Abstract `BrokerFeed`, `MockBrokerFeed` (in-memory inject for tests),
+  `MStockBrokerFeed` wrapping existing `MStockSource` (wire to live/mstock.py per
+  task tracker).
+
+### `live/data_validator.py` (Step 11)
+Quality checks:
+
+* **OHLC:** high>=open/low/close, low<=open/high/close
+* **Price:** min 0.01, max 1M, not zero/negative
+* **Bid/Ask:** bid<=ask, optional last between bid/ask with tolerance
+* **Volume:** non-negative, optional zero check, anomaly vs rolling avg (5x default)
+* **Timestamp:** chronological, future check with tolerance, gap detection
+  (intraday 5min, daily 3 days) via `_check_gap` using timeframe to choose max
+* **Spike:** Z-score vs rolling window (20 bars, min 10 history), threshold 3 std
+  (strict 2, lenient 4)
+* **Stats:** total/failed/failure rate, failures by code, consecutive failures
+  with alert after 10
+* **Config:** `ValidatorConfig` with strictness levels adjusting thresholds,
+  YAML loader.
+
+### `live/time_manager.py` (Step 12)
+NSE time handling:
+
+* **Market hours:** NSE 09:15-15:30 IST default, NYSE 09:30-16:00 ET as reference,
+  pre-open 09:00, post-close 16:00, configurable
+* **Holidays:** Built-in partial lists for 2024 (NSE 14 holidays, NYSE 10),
+  injectable via constructor or YAML
+* **Open checks:** `is_market_open` checks weekend (Sat/Sun) + holidays + time
+  range; `is_pre_market` and `is_after_hours` for session phases
+* **Next open/close:** Iterates up to 365 days, skips weekends/holidays, handles
+  equality (<= open returns today open)
+* **Bar alignment:** `align_to_timeframe` floors to boundary (1min->second=0,
+  5min->minute//5*5, etc.), supports 1min/3min/5min/15min/30min/1hr/day/week/month
+* **Mock time:** `set_mock_time` and `advance_mock_time` for controllable clock
+  in tests – `get_current_time` returns mock if set
+* **Latency:** `measure_latency` samples, `get_latency_stats` mean/p95/min/max
+
+
+
+### `simulator/risk_manager.py` (Step 15)
+Risk checks with hierarchy order→position→portfolio:
+
+* **Order-level:** restricted_symbols, allowed_symbols, min/max order value,
+  max % of daily volume (requires avg volume history)
+* **Position-level:** max_position_value, max_position_pct (vs equity),
+  max_open_positions (via has_position), sector concentration via
+  symbol_to_sector mapping + sector_exposure_limits
+* **Portfolio-level:** max_drawdown_pct (via current_drawdown), daily_loss_limit
+  (tracked in _daily_pnl dict), weekly/monthly placeholders, max_leverage
+  (gross/equity), max_gross_exposure_pct, max_total_exposure absolute
+* **Circuit breakers:** `emergency_stop_all` halts trading, cancels orders via
+  portfolio.cancel_all_orders, sets _is_halted. `check_circuit_breakers`
+  checks drawdown, daily loss, consecutive losses. `record_trade_result`
+  tracks PnL and loss streak, `record_error` tracks technical errors with
+  auto-pause after max_consecutive_errors.
+* **Override:** `override(code, duration)` with allow_override flag and
+  optional override_code, expires after duration.
+* **Alerts:** `add_alert_callback` for limit breaches, all rejections logged
+  with code/reason/details.
+* **Batch:** `validate_orders` and `validate_signals` for engine integration.
+
+Config loader from YAML with 5 profiles: default, conservative, aggressive,
+intraday, nse_fo, permissive.
+
+
+
+### `dashboard/data_provider.py` (Step 19)
+Backend logic for dashboard, no Flask dependency so unit-testable:
+
+* **Portfolio overview:** equity, cash, position value, today P&L (from equity_history today first vs now), total P&L (vs initial), status
+* **Open positions:** qty, entry/current, market value, unrealized P&L $/%, age (minutes→ m/h/d), sorted by unreal P&L
+* **Recent trades:** from trade_analyzer or closed_positions, last 20 sorted by exit time desc, is_winner flag for green/red
+* **Charts:** equity_curve (timestamps, equity, cash, pos value), daily_pnl (group by date, daily P&L bar), drawdown (peak tracking, % and abs), win_loss_ratio (winning/losing counts, win_rate)
+* **Orders:** pending_orders with order_id, symbol, side, type, qty, filled/remaining, limit_price, status
+* **Metrics:** trades today (from closed_positions closed_at today), win_rate, Sharpe, max DD, exposure gross % from portfolio.get_current_exposure
+* **System status:** market_data_connected via is_connected, strategy_status via portfolio.status, loop/error counts from engine, last update from equity_history, health healthy/warning/critical/halted
+* **All data:** get_all_dashboard_data combines all sections + timestamp
+
+### `dashboard/app.py` (Step 19)
+Flask web app:
+
+* **Template:** Single HTML with embedded CSS/JS, Chart.js via CDN, responsive grid (auto-fit minmax 300px, mobile 1fr), dark/light mode via CSS variables and localStorage, auto-refresh 5s via setInterval
+* **Sections:** Portfolio overview big equity display, key metrics, system status, equity curve line, daily P&L bar (green/red), drawdown line, win/loss pie, open positions table with close button, recent trades table, active orders table with cancel button, manual order form (symbol/side/qty/type/price), logs placeholder
+* **API:** /api/portfolio, /positions, /trades, /orders, /metrics, /equity_curve, /daily_pnl, /drawdown, /win_loss, /status, /all (combined), /start/stop/pause/resume (POST), /close_position, /cancel_order, /manual_order (POST) – all JSON, with error handling
+* **Arena compatibility:** Binds to 0.0.0.0, no host allowlist blocking, PREFERRED_URL_SCHEME https for preview
+* **CLI:** run_dashboard(host, port, ...) and main() with argparse --host --port --config --debug, tries to init engine from config or uses mock portfolio demo
+* **Security:** No auth in mock version, placeholder for future multi-user auth
+
+
+### `forward/engine.py` (Step 20)
+Main orchestration engine that ties all components:
+
+* **Config:** ``ForwardTestingConfig`` with 7 sections (portfolio, strategy,
+  risk, execution, sizing, data, system). Loaded from YAML with validation;
+  explicit missing file raises, implicit missing uses defaults.
+* **Placeholders:** Steps 10-12, 15-19 not yet fully implemented, so engine
+  provides minimal but functional mocks:
+  - ``MockMarketDataHandler``: wraps DataSource for backtest replay, inject_bar for tests
+  - ``MockDataValidator``: OHLC sanity (high>=low, high>=close, low<=close, close>0)
+  - ``MockTimeManager``: always market open for backtest
+  - ``MockRiskManager``: checks ``can_open_position`` and drawdown limits
+  - ``MockStopManager``: no-op, placeholder for trailing stops
+  - ``MockPerformanceCalculator``: tracks equity curve and simple metrics
+* **State:** ``StateManager`` saves full system state (portfolio.to_dict,
+  adapter.get_state, performance equity curve) atomically via temp file replace.
+  Restores on ``initialize_system``.
+* **Loop:** ``run_loop`` for live (polls data_handler, validates, updates prices,
+  checks stops, generates signals via adapter, updates performance, saves state
+  periodically, heartbeat every 60s, slow-loop warning >1s). ``_run_backtest_mode``
+  replays historical candles from DataSource bar by bar.
+* **Lifecycle:** ``on_start``, ``on_stop``, ``on_error``, ``on_market_open/close``
+  hooks with isolation (one failing hook doesn't break others). ``pause``/``resume``
+  sets portfolio status and error count.
+* **Error handling:** try/except around loop, error count, auto-pause after
+  ``max_errors_before_pause`` (default 5), signal handlers for SIGINT/SIGTERM
+  save state before exit.
+* **Monitoring:** heartbeat logs equity/cash/positions/exposure/errors, loop time
+  tracking, memory monitoring placeholder.
+* **Modes:** dry_run (signals but no orders), backtest_mode (replay historical),
+  live (polling).
+
+Dockerfile and systemd service included per spec.
+
+
+### `simulator/position_sizing.py` (Step 14)
+Six methods, all pure Decimal:
+
+* **Fixed qty/dollar/%:** trivial division, but with equity and price resolution
+  from signal/portfolio.
+* **Risk-based:** ``qty = (equity * risk_per_trade) / (price * stop_loss_pct)``
+  — if stop is hit, loss equals risk fraction. The most common professional
+  method.
+* **Volatility/ATR:** ``qty = risk_amount / (ATR * multiplier)`` — higher ATR
+  => smaller position, keeping dollar volatility constant. ATR priority:
+  explicit param > signal indicators (``atr``/``ATR``) > instance default.
+* **Kelly:** ``f* = p - q/b`` where ``b=avg_win/avg_loss``, then
+  ``qty = equity * f* * kelly_fraction / price``. Negative Kelly => 0 (don't bet).
+  Half-Kelly (0.5) is default — full Kelly is too volatile for most.
+
+Constraints applied after raw sizing, in order: round lots (floor), min trade
+value (dust filter => 0), max position value, max position % of equity, max
+gross exposure %, max open positions. Each returns ``SizingResult`` with
+``constrained`` flag and reason for audit.
+
+Config loader: ``config/position_sizing.yaml`` with 8 profiles (fixed,
+fixed_dollar, percentage, conservative, aggressive, volatility, kelly, nse_fo).
+Profiles override default; unknown keys raise ValidationError.
+
+Integration: ``StrategyAdapter`` accepts any object with
+``calculate_position_size(signal, portfolio, ...)`` — the new ``PositionSizer``
+satisfies it, so ``adapter = StrategyAdapter(..., position_sizer=PositionSizer(...))``
+works. The adapter's old minimal sizers now re-export from simulator for
+backward compatibility.
+
+
 ### `marketdata/ticks.py` + `bars.py`
 One normalizer for every broker dialect (`ltp`/`last_price`/`c` → `last`);
 feeds return **raw payloads** and never parse. Bar `ts` is the **open** time,
@@ -541,6 +811,8 @@ Python API rather than the CLI when using it.
 | `test_simulator_slippage.py` | 5 slippage models, tiers, time-of-day, limit caps, statistics | 101 |
 | `test_simulator_fees.py` | NSE + US fee stacks, 10 broker presets, volume tiers, FX | 109 |
 | `test_simulator_execution.py` | Liquidity caps, queue position, rejections, TIF, determinism | 99 |
+| `test_strategy_adapter.py` | StrategyAdapter bridge, Signal model, sizers, multi-symbol, dry-run, DB logging, no-lookahead, state persistence | 20 |
+| `test_simulator_position_sizing.py` | PositionSizer 6 methods, constraints, risk params, config loader, adapter integration | 25 |
 | `test_marketdata.py` | Normalization, IST alignment, gaps/late data, reconnect, cache idempotency | 173 |
 | `test_marketdata_quality.py` | Spikes, gaps, volume anomalies, strictness, repair, alerts, integration | 114 |
 | `test_timesync.py` | NSE/NYSE sessions, holidays, DST, next open/close, NTP, latency | 96 |

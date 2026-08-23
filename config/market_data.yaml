@@ -1,0 +1,60 @@
+# =============================================================================
+# Forward Testing Simulator — Market Data Handler Configuration (Step 10)
+# =============================================================================
+# Loaded by backtest.live.market_data_handler.MarketDataHandler
+#
+#   from backtest.live.market_data_handler import MarketDataHandler
+#   handler = MarketDataHandler.from_config()  # uses active_profile
+#
+# =============================================================================
+
+active_profile: mock
+
+default:
+  provider: mock
+  symbols: ["INFY", "RELIANCE", "TCS"]
+  timeframe: "1min"
+  timeframes: ["1min", "5min", "15min", "1hour", "1day"]
+  buffer_size: 1000
+  auto_reconnect: true
+  max_reconnect_attempts: 5
+  timezone: "Asia/Kolkata"
+
+  # Caching
+  cache_to_db: true
+  cache_timeframes: ["1min", "5min", "1day"]
+
+profiles:
+
+  # Mock feed – no network, generates random ticks for testing
+  mock:
+    provider: mock
+    symbols: ["INFY", "TCS"]
+    timeframe: "1min"
+    timeframes: ["1min", "5min", "15min", "1day"]
+    buffer_size: 500
+
+  # mStock live feed – requires .env with MSTOCK_API_KEY etc.
+  mstock:
+    provider: mstock
+    symbols: ["INFY", "RELIANCE", "TCS", "HDFCBANK"]
+    timeframe: "1min"
+    timeframes: ["1min", "5min", "15min", "1hour", "1day"]
+    buffer_size: 2000
+    auto_reconnect: true
+    max_reconnect_attempts: 10
+
+  # CSV replay – replays historical CSV files
+  csv:
+    provider: csv
+    symbols: ["INFY"]
+    timeframe: "1min"
+    csv_path: "data/candles/INFY_1min.csv"
+
+  # Synthetic – generates synthetic OHLCV for stress testing
+  synthetic:
+    provider: synthetic
+    symbols: ["MOCK1", "MOCK2"]
+    timeframe: "1min"
+    volatility: 0.01
+    trend: 0.0

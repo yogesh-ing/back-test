@@ -1,0 +1,108 @@
+# =============================================================================
+# Forward Testing Simulator — Risk Management Configuration (Step 15)
+# =============================================================================
+# Loaded by backtest.simulator.risk_manager.load_risk_config()
+#
+#   from backtest.simulator.risk_manager import RiskManager, RiskConfig
+#   risk = RiskManager(portfolio, config=RiskConfig(max_drawdown_pct=0.1))
+#   risk = RiskManager(portfolio, config=load_risk_config(profile="conservative"))
+#
+# Risk hierarchy: order -> position -> portfolio
+# =============================================================================
+
+active_profile: default
+
+default:
+  # Position-level limits
+  max_position_value: 50000        # Max notional per symbol (e.g. 50k INR)
+  max_position_pct: 0.2            # Max 20% of equity per symbol
+  max_open_positions: 10
+  max_gross_exposure_pct: 1.0      # 1.0 = no leverage, 2.0 = 2x leverage
+  max_leverage: 1
+
+  # Portfolio-level limits
+  max_drawdown_pct: 0.10           # 10% from peak
+  daily_loss_limit_pct: 0.02       # 2% daily loss
+  weekly_loss_limit_pct: 0.05      # 5% weekly
+  monthly_loss_limit_pct: 0.10     # 10% monthly
+  max_total_exposure: 200000       # Absolute max gross exposure
+
+  # Order-level limits
+  min_order_value: 1000
+  max_order_value: 100000
+  max_order_pct_of_daily_volume: 0.1  # Max 10% of avg daily volume
+
+  # Symbol restrictions
+  restricted_symbols: []           # e.g. ["YESBANK", "SUZLON"]
+  allowed_symbols: null            # if set, only these allowed
+
+  # Sector concentration (requires symbol_to_sector mapping)
+  sector_exposure_limits: {}       # e.g. {"BANKING": 0.3, "IT": 0.3}
+  symbol_to_sector: {}             # e.g. {"HDFCBANK": "BANKING", "INFY": "IT"}
+
+  # Circuit breakers
+  max_consecutive_losses: 5
+  max_consecutive_errors: 5
+  pause_on_technical_error: true
+
+  # Manual override
+  allow_override: false
+  override_code: null
+
+profiles:
+
+  # Conservative – tight limits
+  conservative:
+    max_position_pct: 0.1
+    max_open_positions: 5
+    max_gross_exposure_pct: 0.5
+    max_drawdown_pct: 0.05
+    daily_loss_limit_pct: 0.01
+    max_consecutive_losses: 3
+    min_order_value: 5000
+    max_order_pct_of_daily_volume: 0.05
+
+  # Aggressive – looser limits
+  aggressive:
+    max_position_pct: 0.3
+    max_open_positions: 20
+    max_gross_exposure_pct: 2.0
+    max_leverage: 2
+    max_drawdown_pct: 0.20
+    daily_loss_limit_pct: 0.05
+    max_consecutive_losses: 10
+    max_order_pct_of_daily_volume: 0.2
+
+  # Intraday – stricter daily loss, no overnight
+  intraday:
+    max_position_pct: 0.15
+    max_open_positions: 10
+    max_gross_exposure_pct: 1.0
+    max_drawdown_pct: 0.05
+    daily_loss_limit_pct: 0.01
+    weekly_loss_limit_pct: 0.03
+    max_consecutive_losses: 3
+    max_order_pct_of_daily_volume: 0.1
+
+  # NSE F&O – higher leverage, lot-based
+  nse_fo:
+    max_position_pct: 0.2
+    max_open_positions: 15
+    max_gross_exposure_pct: 3.0
+    max_leverage: 3
+    max_drawdown_pct: 0.15
+    daily_loss_limit_pct: 0.03
+    max_consecutive_losses: 5
+
+  # No limits – for backtesting comparison
+  permissive:
+    max_position_value: null
+    max_position_pct: null
+    max_open_positions: null
+    max_gross_exposure_pct: null
+    max_drawdown_pct: 1.0
+    daily_loss_limit_pct: 1.0
+    max_consecutive_losses: null
+    min_order_value: null
+    max_order_value: null
+    max_order_pct_of_daily_volume: null

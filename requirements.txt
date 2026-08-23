@@ -16,3 +16,4 @@ psycopg2-binary>=2.9
 # Reads config/database.yaml. Optional: the connection manager falls back to
 # environment variables alone if the file is absent.
 PyYAML>=6.0
+Flask>=2.0

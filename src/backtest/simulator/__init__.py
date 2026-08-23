@@ -137,6 +137,42 @@ from backtest.simulator.position import (
     ReduceResult,
     SplitResult,
 )
+from backtest.simulator.position_sizing import (
+    ATRBasedSizer,
+    DEFAULT_SIZING_CONFIG_PATH,
+    FixedDollarSizer,
+    FixedQuantitySizer,
+    KellySizer,
+    PercentagePortfolioSizer,
+    PositionSizer,
+    RiskBasedSizer,
+    RiskParams,
+    SizingConfig,
+    SizingConstraints,
+    SizingMethod,
+    SizingResult,
+    VolatilitySizer,
+    load_position_sizing_config,
+)
+from backtest.simulator.risk_manager import (
+    DEFAULT_RISK_CONFIG_PATH,
+    RiskCheckResult,
+    RiskConfig,
+    RiskManager,
+    load_risk_config,
+)
+from backtest.simulator.stop_manager import (
+    DEFAULT_STOP_CONFIG_PATH,
+    Stop,
+    StopConfig,
+    StopHit,
+    StopManager,
+    StopType,
+    TakeProfitType,
+    load_stop_config,
+)
+from backtest.simulator.performance import PerformanceCalculator, PerformanceConfig
+from backtest.simulator.trade_analyzer import AnalyzedTrade, TradeAnalyzer
 
 __all__ = [
     # Portfolio
@@ -242,4 +278,41 @@ __all__ = [
     "ZERO",
     "MONEY_PLACES",
     "PRICE_PLACES",
+    # Position sizing (Step 14)
+    "PositionSizer",
+    "SizingConfig",
+    "SizingConstraints",
+    "RiskParams",
+    "SizingMethod",
+    "SizingResult",
+    "FixedQuantitySizer",
+    "FixedDollarSizer",
+    "PercentagePortfolioSizer",
+    "RiskBasedSizer",
+    "VolatilitySizer",
+    "ATRBasedSizer",
+    "KellySizer",
+    "load_position_sizing_config",
+    "DEFAULT_SIZING_CONFIG_PATH",
+    # Risk manager (Step 15)
+    "RiskManager",
+    "RiskConfig",
+    "RiskCheckResult",
+    "load_risk_config",
+    "DEFAULT_RISK_CONFIG_PATH",
+    # Stop manager (Step 16)
+    "StopManager",
+    "StopConfig",
+    "Stop",
+    "StopHit",
+    "StopType",
+    "TakeProfitType",
+    "load_stop_config",
+    "DEFAULT_STOP_CONFIG_PATH",
+    # Performance (Step 17)
+    "PerformanceCalculator",
+    "PerformanceConfig",
+    # Trade Analyzer (Step 18)
+    "TradeAnalyzer",
+    "AnalyzedTrade",
 ]
