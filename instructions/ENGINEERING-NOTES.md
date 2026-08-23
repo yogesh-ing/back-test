@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 9** (Phase 3 complete).
+Updated at the end of every step. Last updated: **Step 10** (Phase 4 started).
 
 ---
 
@@ -48,6 +48,19 @@ Start here. Symptom → most likely cause → where to look.
 | `IntegrityError` on duplicate `client_order_id` | Working as intended — idempotency key | Generate a fresh id per submission attempt |
 | `ForeignKeyViolation` on `fk_fills_position` | Saving out of dependency order | Use `Portfolio.save_to_db()` — it writes portfolios→positions→orders→fills atomically (§4.7) |
 | Cash off by exactly the fee amount | Fees counted twice, or slippage added to cash | Fees are applied **once**, by whoever moves the cash. Slippage is *never* cash (§2.6) |
+
+### Market data (Step 10)
+
+| Symptom | Likely cause | Check |
+|---|---|---|
+| Bars shifted by 5h30m | Naive timestamp treated as UTC | Feeds declare `naive_tz` (mStock: IST); `normalize_tick` applies it. Never strip tz before alignment |
+| Hourly bars open at :00 instead of 09:15/10:15 | Session anchor missing | `session_anchor: "09:15"` in `config/marketdata.yaml`; NSE hourly candles are anchored at the open |
+| A tick "disappeared" | It was late or invalid — both are counted, never silent | `handler.stats`: `late_dropped`, `invalid_payloads`, `ignored_unsubscribed` |
+| Bar close looks wrong after out-of-order data | Working as intended | A late tick may extend high/low and add volume, but never rewrites `close` — that would rewrite time |
+| Volume-0 flat bars in the stream | Synthetic gap fill | `fill_gaps: true` fabricates them; they carry `synthetic=True` and are **never persisted** |
+| Duplicate rows feared in `market_data_cache` | They cannot happen | `persist_closed_bars` checks the `uq_mdc_bar` key first; replays write 0 rows |
+| `FeedConnectionError: after N attempt(s)` | Reconnect budget exhausted | `max_reconnect_attempts` / backoff in config; the handler retried with exponential backoff first |
+| Handler tests sleeping for real | Backoff not stubbed | Inject `handler._sleep`; the `testing` profile sets backoff to 0 |
 
 ### Orders
 
@@ -226,6 +239,7 @@ from the signal at bar *t−1* (`target.shift(1)`).
 
 ```
 simulator/   pure domain logic, no I/O    ──uses──>  db.DatabaseManager
+marketdata/  live data hub (Step 10)      ──uses──>  db.DatabaseManager, live/ (feed edge only)
 db/          ORM + connection management
 engine/ forward/ live/ strategy/          pre-existing, untouched
 ```
@@ -233,7 +247,9 @@ engine/ forward/ live/ strategy/          pre-existing, untouched
 `simulator/` must **not** import from `engine/` or `forward/`. Enforced by
 `test_simulator_does_not_import_engine_or_forward`, which parses the AST (an
 earlier grep version false-positived on a docstring that merely *mentioned*
-the rule).
+the rule). `marketdata/` has the same guard
+(`test_marketdata_does_not_import_engine_or_forward`); its two allowed edges
+are the injected feed (`live/mstock.py`) and `db.DatabaseManager`.
 
 **Three different `Portfolio` classes exist.** Import the right one:
 
@@ -421,6 +437,23 @@ statement whose predecessors already applied would corrupt data. Pool choice:
 `QueuePool` (5/20) for PostgreSQL, `NullPool` for SQLite files, `StaticPool`
 for in-memory SQLite (whose database *lives inside* one connection).
 
+### `marketdata/ticks.py` + `bars.py`
+One normalizer for every broker dialect (`ltp`/`last_price`/`c` → `last`);
+feeds return **raw payloads** and never parse. Bar `ts` is the **open** time,
+floored in the *exchange* timezone — IST is +05:30, so UTC-floored hourly
+bars would open at half past the local hour. `session_anchor` reproduces real
+NSE candles (09:15–10:15). Late ticks within `late_grace_seconds` add
+volume/extremes but never the close; synthetic gap-fill bars are flagged and
+never persisted.
+
+### `marketdata/handler.py`
+Owns **no event loop** — `poll_once()` does one round trip; Step 20 decides
+cadence. On a transient `FeedError` it reconnects with exponential backoff
+(injectable `_sleep`) and retries the poll once. Buffers are bounded deques
+(`tick_buffer_size`/`bar_buffer_size`) so a week-long run cannot leak.
+`persist_closed_bars` is idempotent against `uq_mdc_bar` and keeps pending
+bars if the write fails.
+
 ---
 
 ## 6. Known limitations
@@ -478,6 +511,7 @@ Python API rather than the CLI when using it.
 | `test_simulator_slippage.py` | 5 slippage models, tiers, time-of-day, limit caps, statistics | 101 |
 | `test_simulator_fees.py` | NSE + US fee stacks, 10 broker presets, volume tiers, FX | 109 |
 | `test_simulator_execution.py` | Liquidity caps, queue position, rejections, TIF, determinism | 99 |
+| `test_marketdata.py` | Normalization, IST alignment, gaps/late data, reconnect, cache idempotency | 173 |
 | Pre-existing | Backtest engine, mStock | 25 (+4 skipped) |
 
 **Drift guards** — these fail loudly if two sources of truth diverge:
@@ -485,4 +519,6 @@ Python API rather than the CLI when using it.
 - `test_enums_match_the_orm` / `test_enums_match_the_sql_check_constraints`
 - `test_sqlite_migration_file_matches_orm`
 - `test_simulator_does_not_import_engine_or_forward`
+- `test_marketdata_does_not_import_engine_or_forward`
+- `test_timeframe_values_match_db_schema` (marketdata ↔ ORM timeframes)
 - Alembic autogenerate produces no diff against the ORM

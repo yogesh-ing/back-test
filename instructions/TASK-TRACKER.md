@@ -5,20 +5,20 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-19 · **Branch:** `arena/01a01ae2-back-test` · **PR [#3](https://github.com/yogesh-ing/back-test/pull/3) merged** into `main` (Steps 1–7)
+**Last updated:** 2026-08-23 · **Branch:** `arena/01a02c7a-back-test` · **PR [#3](https://github.com/yogesh-ing/back-test/pull/3) merged** (Steps 1–7) · **PR [#5](https://github.com/yogesh-ing/back-test/pull/5) merged** into `main` (Steps 8–9, pushed manually by the user)
 
 ---
 
 ## Progress
 
-`██████████████████░░░░░░` **9 / 24 steps complete** (38%)
+`████████████████████░░░░` **10 / 24 steps complete** (42%)
 
 | Phase | Steps | Status |
 |---|---|---|
 | 1 · Database | 1–2 | ✅ **Complete** |
 | 2 · Core models | 3–6 | ✅ **Complete** |
 | 3 · Execution | 7–9 | ✅ **Complete** |
-| 4 · Live data | 10–12 | ⬜ Not started |
+| 4 · Live data | 10–12 | 🟡 **In progress** (10 ✅) |
 | 5 · Strategy | 13–14 | ⬜ Not started |
 | 6 · Risk | 15–16 | ⬜ Not started |
 | 7 · Performance | 17–19 | ⬜ Not started |
@@ -61,7 +61,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 
 | # | Step | Status | Deliverables |
 |---|---|---|---|
-| 10 | Market Data Handler | ⬜ | Normalisation, bar aggregation — **wire to existing `live/mstock.py`** |
+| 10 | Market Data Handler | ✅ | `src/backtest/marketdata/` (`ticks.py` normalization, `bars.py` NSE-anchored aggregation, `feed.py` mStock + mock feeds, `handler.py` hub), `config/marketdata.yaml` — wired to existing `live/mstock.py` · **173 tests** |
 | 11 | Data Quality Validator | ⬜ | Spike/gap detection, OHLC sanity |
 | 12 | Time Synchronization Manager | ⬜ | **NSE calendar** (plan says NYSE), IST/UTC, bar alignment |
 
@@ -115,7 +115,7 @@ Things the agent cannot do; tracked so nothing is silently skipped.
 | 3 | Set `FORWARD_TEST_DB_URL` in `.env` (never commit it) | Step 1/2 | ⬜ Pending |
 | 4 | `pip install -r requirements.txt` (adds SQLAlchemy, Alembic, psycopg2, PyYAML) | Step 1/2 | ⬜ Pending |
 | 5 | Review & merge PR #3 | — | ✅ Merged 2026-08-19 (`4e01d65`) |
-| 6 | Review & merge the Phase 3 PR (Steps 8–9) | — | ⬜ Pending — PR not yet opened, GitHub unreachable |
+| 6 | Review & merge the Phase 3 PR (Steps 8–9) | — | ✅ Merged 2026-08-23 as PR [#5](https://github.com/yogesh-ing/back-test/pull/5) (`43abb57`) — user pushed & merged manually |
 
 ---
 
@@ -154,7 +154,7 @@ src/backtest/
 │   ├── models.py        #   ORM: 10 tables
 │   ├── manager.py       #   DatabaseManager: pooling, retries, transactions
 │   └── config.py        #   Layered config
-├── simulator/           # Steps 3–6 🟡  (forward testing domain models)
+├── simulator/           # Steps 3–9 ✅  (forward testing domain models)
 │   ├── money.py         #   Decimal helpers  ✅
 │   ├── errors.py        #   Domain exceptions ✅
 │   ├── lots.py          #   LotBook, FIFO/LIFO ✅ Step 4
@@ -167,7 +167,13 @@ src/backtest/
 │   ├── slippage.py      #   5 slippage models  ✅ Step 7
 │   ├── fees.py          #   Full fee stack     ✅ Step 8
 │   ├── execution.py     #   OrderExecutor      ✅ Step 9
-│   └── fill.py          #   Fill             ⬜ Step 6
+│
+├── marketdata/          # Step 10 ✅  (live data layer)
+│   ├── errors.py        #   MarketDataError hierarchy
+│   ├── ticks.py         #   Tick/Bar + broker payload normalization
+│   ├── bars.py          #   IST boundary alignment, BarAggregator
+│   ├── feed.py          #   DataFeed ABC, MStockFeed, MockFeed
+│   └── handler.py       #   MarketDataHandler: buffers, reconnect, cache
 │
 ├── data/ engine/ forward/ live/ strategies/ strategy/   # pre-existing
 ```
@@ -192,5 +198,6 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_simulator_slippage.py` (Step 7) | 101 |
 | `test_simulator_fees.py` (Step 8) | 109 |
 | `test_simulator_execution.py` (Step 9) | 99 |
-| **Total** | **913 passing, 4 skipped** |
+| `test_marketdata.py` (Step 10) | 173 |
+| **Total** | **1086 passing, 4 skipped** |
 
