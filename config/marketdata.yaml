@@ -1,0 +1,83 @@
+# =============================================================================
+# Forward Testing Simulator — Live Market Data (Step 10)
+# =============================================================================
+#
+# Loaded by backtest.marketdata.load_marketdata_config().
+#
+#   from backtest.marketdata import MarketDataHandler, load_marketdata_config
+#   handler = MarketDataHandler(config=load_marketdata_config())            # active_profile
+#   handler = MarketDataHandler(config=load_marketdata_config(profile="replay"))
+#
+# Bar timestamps are the bar OPEN time, aligned to the timeframe boundary in
+# `timezone` — the same convention as the market_data_cache table.
+# =============================================================================
+
+active_profile: live
+
+
+# -----------------------------------------------------------------------------
+# Shared settings. Profiles override individual keys.
+# -----------------------------------------------------------------------------
+default:
+
+  # Timeframes aggregated for every subscribed symbol. Must be a subset of
+  # the schema's ck_mdc_timeframe values:
+  #   1min 3min 5min 15min 30min 60min 1hour day week month
+  timeframes: [1min, 5min, 15min, 60min, day]
+
+  # ---- Session (NSE) ----
+  # Boundaries are aligned in this timezone. NSE hourly candles run
+  # 09:15-10:15, so intraday flooring is anchored at the session open;
+  # set session_anchor to null for plain midnight-based flooring.
+  timezone: "Asia/Kolkata"
+  session_anchor: "09:15"
+  exchange: "NSE"
+
+  # ---- Buffers (memory-leak prevention) ----
+  # Recent data kept in bounded deques; oldest entries fall off.
+  tick_buffer_size: 1000     # per symbol
+  bar_buffer_size: 500       # per symbol × timeframe
+
+  # ---- Late data and gaps ----
+  # A tick older than the current bar window is folded into the bar
+  # (volume/extremes only, never the close) if it is at most this old;
+  # older ticks are dropped and counted.
+  late_grace_seconds: 60
+  # Emit flat synthetic bars (volume 0, flagged synthetic, never persisted)
+  # for empty periods inside a gap. Off for live NSE polling: an empty
+  # period usually means no trades, and fabricating bars hides that.
+  fill_gaps: false
+  # Gaps wider than this many periods are never filled — an overnight gap
+  # on 1min bars is ~1,000 periods of noise.
+  max_gap_bars: 16
+
+  # ---- Reconnection ----
+  # On a transient poll failure the handler reconnects with exponential
+  # backoff (1s, 2s, 4s, ... capped) and retries the poll once.
+  max_reconnect_attempts: 5
+  reconnect_backoff_seconds: 1.0
+  reconnect_backoff_cap_seconds: 60.0
+
+
+# -----------------------------------------------------------------------------
+# Profiles
+# -----------------------------------------------------------------------------
+profiles:
+
+  # Live NSE polling through the mStock feed.
+  live: {}
+
+  # Replaying recorded/backfilled data: gaps in history are expected and
+  # gap-filling keeps downstream indicators continuous.
+  replay:
+    fill_gaps: true
+    max_gap_bars: 64
+    late_grace_seconds: 0
+
+  # Unit tests / CI — tiny buffers, no real backoff waits.
+  testing:
+    tick_buffer_size: 50
+    bar_buffer_size: 50
+    max_reconnect_attempts: 3
+    reconnect_backoff_seconds: 0.0
+    reconnect_backoff_cap_seconds: 0.0
