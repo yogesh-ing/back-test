@@ -1,0 +1,56 @@
+# =============================================================================
+# Pre-commit hooks for Forward Testing Simulator (Step 24)
+# =============================================================================
+# Install: pip install pre-commit && pre-commit install
+# Run: pre-commit run --all-files
+# =============================================================================
+
+repos:
+  - repo: https://github.com/psf/black
+    rev: 24.8.0
+    hooks:
+      - id: black
+        language_version: python3.11
+        args: [--line-length=100]
+        include: ^(src|tests)/
+
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: [--profile=black, --line-length=100]
+        include: ^(src|tests)/
+
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.1.1
+    hooks:
+      - id: flake8
+        args: [--max-line-length=100, --exclude=__pycache__]
+        include: ^src/
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.1
+    hooks:
+      - id: mypy
+        args: [--ignore-missing-imports, --no-strict-optional]
+        include: ^src/backtest/
+        exclude: ^src/backtest/(engine|forward|live)/  # legacy code may not be typed
+
+  - repo: https://github.com/pycqa/pylint
+    rev: v3.0.3
+    hooks:
+      - id: pylint
+        args: [--disable=all, --enable=E,F, --max-line-length=100]
+        include: ^src/backtest/simulator/
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-json
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key

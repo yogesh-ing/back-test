@@ -133,5 +133,8 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_simulator_trade_analyzer.py` (Step 18) | 15 |
 | `test_dashboard.py` (Step 19) | 15 |
 | `test_forward_engine.py` (Step 20) | 14 |
-| **Total** | **1115 passing, 4 skipped** |
+| `test_alert_manager.py` (Step 21) | 33 |
+| `test_comparison.py` (Step 22) | 13 |
+| `test_config_manager.py` (Step 23) | 13 |
+| **Total** | **1175 passing, 4 skipped** |
 
