@@ -36,6 +36,7 @@ __all__ = [
     "PerShareCommission",
     "PercentageCommission",
     "TieredCommission",
+    "PaymentForOrderFlowCommission",
     "resolve_commission_model",
 ]
 
@@ -296,8 +297,50 @@ class TieredCommission(CommissionModel):
 
 
 #: Name -> constructor, for building a model from configuration.
+@dataclass
+class PaymentForOrderFlowCommission(CommissionModel):
+    """Zero commission, funded by payment for order flow.
+
+    The Robinhood model. Commission really is zero — but the cost does not
+    vanish, it reappears as systematically worse fills, because the broker is
+    paid to route your order to a market maker rather than to the best venue.
+
+    Reporting this as "free" is the single most misleading thing a fee model
+    can do. :attr:`implied_slippage_bps` records the cost that *should* be
+    charged as slippage instead, so it is visible rather than silently absent.
+    Wire it into :mod:`backtest.simulator.slippage` — this class deliberately
+    does **not** return it as a fee, because it is not one.
+    """
+
+    implied_slippage_bps: Decimal = Decimal("2.5")
+    name: str = field(default="pfof", init=False)
+
+    def __post_init__(self) -> None:
+        self.implied_slippage_bps = to_decimal(
+            self.implied_slippage_bps, "implied_slippage_bps"
+        )
+        if self.implied_slippage_bps < ZERO:
+            raise ValidationError(
+                "implied_slippage_bps must not be negative",
+                code="invalid_commission_config",
+            )
+
+    def calculate(self, quantity: Any, price: Any, side: Any = OrderSide.BUY) -> Decimal:
+        self._inputs(quantity, price)
+        return ZERO
+
+    def hidden_cost(self, quantity: Any, price: Any) -> Decimal:
+        """What the 'free' trade actually costs, via worse fills."""
+        qty, px = self._inputs(quantity, price)
+        return money(qty * px * self.implied_slippage_bps / Decimal("10000"))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"model": self.name, "implied_slippage_bps": str(self.implied_slippage_bps)}
+
+
 _REGISTRY: dict[str, type[CommissionModel]] = {
     "zero": ZeroCommission,
+    "pfof": PaymentForOrderFlowCommission,
     "flat": FlatCommission,
     "per_share": PerShareCommission,
     "percentage": PercentageCommission,

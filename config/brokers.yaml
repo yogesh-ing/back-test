@@ -1,0 +1,171 @@
+# =============================================================================
+# Forward Testing Simulator — Broker Cost Models
+# =============================================================================
+#
+# Loaded by backtest.simulator.fees.load_broker_profile().
+#
+#   from backtest.simulator import CommissionCalculator
+#   calc = CommissionCalculator.from_config()                # active_broker
+#   calc = CommissionCalculator.from_config(broker="ibkr")
+#   calc = CommissionCalculator.for_broker("zerodha")        # preset, no file
+#
+# Anything not listed here falls back to the built-in preset of the same name,
+# so the presets work with no configuration at all.
+#
+# -----------------------------------------------------------------------------
+# RATES CHANGE. The Indian figures below are FY 2024-25 equity values. STT,
+# stamp duty and exchange transaction charges have all moved within the last
+# few years, sometimes mid-year. Check a recent contract note before trusting
+# any cost-sensitive result.
+# -----------------------------------------------------------------------------
+
+active_broker: zerodha
+
+
+brokers:
+
+  # ---------------------------------------------------------------------------
+  # India
+  # ---------------------------------------------------------------------------
+
+  # The discount-broker model Zerodha popularised: delivery free, intraday
+  # capped at 0.03% or Rs 20 whichever is lower.
+  zerodha:
+    currency: INR
+    default_segment: equity_delivery
+    commission_model:
+      model: percentage
+      rate: 0.0003
+      maximum: 20
+    delivery_commission_model:
+      model: zero
+    fee_schedule:
+      schedule: india_equity
+      # STT: 0.1% both sides on delivery, 0.025% sell-only on intraday.
+      # This asymmetry is why `segment` must be set correctly — get it wrong
+      # and a round trip is mispriced by roughly 8x.
+      stt_delivery: 0.001
+      stt_intraday_sell: 0.00025
+      exchange_txn_equity: 0.0000297
+      sebi_turnover: 0.000001
+      ipft: 0.000001
+      # Stamp duty is charged on the BUY side only.
+      stamp_duty_delivery: 0.00015
+      stamp_duty_intraday: 0.00003
+      # GST applies to brokerage + exchange + SEBI charges, NOT to STT or
+      # stamp duty — those are taxes and are not taxed again.
+      gst_rate: 0.18
+      # Per-scrip charge on a delivery sell. Broker-specific; 0 disables.
+      dp_charges: 15.34
+
+  # mStock's flat-fee plan — the broker this repository actually connects to.
+  mstock:
+    currency: INR
+    default_segment: equity_delivery
+    commission_model:
+      model: flat
+      per_trade: 20
+    delivery_commission_model:
+      model: zero
+    fee_schedule:
+      schedule: india_equity
+
+  # Traditional full-service broker: percentage brokerage, no cap, and a
+  # per-order minimum. Useful for showing how much the discount model saves.
+  india_full_service:
+    currency: INR
+    default_segment: equity_delivery
+    minimum_commission: 25
+    commission_model:
+      model: percentage
+      rate: 0.005
+      maximum: null
+    fee_schedule:
+      schedule: india_equity
+
+  # Zero brokerage, full statutory stack. Demonstrates that "free" trading
+  # still costs roughly 12 bps on a delivery round trip.
+  india_zero:
+    currency: INR
+    default_segment: equity_delivery
+    commission_model:
+      model: zero
+    fee_schedule:
+      schedule: india_equity
+
+  # Volume-tiered brokerage. The calculator prices this off MONTHLY volume
+  # once any has been recorded, otherwise off the single trade's value.
+  india_tiered:
+    currency: INR
+    default_segment: equity_intraday
+    commission_model:
+      model: tiered
+      tiers:
+        - [0, 0.0005]
+        - [10000000, 0.0003]      # 1 crore
+        - [100000000, 0.0001]     # 10 crore
+      maximum: 20
+    fee_schedule:
+      schedule: india_equity
+
+  # ---------------------------------------------------------------------------
+  # United States — named by the plan document
+  #
+  # SEC Section 31 and FINRA TAF are both SELL-SIDE ONLY.
+  # ---------------------------------------------------------------------------
+
+  ibkr:
+    currency: USD
+    default_segment: equity_delivery
+    commission_model:
+      model: per_share
+      per_share: 0.005
+      minimum: 1
+      maximum: null
+    fee_schedule:
+      schedule: us_equity
+      sec_fee_rate: 0.0000278
+      finra_taf_per_share: 0.000166
+      finra_taf_max: 8.30
+
+  td_ameritrade:
+    currency: USD
+    default_segment: equity_delivery
+    commission_model:
+      model: zero
+    fee_schedule:
+      schedule: us_equity
+
+  # Zero commission funded by payment for order flow. The cost does not
+  # vanish — it reappears as worse fills. Model that with a wider slippage
+  # profile in config/slippage.yaml, not with a fee here.
+  robinhood:
+    currency: USD
+    default_segment: equity_delivery
+    commission_model:
+      model: zero
+    fee_schedule:
+      schedule: us_equity
+
+  # ---------------------------------------------------------------------------
+  # Synthetic
+  # ---------------------------------------------------------------------------
+
+  # Brokerage only, no statutory charges. Isolates the effect of the fee
+  # stack when comparing runs.
+  generic_discount:
+    currency: INR
+    commission_model:
+      model: percentage
+      rate: 0.0003
+      maximum: 20
+    fee_schedule:
+      schedule: none
+
+  # Completely free. The baseline, matching the `backtest` slippage profile.
+  zero:
+    currency: INR
+    commission_model:
+      model: zero
+    fee_schedule:
+      schedule: none

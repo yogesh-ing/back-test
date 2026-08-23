@@ -1,0 +1,99 @@
+# =============================================================================
+# Forward Testing Simulator — Order Execution Realism
+# =============================================================================
+#
+# Loaded by backtest.simulator.execution.load_execution_config().
+#
+#   from backtest.simulator import OrderExecutor
+#   ex = OrderExecutor.from_config()                       # active_profile
+#   ex = OrderExecutor.from_config(profile="pessimistic")
+#   ex = OrderExecutor.for_realism("optimistic")           # preset, no file
+#
+# Pair these with the matching profile in config/slippage.yaml — an optimistic
+# execution model with pessimistic slippage is not a coherent scenario.
+# =============================================================================
+
+active_profile: realistic
+
+
+# -----------------------------------------------------------------------------
+# Shared settings. Profiles override individual keys.
+# -----------------------------------------------------------------------------
+default:
+
+  # ---- Session (NSE) ----
+  # Off by default: a backtest over daily bars has no meaningful intraday
+  # clock, and rejecting everything would make it useless. Turn on for
+  # intraday runs.
+  enforce_market_hours: false
+  session_open: "09:15"
+  session_close: "15:30"
+  session_timezone: "Asia/Kolkata"
+
+  # Symbols that cannot trade at all. Also settable at runtime with
+  # executor.halt("SYMBOL") / executor.resume("SYMBOL").
+  halted_symbols: []
+
+  # Which product is being traded — decides the statutory rates applied by
+  # the fee engine. Delivery pays STT on both sides; intraday sell-only.
+  segment: equity_delivery
+
+  # Fixes every random decision (latency, queue position, price improvement)
+  # so a run is exactly reproducible. An execution simulator that answers
+  # differently each run cannot be used to compare two strategies.
+  # Set to null for non-deterministic behaviour.
+  seed: 42
+
+
+# -----------------------------------------------------------------------------
+# Profiles
+# -----------------------------------------------------------------------------
+profiles:
+
+  # Everything fills, instantly, often better than quoted. Not achievable in
+  # practice — use it only as an upper bound on what a strategy could earn.
+  optimistic:
+    realism: optimistic
+    min_latency_ms: 0
+    max_latency_ms: 0
+    # One order may consume the entire bar's volume.
+    max_participation: 1.0
+    allow_partial_fills: true
+    # A limit order at the touch always fills — i.e. you are always first in
+    # the queue. Flattering and false, but that is the point of this profile.
+    touch_fill_probability: 1.0
+    price_improvement_probability: 0.5
+    price_improvement_bps: 2
+    require_volume: false
+
+  # The default. Partial fills, queue risk, realistic latency.
+  realistic:
+    realism: realistic
+    # Typical retail round-trip latency to an Indian exchange.
+    min_latency_ms: 50
+    max_latency_ms: 500
+    # One order takes at most 10% of the bar's volume. This is the single
+    # most important setting here: it is what forces a large order to fill
+    # in pieces instead of magically absorbing the whole book.
+    max_participation: 0.1
+    allow_partial_fills: true
+    # A limit order that is merely touched fills about half the time — you
+    # are in a queue behind whoever got there first.
+    touch_fill_probability: 0.5
+    price_improvement_probability: 0.1
+    price_improvement_bps: 1
+    require_volume: false
+
+  # Thin liquidity, bad queue position, no price improvement. If a strategy's
+  # edge survives this, it is probably real; if it only works at `realistic`,
+  # the margin is too thin to trade.
+  pessimistic:
+    realism: pessimistic
+    min_latency_ms: 200
+    max_latency_ms: 1000
+    max_participation: 0.02
+    allow_partial_fills: true
+    touch_fill_probability: 0.1
+    price_improvement_probability: 0
+    # Reject rather than assume liquidity when the feed carries no volume.
+    require_volume: true

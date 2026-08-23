@@ -11,13 +11,13 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 
 ## Progress
 
-`██████████████░░░░░░░░░░` **7 / 24 steps complete** (29%)
+`██████████████████░░░░░░` **9 / 24 steps complete** (38%)
 
 | Phase | Steps | Status |
 |---|---|---|
 | 1 · Database | 1–2 | ✅ **Complete** |
 | 2 · Core models | 3–6 | ✅ **Complete** |
-| 3 · Execution | 7–9 | 🟡 In progress (1/3) |
+| 3 · Execution | 7–9 | ✅ **Complete** |
 | 4 · Live data | 10–12 | ⬜ Not started |
 | 5 · Strategy | 13–14 | ⬜ Not started |
 | 6 · Risk | 15–16 | ⬜ Not started |
@@ -54,8 +54,8 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 | # | Step | Status | Deliverables |
 |---|---|---|---|
 | 7 | Slippage Model | ✅ | `src/backtest/simulator/slippage.py`, `config/slippage.yaml` — 5 models, 4 profiles, tiers, time-of-day · **101 tests** |
-| 8 | Commission Calculator | ⬜ | Extends `commission.py` from Step 6 — **NSE stack**: STT, stamp duty, SEBI, GST |
-| 9 | Order Execution Simulator | ⬜ | `OrderExecutor`, latency, partial fills, rejections |
+| 8 | Commission Calculator | ✅ | `src/backtest/simulator/fees.py`, `config/brokers.yaml` — NSE + US fee stacks, 10 broker presets, monthly volume tiers, FX · **109 tests** |
+| 9 | Order Execution Simulator | ✅ | `src/backtest/simulator/execution.py`, `config/execution.yaml` — liquidity caps, queue position, latency, rejections · **99 tests** |
 
 ### Phase 4 — Live Data Integration
 
@@ -115,6 +115,7 @@ Things the agent cannot do; tracked so nothing is silently skipped.
 | 3 | Set `FORWARD_TEST_DB_URL` in `.env` (never commit it) | Step 1/2 | ⬜ Pending |
 | 4 | `pip install -r requirements.txt` (adds SQLAlchemy, Alembic, psycopg2, PyYAML) | Step 1/2 | ⬜ Pending |
 | 5 | Review & merge PR #3 | — | ✅ Merged 2026-08-19 (`4e01d65`) |
+| 6 | Review & merge the Phase 3 PR (Steps 8–9) | — | ⬜ Pending — PR not yet opened, GitHub unreachable |
 
 ---
 
@@ -124,7 +125,7 @@ Recorded so the divergence is deliberate and reviewable, not accidental drift.
 
 | # | Plan says | We do | Why |
 |---|---|---|---|
-| 1 | SEC / FINRA TAF fees (US) | Generic `exchange_fees` / `regulatory_fees`, INR default | Repo trades NSE via mStock |
+| 1 | SEC / FINRA TAF fees (US) | **Both** regimes implemented (`IndiaEquityFees` default, `USEquityFees` available) | Repo trades NSE via mStock, but the plan names US fees |
 | 2 | Column named `timestamp` | Column named `ts` | `timestamp` is a SQL type name; forces quoting, confuses ORM reflection |
 | 3 | NYSE calendar, 9:30–16:00 ET | NSE calendar, IST | Same reason as 1 |
 | 4 | Broker: Alpaca / IBKR | mStock (already implemented in `live/`) | Existing code |
@@ -164,6 +165,8 @@ src/backtest/
 │   ├── commission.py    #   5 fee models       ✅ Step 6
 │   ├── fill.py          #   Fill (immutable)   ✅ Step 6
 │   ├── slippage.py      #   5 slippage models  ✅ Step 7
+│   ├── fees.py          #   Full fee stack     ✅ Step 8
+│   ├── execution.py     #   OrderExecutor      ✅ Step 9
 │   └── fill.py          #   Fill             ⬜ Step 6
 │
 ├── data/ engine/ forward/ live/ strategies/ strategy/   # pre-existing
@@ -187,4 +190,7 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_simulator_order.py` (Step 5) | 115 |
 | `test_simulator_fill.py` (Step 6) | 106 |
 | `test_simulator_slippage.py` (Step 7) | 101 |
-| **Total** | **705 passing, 4 skipped** |
+| `test_simulator_fees.py` (Step 8) | 109 |
+| `test_simulator_execution.py` (Step 9) | 99 |
+| **Total** | **913 passing, 4 skipped** |
+

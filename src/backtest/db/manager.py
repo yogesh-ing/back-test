@@ -747,3 +747,4 @@ def _compact(sql: str, limit: int = 200) -> str:
     """Collapse whitespace and truncate, for readable one-line log entries."""
     flat = " ".join(str(sql).split())
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+

@@ -64,6 +64,7 @@ from backtest.simulator.enums import (
 from backtest.simulator.commission import (
     CommissionModel,
     FlatCommission,
+    PaymentForOrderFlowCommission,
     PercentageCommission,
     PerShareCommission,
     TieredCommission,
@@ -75,6 +76,33 @@ from backtest.simulator.fill import (
     LiquidityFlag,
     PositionAction,
     PositionImpact,
+)
+from backtest.simulator.execution import (
+    DEFAULT_EXECUTION_CONFIG_PATH,
+    ExecutionConfig,
+    ExecutionEvent,
+    ExecutionResult,
+    ExecutionStatus,
+    OrderExecutor,
+    RealismLevel,
+    RejectionCode,
+    load_execution_config,
+)
+from backtest.simulator.fees import (
+    BROKER_PRESETS,
+    DEFAULT_BROKER_CONFIG_PATH,
+    BrokerProfile,
+    CommissionCalculator,
+    CurrencyConverter,
+    FeeBreakdown,
+    FeeSchedule,
+    IndiaEquityFees,
+    NoStatutoryFees,
+    TradeSegment,
+    USEquityFees,
+    get_broker_preset,
+    load_broker_profile,
+    resolve_fee_schedule,
 )
 from backtest.simulator.lots import CostBasisMethod, Lot, LotBook, LotConsumption
 from backtest.simulator.slippage import (
@@ -142,6 +170,31 @@ __all__ = [
     "LiquidityFlag",
     "PositionImpact",
     "PositionAction",
+    # Execution (Step 9)
+    "OrderExecutor",
+    "ExecutionConfig",
+    "ExecutionResult",
+    "ExecutionStatus",
+    "ExecutionEvent",
+    "RealismLevel",
+    "RejectionCode",
+    "load_execution_config",
+    "DEFAULT_EXECUTION_CONFIG_PATH",
+    # Fees (Step 8)
+    "CommissionCalculator",
+    "FeeBreakdown",
+    "FeeSchedule",
+    "IndiaEquityFees",
+    "USEquityFees",
+    "NoStatutoryFees",
+    "BrokerProfile",
+    "TradeSegment",
+    "CurrencyConverter",
+    "BROKER_PRESETS",
+    "get_broker_preset",
+    "load_broker_profile",
+    "resolve_fee_schedule",
+    "DEFAULT_BROKER_CONFIG_PATH",
     # Commission
     "CommissionModel",
     "ZeroCommission",
@@ -149,6 +202,7 @@ __all__ = [
     "PerShareCommission",
     "PercentageCommission",
     "TieredCommission",
+    "PaymentForOrderFlowCommission",
     "resolve_commission_model",
     # Slippage
     "SlippageCalculator",

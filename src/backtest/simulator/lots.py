@@ -375,3 +375,4 @@ class LotBook:
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"<LotBook {self.method} lots={len(self._lots)} qty={self.total_quantity}>"
+
