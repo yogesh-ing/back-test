@@ -1,0 +1,40 @@
+# Forward Testing Simulator — systemd service (Step 20)
+# Install: sudo cp forward_testing.service /etc/systemd/system/
+#          sudo systemctl daemon-reload
+#          sudo systemctl enable forward_testing
+#          sudo systemctl start forward_testing
+# Logs: journalctl -u forward_testing -f
+
+[Unit]
+Description=Forward Testing Trading Simulator
+After=network.target postgresql.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=forward_test
+Group=forward_test
+WorkingDirectory=/opt/back-test
+Environment=PYTHONPATH=/opt/back-test/src
+EnvironmentFile=/opt/back-test/.env
+ExecStart=/opt/back-test/.venv/bin/python -m backtest.forward.engine --config /opt/back-test/config/forward_testing.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=forward_testing
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/back-test/state /opt/back-test/logs
+
+# Resource limits
+MemoryMax=2G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

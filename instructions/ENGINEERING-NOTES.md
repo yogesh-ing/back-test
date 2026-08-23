@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 14** (Position Sizing complete).
+Updated at the end of every step. Last updated: **Step 20** (Main Engine complete).
 
 ---
 
@@ -365,6 +365,16 @@ trading.
 **Lesson:** Audit-log tables with FKs to operational tables need graceful
 degradation when the operational rows have not been flushed yet.
 
+### 4.9 ExecutionConfig unexpected kwarg (Step 20)
+
+**Symptom:** ``Failed to init executor: ExecutionConfig.__init__() got an unexpected keyword argument 'allow_short'``
+
+**Cause:** Engine passed ``allow_short`` to ``ExecutionConfig`` which doesn't accept it — short selling is controlled by ``PortfolioLimits``, not execution.
+
+**Fix:** Removed ``allow_short`` from ExecutionConfig init; executor now uses default config loaded from file/profile.
+
+**Lesson:** Check constructor signatures; portfolio limits vs execution config are separate concerns.
+
 ### 4.6 Test-only mistakes worth remembering
 
 - `pgserver.psql()` **prints** errors instead of raising — an early constraint
@@ -491,6 +501,41 @@ Bridges ``strategy/base.py`` (existing) into ``simulator.Portfolio`` and
 Re-exported from ``strategy/adapter.py`` so both
 ``from backtest.forward.strategy_adapter import StrategyAdapter`` and
 ``from backtest.strategy.adapter import StrategyAdapter`` work.
+
+### `forward/engine.py` (Step 20)
+Main orchestration engine that ties all components:
+
+* **Config:** ``ForwardTestingConfig`` with 7 sections (portfolio, strategy,
+  risk, execution, sizing, data, system). Loaded from YAML with validation;
+  explicit missing file raises, implicit missing uses defaults.
+* **Placeholders:** Steps 10-12, 15-19 not yet fully implemented, so engine
+  provides minimal but functional mocks:
+  - ``MockMarketDataHandler``: wraps DataSource for backtest replay, inject_bar for tests
+  - ``MockDataValidator``: OHLC sanity (high>=low, high>=close, low<=close, close>0)
+  - ``MockTimeManager``: always market open for backtest
+  - ``MockRiskManager``: checks ``can_open_position`` and drawdown limits
+  - ``MockStopManager``: no-op, placeholder for trailing stops
+  - ``MockPerformanceCalculator``: tracks equity curve and simple metrics
+* **State:** ``StateManager`` saves full system state (portfolio.to_dict,
+  adapter.get_state, performance equity curve) atomically via temp file replace.
+  Restores on ``initialize_system``.
+* **Loop:** ``run_loop`` for live (polls data_handler, validates, updates prices,
+  checks stops, generates signals via adapter, updates performance, saves state
+  periodically, heartbeat every 60s, slow-loop warning >1s). ``_run_backtest_mode``
+  replays historical candles from DataSource bar by bar.
+* **Lifecycle:** ``on_start``, ``on_stop``, ``on_error``, ``on_market_open/close``
+  hooks with isolation (one failing hook doesn't break others). ``pause``/``resume``
+  sets portfolio status and error count.
+* **Error handling:** try/except around loop, error count, auto-pause after
+  ``max_errors_before_pause`` (default 5), signal handlers for SIGINT/SIGTERM
+  save state before exit.
+* **Monitoring:** heartbeat logs equity/cash/positions/exposure/errors, loop time
+  tracking, memory monitoring placeholder.
+* **Modes:** dry_run (signals but no orders), backtest_mode (replay historical),
+  live (polling).
+
+Dockerfile and systemd service included per spec.
+
 
 ### `simulator/position_sizing.py` (Step 14)
 Six methods, all pure Decimal:

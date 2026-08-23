@@ -5,24 +5,24 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 13–14 complete**
+**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 13–14, 20 complete**
 
 ---
 
 ## Progress
 
-`██████████████████████░░` **11 / 24 steps complete** (46%)
+`████████████████████████░░` **12 / 24 steps complete** (50%)
 
 | Phase | Steps | Status |
 |---|---|---|
 | 1 · Database | 1–2 | ✅ **Complete** |
 | 2 · Core models | 3–6 | ✅ **Complete** |
 | 3 · Execution | 7–9 | ✅ **Complete** |
-| 4 · Live data | 10–12 | ⬜ Not started |
+| 4 · Live data | 10–12 | ⬜ Not started (placeholders in engine) |
 | 5 · Strategy | 13–14 | ✅ **Complete** |
-| 6 · Risk | 15–16 | ⬜ Not started |
-| 7 · Performance | 17–19 | ⬜ Not started |
-| 8 · Orchestration | 20 | ⬜ Not started |
+| 6 · Risk | 15–16 | ⬜ Not started (placeholders in engine) |
+| 7 · Performance | 17–19 | ⬜ Not started (placeholders in engine) |
+| 8 · Orchestration | 20 | ✅ **Complete** |
 | Bonus | 21–24 | ⬜ Not started |
 
 Build order follows the plan's own recommendation: **1–6 → 10–12 → 7–9 → 20 → rest**.
@@ -91,7 +91,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 
 | # | Step | Status | Deliverables |
 |---|---|---|---|
-| 20 | Main Forward Testing Engine | ⬜ | Event loop, state persistence, lifecycle hooks |
+| 20 | Main Forward Testing Engine | ✅ | `src/backtest/forward/engine.py`, `config/forward_testing.yaml`, `Dockerfile`, `forward_testing.service` — event loop, state persistence, lifecycle hooks (on_start/on_stop/on_error/on_market_open/close), heartbeat, slow-loop detection, signal handlers (SIGINT/SIGTERM), dry-run & backtest replay modes, config validation, placeholders for Steps 10-12, 15-19, integration tests · **14 tests** |
 
 ### Bonus
 
@@ -168,8 +168,9 @@ src/backtest/
 │   ├── fees.py          #   Full fee stack     ✅ Step 8
 │   ├── execution.py     #   OrderExecutor      ✅ Step 9
 │   └── position_sizing.py # PositionSizer, 6 methods, constraints ✅ Step 14
-├── forward/             # Steps 13–14 ✅ (orchestration bridge)
+├── forward/             # Steps 13–14, 20 ✅ (orchestration)
 │   ├── strategy_adapter.py  # StrategyAdapter, Signal, sizers ✅ Step 13
+│   ├── engine.py            # ForwardTestingEngine, StateManager ✅ Step 20
 │   ├── broker.py        #   SimulatedBroker (legacy)
 │   ├── paper.py         #   Walk-forward + live papertrade
 │   └── portfolio.py     #   Legacy multi-strategy allocator
@@ -178,11 +179,14 @@ src/backtest/
 │   ├── adapter.py       #   Re-export of forward + simulator sizers ✅ Steps 13–14
 │   └── registry.py      #   Strategy registry
 ├── config/
+│   ├── forward_testing.yaml # Main engine config ✅ Step 20
 │   ├── position_sizing.yaml # 8 profiles for sizing ✅ Step 14
 │   ├── slippage.yaml
 │   ├── execution.yaml
 │   ├── brokers.yaml
 │   └── database.yaml
+├── Dockerfile           # Container setup ✅ Step 20
+├── forward_testing.service # systemd service ✅ Step 20
 │
 ├── data/ engine/ live/ strategies/   # pre-existing
 ```
@@ -211,5 +215,6 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_simulator_execution.py` (Step 9) | 99 |
 | `test_strategy_adapter.py` (Step 13) | 20 |
 | `test_simulator_position_sizing.py` (Step 14) | 25 |
-| **Total** | **958 passing, 4 skipped** |
+| `test_forward_engine.py` (Step 20) | 14 |
+| **Total** | **972 passing, 4 skipped** |
 
