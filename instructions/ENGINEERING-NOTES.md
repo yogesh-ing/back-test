@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 16** (Stop Loss & Take Profit complete).
+Updated at the end of every step. Last updated: **Step 19** (Real-Time Dashboard complete).
 
 ---
 
@@ -602,6 +602,30 @@ Risk checks with hierarchy order→position→portfolio:
 
 Config loader from YAML with 5 profiles: default, conservative, aggressive,
 intraday, nse_fo, permissive.
+
+
+
+### `dashboard/data_provider.py` (Step 19)
+Backend logic for dashboard, no Flask dependency so unit-testable:
+
+* **Portfolio overview:** equity, cash, position value, today P&L (from equity_history today first vs now), total P&L (vs initial), status
+* **Open positions:** qty, entry/current, market value, unrealized P&L $/%, age (minutes→ m/h/d), sorted by unreal P&L
+* **Recent trades:** from trade_analyzer or closed_positions, last 20 sorted by exit time desc, is_winner flag for green/red
+* **Charts:** equity_curve (timestamps, equity, cash, pos value), daily_pnl (group by date, daily P&L bar), drawdown (peak tracking, % and abs), win_loss_ratio (winning/losing counts, win_rate)
+* **Orders:** pending_orders with order_id, symbol, side, type, qty, filled/remaining, limit_price, status
+* **Metrics:** trades today (from closed_positions closed_at today), win_rate, Sharpe, max DD, exposure gross % from portfolio.get_current_exposure
+* **System status:** market_data_connected via is_connected, strategy_status via portfolio.status, loop/error counts from engine, last update from equity_history, health healthy/warning/critical/halted
+* **All data:** get_all_dashboard_data combines all sections + timestamp
+
+### `dashboard/app.py` (Step 19)
+Flask web app:
+
+* **Template:** Single HTML with embedded CSS/JS, Chart.js via CDN, responsive grid (auto-fit minmax 300px, mobile 1fr), dark/light mode via CSS variables and localStorage, auto-refresh 5s via setInterval
+* **Sections:** Portfolio overview big equity display, key metrics, system status, equity curve line, daily P&L bar (green/red), drawdown line, win/loss pie, open positions table with close button, recent trades table, active orders table with cancel button, manual order form (symbol/side/qty/type/price), logs placeholder
+* **API:** /api/portfolio, /positions, /trades, /orders, /metrics, /equity_curve, /daily_pnl, /drawdown, /win_loss, /status, /all (combined), /start/stop/pause/resume (POST), /close_position, /cancel_order, /manual_order (POST) – all JSON, with error handling
+* **Arena compatibility:** Binds to 0.0.0.0, no host allowlist blocking, PREFERRED_URL_SCHEME https for preview
+* **CLI:** run_dashboard(host, port, ...) and main() with argparse --host --port --config --debug, tries to init engine from config or uses mock portfolio demo
+* **Security:** No auth in mock version, placeholder for future multi-user auth
 
 
 ### `forward/engine.py` (Step 20)

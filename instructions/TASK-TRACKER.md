@@ -5,13 +5,13 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 10–18, 20 complete (Phase 4, 5, 6, 7 partial, 8 done)**
+**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 10–20 complete (Phase 4, 5, 6, 7, 8 done)**
 
 ---
 
 ## Progress
 
-`████████████████████████████████████░░` **19 / 24 steps complete** (79%)
+`████████████████████████████████████████░░` **20 / 24 steps complete** (83%)
 
 | Phase | Steps | Status |
 |---|---|---|
@@ -21,7 +21,7 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 | 4 · Live data | 10–12 | ✅ **Complete** |
 | 5 · Strategy | 13–14 | ✅ **Complete** |
 | 6 · Risk | 15–16 | ✅ **Complete** |
-| 7 · Performance | 17–19 | 🟡 **In progress** (17–18 ✅, 19 ⬜) |
+| 7 · Performance | 17–19 | ✅ **Complete** |
 | 8 · Orchestration | 20 | ✅ **Complete** |
 | Bonus | 21–24 | ⬜ Not started |
 
@@ -89,6 +89,9 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 │   ├── execution.yaml
 │   ├── brokers.yaml
 │   └── database.yaml
+├── dashboard/           # Step 19 ✅ (real-time UI)
+│   ├── app.py           # Flask + Chart.js, API, HTML template ✅ Step 19
+│   └── data_provider.py # DashboardDataProvider backend logic ✅ Step 19
 ├── docs/
 │   └── LOCAL-TESTING-MANUAL.md # Local testing guide ✅ Phase 4
 ├── Dockerfile           # Container setup ✅ Step 20
@@ -128,6 +131,7 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_simulator_stop_manager.py` (Step 16) | 21 |
 | `test_simulator_performance.py` (Step 17) | 14 |
 | `test_simulator_trade_analyzer.py` (Step 18) | 15 |
+| `test_dashboard.py` (Step 19) | 15 |
 | `test_forward_engine.py` (Step 20) | 14 |
-| **Total** | **1100 passing, 4 skipped** |
+| **Total** | **1115 passing, 4 skipped** |
 
