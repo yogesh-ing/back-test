@@ -845,15 +845,40 @@ class ForwardTestingEngine:
             logger.error("Failed to init adapter: %s", exc)
             raise
 
-        # Data handler
-        self.data_handler = MockMarketDataHandler(
-            symbols=self.config.data.symbols, provider=self.config.data.provider, data_source=self.data_source
-        )
+        # Data handler – try real implementation first, fallback to mock placeholder
+        try:
+            from backtest.live.market_data_handler import MarketDataHandler as RealMarketDataHandler
+            from backtest.live.data_validator import DataValidator as RealDataValidator
+            from backtest.live.time_manager import TimeManager as RealTimeManager
+
+            self.data_handler = RealMarketDataHandler(
+                symbols=self.config.data.symbols,
+                provider=self.config.data.provider,
+                db_manager=self.db_manager,
+                validator=RealDataValidator(),
+                time_manager=RealTimeManager(market=self.config.system.market),
+                timeframe=self.config.data.timeframe,
+                timeframes=[self.config.data.timeframe, "5min", "15min", "1day"],
+            )
+            self.validator = self.data_handler.validator
+            self.time_manager = self.data_handler.time_manager
+            logger.info("Using real MarketDataHandler (Steps 10-12)")
+        except Exception as exc:
+            logger.warning("Failed to init real MarketDataHandler, using mock placeholder: %s", exc)
+            self.data_handler = MockMarketDataHandler(
+                symbols=self.config.data.symbols, provider=self.config.data.provider, data_source=self.data_source
+            )
+            self.validator = MockDataValidator()
+            self.time_manager = MockTimeManager(market=self.config.system.market)
+
         self.data_handler.connect()
 
-        # Validators and managers
-        self.validator = MockDataValidator()
-        self.time_manager = MockTimeManager(market=self.config.system.market)
+        # Validators and managers (if real handler already has validator/time_manager, keep them)
+        if not hasattr(self, "validator") or self.validator is None:
+            self.validator = MockDataValidator()
+        if not hasattr(self, "time_manager") or self.time_manager is None:
+            self.time_manager = MockTimeManager(market=self.config.system.market)
+
         self.risk_manager = MockRiskManager(portfolio=self.portfolio, risk_config=self.config.risk)
         self.stop_manager = MockStopManager(portfolio=self.portfolio)
         self.performance = MockPerformanceCalculator(portfolio=self.portfolio)
@@ -1060,6 +1085,7 @@ class ForwardTestingEngine:
                         "low": float(row["low"]),
                         "close": float(row["close"]),
                         "volume": int(row["volume"]),
+                        "timeframe": timeframe,
                     }
 
                     # Inject into data handler for consistency

@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 20** (Main Engine complete).
+Updated at the end of every step. Last updated: **Step 12** (Phase 4 Live Data complete, mock-only).
 
 ---
 
@@ -501,6 +501,63 @@ Bridges ``strategy/base.py`` (existing) into ``simulator.Portfolio`` and
 Re-exported from ``strategy/adapter.py`` so both
 ``from backtest.forward.strategy_adapter import StrategyAdapter`` and
 ``from backtest.strategy.adapter import StrategyAdapter`` work.
+
+
+### `live/market_data_handler.py` (Step 10)
+Normalization and bar aggregation:
+
+* **Normalization:** Converts many broker formats (mStock uses `o/h/l/c/v/t`,
+  `tradingsymbol/ltp`, etc.) into standard `{symbol, timestamp, bid, ask,
+  last, open, high, low, close, volume, timeframe}`. Missing bid/ask estimated
+  from last with 0.1% spread.
+* **Bar aggregation:** `BarBuilder` per symbol/timeframe aggregates ticks into
+  OHLCV, aligns to boundaries via `TimeManager.align_to_timeframe`, closes bar
+  when aligned time advances. Supports 1min/3min/5min/15min/30min/1hr/1day.
+* **Multi-symbol:** `_bar_builders` dict symbol->timeframe->builder, `_tick_buffers`
+  bounded deques (prevents memory leaks).
+* **Observer:** `on_tick_received` and `on_bar_closed` callbacks with isolation
+  (one failing callback doesn't break others).
+* **Reconnection:** `connect_to_feed` with backoff (2^attempt, max 30s), max attempts,
+  auto-reconnect flag.
+* **DB cache:** `_store_bar_to_db` inserts into `market_data_cache` with unique
+  constraint handling (duplicate bars ignored).
+* **Feeds:** Abstract `BrokerFeed`, `MockBrokerFeed` (in-memory inject for tests),
+  `MStockBrokerFeed` wrapping existing `MStockSource` (wire to live/mstock.py per
+  task tracker).
+
+### `live/data_validator.py` (Step 11)
+Quality checks:
+
+* **OHLC:** high>=open/low/close, low<=open/high/close
+* **Price:** min 0.01, max 1M, not zero/negative
+* **Bid/Ask:** bid<=ask, optional last between bid/ask with tolerance
+* **Volume:** non-negative, optional zero check, anomaly vs rolling avg (5x default)
+* **Timestamp:** chronological, future check with tolerance, gap detection
+  (intraday 5min, daily 3 days) via `_check_gap` using timeframe to choose max
+* **Spike:** Z-score vs rolling window (20 bars, min 10 history), threshold 3 std
+  (strict 2, lenient 4)
+* **Stats:** total/failed/failure rate, failures by code, consecutive failures
+  with alert after 10
+* **Config:** `ValidatorConfig` with strictness levels adjusting thresholds,
+  YAML loader.
+
+### `live/time_manager.py` (Step 12)
+NSE time handling:
+
+* **Market hours:** NSE 09:15-15:30 IST default, NYSE 09:30-16:00 ET as reference,
+  pre-open 09:00, post-close 16:00, configurable
+* **Holidays:** Built-in partial lists for 2024 (NSE 14 holidays, NYSE 10),
+  injectable via constructor or YAML
+* **Open checks:** `is_market_open` checks weekend (Sat/Sun) + holidays + time
+  range; `is_pre_market` and `is_after_hours` for session phases
+* **Next open/close:** Iterates up to 365 days, skips weekends/holidays, handles
+  equality (<= open returns today open)
+* **Bar alignment:** `align_to_timeframe` floors to boundary (1min->second=0,
+  5min->minute//5*5, etc.), supports 1min/3min/5min/15min/30min/1hr/day/week/month
+* **Mock time:** `set_mock_time` and `advance_mock_time` for controllable clock
+  in tests – `get_current_time` returns mock if set
+* **Latency:** `measure_latency` samples, `get_latency_stats` mean/p95/min/max
+
 
 ### `forward/engine.py` (Step 20)
 Main orchestration engine that ties all components:

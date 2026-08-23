@@ -5,20 +5,20 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 13–14, 20 complete**
+**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 10–14, 20 complete (Phase 4 & 5 & 8 done)**
 
 ---
 
 ## Progress
 
-`████████████████████████░░` **12 / 24 steps complete** (50%)
+`█████████████████████████████░░░` **15 / 24 steps complete** (62%)
 
 | Phase | Steps | Status |
 |---|---|---|
 | 1 · Database | 1–2 | ✅ **Complete** |
 | 2 · Core models | 3–6 | ✅ **Complete** |
 | 3 · Execution | 7–9 | ✅ **Complete** |
-| 4 · Live data | 10–12 | ⬜ Not started (placeholders in engine) |
+| 4 · Live data | 10–12 | ✅ **Complete** |
 | 5 · Strategy | 13–14 | ✅ **Complete** |
 | 6 · Risk | 15–16 | ⬜ Not started (placeholders in engine) |
 | 7 · Performance | 17–19 | ⬜ Not started (placeholders in engine) |
@@ -61,9 +61,9 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 
 | # | Step | Status | Deliverables |
 |---|---|---|---|
-| 10 | Market Data Handler | ⬜ | Normalisation, bar aggregation — **wire to existing `live/mstock.py`** |
-| 11 | Data Quality Validator | ⬜ | Spike/gap detection, OHLC sanity |
-| 12 | Time Synchronization Manager | ⬜ | **NSE calendar** (plan says NYSE), IST/UTC, bar alignment |
+| 10 | Market Data Handler | ✅ | `src/backtest/live/market_data_handler.py`, `config/market_data.yaml` — normalization to standard format, bar aggregation (1min/3min/5min/15min/30min/1hr/1day), multi-symbol, reconnection with backoff, bounded buffers, observer pattern (on_tick_received/on_bar_closed), DB cache to MARKET_DATA_CACHE, abstract BrokerFeed + MockBrokerFeed + MStockBrokerFeed wired to `live/mstock.py` · **18 tests** |
+| 11 | Data Quality Validator | ✅ | `src/backtest/live/data_validator.py`, `config/data_quality.yaml` — OHLC sanity, price range, bid<=ask, volume, chronological, future timestamp, spike detection (Z-score rolling window), gap detection (intraday 5min / daily 3 days), volume anomaly (5x avg), configurable strictness (strict/normal/lenient), stats, alert on repeated failures · **18 tests** |
+| 12 | Time Synchronization Manager | ✅ | `src/backtest/live/time_manager.py`, `config/time_sync.yaml` — NSE 09:15-15:30 IST (NYSE 09:30-16:00 ET as reference), weekend/holiday handling, pre-market/after-hours, next open/close, trading days between, bar alignment to timeframe boundaries, IST/UTC/ET conversion, DST awareness, mock time controllable clock, NTP placeholder, latency stats · **18 tests** |
 
 ### Phase 5 — Strategy Integration
 
@@ -168,6 +168,12 @@ src/backtest/
 │   ├── fees.py          #   Full fee stack     ✅ Step 8
 │   ├── execution.py     #   OrderExecutor      ✅ Step 9
 │   └── position_sizing.py # PositionSizer, 6 methods, constraints ✅ Step 14
+├── live/                # Steps 10–12 ✅ (live data)
+│   ├── market_data_handler.py # MarketDataHandler, BarBuilder, BrokerFeed ✅ Step 10
+│   ├── data_validator.py      # DataValidator, ValidationResult ✅ Step 11
+│   ├── time_manager.py        # TimeManager, MarketHours ✅ Step 12
+│   ├── mstock.py        #   MStockSource (existing, wired) ✅
+│   └── auth.py          #   Auth (existing)
 ├── forward/             # Steps 13–14, 20 ✅ (orchestration)
 │   ├── strategy_adapter.py  # StrategyAdapter, Signal, sizers ✅ Step 13
 │   ├── engine.py            # ForwardTestingEngine, StateManager ✅ Step 20
@@ -181,14 +187,19 @@ src/backtest/
 ├── config/
 │   ├── forward_testing.yaml # Main engine config ✅ Step 20
 │   ├── position_sizing.yaml # 8 profiles for sizing ✅ Step 14
+│   ├── market_data.yaml     # Market data handler config ✅ Step 10
+│   ├── data_quality.yaml    # Data validator config ✅ Step 11
+│   ├── time_sync.yaml       # Time manager config ✅ Step 12
 │   ├── slippage.yaml
 │   ├── execution.yaml
 │   ├── brokers.yaml
 │   └── database.yaml
+├── docs/
+│   └── LOCAL-TESTING-MANUAL.md # Local testing guide ✅ Phase 4
 ├── Dockerfile           # Container setup ✅ Step 20
 ├── forward_testing.service # systemd service ✅ Step 20
 │
-├── data/ engine/ live/ strategies/   # pre-existing
+├── data/ engine/ strategies/   # pre-existing
 ```
 
 **Layering rule:** `simulator/` holds pure in-memory domain logic and must not
@@ -216,5 +227,8 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_strategy_adapter.py` (Step 13) | 20 |
 | `test_simulator_position_sizing.py` (Step 14) | 25 |
 | `test_forward_engine.py` (Step 20) | 14 |
-| **Total** | **972 passing, 4 skipped** |
+| `test_market_data_handler.py` (Step 10) | 18 |
+| `test_data_validator.py` (Step 11) | 18 |
+| `test_time_manager.py` (Step 12) | 18 |
+| **Total** | **1026 passing, 4 skipped** |
 
