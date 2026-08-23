@@ -1,0 +1,91 @@
+# =============================================================================
+# Forward Testing Simulator — Exchange Calendars (Step 12)
+# =============================================================================
+#
+# Loaded by backtest.marketdata.load_calendars() / TimeManager().
+#
+#   from backtest.marketdata import TimeManager
+#   tm = TimeManager()                       # NSE by default
+#   tm.is_market_open()                      # continuous session only
+#   tm.is_market_open(include_extended=True) # + pre-open / closing session
+#   tm.is_market_open("NYSE")
+#
+# MAINTENANCE: exchanges publish next year's holiday list each December —
+# add it here. A date under `holidays` is a full trading holiday for the
+# equity segment. Holidays that fall on the configured weekend days are
+# harmless to include but unnecessary.
+#
+# NSE 2026 list per the exchange circular (cross-checked against Zerodha,
+# Upstox and Profitmart holiday calendars, Aug 2026).
+# Note: 2026-11-08 (Sunday) hosts the Muhurat trading session; special
+# sessions are NOT modelled (see Known limitations in the task tracker).
+# =============================================================================
+
+default_exchange: NSE
+
+exchanges:
+
+  NSE:
+    timezone: Asia/Kolkata
+    session_open: "09:15"
+    session_close: "15:30"
+    # Pre-open auction: order entry + matching.
+    pre_open: ["09:00", "09:15"]
+    # Closing (post-close) session at the closing price.
+    post_close: ["15:40", "16:00"]
+    weekend: [saturday, sunday]
+    holidays:
+      2025:
+        - 2025-02-26   # Mahashivratri
+        - 2025-03-14   # Holi
+        - 2025-03-31   # Id-Ul-Fitr
+        - 2025-04-10   # Shri Mahavir Jayanti
+        - 2025-04-14   # Dr. Baba Saheb Ambedkar Jayanti
+        - 2025-04-18   # Good Friday
+        - 2025-05-01   # Maharashtra Day
+        - 2025-08-15   # Independence Day
+        - 2025-08-27   # Ganesh Chaturthi
+        - 2025-10-02   # Mahatma Gandhi Jayanti / Dussehra
+        - 2025-10-21   # Diwali Laxmi Pujan
+        - 2025-10-22   # Balipratipada
+        - 2025-11-05   # Prakash Gurpurb Sri Guru Nanak Dev
+        - 2025-12-25   # Christmas
+      2026:
+        - 2026-01-15   # Maharashtra Municipal Elections
+        - 2026-01-26   # Republic Day
+        - 2026-03-03   # Holi
+        - 2026-03-26   # Shri Ram Navami
+        - 2026-03-31   # Shri Mahavir Jayanti
+        - 2026-04-03   # Good Friday
+        - 2026-04-14   # Dr. Baba Saheb Ambedkar Jayanti
+        - 2026-05-01   # Maharashtra Day
+        - 2026-05-28   # Bakri Id
+        - 2026-06-26   # Muharram
+        - 2026-09-14   # Ganesh Chaturthi
+        - 2026-10-02   # Mahatma Gandhi Jayanti
+        - 2026-10-20   # Dussehra
+        - 2026-11-10   # Diwali - Balipratipada
+        - 2026-11-24   # Prakash Gurpurb Sri Guru Nanak Dev
+        - 2026-12-25   # Christmas
+
+  # Included to prove multi-exchange support is a config entry, not a code
+  # change. America/New_York handles DST via zoneinfo automatically.
+  NYSE:
+    timezone: America/New_York
+    session_open: "09:30"
+    session_close: "16:00"
+    pre_open: ["04:00", "09:30"]     # pre-market
+    post_close: ["16:00", "20:00"]   # after-hours
+    weekend: [saturday, sunday]
+    holidays:
+      2026:
+        - 2026-01-01   # New Year's Day
+        - 2026-01-19   # Martin Luther King Jr. Day
+        - 2026-02-16   # Washington's Birthday
+        - 2026-04-03   # Good Friday
+        - 2026-05-25   # Memorial Day
+        - 2026-06-19   # Juneteenth
+        - 2026-07-03   # Independence Day (observed)
+        - 2026-09-07   # Labor Day
+        - 2026-11-26   # Thanksgiving Day
+        - 2026-12-25   # Christmas Day

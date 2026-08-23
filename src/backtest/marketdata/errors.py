@@ -16,6 +16,7 @@ __all__ = [
     "NormalizationError",
     "FeedError",
     "FeedConnectionError",
+    "TimeSyncError",
 ]
 
 
@@ -58,3 +59,7 @@ class FeedError(MarketDataError):
 
 class FeedConnectionError(FeedError):
     """The feed cannot be (re)connected. Terminal until intervention."""
+
+
+class TimeSyncError(MarketDataError):
+    """Clock synchronisation (NTP) failed."""

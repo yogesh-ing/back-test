@@ -30,6 +30,7 @@ from backtest.marketdata.errors import (
     FeedError,
     MarketDataError,
     NormalizationError,
+    TimeSyncError,
 )
 from backtest.marketdata.feed import DataFeed, MockFeed, MStockFeed
 from backtest.marketdata.handler import (
@@ -51,6 +52,13 @@ from backtest.marketdata.quality import (
     load_quality_config,
 )
 from backtest.marketdata.ticks import Bar, Tick, normalize_tick, parse_timestamp
+from backtest.marketdata.timesync import (
+    DEFAULT_CALENDAR_CONFIG_PATH,
+    ExchangeCalendar,
+    MarketPhase,
+    TimeManager,
+    load_calendars,
+)
 
 __all__ = [
     # errors
@@ -89,4 +97,11 @@ __all__ = [
     "BadDataPolicy",
     "load_quality_config",
     "DEFAULT_QUALITY_CONFIG_PATH",
+    # time sync (Step 12)
+    "TimeManager",
+    "ExchangeCalendar",
+    "MarketPhase",
+    "TimeSyncError",
+    "load_calendars",
+    "DEFAULT_CALENDAR_CONFIG_PATH",
 ]

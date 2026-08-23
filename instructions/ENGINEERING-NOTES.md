@@ -5,7 +5,7 @@ Running reference for **debugging and maintenance**. Companion to
 *why* things are the way they are, what has already bitten us, and where to
 look when something breaks.
 
-Updated at the end of every step. Last updated: **Step 11**.
+Updated at the end of every step. Last updated: **Step 12** (Phase 4 complete).
 
 ---
 
@@ -65,6 +65,10 @@ Start here. Symptom → most likely cause → where to look.
 | Every tick rejected after a big move | Regime change looked like a spike | The validator self-heals: after `alert_threshold` consecutive rejects it alerts and resets the window. If it keeps happening, raise `spike_zscore_threshold` or use the `lenient` profile |
 | Repaired tick has the "wrong" price | Interpolation is deliberate | `on_bad_data: repair` substitutes the previous *accepted* price. Bars are never repaired |
 | Same data, different verdicts across runs | Different strictness profile | `quality.yaml` severity table: spikes are errors at `normal`, warnings at `lenient` |
+| "Market open" at 15:30:00 sharp | It is not — boundaries are half-open | `[open, close)`: 15:29:59 open, 15:30:00 closed. Closing session is 15:40–16:00 (`include_extended=True`) |
+| Every weekday looks like a trading day for some year | Holiday list missing for that year | `config/calendar.yaml` — lists must be added annually (exchanges publish each December) |
+| Session logic off by 5h30m | Naive datetime or UTC-as-IST confusion | `TimeManager` rejects naive datetimes; pass aware timestamps and let it convert |
+| NYSE tests flip between winter/summer | That is DST working | 09:30 ET = 14:30 UTC in January, 13:30 UTC in July; zoneinfo handles it |
 
 ### Orders
 
@@ -469,6 +473,17 @@ and resets the symbol's window so a genuine regime change self-heals.
 `on_bad_data: repair` interpolates price-level errors from the previous
 accepted price — bars are never repaired.
 
+### `marketdata/timesync.py`
+`TimeManager` owns the market clock: NSE phases (pre-open 09:00–09:15,
+continuous 09:15–15:30, closing 15:40–16:00, **half-open boundaries**),
+holiday-aware next-open/next-close scans, trading-day ranges, and
+timeframe alignment delegated to the Step 10 aligner (session-anchored).
+The wall clock is injectable (`clock=`) and NTP sync applies a measured
+offset on top — a failed sync keeps the previous offset. Calendars are
+data (`config/calendar.yaml`); NYSE ships alongside NSE to prove
+multi-exchange support is a config entry, not a code change. Special
+sessions (Muhurat) are not modelled; holiday lists need annual upkeep.
+
 ---
 
 ## 6. Known limitations
@@ -528,6 +543,7 @@ Python API rather than the CLI when using it.
 | `test_simulator_execution.py` | Liquidity caps, queue position, rejections, TIF, determinism | 99 |
 | `test_marketdata.py` | Normalization, IST alignment, gaps/late data, reconnect, cache idempotency | 173 |
 | `test_marketdata_quality.py` | Spikes, gaps, volume anomalies, strictness, repair, alerts, integration | 114 |
+| `test_timesync.py` | NSE/NYSE sessions, holidays, DST, next open/close, NTP, latency | 96 |
 | Pre-existing | Backtest engine, mStock | 25 (+4 skipped) |
 
 **Drift guards** — these fail loudly if two sources of truth diverge:

@@ -11,14 +11,14 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 
 ## Progress
 
-`██████████████████████░░` **11 / 24 steps complete** (46%)
+`████████████████████████` **12 / 24 steps complete** (50%)
 
 | Phase | Steps | Status |
 |---|---|---|
 | 1 · Database | 1–2 | ✅ **Complete** |
 | 2 · Core models | 3–6 | ✅ **Complete** |
 | 3 · Execution | 7–9 | ✅ **Complete** |
-| 4 · Live data | 10–12 | 🟡 **In progress** (10–11 ✅) |
+| 4 · Live data | 10–12 | ✅ **Complete** |
 | 5 · Strategy | 13–14 | ⬜ Not started |
 | 6 · Risk | 15–16 | ⬜ Not started |
 | 7 · Performance | 17–19 | ⬜ Not started |
@@ -63,7 +63,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ⏭️ deferred
 |---|---|---|---|
 | 10 | Market Data Handler | ✅ | `src/backtest/marketdata/` (`ticks.py` normalization, `bars.py` NSE-anchored aggregation, `feed.py` mStock + mock feeds, `handler.py` hub), `config/marketdata.yaml` — wired to existing `live/mstock.py` · **173 tests** |
 | 11 | Data Quality Validator | ✅ | `src/backtest/marketdata/quality.py`, `config/quality.yaml` — z-score spikes, gap/volume anomalies, 3 strictness levels, reject/repair, alerts + regime reset, handler integration · **114 tests** |
-| 12 | Time Synchronization Manager | ⬜ | **NSE calendar** (plan says NYSE), IST/UTC, bar alignment |
+| 12 | Time Synchronization Manager | ✅ | `src/backtest/marketdata/timesync.py`, `config/calendar.yaml` — NSE sessions (pre-open/continuous/closing) in IST, NSE 2025–26 + NYSE 2026 holidays, next open/close, trading-day ranges, NTP sync, latency tracking · **96 tests** |
 
 ### Phase 5 — Strategy Integration
 
@@ -143,6 +143,8 @@ Deliberate gaps, recorded so they are not mistaken for oversights.
 |---|---|---|---|
 | 1 | Tax lots are **not** persisted — the schema has no `lots` table. A FIFO position reloaded from the database collapses to one lot at the stored average price. | Step 4 | Restart mid-run loses FIFO granularity. Workaround: the `to_dict()`/`from_dict()` JSON snapshot **is** lossless; the Step 20 state manager should use it. Revisit if per-lot tax reporting is needed. |
 | 2 | `Order.status_history`, `triggered` and `extreme_price` are not persisted — no columns in `orders`. | Step 5 | Survives in the `to_dict()` JSON snapshot; Step 20 should use it. |
+| 3 | Special trading sessions (Muhurat, half-days, ad-hoc extensions) are not modelled — `config/calendar.yaml` only knows full trading days and full holidays. | Step 12 | 2026-11-08 Muhurat session will show as closed. Acceptable for daily-bar strategies; revisit for intraday live trading. |
+| 4 | Holiday calendars require **annual maintenance** — NSE/NYSE publish next year's list each December; add it to `config/calendar.yaml`. | Step 12 | A missing year makes every weekday look like a trading day. |
 
 ---
 
@@ -168,13 +170,14 @@ src/backtest/
 │   ├── fees.py          #   Full fee stack     ✅ Step 8
 │   ├── execution.py     #   OrderExecutor      ✅ Step 9
 │
-├── marketdata/          # Steps 10–11 ✅  (live data layer)
+├── marketdata/          # Steps 10–12 ✅  (live data layer)
 │   ├── errors.py        #   MarketDataError hierarchy
 │   ├── ticks.py         #   Tick/Bar + broker payload normalization
 │   ├── bars.py          #   IST boundary alignment, BarAggregator
 │   ├── feed.py          #   DataFeed ABC, MStockFeed, MockFeed
 │   ├── handler.py       #   MarketDataHandler: buffers, reconnect, cache
-│   └── quality.py       #   DataValidator: spikes, gaps, strictness  ✅ Step 11
+│   ├── quality.py       #   DataValidator: spikes, gaps, strictness  ✅ Step 11
+│   └── timesync.py      #   TimeManager: NSE calendar, NTP, latency  ✅ Step 12
 │
 ├── data/ engine/ forward/ live/ strategies/ strategy/   # pre-existing
 ```
@@ -201,5 +204,6 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_simulator_execution.py` (Step 9) | 99 |
 | `test_marketdata.py` (Step 10) | 173 |
 | `test_marketdata_quality.py` (Step 11) | 114 |
-| **Total** | **1200 passing, 4 skipped** |
+| `test_timesync.py` (Step 12) | 96 |
+| **Total** | **1296 passing, 4 skipped** |
 
