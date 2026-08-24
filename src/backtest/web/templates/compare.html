@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Compare · Trading Bot{% endblock %}
+
+{% block content %}
+<h1 class="page-title">Compare</h1>
+<p class="muted small page-sub">Run 2–4 strategy / timeframe combinations side by side.</p>
+
+<!-- ================= SHARED CONFIG ================= -->
+<div class="card shared-config">
+    <div class="shared-grid">
+        <div class="form-row">
+            <label for="symbol">Symbol</label>
+            <select id="symbol" class="input">
+                <option>DEMO</option><option>BTCUSD</option><option>ETHUSD</option>
+                <option>NIFTY</option><option>INFY</option>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="fromDate">From</label>
+            <input type="date" id="fromDate" class="input" value="2024-01-01">
+        </div>
+        <div class="form-row">
+            <label for="toDate">To</label>
+            <input type="date" id="toDate" class="input" value="2024-12-31">
+        </div>
+        <div class="form-row">
+            <label for="capital">Capital ($)</label>
+            <input type="number" id="capital" class="input" value="10000" min="1">
+        </div>
+    </div>
+</div>
+
+<!-- ================= SLOTS ================= -->
+<div class="slots-head">
+    <h2 class="card-title inline">Slots</h2>
+    <div class="actions">
+        <button id="addSlotBtn" class="btn">+ Add Slot</button>
+        <button id="runAllBtn" class="btn btn-primary">▶ Run All</button>
+    </div>
+</div>
+<div id="slotsRow" class="slots-row"></div>
+
+<!-- ================= RESULTS ================= -->
+<section id="results" class="results-panel" hidden>
+    <div class="card">
+        <div class="tabs">
+            <button class="tab active" data-tab="metrics">Metrics Table</button>
+            <button class="tab" data-tab="equity">Equity Curves</button>
+            <button class="tab" data-tab="drawdown">Drawdown</button>
+        </div>
+        <div class="tab-body">
+            <div class="tab-pane active" data-pane="metrics">
+                <div class="table-scroll"><table id="compareTable" class="data-table compare-table"></table></div>
+            </div>
+            <div class="tab-pane" data-pane="equity"><div class="chart-wrap"><canvas id="equityCompareChart"></canvas></div></div>
+            <div class="tab-pane" data-pane="drawdown"><div class="chart-wrap"><canvas id="drawdownCompareChart"></canvas></div></div>
+        </div>
+    </div>
+</section>
+
+<section id="emptyState" class="empty-state card">
+    <p class="muted">Configure slots and click <strong>Run All</strong> to compare.</p>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/components/params_form.js') }}"></script>
+<script src="{{ url_for('static', filename='js/compare/metrics_table.js') }}"></script>
+<script src="{{ url_for('static', filename='js/compare/equity_compare_chart.js') }}"></script>
+<script src="{{ url_for('static', filename='js/compare/drawdown_compare_chart.js') }}"></script>
+<script src="{{ url_for('static', filename='js/compare.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Forward Test · Trading Bot{% endblock %}
+
+{% block content %}
+<h1 class="page-title">Forward Test</h1>
+<p class="muted small page-sub">Live paper trading. Promote a backtest result here, then Start.</p>
+
+<div id="prefillBanner" class="banner" hidden>Pre-filled from a backtest / compare result</div>
+
+<!-- ================= CONFIG ================= -->
+<section class="card config-panel">
+    <h2 class="card-title">Configuration</h2>
+    <div class="forward-grid">
+        <div class="form-row"><label>Strategy</label><select id="strategy" class="input"><option value="">Loading…</option></select></div>
+        <div class="form-row"><label>Symbol</label><select id="symbol" class="input">
+            <option>DEMO</option><option>BTCUSD</option><option>ETHUSD</option><option>NIFTY</option><option>INFY</option>
+        </select></div>
+        <div class="form-row"><label>Timeframe</label><select id="timeframe" class="input">
+            <option>1D</option><option>1H</option><option>4H</option><option>1W</option>
+        </select></div>
+        <div class="form-row"><label>From</label><input type="date" id="fromDate" class="input" value="2024-01-01"></div>
+        <div class="form-row"><label>To</label><input type="date" id="toDate" class="input" value="2024-12-31"></div>
+        <div class="form-row"><label>Capital ($)</label><input type="number" id="capital" class="input" value="10000" min="1"></div>
+    </div>
+    <fieldset class="params-fieldset"><legend>Strategy Params</legend>
+        <div id="params-container"><p class="muted small">Select a strategy…</p></div>
+    </fieldset>
+
+    <div class="control-bar">
+        <span class="status-wrap">Status: <span id="statusBadge" class="status-badge status-idle">Idle</span></span>
+        <button id="startBtn" class="btn btn-primary">▶ Start</button>
+        <button id="stopBtn" class="btn btn-danger" disabled>■ Stop</button>
+        <span id="progressText" class="muted small"></span>
+    </div>
+    <div class="progress-track"><div id="progressBar" class="progress-fill"></div></div>
+</section>
+
+<!-- ================= LIVE RESULTS ================= -->
+<section id="livePanel" hidden>
+    <div id="metricsCards" class="metrics-grid"></div>
+
+    <div class="card">
+        <h2 class="card-title">Live Equity</h2>
+        <div class="chart-wrap"><canvas id="equityChart"></canvas></div>
+    </div>
+
+    <div class="card">
+        <h2 class="card-title">Open Positions</h2>
+        <table class="data-table">
+            <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Current</th><th>Unrealized</th><th>Entry Date</th></tr></thead>
+            <tbody id="positionsBody"></tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <h2 class="card-title">Trade Feed</h2>
+        <div id="tradeTable-wrap">
+            <table id="tradeTable" class="data-table">
+                <thead><tr><th>#</th><th>Date</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Result</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/components/params_form.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/metrics_cards.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/trade_table.js') }}"></script>
+<script src="{{ url_for('static', filename='js/charts/equity_chart.js') }}"></script>
+<script src="{{ url_for('static', filename='js/forward.js') }}"></script>
+{% endblock %}
