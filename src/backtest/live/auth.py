@@ -53,9 +53,12 @@ def get_auth_code(explicit_code: str | None = None) -> str:
 def login() -> dict[str, Any]:
     """Login with username/password using the real mStock TypeA connect API."""
     base_url = os.getenv("MSTOCK_BASE_URL", "https://api.mstock.trade").rstrip("/")
+    api_key = os.getenv("MSTOCK_API_KEY", "").strip()
     username = os.getenv("MSTOCK_USERNAME", "")
     password = os.getenv("MSTOCK_PASSWORD", "")
 
+    if not api_key:
+        raise ValueError("MSTOCK_API_KEY required before login")
     if not username or not password:
         raise ValueError("MSTOCK_USERNAME and MSTOCK_PASSWORD required")
 
@@ -138,19 +141,20 @@ def generate_session(code: str) -> dict[str, Any]:
 
 
 def get_session_token() -> str:
-    """Get session token. If not cached, authenticate via TOTP/OTP."""
+    """Get a valid session token. Ignore unusable cached values and re-auth when needed."""
     cache_file = ".mstock_session_token"
-    
-    # Check cached token
+
     if os.path.exists(cache_file):
         try:
             with open(cache_file) as f:
                 token = f.read().strip()
-            if token:
+            if token and len(token) >= 16:
                 return token
+            if token:
+                os.remove(cache_file)
         except Exception:
             pass
-    
+
     # Real mStock flow from the SDK example: login first, then ask the user for the
     # current TOTP/OTP, then verify or generate the session on the server.
     mode = os.getenv("MSTOCK_AUTH_MODE", "otp").lower()
@@ -167,5 +171,5 @@ def get_session_token() -> str:
     if token:
         with open(cache_file, "w") as f:
             f.write(token)
-    
+
     return token

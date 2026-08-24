@@ -128,6 +128,49 @@ def test_totp_session_uses_login_then_prompt_then_verify_totp(monkeypatch, tmp_p
         os.chdir(old_cwd)
 
 
+def test_get_session_token_ignores_short_cached_token(monkeypatch, tmp_path):
+    """A stale/short cached token should not block a fresh TOTP login."""
+    monkeypatch.setenv("MSTOCK_AUTH_MODE", "totp")
+    monkeypatch.setenv("MSTOCK_USERNAME", "user")
+    monkeypatch.setenv("MSTOCK_PASSWORD", "pass")
+    monkeypatch.setenv("MSTOCK_API_KEY", "api-key")
+    monkeypatch.setenv("MSTOCK_CHECKSUM", "W")
+    monkeypatch.delenv("MSTOCK_TOTP", raising=False)
+    monkeypatch.delenv("MSTOCK_OTP", raising=False)
+
+    old_cwd = Path.cwd()
+    os.chdir(tmp_path)
+    cache = Path(tmp_path / ".mstock_session_token")
+    cache.write_text("short", encoding="utf-8")
+
+    try:
+        from backtest.live import auth as live_auth
+
+        calls = []
+
+        def fake_login():
+            calls.append("login")
+            return {"status": "success"}
+
+        def fake_verify_totp(code):
+            calls.append(("verify_totp", code))
+            return {"token": "new-access-token"}
+
+        def fake_input(prompt=""):
+            calls.append(f"prompt:{prompt}")
+            return "123456"
+
+        monkeypatch.setattr(live_auth, "login", fake_login)
+        monkeypatch.setattr(live_auth, "verify_totp", fake_verify_totp)
+        monkeypatch.setattr("builtins.input", fake_input)
+
+        assert live_auth.get_session_token() == "new-access-token"
+        assert calls[0] == "login"
+        assert calls[1].startswith("prompt:Enter TOTP")
+    finally:
+        os.chdir(old_cwd)
+
+
 @pytest.mark.skip(reason="Card 07 live bring-up deferred (requires mStock credentials and auth testing)")
 def test_totp_auth_calls_verify_totp():
     """Test 16: auth_mode='totp' ⇒ calls verify_totp with the preset code (not generate_session)."""
