@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Backtest · Trading Bot{% endblock %}
+
+{% block content %}
+<div class="page-grid">
+    <!-- ================= CONFIG PANEL ================= -->
+    <section class="card config-panel">
+        <h2 class="card-title">Configuration</h2>
+
+        <div class="form-row">
+            <label for="strategy">Strategy</label>
+            <select id="strategy" class="input">
+                <option value="">Loading…</option>
+            </select>
+        </div>
+
+        <div class="form-row">
+            <label for="symbol">Symbol</label>
+            <select id="symbol" class="input">
+                <option>DEMO</option>
+                <option>BTCUSD</option>
+                <option>ETHUSD</option>
+                <option>NIFTY</option>
+                <option>INFY</option>
+            </select>
+        </div>
+
+        <div class="form-row">
+            <label for="timeframe">Timeframe</label>
+            <select id="timeframe" class="input">
+                <option value="1D">1D</option>
+                <option value="1H">1H</option>
+                <option value="4H">4H</option>
+                <option value="1W">1W</option>
+            </select>
+        </div>
+
+        <div class="form-row two-col">
+            <div>
+                <label for="fromDate">From</label>
+                <input type="date" id="fromDate" class="input" value="2024-01-01">
+            </div>
+            <div>
+                <label for="toDate">To</label>
+                <input type="date" id="toDate" class="input" value="2024-12-31">
+            </div>
+        </div>
+
+        <div class="form-row">
+            <label for="capital">Capital ($)</label>
+            <input type="number" id="capital" class="input" value="10000" min="1">
+        </div>
+
+        <fieldset class="params-fieldset">
+            <legend>Strategy Params</legend>
+            <div id="params-container"><p class="muted small">Select a strategy…</p></div>
+        </fieldset>
+
+        <button id="runBtn" class="btn btn-primary btn-block">▶ Run Backtest</button>
+    </section>
+
+    <!-- ================= RESULTS PANEL ================= -->
+    <section id="results" class="results-panel" hidden>
+        <div id="metricsCards" class="metrics-grid"></div>
+
+        <div class="card">
+            <div class="tabs">
+                <button class="tab active" data-tab="equity">Equity Curve</button>
+                <button class="tab" data-tab="drawdown">Drawdown</button>
+                <button class="tab" data-tab="signals">Price + Signals</button>
+            </div>
+            <div class="tab-body">
+                <div class="tab-pane active" data-pane="equity"><div class="chart-wrap"><canvas id="equityChart"></canvas></div></div>
+                <div class="tab-pane" data-pane="drawdown"><div class="chart-wrap"><canvas id="drawdownChart"></canvas></div></div>
+                <div class="tab-pane" data-pane="signals"><div class="chart-wrap"><canvas id="signalsChart"></canvas></div></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <h2 class="card-title">Trades</h2>
+                <div class="actions">
+                    <button id="saveCompareBtn" class="btn">💾 Save to Compare</button>
+                    <button id="exportCsvBtn" class="btn">📤 Export CSV</button>
+                    <button id="promoteBtn" class="btn btn-accent">▶ Promote to Forward</button>
+                </div>
+            </div>
+            <div id="tradeTable-wrap">
+                <table id="tradeTable" class="data-table">
+                    <thead><tr>
+                        <th data-sort="id">#</th><th data-sort="date">Date</th>
+                        <th data-sort="side">Side</th><th data-sort="entry">Entry</th>
+                        <th data-sort="exit">Exit</th><th data-sort="pnl">PnL</th>
+                        <th>Result</th>
+                    </tr></thead>
+                    <tbody></tbody>
+                </table>
+                <div id="pagination" class="pagination"></div>
+            </div>
+        </div>
+    </section>
+
+    <section id="emptyState" class="empty-state card">
+        <p class="muted">Configure a strategy and click <strong>Run Backtest</strong> to see results.</p>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/components/params_form.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/metrics_cards.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/trade_table.js') }}"></script>
+<script src="{{ url_for('static', filename='js/charts/equity_chart.js') }}"></script>
+<script src="{{ url_for('static', filename='js/charts/drawdown_chart.js') }}"></script>
+<script src="{{ url_for('static', filename='js/charts/signals_chart.js') }}"></script>
+<script src="{{ url_for('static', filename='js/backtest.js') }}"></script>
+{% endblock %}

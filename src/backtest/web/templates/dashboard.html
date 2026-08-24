@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · Trading Bot{% endblock %}
+
+{% block content %}
+<h1 class="page-title">Dashboard</h1>
+<p class="muted small page-sub">System overview — start here, then jump into a workflow.</p>
+
+<!-- ================= STATUS CARDS ================= -->
+<div class="metrics-grid">
+    <div class="metric-card">
+        <div class="label">Strategies Available</div>
+        <div class="value" id="strategyCount">—</div>
+    </div>
+    <div class="metric-card">
+        <div class="label">Forward Bot</div>
+        <div class="value"><span id="botBadge" class="status-badge status-idle">Idle</span></div>
+    </div>
+    <div class="metric-card">
+        <div class="label">Active Symbol</div>
+        <div class="value" id="botSymbol">—</div>
+    </div>
+    <div class="metric-card">
+        <div class="label">Live P&amp;L</div>
+        <div class="value" id="botPnl">—</div>
+    </div>
+</div>
+
+<!-- ================= FORWARD BOT PANEL ================= -->
+<div class="card" id="forwardPanel">
+    <div class="card-head">
+        <h2 class="card-title">Forward Bot</h2>
+        <a href="/forward" class="btn">Open Forward Test →</a>
+    </div>
+    <p class="muted small" id="botDetail">No active bot. Promote a backtest result to Forward Test and click Start.</p>
+    <div class="progress-track" hidden id="botProgressTrack"><div class="progress-fill" id="botProgressBar"></div></div>
+</div>
+
+<!-- ================= NAV CARDS ================= -->
+<h2 class="card-title">Workflows</h2>
+<div class="nav-cards">
+    <a class="nav-card" href="/backtest">
+        <div class="nav-card-icon">📈</div>
+        <div class="nav-card-title">Backtest</div>
+        <div class="nav-card-desc">Single strategy deep dive — run, analyse, promote.</div>
+    </a>
+    <a class="nav-card" href="/compare">
+        <div class="nav-card-icon">⚖️</div>
+        <div class="nav-card-title">Compare</div>
+        <div class="nav-card-desc">2–4 strategy / timeframe combinations side by side.</div>
+    </a>
+    <a class="nav-card" href="/forward">
+        <div class="nav-card-icon">🤖</div>
+        <div class="nav-card-title">Forward Test</div>
+        <div class="nav-card-desc">Live paper trading with real-time updates.</div>
+    </a>
+</div>
+
+<!-- ================= STRATEGIES ================= -->
+<div class="card">
+    <h2 class="card-title">Available Strategies</h2>
+    <div id="strategyList" class="strategy-chips"><span class="muted small">Loading…</span></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+{% endblock %}

@@ -5,11 +5,189 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Steps 1–20 complete (Phase 1–8 done)**
+**Last updated:** 2026-08-24 · **Branch:** `arena/01a03438-back-test` (PRD effort) / `arena/01a02caa-back-test` (simulator) · **Simulator Steps 1–20 complete · PRD Epic 1 complete**
 
 ---
 
-## Progress
+## Unified Trading Bot Platform (PRD — active effort)
+
+Tracks progress against `instructions/PRDandTASK_DECOMPOSITION.md` — the unified
+web UI (Dashboard / Backtest / Compare / Forward) layered on top of the mature
+simulator + backtester (this tracker's Steps 1–24). Active branch:
+`arena/01a03438-back-test`.
+
+> **V1 is complete (Epics 1–6 + Dashboard). Pick up here in a new session:**
+
+### 🟡 Pending / Next session (V2 backlog)
+
+**Housekeeping (do first)**
+1. **Commit & open a PR** — Epic 1–6 + Dashboard are built but **not yet committed/pushed**. Suggested target: `feature/UI-rediness`.
+2. **Run it:** `PYTHONPATH=src python -m backtest.web.app --host 0.0.0.0 --port 5000 --source synthetic` (venv `/home/user/.venv`; deps via `pip install -r requirements.txt`). Data is **synthetic only** — swap `--source csv|mstock` when real data is wired.
+
+**V2 — product (PRD §7)**
+3. **Persistence layer** — store run history / saved comparisons / forward state to DB (`forward/engine.py` + `db/` exist). Unblocks refresh-survives-restart, save/load compare configs, Dashboard history.
+4. **Live Forward feed** — replace the replay with the real mStock polling loop (needs credentials; `live/mstock.py` exists).
+5. **Compare: month-on-month returns heatmap** per slot.
+6. **Export** — PDF + comparison export (client-side CSV done).
+7. **Save/load comparison configurations.**
+8. **Parameter sensitivity analysis** — sweep params, heatmap.
+
+**V2 — platform**
+9. **Full Dashboard** — recent backtests, saved comparisons, multi-bot, system health over time (depends on #3).
+10. **Production WSGI** — gunicorn instead of Flask dev server.
+11. **Retire/merge the legacy Step-19 `dashboard/app.py`** now that `/forward` exists.
+
+**Known limitations (revisit)**
+- Synthetic data only; no real market data wired into the UI yet.
+- Forward test is a deterministic replay, not a live market feed.
+- In-memory session state — lost on server restart (fix via #3).
+
+`████████████████████████████████████████░░` **Epics 1–6 complete (PRD V1 = 100%)**
+
+| Epic | Theme | Tasks | Status |
+|---|---|---|---|
+| 1 · Foundation | BaseStrategy contract, registry, BacktestAdapter, REST APIs | 1.1–1.6 | ✅ **Complete** |
+| 2 · Backtest Page | Route, template, dynamic params, charts, trade table | 2.1–2.10 | ✅ **Complete** |
+| 3 · Compare Page | Slots, Run All, overlaid charts, per-slot actions | 3.1–3.8 | ✅ **Complete** |
+| 4 · Forward Page | Pre-fill, template cleanup, forward API alignment | 4.1–4.3 | ✅ **Complete** |
+| 5 · Cross-Page | Shared nav, session state, toast, loader | 5.1–5.4 | ✅ **Complete** (built alongside Epic 2) |
+| 6 · Testing | Contract/adapter/API/e2e tests, strategy migration | 6.1–6.6 | ✅ **Complete** |
+
+### Epic 1 — Foundation ✅ (2026-08-24)
+
+Non-breaking layer over existing `strategy/` + `engine/`. All 1571 pre-existing
+tests still pass; 35 new PRD tests added (6.1–6.4). One unrelated pre-existing
+failure (`test_mstock_auth::test_login_sends_sdk_headers`, needs `MSTOCK_API_KEY`).
+
+| # | Task | Deliverable |
+|---|------|-------------|
+| 1.1 | BaseStrategy contract | `strategy/base.py` — dual params form (flat + schema), `description/version/author`, `validate()` + `StrategyContractError` |
+| 1.2 | Strategy auto-discovery | `strategy/registry.py` — `get_all()` / `get_params()`, skip-invalid-with-warning |
+| 1.3 | Strategy API | `api/strategies.py` — `GET /api/strategies`, `GET /api/strategies/<name>/params` |
+| 1.4 | BacktestAdapter | `adapters/backtest_adapter.py` — metrics/equity/drawdown/trades/signals/compare |
+| 1.5 | Backtest API | `api/backtest.py` — `POST /api/backtest/run` |
+| 1.6 | Parallel backtest API | `api/backtest.py` — `POST /api/backtest/run-many` (ThreadPoolExecutor) |
+
+**New packages:** `src/backtest/adapters/`, `src/backtest/api/`, `src/backtest/web/`
+(unified app factory `create_app()`; live preview on port 5000).
+
+**Deviations from the PRD:**
+
+| # | PRD says | We do | Why |
+|---|----------|-------|-----|
+| 1 | Top-level `api/`, `adapters/`, `dashboard/` paths | `src/backtest/api/`, `adapters/`, `web/` | Repo nests under `src/backtest/` |
+| 2 | New `BaseStrategy` class | Extend existing `Strategy` | Avoid duplicating a working abstraction (matches existing simulator deviation #5) |
+| 3 | `generate_signals(candles, params)` | `generate_signals(candles)` (params bound to instance attrs) | Existing contract; schema still drives dynamic UI forms |
+| 4 | `params` = schema dict only | Accept flat (legacy) **and** schema forms | Zero regressions on the 4 existing strategies |
+
+### Epic 2 — Backtest Page ✅ (2026-08-24)
+
+Single-strategy deep-dive UI, end-to-end on top of the Epic 1 API. Live preview
+on port 5000 → `/backtest`.
+
+| # | Task | Deliverable |
+|---|------|-------------|
+| 2.1 | Backtest page route | `web/app.py` — `GET /backtest` (+ `/` redirect) |
+| 2.2 | Template structure | `web/templates/backtest.html` — two-column config/results |
+| 2.3 | Dynamic params (JS) | `web/static/js/backtest.js` — type-aware form from `/params` |
+| 2.4 | Equity curve chart | `web/static/js/charts/equity_chart.js` (+ buy&hold benchmark) |
+| 2.5 | Drawdown chart | `web/static/js/charts/drawdown_chart.js` (+ worst-DD marker) |
+| 2.6 | Price + signals chart | `web/static/js/charts/signals_chart.js` (▲ buys / ▼ sells) |
+| 2.7 | Metrics cards | `web/static/js/components/metrics_cards.js` |
+| 2.8 | Trade table | `web/static/js/components/trade_table.js` (paginated + sortable) |
+| 2.9 | Save to Compare | `backtest.js` → `SessionState.addCompareSlot` (max 4) |
+| 2.10 | Export CSV | `backtest.js` — client-side CSV download |
+
+**Epic 5 (cross-page) also delivered:** 5.1 shared nav `base.html`, 5.2
+`session_state.js`, 5.3 `toast.js`, 5.4 `loader.js`. Promote-to-Forward wires
+`forwardPrefill` (lands in Epic 4).
+
+**Deviations:** frontend uses Chart.js (already a dependency via the existing
+forward dashboard) instead of splitting chart libs; Export CSV is generated
+client-side from the run response (stateless) rather than a server `session_id`
+endpoint.
+
+### Epic 3 — Compare Page ✅ (2026-08-24)
+
+Side-by-side comparison of 2–4 strategy/timeframe combinations, on top of the
+Epic 1 parallel API. Live preview → `/compare`.
+
+| # | Task | Deliverable |
+|---|------|-------------|
+| 3.1 | Compare route | `web/app.py` — `GET /compare` |
+| 3.2 | Template structure | `web/templates/compare.html` — shared config bar + dynamic slots + 3-tab results |
+| 3.3 | Slot management | `web/static/js/compare.js` — add/remove (2–4), independent strategy+params, pre-fill from saved slots |
+| 3.4 | Run All | `compare.js` — validates, POST `/api/backtest/run-many`, per-slot status |
+| 3.5 | Metrics table | `web/static/js/compare/metrics_table.js` — N-column, best-per-row 🏆 |
+| 3.6 | Overlaid equity | `web/static/js/compare/equity_compare_chart.js` — date-union alignment |
+| 3.7 | Overlaid drawdown | `web/static/js/compare/drawdown_compare_chart.js` |
+| 3.8 | Per-slot actions | `metrics_table.js` actions row → `backtest_prefill` / `forward_prefill` + navigate |
+
+**Deviations:** overlaid charts align series to the union of all dates (null gaps)
+so slots with different timeframes/timebases compare correctly; best-per-row uses
+max for return/win-rate/Sharpe/max-DD (least-negative) and leaves Trades
+unhighlighted (no meaningful "best").
+
+### Epic 4 — Forward Test Page ✅ (2026-08-24)
+
+Live paper-trading page + forward API, completing the promote loop. Live preview
+→ `/forward`. Shared param-form component extracted (`components/params_form.js`)
+and now used by Backtest / Compare / Forward.
+
+| # | Task | Deliverable |
+|---|------|-------------|
+| 4.1 | Forward pre-fill | `web/static/js/forward.js` — reads `forward_prefill`, pre-fills, banner, clears |
+| 4.2 | Template cleanup | `web/templates/forward.html` — config + status/Start-Stop + live equity/metrics/positions/trade feed |
+| 4.3 | Forward API | `api/forward.py` — `POST /start`, `POST /stop`, `GET /status` (adapter shape + positions/progress) |
+
+**Tests:** `tests/test_api_forward.py` — 8 tests (idle before start, valid/unknown/missing,
+shape, progress→complete, stop freezes, refresh-safe). **1575 passing.**
+
+**Deviations:** no live market feed in the sandbox (mStock needs credentials), so
+forward testing is an **in-process paper-trading replay** — `/start` runs the
+strategy once, `/status` reveals it bar-by-bar each poll, recomputing metrics on
+the prefix via `BacktestAdapter` + `compute_metrics` (same shape as the Backtest
+page, so components are reusable). Server-side state survives a page refresh;
+DB persistence is deferred to V2.
+
+### Dashboard landing page ✅ (2026-08-24)
+
+Built as a **lightweight landing** (not in the 37-task decomposition; discussed
+and scoped down from a full dashboard due to overlap with the Forward page and
+the existing Step 19 dashboard, and the lack of persisted run history).
+
+`GET /dashboard` → `web/templates/dashboard.html` + `web/static/js/dashboard.js`.
+Aggregates cross-page state: strategies available (count + chips), **live
+forward-bot status** (idle/running + active symbol + live P&L + replay progress,
+visible from anywhere), and workflow nav cards. No persistence required.
+
+Bug fixed along the way: forward `/status` config now carries `strategy`/`symbol`
+onto the live snapshot (previously blank because `compute_metrics` rebuilds the
+metrics dict) — locked in with a test assertion.
+
+### Epic 6 — Testing ✅ (2026-08-24)
+
+| # | Task | Deliverable |
+|---|------|-------------|
+| 6.1 | Strategy contract | `tests/test_strategy_base.py` — validation, schema forms, auto-discovery |
+| 6.2 | BacktestAdapter | `tests/test_backtest_adapter.py` — shapes, drawdown, trades, immutability |
+| 6.3 | Backtest API | `tests/test_api_backtest.py` — run/run-many, error cases |
+| 6.4 | Strategy API | `tests/test_api_strategies.py` — catalogue, params, 404 |
+| 6.5 | End-to-end workflow | `tests/test_e2e_workflow.py` — load→run→adapt, 4-slot parallel+winner, promote→forward |
+| 6.6 | Strategy migration | 4 strategies now declare `description/version/author` + full param schemas; verified in registry |
+
+**Strategy migration (6.6):** all four strategies converted from flat
+(`params = {"period": 14}`) to full schema form
+(`{"default", "min", "max", "type", "label", "tooltip"}`) with human metadata —
+so the dynamic UI forms are now fully populated (labels, tooltips, ranges).
+Signal logic unchanged; flat-form support retained for any future strategy.
+
+**Final test status: 1582 passing, 0 regressions.** All 6 PRD success criteria
+are satisfied and demonstrable on the live preview.
+
+---
+
+## Simulator Progress
 
 `████████████████████████████████████████░░` **20 / 24 steps complete** (83%)
 

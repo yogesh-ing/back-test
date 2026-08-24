@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Trading Bot{% endblock %}</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+    {% block head %}{% endblock %}
+</head>
+<body data-active="{{ active }}">
+    <nav class="topnav">
+        <div class="brand">🤖 Trading Bot</div>
+        <div class="nav-links">
+            <a href="/dashboard"  class="nav-link" data-key="dashboard">Dashboard</a>
+            <a href="/backtest"   class="nav-link" data-key="backtest">Backtest</a>
+            <a href="/compare"    class="nav-link" data-key="compare">Compare</a>
+            <a href="/forward"    class="nav-link" data-key="forward">Forward Test</a>
+        </div>
+    </nav>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <div id="toast-stack" class="toast-stack"></div>
+
+    <script src="{{ url_for('static', filename='js/session_state.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/toast.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/loader.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

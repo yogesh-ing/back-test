@@ -4,8 +4,18 @@ from backtest.strategy.base import Strategy
 
 
 class DonchianBreakout(Strategy):
+    """Donchian channel breakout: enter on a new high, exit on a new low."""
+
     name = "donchian_breakout"
-    params = {"lookback": 20}
+    description = "Donchian channel breakout — enter long on a new lookback high, exit on a new lookback low. Risk-managed with a stop and target."
+    version = "1.0"
+    author = "Trading Bot"
+    params = {
+        "lookback": {
+            "default": 20, "min": 2, "max": 100, "type": "int",
+            "label": "Lookback", "tooltip": "Channel window for the highest high / lowest low.",
+        },
+    }
     stop_loss = 0.05
     take_profit = 0.10
 
