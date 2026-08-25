@@ -198,7 +198,7 @@ API, and the Forward Test start guard. Active branch: `arena/01a03995-back-test`
 | # | Task | Deliverable | Status |
 |---|------|-------------|--------|
 | 1.1 | `BrokerAuthBase` abstract class | `src/backtest/brokers/base.py` (+ package `__init__`, status constants) | ✅ **Complete** |
-| 1.2 | `MStockBroker` implementation | `src/backtest/brokers/mstock.py` | ⬜ Pending |
+| 1.2 | `MStockBroker` implementation | `src/backtest/brokers/mstock.py` | ✅ **Complete** |
 | 1.3 | `BrokerSessionManager` singleton | `src/backtest/brokers/session_manager.py` | ⬜ Pending |
 
 **Task 1.1 verification:** `tests/test_broker_base.py` — 13 tests, all pass.
@@ -206,6 +206,17 @@ Abstract methods (`login`, `verify_totp`, `get_session_status`, `logout`)
 cannot be skipped without `TypeError`; return-shape contracts + status
 vocabulary asserted. Full suite: 1598 passed / 3 skipped / 1 pre-existing
 env failure (`MSTOCK_API_KEY`), no regressions.
+
+**Task 1.2 verification:** `tests/test_broker_mstock.py` — 28 tests, all
+pass, every HTTP call mocked. PRD flow (login → verify_totp → status
+`authenticated`) covered, plus: TypeA endpoint/form/header contract,
+credentials never stored on the instance, temp context kept on wrong TOTP
+(retry works) and cleared on success, `expiring_soon` window boundaries
+(31→authenticated, 30→expiring_soon, ≤0→expired), server-provided
+`expires_in` preferred over the `MSTOCK_SESSION_TTL_MINUTES` fallback
+(default 390, documented in `.env.example`), token absent from every
+contract response, logout clears all state. Suite: 1626 passed / 3 skipped
+/ same 1 pre-existing env failure.
 
 **Deviations from the PRD:** top-level `brokers/` paths map to
 `src/backtest/brokers/` (repo nests under `src/backtest/`, same as PRD V1).
