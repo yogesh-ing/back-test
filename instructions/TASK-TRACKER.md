@@ -5,7 +5,7 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-24 · **Branch:** `arena/01a03438-back-test` (PRD effort) / `arena/01a02caa-back-test` (simulator) · **Simulator Steps 1–20 complete · PRD Epic 1 complete**
+**Last updated:** 2026-08-25 · **Branch:** `arena/01a03995-back-test` (broker auth effort) / `arena/01a03438-back-test` (PRD effort) / `arena/01a02caa-back-test` (simulator) · **Simulator Steps 1–20 complete · PRD Epic 1 complete · Broker Auth Phase 1 started (Task 1.1 done)**
 
 ---
 
@@ -184,6 +184,31 @@ Signal logic unchanged; flat-form support retained for any future strategy.
 
 **Final test status: 1582 passing, 0 regressions.** All 6 PRD success criteria
 are satisfied and demonstrable on the live preview.
+
+---
+
+## Generic Broker Authentication (mStock Auth UI — active effort)
+
+Tracks progress against `instructions/Generic_Broker_Authentication.md` — the
+broker-agnostic auth layer (Credentials → TOTP), session store, auth status
+API, and the Forward Test start guard. Active branch: `arena/01a03995-back-test`.
+
+### Phase 1 — Generic Broker Auth Backend Layer (in progress)
+
+| # | Task | Deliverable | Status |
+|---|------|-------------|--------|
+| 1.1 | `BrokerAuthBase` abstract class | `src/backtest/brokers/base.py` (+ package `__init__`, status constants) | ✅ **Complete** |
+| 1.2 | `MStockBroker` implementation | `src/backtest/brokers/mstock.py` | ⬜ Pending |
+| 1.3 | `BrokerSessionManager` singleton | `src/backtest/brokers/session_manager.py` | ⬜ Pending |
+
+**Task 1.1 verification:** `tests/test_broker_base.py` — 13 tests, all pass.
+Abstract methods (`login`, `verify_totp`, `get_session_status`, `logout`)
+cannot be skipped without `TypeError`; return-shape contracts + status
+vocabulary asserted. Full suite: 1598 passed / 3 skipped / 1 pre-existing
+env failure (`MSTOCK_API_KEY`), no regressions.
+
+**Deviations from the PRD:** top-level `brokers/` paths map to
+`src/backtest/brokers/` (repo nests under `src/backtest/`, same as PRD V1).
 
 ---
 
