@@ -193,6 +193,9 @@ Tracks progress against `instructions/Generic_Broker_Authentication.md` — the
 broker-agnostic auth layer (Credentials → TOTP), session store, auth status
 API, and the Forward Test start guard. Active branch: `arena/01a03995-back-test`.
 
+> **Dedicated tracker with pick-up instructions for the remaining tasks
+> (3.2, 4.1, 4.2, Phase 5): `instructions/BROKER-AUTH-TRACKER.md`.**
+
 ### Phase 1 — Generic Broker Auth Backend Layer ✅ (2026-08-25)
 
 | # | Task | Deliverable | Status |
