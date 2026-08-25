@@ -22,7 +22,7 @@ env/
 *.sqlite3
 
 # Build / run artefacts
-charts/
+/charts/
 dist/
 build/
 htmlcov/

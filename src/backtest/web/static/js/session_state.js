@@ -20,7 +20,7 @@ const SessionState = (() => {
     return {
         keys: { compare: KEY_COMPARE, backtestPrefill: KEY_BACKTEST_PREFILL, forwardPrefill: KEY_FORWARD_PREFILL },
         maxCompareSlots: MAX_COMPARE_SLOTS,
-        get, set, clear,
+        get: read, set: write, clear,
         get compareSlots() { return read(KEY_COMPARE) || []; },
         addCompareSlot(slot) {
             const slots = this.compareSlots;
