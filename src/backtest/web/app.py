@@ -13,7 +13,8 @@ from typing import Any
 
 from flask import Flask, jsonify, render_template
 
-from backtest.api import backtest_bp, forward_bp, strategies_bp
+from backtest.api import backtest_bp, broker_auth_bp, forward_bp, strategies_bp
+from backtest.brokers.session_manager import get_session_manager
 
 logger = logging.getLogger("backtest.web.app")
 
@@ -42,6 +43,11 @@ def create_app(source: str = "synthetic", **overrides: Any) -> Flask:
     app.register_blueprint(strategies_bp)
     app.register_blueprint(backtest_bp)
     app.register_blueprint(forward_bp)
+    app.register_blueprint(broker_auth_bp)
+
+    # Broker session expiry monitor (auth epic Task 2.2): idempotent daemon
+    # thread, one per process, polls the active broker session every 5 min.
+    get_session_manager().start_monitor()
 
     # ------------------------------------------------------------------
     # Page routes

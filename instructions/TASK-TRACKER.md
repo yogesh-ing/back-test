@@ -5,7 +5,7 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-25 · **Branch:** `arena/01a03995-back-test` (broker auth effort) / `arena/01a03438-back-test` (PRD effort) / `arena/01a02caa-back-test` (simulator) · **Simulator Steps 1–20 complete · PRD Epic 1 complete · Broker Auth Phase 1 complete (1.1–1.3) + Task 2.2**
+**Last updated:** 2026-08-25 · **Branch:** `arena/01a03995-back-test` (broker auth effort) / `arena/01a03438-back-test` (PRD effort) / `arena/01a02caa-back-test` (simulator) · **Simulator Steps 1–20 complete · PRD Epic 1 complete · Broker Auth Phases 1–2 complete (backend layer + API)**
 
 ---
 
@@ -201,11 +201,11 @@ API, and the Forward Test start guard. Active branch: `arena/01a03995-back-test`
 | 1.2 | `MStockBroker` implementation | `src/backtest/brokers/mstock.py` | ✅ **Complete** |
 | 1.3 | `BrokerSessionManager` singleton | `src/backtest/brokers/session_manager.py` | ✅ **Complete** |
 
-### Phase 2 — Authentication API Endpoints (in progress)
+### Phase 2 — Authentication API Endpoints ✅ (2026-08-25)
 
 | # | Task | Deliverable | Status |
 |---|------|-------------|--------|
-| 2.1 | Auth API routes | `src/backtest/api/broker_auth.py` | ⬜ Pending |
+| 2.1 | Auth API routes | `src/backtest/api/broker_auth.py` (mounted in `web/app.py`) | ✅ **Complete** |
 | 2.2 | Session expiry background monitor | `src/backtest/brokers/session_manager.py` | ✅ **Complete** (built with 1.3 — same file, PRD assigns it to `session_manager.py`) |
 
 **Task 1.1 verification:** `tests/test_broker_base.py` — 13 tests, all pass.
@@ -239,6 +239,20 @@ flag fires exactly once per cycle, `expired` clears the token via
 end-to-end test drives the real `MStockBroker` (mocked HTTP) through
 login → TOTP → 25-min-left expiry → `expiring_soon` flag → expiry clears
 token. Suite: 1646 passed / 3 skipped / same 1 pre-existing env failure.
+
+**Task 2.1 verification:** `tests/test_api_broker_auth.py` — 24 tests, all
+pass, stub broker injected into the singleton manager. All four endpoints
+tested independently: exact PRD response shapes; malformed bodies → 400
+(broker never called); flow failures (bad creds / bad TOTP) → 200 with
+`success:false`; unexpected errors → generic 500 (no tracebacks);
+`GET /status` fails **closed** (reports `unauthenticated` on internal
+error so the start guard stays engaged); TOTP input trimmed; logout
+idempotent. PRD security verification: session token absent from every
+response payload across the full endpoint sweep; password never echoed.
+`create_app()` now registers `broker_auth_bp` and auto-starts the Task 2.2
+monitor (idempotent). Live smoke test on port 5000 confirmed real-server
+behaviour with mStock defaults. Suite: 1670 passed / 3 skipped / same 1
+pre-existing env failure. **Phase 2 complete.**
 
 **Deviations from the PRD:** top-level `brokers/` paths map to
 `src/backtest/brokers/` (repo nests under `src/backtest/`, same as PRD V1).
