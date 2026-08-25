@@ -5,7 +5,7 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-25 · **Branch:** `arena/01a03995-back-test` (broker auth effort) / `arena/01a03438-back-test` (PRD effort) / `arena/01a02caa-back-test` (simulator) · **Simulator Steps 1–20 complete · PRD Epic 1 complete · Broker Auth Phases 1–2 complete (backend layer + API)**
+**Last updated:** 2026-08-25 · **Branch:** `arena/01a03995-back-test` (broker auth effort) / `arena/01a03438-back-test` (PRD effort) / `arena/01a02caa-back-test` (simulator) · **Simulator Steps 1–20 complete · PRD Epic 1 complete · Broker Auth Phases 1–2 complete; Phase 3: 3.1 + 3.3 done**
 
 ---
 
@@ -253,6 +253,27 @@ response payload across the full endpoint sweep; password never echoed.
 monitor (idempotent). Live smoke test on port 5000 confirmed real-server
 behaviour with mStock defaults. Suite: 1670 passed / 3 skipped / same 1
 pre-existing env failure. **Phase 2 complete.**
+
+### Phase 3 — Authentication UI Components (in progress)
+
+| # | Task | Deliverable | Status |
+|---|------|-------------|--------|
+| 3.1 | Nav broker status icon | `web/templates/base.html` + `web/static/js/broker_status.js` | ✅ **Complete** |
+| 3.2 | Auth popup modal | `web/templates/components/broker_auth_modal.html` + `web/static/js/broker_auth_modal.js` | ⬜ Pending |
+| 3.3 | Session expiry toast | `web/static/js/broker_status.js` | ✅ **Complete** (built with 3.1 — same file) |
+
+**Task 3.1 + 3.3 verification:** template wiring tests
+(`tests/test_broker_ui.py`, 7 pass) — pill present on all 5 pages, starts
+⚪/unknown pre-poll. Browser logic verified for real under Node
+(`tests/js/test_broker_status.mjs`, 12 pass, driven via the public API
+against a stub DOM): 🔴/🟡/🟢 render with tooltips, 60 s polling
+auto-start, expiring toast fires **exactly once per cycle** (repeated
+polls don't re-fire; re-auth arms a new cycle), toast click opens the
+auth popup + dismisses, 10 s auto-dismiss, session-expired error toast
+with `expectLogout()` suppression for intentional logouts, fetch failure
+keeps last known state, `broker:status` document event for Task 4.1.
+Popup hook (`window.BrokerAuthUI.open`) is a guarded no-op until 3.2.
+Suite: 1677 passed / 3 skipped / same 1 pre-existing env failure.
 
 **Deviations from the PRD:** top-level `brokers/` paths map to
 `src/backtest/brokers/` (repo nests under `src/backtest/`, same as PRD V1).
