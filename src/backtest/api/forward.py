@@ -11,6 +11,10 @@ poll the revealed bar count advances, and metrics/equity/trades/positions are
 computed on the prefix via ``BacktestAdapter`` + ``compute_metrics`` — the same
 shape the Backtest page consumes, so the frontend components are reusable. State
 is server-side (survives a page refresh; DB persistence is V2).
+
+**Task 4.2** adds a server-side authentication guard: the ``/start`` endpoint
+returns 403 if no broker session is authenticated. This is the security layer
+complementing the client-side button gate (Task 4.1).
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from backtest.adapters.backtest_adapter import BacktestAdapter
 from backtest.api.backtest import _interval, _resolve_strategy
+from backtest.brokers.session_manager import get_session_manager
 from backtest.engine.backtester import BacktestConfig, BacktestResult
 from backtest.engine.metrics import compute_metrics
 from backtest.runner import build_source, run_on_candles
@@ -49,7 +54,23 @@ def _reset_session() -> None:
 
 @forward_bp.post("/api/forward/start")
 def start() -> tuple:
+    """Start a forward test session (server-side auth guard: Task 4.2).
+
+    Returns 403 if no broker session is authenticated — the client-side
+    button gate (Task 4.1) prevents the user from reaching this endpoint,
+    but the server-side check is the authoritative security boundary.
+    """
     data = request.get_json(silent=True) or {}
+
+    # Task 4.2: server-side authentication guard.
+    # The session manager is the single source of truth; the forward engine
+    # must not start without a valid broker session.
+    if not get_session_manager().is_authenticated():
+        return jsonify({
+            "success": False,
+            "error": "broker_not_authenticated",
+            "message": "Valid broker session required to start forward test",
+        }), 403
 
     resolution = _resolve_strategy(data.get("strategy"))
     if isinstance(resolution, str):

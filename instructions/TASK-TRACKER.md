@@ -5,7 +5,7 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-24 · **Branch:** `arena/01a03438-back-test` (PRD effort) / `arena/01a02caa-back-test` (simulator) · **Simulator Steps 1–20 complete · PRD Epic 1 complete**
+**Last updated:** 2026-08-26 · **Branch:** `arena/01a03e5a-back-test` (broker auth effort) / `arena/01a03438-back-test` (PRD effort) / `arena/01a02caa-back-test` (simulator) · **Simulator Steps 1–20 complete · PRD Epic 1 complete · Broker Auth Epic COMPLETE (all 5 phases, 13/13 tasks)**
 
 ---
 
@@ -184,6 +184,64 @@ Signal logic unchanged; flat-form support retained for any future strategy.
 
 **Final test status: 1582 passing, 0 regressions.** All 6 PRD success criteria
 are satisfied and demonstrable on the live preview.
+
+---
+
+## Generic Broker Authentication (mStock Auth UI — ✅ COMPLETE)
+
+Tracks progress against `instructions/Generic_Broker_Authentication.md` — the
+broker-agnostic auth layer (Credentials → TOTP), session store, auth status
+API, and the Forward Test start guard. Active branch: `arena/01a03e5a-back-test`.
+
+> **All 5 phases complete, all 13 tasks delivered. See dedicated tracker:**
+> `instructions/BROKER-AUTH-TRACKER.md` for full details.
+
+### Phase 1 — Generic Broker Auth Backend Layer ✅ (2026-08-25)
+
+| # | Task | Deliverable | Status |
+|---|------|-------------|--------|
+| 1.1 | `BrokerAuthBase` abstract class | `src/backtest/brokers/base.py` (+ package `__init__`, status constants) | ✅ **Complete** |
+| 1.2 | `MStockBroker` implementation | `src/backtest/brokers/mstock.py` | ✅ **Complete** |
+| 1.3 | `BrokerSessionManager` singleton | `src/backtest/brokers/session_manager.py` | ✅ **Complete** |
+
+### Phase 2 — Authentication API Endpoints ✅ (2026-08-25)
+
+| # | Task | Deliverable | Status |
+|---|------|-------------|--------|
+| 2.1 | Auth API routes | `src/backtest/api/broker_auth.py` (mounted in `web/app.py`) | ✅ **Complete** |
+| 2.2 | Session expiry background monitor | `src/backtest/brokers/session_manager.py` | ✅ **Complete** |
+
+### Phase 3 — Authentication UI Components ✅ (2026-08-26)
+
+| # | Task | Deliverable | Status |
+|---|------|-------------|--------|
+| 3.1 | Nav broker status icon | `web/templates/base.html` + `web/static/js/broker_status.js` | ✅ **Complete** |
+| 3.2 | Auth popup modal | `web/templates/components/broker_auth_modal.html` + `web/static/js/broker_auth_modal.js` | ✅ **Complete** |
+| 3.3 | Session expiry toast | `web/static/js/broker_status.js` | ✅ **Complete** |
+
+### Phase 4 — Forward Test Page Guard ✅ (2026-08-26)
+
+| # | Task | Deliverable | Status |
+|---|------|-------------|--------|
+| 4.1 | Gate Forward Start button on auth status | `web/static/js/forward.js` (client-side gate) | ✅ **Complete** |
+| 4.2 | Server-side guard on `/api/forward/start` | `src/backtest/api/forward.py` | ✅ **Complete** |
+
+### Phase 5 — Integration & Verification ✅ (2026-08-26)
+
+| # | Task | Deliverable | Status |
+|---|------|-------------|--------|
+| 5.1 | Full auth flow integration test | `tests/manual/test_auth_flow_integration.py` (7 tests) | ✅ **Complete** |
+| 5.2 | Session expiry warning test | `tests/test_broker_expiry.py` (11 tests) | ✅ **Complete** |
+| 5.3 | Security verification checklist | `tests/test_security_verification.py` (29 tests) | ✅ **Complete** |
+
+**Final test status: 1740 passed / 3 skipped / 1 failed** (the 1 failure is
+pre-existing and unrelated — `test_mstock_auth::test_login_sends_sdk_headers`
+needs `MSTOCK_API_KEY`). All 13 auth tasks complete, all success criteria met.
+
+**Deviations from the PRD:** top-level `brokers/` paths map to
+`src/backtest/brokers/` (repo nests under `src/backtest/`, same as PRD V1).
+Task 2.2 was implemented together with 1.3 (same file), and 3.3 with 3.1
+(same file).
 
 ---
 
