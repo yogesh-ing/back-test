@@ -1,10 +1,56 @@
 /**
- * Forward Test page controller (PRD Task 4.1).
+ * Forward Test page controller (PRD Tasks 4.1 + 4.1-gate).
  * Pre-fill from forward_prefill, Start/Stop, live polling of /api/forward/status.
+ * Task 4.1-gate: Start button disabled until broker authenticated (broker:status event).
  */
 const $ = (id) => document.getElementById(id);
 const POLL_MS = 1500;
 let pollTimer = null;
+
+// ---- Task 4.1-gate: auth-aware Start button --------------------------------
+let brokerAuthenticated = false;
+
+function updateStartButtonForAuth() {
+    const btn = $("startBtn");
+    if (!btn) return;
+
+    if (brokerAuthenticated) {
+        // Authenticated: normal Start button
+        btn.disabled = false;
+        btn.textContent = "▶ Start";
+        btn.title = "";
+        btn.classList.remove("btn-disabled-auth");
+    } else {
+        // Not authenticated: disabled, red icon, opens modal on click
+        btn.disabled = true;
+        btn.textContent = "🔴 Connect mStock to Start";
+        btn.title = "Authentication required before starting forward test";
+        btn.classList.add("btn-disabled-auth");
+    }
+}
+
+function onBrokerStatusUpdate(event) {
+    const payload = event.detail;
+    const state = payload && payload.status;
+    brokerAuthenticated = (state === "authenticated" || state === "expiring_soon");
+    updateStartButtonForAuth();
+}
+
+// Override Start button click when not authenticated
+function handleStartClick(e) {
+    if (!brokerAuthenticated) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (window.BrokerAuthUI && typeof window.BrokerAuthUI.open === "function") {
+            window.BrokerAuthUI.open();
+        } else {
+            showToast("Broker authentication required", "warning");
+        }
+        return false;
+    }
+    // Authenticated: proceed with normal start
+    return startBot();
+}
 
 async function fetchJSON(url, opts) {
     const r = await fetch(url, opts);
@@ -20,7 +66,16 @@ function setStatus(status) {
     badge.textContent = label;
     badge.className = `status-badge status-${status}`;
     const running = status === "running";
-    $("startBtn").disabled = running;
+    // Combine running state with auth gate: Start is disabled if running OR not authenticated
+    const btn = $("startBtn");
+    btn.disabled = running || !brokerAuthenticated;
+    if (running) {
+        btn.textContent = "▶ Start";
+        btn.title = "";
+        btn.classList.remove("btn-disabled-auth");
+    } else {
+        updateStartButtonForAuth();
+    }
     $("stopBtn").disabled = !running;
 }
 
@@ -119,8 +174,14 @@ function applyConfig(cfg) {
 }
 
 async function init() {
-    $("startBtn").addEventListener("click", startBot);
+    // Task 4.1-gate: Start button click is gated on broker auth status
+    $("startBtn").addEventListener("click", handleStartClick);
     $("stopBtn").addEventListener("click", stopBot);
+
+    // Listen to broker:status events and gate the Start button
+    document.addEventListener("broker:status", onBrokerStatusUpdate);
+    // Initial auth state (may already be set if broker_status.js polled before we loaded)
+    updateStartButtonForAuth();
 
     let strategies = [];
     try {

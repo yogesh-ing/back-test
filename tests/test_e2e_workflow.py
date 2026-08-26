@@ -4,20 +4,65 @@ Exercises the full journey through the real engine + adapter + Flask API:
   1. strategies load → run backtest → adapt → display data
   2. 4-slot compare → parallel results → winner detection
   3. backtest result → promote config → forward pre-fill shape
+
+Task 4.2 added a server-side auth guard to /api/forward/start, so the
+forward-related test injects an authenticated stub broker.
 """
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from typing import Any
 
 import pytest
 
 from backtest.adapters.backtest_adapter import BacktestAdapter
 from backtest.api import forward as fwd
+from backtest.brokers.base import STATUS_AUTHENTICATED, BrokerAuthBase
+from backtest.brokers.session_manager import get_session_manager, reset_default_manager
 from backtest.data.synthetic import SyntheticSource
 from backtest.runner import run_on_candles
 from backtest.web.app import create_app
 
 
+class _E2EStubBroker(BrokerAuthBase):
+    """Authenticated stub for e2e tests that touch /api/forward/start."""
+
+    broker_name = "stub"
+    broker_display_name = "Stub Broker"
+
+    def __init__(self) -> None:
+        self._expires_at = (datetime.now() + timedelta(hours=2)).isoformat()
+
+    def login(self, username: str, password: str) -> dict[str, Any]:
+        return {"success": True, "message": "", "requires_totp": True}
+
+    def verify_totp(self, totp_code: str) -> dict[str, Any]:
+        return {"success": True, "message": "", "expires_at": self._expires_at}
+
+    def get_session_status(self) -> dict[str, Any]:
+        return {
+            "status": STATUS_AUTHENTICATED,
+            "expires_at": self._expires_at,
+            "broker": self.broker_name,
+        }
+
+    def get_session_token(self) -> str | None:
+        return "tok"
+
+    def logout(self) -> None:
+        pass
+
+
 @pytest.fixture()
 def client():
-    return create_app(source="synthetic").test_client()
+    reset_default_manager()
+    get_session_manager().set_broker(_E2EStubBroker())
+    app = create_app(source="synthetic")
+    try:
+        yield app.test_client()
+    finally:
+        reset_default_manager()
 
 
 @pytest.fixture(autouse=True)

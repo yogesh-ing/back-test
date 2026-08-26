@@ -30,10 +30,13 @@
 
     <div id="toast-stack" class="toast-stack"></div>
 
+    {% include "components/broker_auth_modal.html" %}
+
     <script src="{{ url_for('static', filename='js/session_state.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/toast.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/loader.js') }}"></script>
     <script src="{{ url_for('static', filename='js/broker_status.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/broker_auth_modal.js') }}"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>
