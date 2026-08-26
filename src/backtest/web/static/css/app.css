@@ -220,6 +220,8 @@ body[data-active="forward"]   .nav-link[data-key="forward"] {
 .btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn-danger:hover { opacity: .9; }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn-disabled-auth { opacity: .5 !important; cursor: pointer !important; }
+.btn-disabled-auth:hover { border-color: var(--warning) !important; }
 .forward-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 14px; }
 .control-bar { display: flex; align-items: center; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
 .status-wrap { font-size: .9rem; }
@@ -244,4 +246,68 @@ body[data-active="forward"]   .nav-link[data-key="forward"] {
 .strategy-chip {
     background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px;
     padding: 5px 14px; font-size: .85rem;
+}
+
+/* ---------------- auth popup modal (Task 3.2) ---------------- */
+.broker-auth-overlay {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(0,0,0,.55);
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; visibility: hidden; transition: opacity .2s, visibility .2s;
+}
+.broker-auth-overlay.open { opacity: 1; visibility: visible; }
+
+.broker-auth-modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); width: 420px; max-width: 92vw;
+    box-shadow: 0 8px 32px rgba(0,0,0,.5); animation: modalSlide .2s ease;
+}
+@keyframes modalSlide { from { transform: translateY(-12px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+.broker-auth-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 18px 22px; border-bottom: 1px solid var(--border);
+}
+.broker-auth-title { font-size: 1.05rem; font-weight: 700; }
+.broker-auth-close {
+    background: none; border: none; color: var(--muted); font-size: 1.4rem;
+    cursor: pointer; line-height: 1; padding: 2px 6px; border-radius: 4px;
+}
+.broker-auth-close:hover { color: var(--danger); background: var(--surface-2); }
+
+.broker-auth-view { padding: 22px; }
+.broker-auth-field { margin-bottom: 14px; }
+.broker-auth-field label { display: block; font-size: .82rem; color: var(--muted); margin-bottom: 5px; }
+
+.broker-auth-error {
+    color: var(--danger); font-size: .84rem; min-height: 1.2em; margin-bottom: 10px;
+}
+
+.broker-auth-divider {
+    border: none; border-top: 1px solid var(--border); margin: 18px 0;
+}
+
+.broker-auth-totp-section { opacity: .5; }
+.broker-auth-totp-section[aria-disabled="false"] { opacity: 1; }
+.broker-auth-totp-label { display: block; font-size: .88rem; font-weight: 600; margin-bottom: 8px; }
+
+.broker-auth-success-msg {
+    color: var(--success); font-size: .95rem; font-weight: 600;
+}
+
+.broker-auth-status-info { margin-bottom: 18px; }
+.broker-auth-info-row {
+    display: flex; justify-content: space-between; padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+}
+.broker-auth-info-row:last-child { border-bottom: none; }
+.broker-auth-info-label { color: var(--muted); font-size: .88rem; }
+.broker-auth-info-value { font-weight: 600; font-size: .92rem; }
+
+/* spinner inline with button text */
+.broker-auth-spinner {
+    display: inline-block; width: 16px; height: 16px;
+    border: 2px solid rgba(255,255,255,.3); border-top-color: #fff;
+    border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle;
+    margin-left: 6px;
 }
