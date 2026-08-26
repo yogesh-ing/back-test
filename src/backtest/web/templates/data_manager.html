@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Data Manager · Trading Bot{% endblock %}
+
+{% block content %}
+<div class="page-grid">
+    <!-- ================= FETCH PANEL ================= -->
+    <section class="card config-panel">
+        <h2 class="card-title">📥 Fetch Market Data</h2>
+        <p class="muted small">Download historical OHLCV data from mStock and store in PostgreSQL.</p>
+
+        <div class="form-row">
+            <label for="dm-timeframe">Timeframe</label>
+            <select id="dm-timeframe" class="input">
+                <option value="1min">1 Minute</option>
+                <option value="5min">5 Minute</option>
+                <option value="15min">15 Minute</option>
+                <option value="30min">30 Minute</option>
+                <option value="60min">1 Hour</option>
+                <option value="day" selected>Day</option>
+            </select>
+        </div>
+
+        <div class="form-row two-col">
+            <div>
+                <label for="dm-fromDate">From</label>
+                <input type="date" id="dm-fromDate" class="input" value="2024-01-01">
+            </div>
+            <div>
+                <label for="dm-toDate">To</label>
+                <input type="date" id="dm-toDate" class="input">
+            </div>
+        </div>
+
+        <div class="form-row">
+            <label for="dm-symbols">Symbols (optional)</label>
+            <input type="text" id="dm-symbols" class="input" placeholder="RELIANCE,TCS,INFY (or leave empty for all)">
+            <div class="hint">Comma-separated, or leave empty to fetch all NIFTY 200 stocks.</div>
+        </div>
+
+        <div class="form-row" id="dm-token-status">
+            <div class="hint" id="dm-token-msg">🔑 Authenticate via Broker button first.</div>
+        </div>
+
+        <div class="form-row" id="dm-fetch-controls">
+            <button id="dm-fetchBtn" class="btn btn-primary btn-block">📥 Start Fetch</button>
+            <button id="dm-stopBtn" class="btn btn-danger btn-block" hidden>⏹ Stop</button>
+        </div>
+    </section>
+
+    <!-- ================= PROGRESS PANEL ================= -->
+    <section id="dm-progress-section" class="card" hidden>
+        <h2 class="card-title">⏳ Fetch Progress</h2>
+
+        <div class="progress-bar-wrap">
+            <div class="progress-bar" id="dm-progress-bar" style="width: 0%"></div>
+        </div>
+        <div class="progress-stats" id="dm-progress-stats">
+            <span id="dm-status-text">Idle</span>
+            <span id="dm-fetched-count">0 / 0 symbols</span>
+            <span id="dm-bars-count">0 bars</span>
+            <span id="dm-elapsed">0s</span>
+        </div>
+
+        <div class="form-row" id="dm-current-symbol" hidden>
+            <span class="muted">Fetching:</span> <strong id="dm-current-name">-</strong>
+        </div>
+
+        <div id="dm-errors" class="error-list" hidden>
+            <h3 class="small">Failed Symbols</h3>
+            <div id="dm-error-list"></div>
+        </div>
+    </section>
+
+    <!-- ================= INVENTORY PANEL ================= -->
+    <section class="card">
+        <div class="card-head">
+            <h2 class="card-title">📊 Data Inventory</h2>
+            <button id="dm-refreshBtn" class="btn btn-sm">🔄 Refresh</button>
+        </div>
+
+        <div class="inventory-summary" id="dm-inv-summary">
+            <span id="dm-inv-symbols">0 symbols</span>
+            <span id="dm-inv-bars">0 bars</span>
+            <span id="dm-inv-timeframes">-</span>
+        </div>
+
+        <div class="inventory-table-wrap">
+            <table class="data-table" id="dm-inv-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Timeframes</th>
+                        <th>Bars</th>
+                        <th>From</th>
+                        <th>To</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+
+        <div id="dm-inv-empty" class="empty-state" hidden>
+            <p class="muted">No data in database yet. Use the fetch panel above to download data.</p>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/data_manager.js') }}"></script>
+{% endblock %}

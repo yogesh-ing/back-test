@@ -40,8 +40,33 @@ DB_URL = os.getenv(
 )
 MSTOCK_BASE_URL = os.getenv("MSTOCK_BASE_URL", "https://api.mstock.trade").rstrip("/")
 EXCHANGE = "NSE"
-TIMEFRAME = "day"
+TIMEFRAME = "day"  # default, overridden by --timeframe flag
 REQUEST_DELAY = 0.5  # seconds between API calls to avoid rate limits
+
+# Chunk sizes: mStock API returns max 1000 candles per request
+MAX_CANDLES = 1000
+CHUNK_DAYS = {
+    "day": 800,       # ~3.2 years of daily data
+    "1min": 2,         # ~2 trading days (375 bars/day)
+    "5min": 10,        # ~2 weeks
+    "15min": 30,       # ~1.5 months
+    "30min": 60,       # ~3 months
+    "60min": 120,      # ~6 months
+    "1hour": 120,
+}
+
+# mStock API uses different interval names than our internal ones
+# Our internal: 1min, 5min, 15min, 30min, 60min, day
+# mStock API:   minute, 5minute, 15minute, 30minute, 60minute, day
+_MSTOCK_INTERVAL_MAP = {
+    "1min": "minute",
+    "5min": "5minute",
+    "15min": "15minute",
+    "30min": "30minute",
+    "60min": "60minute",
+    "1hour": "60minute",
+    "day": "day",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -118,15 +143,16 @@ def load_nse_equities(engine, limit: int | None = None, symbols: list[str] | Non
     return [dict(r) for r in rows]
 
 
-def get_existing_coverage(engine, symbol: str, exchange: str = EXCHANGE) -> dict | None:
+def get_existing_coverage(engine, symbol: str, exchange: str = EXCHANGE, timeframe: str | None = None) -> dict | None:
     """Check what data we already have for a symbol in market_data_cache."""
+    tf = timeframe or TIMEFRAME
     sql = text(
         "SELECT min(ts) as earliest, max(ts) as latest, count(*) as cnt "
         "FROM market_data_cache "
         "WHERE symbol = :sym AND exchange = :exch AND timeframe = :tf"
     )
     with engine.connect() as conn:
-        row = conn.execute(sql, {"sym": symbol, "exch": exchange, "tf": TIMEFRAME}).mappings().first()
+        row = conn.execute(sql, {"sym": symbol, "exch": exchange, "tf": tf}).mappings().first()
     if row and row["cnt"] > 0:
         return {"earliest": row["earliest"], "latest": row["latest"], "count": row["cnt"]}
     return None
@@ -135,8 +161,7 @@ def get_existing_coverage(engine, symbol: str, exchange: str = EXCHANGE) -> dict
 # ---------------------------------------------------------------------------
 # Fetch from mStock API
 # ---------------------------------------------------------------------------
-MAX_CANDLES = 1000  # mStock API limit per request
-CHUNK_DAYS = 800    # ~3.2 years of trading days, safe under 1000 limit
+# CHUNK_DAYS is now a dict defined at the top of the file
 
 
 def _extract_bars(payload) -> list[dict]:
@@ -168,19 +193,24 @@ def _fetch_chunk(api_key: str, token: str, url: str, from_date: str, to_date: st
     return _extract_bars(resp.json())
 
 
-def fetch_bars(token: str, security_token: str, from_date: str, to_date: str, segment: str = EXCHANGE) -> list[dict]:
+def fetch_bars(token: str, security_token: str, from_date: str, to_date: str, segment: str = EXCHANGE, timeframe: str | None = None) -> list[dict]:
     """Fetch OHLCV bars from mStock, chunking date ranges to stay under 1000 candle limit."""
+    tf = timeframe or TIMEFRAME
+    mstock_tf = _MSTOCK_INTERVAL_MAP.get(tf, tf)  # Map to mStock API interval name
     api_key = os.getenv('MSTOCK_API_KEY', '')
-    url = f"{MSTOCK_BASE_URL}/openapi/typea/instruments/historical/{segment}/{security_token}/{TIMEFRAME}"
+    url = f"{MSTOCK_BASE_URL}/openapi/typea/instruments/historical/{segment}/{security_token}/{mstock_tf}"
 
     start = datetime.strptime(from_date, "%Y-%m-%d")
     end = datetime.strptime(to_date, "%Y-%m-%d")
+
+    # Dynamic chunk size based on timeframe
+    chunk_days = CHUNK_DAYS.get(tf, 800)
 
     all_bars = []
     chunk_start = start
 
     while chunk_start < end:
-        chunk_end = min(chunk_start + timedelta(days=CHUNK_DAYS), end)
+        chunk_end = min(chunk_start + timedelta(days=chunk_days), end)
         bars = _fetch_chunk(
             api_key, token, url,
             chunk_start.strftime("%Y-%m-%d"),
@@ -321,11 +351,18 @@ def main():
                         help="End date YYYY-MM-DD (default: today)")
     parser.add_argument("--limit", type=int, default=None,
                         help="Max instruments to fetch (for testing)")
+    parser.add_argument("--timeframe", type=str, default="day",
+                        choices=["day", "1min", "5min", "15min", "30min", "60min", "1hour"],
+                        help="Timeframe to fetch (default: day)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be fetched without fetching")
     parser.add_argument("--skip-existing", action="store_true",
                         help="Skip symbols that already have data in DB")
     args = parser.parse_args()
+
+    # Override global TIMEFRAME from CLI
+    global TIMEFRAME
+    TIMEFRAME = args.timeframe
 
     to_date = args.to_date or date.today().isoformat()
     from_date = args.from_date
@@ -350,7 +387,7 @@ def main():
     print("=" * 70)
     print(f"  Date range:  {from_date} -> {to_date}")
     print(f"  Exchange:    NSE + BSE")
-    print(f"  Interval:    {TIMEFRAME}")
+    print(f"  Timeframe:   {TIMEFRAME}")
     if symbols_list:
         print(f"  Symbols:     {symbols_list}")
     if args.limit:
@@ -395,7 +432,7 @@ def main():
         print(f"  [{i}/{len(instruments)}] {symbol} ({inst_exchange} token={sec_token})...", end=" ", flush=True)
 
         try:
-            bars = fetch_bars(token, sec_token, from_date, to_date, segment=inst_exchange)
+            bars = fetch_bars(token, sec_token, from_date, to_date, segment=inst_exchange, timeframe=TIMEFRAME)
             if not bars:
                 print("no data returned")
                 stats["skipped"] += 1

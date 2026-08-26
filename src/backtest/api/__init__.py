@@ -13,8 +13,9 @@ Mounted by :func:`backtest.web.app.create_app`.
 
 from backtest.api.backtest import backtest_bp
 from backtest.api.broker_auth import broker_auth_bp
+from backtest.api.data_manager import data_bp
 from backtest.api.forward import forward_bp
 from backtest.api.strategies import strategies_bp
 from backtest.api.symbols import symbols_bp
 
-__all__ = ["strategies_bp", "symbols_bp", "backtest_bp", "forward_bp", "broker_auth_bp"]
+__all__ = ["strategies_bp", "symbols_bp", "backtest_bp", "forward_bp", "broker_auth_bp", "data_bp"]
