@@ -17,12 +17,12 @@
         <div class="form-row">
             <label for="symbol">Symbol</label>
             <select id="symbol" class="input">
-                <option>DEMO</option>
-                <option>BTCUSD</option>
-                <option>ETHUSD</option>
-                <option>NIFTY</option>
+                <option>RELIANCE</option>
+                <option>HDFCBANK</option>
                 <option>INFY</option>
+                <option>TCS</option>
             </select>
+            <small id="symbol-status" class="text-muted" style="display:none"></small>
         </div>
 
         <div class="form-row">
@@ -107,6 +107,38 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+  const SOURCE = "{{ source }}";
+  document.addEventListener("DOMContentLoaded", function() {
+    if (SOURCE === "db") {
+      const sel = document.getElementById("symbol");
+      const status = document.getElementById("symbol-status");
+      if (!sel || !status) return;
+      sel.innerHTML = '<option disabled selected>Loading symbols…</option>';
+      status.style.display = "inline";
+      status.textContent = "Fetching available symbols from database…";
+      fetch("/api/symbols")
+        .then(r => r.json())
+        .then(data => {
+          if (!data.symbols || data.symbols.length === 0) {
+            sel.innerHTML = '<option disabled selected>No symbols found</option>';
+            status.textContent = "No data in database.";
+            return;
+          }
+          sel.innerHTML = data.symbols.map(s => `<option value="${s}">${s}</option>`).join("");
+          if (data.symbols.includes("RELIANCE")) {
+            sel.value = "RELIANCE";
+          }
+          status.textContent = `${data.count} symbols available`;
+        })
+        .catch(() => {
+          sel.innerHTML = '<option disabled selected>Error loading symbols</option>';
+          status.textContent = "Could not reach database.";
+        });
+    }
+  });
+</script>
+
 <script src="{{ url_for('static', filename='js/components/params_form.js') }}"></script>
 <script src="{{ url_for('static', filename='js/components/metrics_cards.js') }}"></script>
 <script src="{{ url_for('static', filename='js/components/trade_table.js') }}"></script>

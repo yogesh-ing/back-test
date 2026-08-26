@@ -30,6 +30,9 @@ def build_source(name: str, **kwargs):
     if source_name == "mstock":
         from backtest.live.mstock import MStockSource
         return MStockSource()
+    if source_name == "db":
+        from backtest.data.db_source import DbSource
+        return DbSource()
     raise ValueError(f"unsupported source: {name}")
 
 
