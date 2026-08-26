@@ -14,6 +14,7 @@ from typing import Any
 from flask import Flask, jsonify, render_template
 
 from backtest.api import backtest_bp, broker_auth_bp, forward_bp, strategies_bp
+from backtest.api.symbols import symbols_bp
 from backtest.brokers.session_manager import get_session_manager
 
 logger = logging.getLogger("backtest.web.app")
@@ -40,7 +41,17 @@ def create_app(source: str = "synthetic", **overrides: Any) -> Flask:
     app.config["BACKTEST_SOURCE"] = source
     app.config.update(overrides)
 
+    if source == "db":
+        try:
+            from backtest.data.db_source import DbSource
+            _src = DbSource()
+            syms = _src.list_symbols()
+            app.logger.info(f"[DB] {len(syms)} symbols available in market_data_cache")
+        except Exception as e:
+            app.logger.warning(f"[DB] Could not connect to database: {e}")
+
     app.register_blueprint(strategies_bp)
+    app.register_blueprint(symbols_bp)
     app.register_blueprint(backtest_bp)
     app.register_blueprint(forward_bp)
     app.register_blueprint(broker_auth_bp)
@@ -54,11 +65,11 @@ def create_app(source: str = "synthetic", **overrides: Any) -> Flask:
     # ------------------------------------------------------------------
     @app.get("/")
     def index() -> Any:
-        return render_template("backtest.html", active="backtest")
+        return render_template("backtest.html", active="backtest", source=app.config.get("BACKTEST_SOURCE", "synthetic"))
 
     @app.get("/backtest")
     def backtest_page() -> Any:
-        return render_template("backtest.html", active="backtest")
+        return render_template("backtest.html", active="backtest", source=app.config.get("BACKTEST_SOURCE", "synthetic"))
 
     @app.get("/dashboard")
     def dashboard_page() -> Any:
@@ -101,7 +112,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Unified Trading Bot Platform")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
-    parser.add_argument("--source", default="synthetic", help="synthetic | csv | mstock")
+    parser.add_argument("--source", default="synthetic", choices=["synthetic", "csv", "mstock", "db"], help="Data source: synthetic | csv | mstock | db")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     run_app(host=args.host, port=args.port, source=args.source, debug=args.debug)
