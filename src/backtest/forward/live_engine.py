@@ -213,6 +213,7 @@ class LiveForwardEngine:
 
         # Runtime state
         self._running = False
+        self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
@@ -526,12 +527,12 @@ class LiveForwardEngine:
                 else:
                     self._tick_live()
 
-                time.sleep(60)
+                self._stop_event.wait(60)
 
             except Exception as e:
                 logger.error("Engine loop error: %s", e, exc_info=True)
                 self.error = str(e)
-                time.sleep(30)
+                self._stop_event.wait(30)
 
         self._close_all_positions()
         self.status = "stopped"
@@ -604,6 +605,7 @@ class LiveForwardEngine:
             logger.info("Synthetic mode — no mStock auth needed")
 
         self._running = True
+        self._stop_event.clear()
         self.status = "running"
         self._save_state()
 
@@ -612,11 +614,11 @@ class LiveForwardEngine:
         logger.info("Engine thread started (mode=%s)", self.mode)
 
     def stop(self):
-        """Stop the engine."""
+        """Stop the engine (non-blocking)."""
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=30)
+        self._stop_event.set()  # Wake the thread immediately
         self.status = "stopped"
+        self._save_state()
         logger.info("Engine stop requested")
 
     def get_status(self) -> dict:
