@@ -40,17 +40,18 @@ def start() -> tuple:
     """
     data = request.get_json(silent=True) or {}
 
-    # Server-side auth guard
-    if not get_session_manager().is_authenticated():
+    strategy = data.get("strategy", "")
+    symbol = data.get("symbol", "DEMO")
+    timeframe = data.get("timeframe", "1min")
+    mode = data.get("mode", "live")  # "live" or "synthetic"
+
+    # Server-side auth guard — only required for live mode
+    if mode == "live" and not get_session_manager().is_authenticated():
         return jsonify({
             "success": False,
             "error": "broker_not_authenticated",
             "message": "Valid broker session required to start forward test",
         }), 403
-
-    strategy = data.get("strategy", "")
-    symbol = data.get("symbol", "DEMO")
-    timeframe = data.get("timeframe", "1min")
     try:
         capital = float(data.get("capital", 100_000))
     except (TypeError, ValueError):
@@ -95,10 +96,10 @@ def start() -> tuple:
         state_id = result.fetchone()[0]
         conn.commit()
 
-    # Start the live engine
+    # Start the engine
     from backtest.forward.live_engine import start_engine
     try:
-        engine = start_engine(state_id, db_url=DB_URL)
+        engine = start_engine(state_id, db_url=DB_URL, mode=mode)
     except Exception as exc:
         # Mark state as failed
         with engine_db.connect() as conn:

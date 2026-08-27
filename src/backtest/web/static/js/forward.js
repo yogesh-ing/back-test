@@ -16,7 +16,8 @@ let brokerAuthenticated = false;
 function updateStartButtonForAuth() {
     const btn = $("startBtn");
     if (!btn) return;
-    if (brokerAuthenticated) {
+    const mode = $("dataMode")?.value;
+    if (mode === "synthetic" || brokerAuthenticated) {
         btn.disabled = false;
         btn.textContent = "▶ Start";
         btn.title = "";
@@ -24,7 +25,7 @@ function updateStartButtonForAuth() {
     } else {
         btn.disabled = true;
         btn.textContent = "🔴 Connect mStock to Start";
-        btn.title = "Authentication required before starting forward test";
+        btn.title = "Authentication required for live mode";
         btn.classList.add("btn-disabled-auth");
     }
 }
@@ -37,13 +38,19 @@ function onBrokerStatusUpdate(event) {
 }
 
 function handleStartClick(e) {
+    const mode = $("dataMode").value;
+    // Synthetic mode doesn't need broker auth
+    if (mode === "synthetic") {
+        return startBot();
+    }
+    // Live mode needs broker auth
     if (!brokerAuthenticated) {
         e.preventDefault();
         e.stopPropagation();
         if (window.BrokerAuthUI && typeof window.BrokerAuthUI.open === "function") {
             window.BrokerAuthUI.open();
         } else {
-            showToast("Broker authentication required", "warning");
+            showToast("Broker authentication required for live mode", "warning");
         }
         return false;
     }
@@ -175,11 +182,13 @@ function renderLive(data) {
 
 // ---- Start / Stop / Poll -------------------------------------------------
 function forwardConfig() {
+    const mode = $("dataMode").value;
     return {
         strategy: $("strategy").value,
         symbol: $("symbol").value.toUpperCase(),
         timeframe: $("timeframe").value,
         capital: Number($("capital").value) || 100000,
+        mode: mode,
         params: collectParamsFrom($("params-container")),
     };
 }
@@ -251,6 +260,7 @@ async function loadSymbols() {
 async function init() {
     $("startBtn").addEventListener("click", handleStartClick);
     $("stopBtn").addEventListener("click", stopBot);
+    $("dataMode").addEventListener("change", updateStartButtonForAuth);
     document.addEventListener("broker:status", onBrokerStatusUpdate);
     updateStartButtonForAuth();
 

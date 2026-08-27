@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from typing import Any
 
+import pandas as pd
 from flask import Blueprint, current_app, jsonify, request
 
 from backtest.adapters.backtest_adapter import BacktestAdapter
@@ -17,6 +19,10 @@ from backtest.runner import build_source, run_on_candles
 from backtest.strategy.registry import get_strategy
 
 backtest_bp = Blueprint("backtest_api", __name__)
+
+# Number of extra bars to load before start_date for strategy warmup.
+# RSI(14) needs ~14 bars; SMA(50) needs ~50. 60 covers most strategies.
+WARMUP_BARS = 60
 
 _TIMEFRAME_TO_INTERVAL = {
     "1D": "day", "D": "day", "DAY": "day", "1D": "day",
@@ -41,6 +47,48 @@ def _source() -> Any:
 
 def _candles(symbol: str, from_date: str, to_date: str, timeframe: str):
     return _source().get_candles(symbol, from_date, to_date, _interval(timeframe))
+
+
+def _trim_to_range(result, from_date: str, to_date: str):
+    """Trim backtest result to the requested date range.
+
+    Removes warmup bars from candles, equity, returns, and position series
+    so the user only sees the date range they asked for.
+    Uses string date comparison to avoid tz-aware/tz-naive issues.
+    """
+    from backtest.engine.backtester import BacktestResult
+
+    # Use string date comparison — avoids tz mismatch entirely
+    idx = result.candles.index
+    idx_dates = idx.strftime("%Y-%m-%d")
+    mask = (idx_dates >= from_date) & (idx_dates <= to_date)
+    trimmed_candles = result.candles.loc[mask]
+
+    if trimmed_candles.empty:
+        return result
+
+    # Trim equity, returns, position to same range
+    trimmed_equity = result.equity.loc[mask]
+    trimmed_returns = result.returns.loc[mask]
+    trimmed_position = result.position.loc[mask]
+
+    # Renormalize equity so it starts at initial capital
+    if len(trimmed_equity) > 0:
+        initial = result.config.initial_capital
+        cum_returns = (1 + trimmed_returns).cumprod()
+        trimmed_equity = pd.Series(
+            initial * cum_returns.values,
+            index=trimmed_equity.index,
+        )
+
+    return BacktestResult(
+        equity=trimmed_equity,
+        returns=trimmed_returns,
+        position=trimmed_position,
+        candles=trimmed_candles,
+        config=result.config,
+        metrics=result.metrics,
+    )
 
 
 def _resolve_strategy(name: str):
@@ -83,18 +131,29 @@ def run_backtest() -> tuple:
     params = data.get("params") or {}
     timeframe = data.get("timeframe", "1D")
 
+    # Calculate warmup start date (extra bars before from_date for strategy warmup)
     try:
-        candles = _candles(symbol, from_date, to_date, timeframe)
+        from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+        warmup_start = (from_dt - timedelta(days=WARMUP_BARS * 2)).strftime("%Y-%m-%d")
+    except ValueError:
+        warmup_start = from_date
+
+    try:
+        candles_full = _candles(symbol, warmup_start, to_date, timeframe)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"data error: {exc}"}), 400
 
+    # Run strategy on full dataset (includes warmup bars)
     config = BacktestConfig(initial_capital=capital)
     try:
-        result = run_on_candles(candles, strategy, params, symbol, config)
+        result = run_on_candles(candles_full, strategy, params, symbol, config)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"backtest failed: {exc}"}), 500
+
+    # Trim results to the requested date range (strip warmup period)
+    result = _trim_to_range(result, from_date, to_date)
 
     payload = BacktestAdapter(result).to_all()
     payload["config"].update(
@@ -130,6 +189,13 @@ def run_many() -> tuple:
 
     source = _source()
 
+    # Calculate warmup start date
+    try:
+        from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+        warmup_start = (from_dt - timedelta(days=WARMUP_BARS * 2)).strftime("%Y-%m-%d")
+    except ValueError:
+        warmup_start = from_date
+
     def run_slot(slot: dict) -> tuple[Any, dict]:
         sid = slot.get("id")
         try:
@@ -140,9 +206,10 @@ def run_many() -> tuple:
             params = slot.get("params") or {}
             timeframe = slot.get("timeframe", "1D")
             interval = _interval(timeframe)
-            candles = source.get_candles(symbol, from_date, to_date, interval)
+            candles_full = source.get_candles(symbol, warmup_start, to_date, interval)
             config = BacktestConfig(initial_capital=capital)
-            result = run_on_candles(candles, strategy, params, symbol, config)
+            result = run_on_candles(candles_full, strategy, params, symbol, config)
+            result = _trim_to_range(result, from_date, to_date)
             payload = BacktestAdapter(result).to_all()
             payload["config"].update(
                 {

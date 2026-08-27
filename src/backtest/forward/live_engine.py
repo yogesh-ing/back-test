@@ -1,11 +1,15 @@
 """Live Forward Test Engine.
 
-Polls mStock API every 60 seconds for 1-minute bars, feeds them to a
-strategy, executes paper trades, and persists state to PostgreSQL.
+Modes:
+  - ``live``: polls mStock API every 60 seconds for 1-minute bars.
+  - ``synthetic``: generates random-walk OHLC bars every 60 seconds.
+
+Both modes feed bars to a strategy, execute paper trades, and persist
+state to PostgreSQL.
 
 Usage::
 
-    engine = LiveForwardEngine(state_id=1)
+    engine = LiveForwardEngine(state_id=1, mode="synthetic")
     engine.start()   # blocks in a background thread
     engine.stop()
 """
@@ -15,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import threading
 import time
 from datetime import datetime, timezone, timedelta, date
@@ -26,11 +31,16 @@ import requests
 from sqlalchemy import text
 
 from backtest.data.base import normalize_candles
+
+
 class PaperPortfolio:
     """Simple paper trading portfolio tracker."""
+
     def __init__(self, initial_capital: float = 100000.0):
         self.initial_capital = initial_capital
         self.open_positions: list[dict] = []
+
+
 from backtest.live.auth import get_session_token
 from backtest.runner import build_source
 from backtest.strategy.registry import get_strategy
@@ -55,12 +65,9 @@ def _is_market_open(now_utc: datetime | None = None) -> bool:
     """Check if NSE market is currently open."""
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
-    # Convert to IST
     ist = now_utc + timedelta(hours=5, minutes=30)
-    # Check if weekday
     if ist.weekday() >= 5:
         return False
-    # Check hours
     market_open = ist.replace(
         hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0
     )
@@ -93,7 +100,6 @@ def _fetch_latest_bar(
         resp.raise_for_status()
         payload = resp.json()
 
-        # Extract candles
         candles = []
         if isinstance(payload, dict):
             data = payload.get("data", payload)
@@ -105,7 +111,6 @@ def _fetch_latest_bar(
         if not candles:
             return None
 
-        # Return the last bar
         last = candles[-1]
         if isinstance(last, list) and len(last) >= 6:
             return {
@@ -156,20 +161,55 @@ def _resolve_security_token(api_key: str, token: str, symbol: str) -> str:
         raise
 
 
+def _generate_synthetic_bar(last_bar: dict | None, ts: datetime) -> dict:
+    """Generate a synthetic OHLCV bar using random walk.
+
+    If last_bar is None, starts from a random price between 100-500.
+    Otherwise walks from the last close with ±0.5% random movement.
+    """
+    if last_bar is None:
+        base = random.uniform(100, 500)
+    else:
+        base = last_bar["close"]
+
+    # Random walk: -0.5% to +0.5%
+    change_pct = random.uniform(-0.005, 0.005)
+    open_price = base
+    close_price = base * (1 + change_pct)
+
+    # High/low within the bar
+    spread = abs(close_price - open_price) * random.uniform(0.2, 1.5)
+    high = max(open_price, close_price) + spread * 0.5
+    low = min(open_price, close_price) - spread * 0.5
+
+    volume = random.randint(500, 50000)
+
+    return {
+        "ts": ts.strftime("%Y-%m-%d %H:%M:%S%z") or ts.isoformat(),
+        "open": round(open_price, 2),
+        "high": round(high, 2),
+        "low": round(low, 2),
+        "close": round(close_price, 2),
+        "volume": volume,
+    }
+
+
 class LiveForwardEngine:
     """Live forward test engine.
 
-    Runs in a background thread, polls mStock API every 60 seconds,
-    feeds bars to strategy, executes paper trades, saves to DB.
+    Runs in a background thread, polls mStock API (or generates synthetic bars)
+    every 60 seconds, feeds bars to strategy, executes paper trades, saves to DB.
     """
 
     def __init__(
         self,
         state_id: int,
         db_url: str | None = None,
+        mode: str = "live",
     ):
         self.state_id = state_id
         self.db_url = db_url or os.getenv("FORWARD_TEST_DB_URL", "")
+        self.mode = mode  # "live" or "synthetic"
 
         # Runtime state
         self._running = False
@@ -188,7 +228,7 @@ class LiveForwardEngine:
         self._bars: list[dict] = []
         self._last_bar_ts: str | None = None
 
-        # mStock auth
+        # mStock auth (only needed for live mode)
         self._token = ""
         self._api_key = ""
         self._security_token = ""
@@ -215,19 +255,14 @@ class LiveForwardEngine:
             if row is None:
                 raise ValueError(f"State {self.state_id} not found")
 
-            self._strategy = get_strategy(row.strategy)
-            if self._params:
-                self._strategy = get_strategy(row.strategy)(**self._params)
-            else:
-                params = json.loads(row.params) if isinstance(row.params, str) else (row.params or {})
-                self._strategy = get_strategy(row.strategy)(**params)
+            params = json.loads(row.params) if isinstance(row.params, str) else (row.params or {})
+            self._strategy = get_strategy(row.strategy)(**params)
 
             self._symbol = row.symbol
             self._timeframe = row.timeframe or "1min"
             self._capital = float(row.capital) if row.capital else 100000.0
-            self._params = json.loads(row.params) if isinstance(row.params, str) else (row.params or {})
+            self._params = params
 
-            # Restore last bar timestamp
             if row.last_bar_ts:
                 self._last_bar_ts = str(row.last_bar_ts)
 
@@ -303,18 +338,14 @@ class LiveForwardEngine:
     def _strategy_state(self) -> dict:
         """Extract strategy internal state for persistence."""
         state = {}
-        # SMA crossover state
         if hasattr(self._strategy, "fast"):
             state["fast_period"] = self._strategy.fast
         if hasattr(self._strategy, "slow"):
             state["slow_period"] = self._strategy.slow
-        # RSI state
         if hasattr(self._strategy, "period"):
             state["rsi_period"] = self._strategy.period
-        # Donchian state
         if hasattr(self._strategy, "lookback"):
             state["lookback"] = self._strategy.lookback
-        # Bars seen count
         state["bars_seen"] = len(self._bars)
         return state
 
@@ -391,7 +422,6 @@ class LiveForwardEngine:
         """Save current equity snapshot to DB."""
         unrealized = 0.0
         for pos in self._portfolio.open_positions:
-            # Approximate with last close
             if self._bars:
                 last_close = self._bars[-1]["close"]
                 if pos["side"] == "LONG":
@@ -420,7 +450,6 @@ class LiveForwardEngine:
         """Process a single bar: feed to strategy, execute trades."""
         ts = bar["ts"]
 
-        # Skip if we already processed this bar
         if self._last_bar_ts and ts <= self._last_bar_ts:
             return
 
@@ -431,7 +460,6 @@ class LiveForwardEngine:
         self._last_bar_ts = ts
         self.total_bars += 1
 
-        # Build DataFrame for strategy
         if len(self._bars) < 10:
             logger.info("Accumulating bars: %d/%d", len(self._bars), 10)
             return
@@ -441,7 +469,6 @@ class LiveForwardEngine:
         df = df.set_index("ts")[["open", "high", "low", "close", "volume"]]
         df = df.sort_index()
 
-        # Generate signals
         try:
             signals = self._strategy.generate_signals(df)
             current_signal = int(signals.iloc[-1])
@@ -451,19 +478,15 @@ class LiveForwardEngine:
 
         current_price = bar["close"]
 
-        # Check existing positions
         has_long = any(p["side"] == "LONG" for p in self._portfolio.open_positions)
         has_short = any(p["side"] == "SHORT" for p in self._portfolio.open_positions)
 
-        # Execute based on signal
         if current_signal == 1 and not has_long:
-            # Close any short
             for pos in list(self._portfolio.open_positions):
                 if pos["side"] == "SHORT":
                     self._close_trade(pos["trade_id"], current_price, ts)
                     self._portfolio.open_positions.remove(pos)
 
-            # Open long
             qty = max(1, int(self._capital * 0.95 / current_price))
             trade = {
                 "symbol": self._symbol,
@@ -479,38 +502,30 @@ class LiveForwardEngine:
             logger.info("BUY %s @ ₹%.2f x %d", self._symbol, current_price, qty)
 
         elif current_signal == 0 and has_long:
-            # Close long
             for pos in list(self._portfolio.open_positions):
                 if pos["side"] == "LONG":
                     self._close_trade(pos["trade_id"], current_price, ts)
                     self._portfolio.open_positions.remove(pos)
 
-        # Save equity snapshot
         self._save_equity()
 
     def _run_loop(self):
         """Main polling loop (runs in background thread)."""
-        logger.info("Engine started: symbol=%s strategy=%s capital=%.0f",
-                     self._symbol, self._strategy.name if self._strategy else "?", self._capital)
+        logger.info(
+            "Engine started: symbol=%s strategy=%s mode=%s capital=%.0f",
+            self._symbol,
+            self._strategy.name if self._strategy else "?",
+            self.mode,
+            self._capital,
+        )
 
         while self._running:
             try:
-                # Check market hours
-                if not _is_market_open():
-                    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-                    logger.info("Market closed (IST %s). Sleeping 60s...", now_ist.strftime("%H:%M"))
-                    time.sleep(60)
-                    continue
-
-                # Fetch latest bar
-                bar = _fetch_latest_bar(self._token, self._api_key, self._security_token)
-                if bar:
-                    self._process_bar(bar)
-                    self._save_state()
+                if self.mode == "synthetic":
+                    self._tick_synthetic()
                 else:
-                    logger.debug("No new bar returned")
+                    self._tick_live()
 
-                # Sleep 60 seconds
                 time.sleep(60)
 
             except Exception as e:
@@ -518,11 +533,44 @@ class LiveForwardEngine:
                 self.error = str(e)
                 time.sleep(30)
 
-        # Engine stopped — close any open positions
         self._close_all_positions()
         self.status = "stopped"
         self._save_state()
         logger.info("Engine stopped")
+
+    def _tick_live(self):
+        """One tick of the live engine: fetch bar from mStock API."""
+        if not _is_market_open():
+            now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+            logger.info("Market closed (IST %s). Sleeping 60s...", now_ist.strftime("%H:%M"))
+            return
+
+        bar = _fetch_latest_bar(self._token, self._api_key, self._security_token)
+        if bar:
+            self._process_bar(bar)
+            self._save_state()
+        else:
+            logger.debug("No new bar returned")
+
+    def _tick_synthetic(self):
+        """One tick of the synthetic engine: generate a random-walk bar."""
+        now = datetime.now(timezone.utc)
+        last_bar = self._bars[-1] if self._bars else None
+
+        # Generate bar with timestamp 1 minute after the last bar
+        if last_bar:
+            try:
+                last_ts = pd.to_datetime(last_bar["ts"])
+                new_ts = last_ts + timedelta(minutes=1)
+            except Exception:
+                new_ts = now
+        else:
+            new_ts = now
+
+        bar = _generate_synthetic_bar(last_bar, new_ts)
+        self._process_bar(bar)
+        self._save_state()
+        logger.debug("Synthetic bar: close=%.2f ts=%s", bar["close"], bar["ts"])
 
     def _close_all_positions(self):
         """Close all open positions at last known price."""
@@ -541,30 +589,27 @@ class LiveForwardEngine:
             logger.warning("Engine already running")
             return
 
-        # Load state from DB
         self._load_state()
-
-        # Initialize portfolio
         self._portfolio = PaperPortfolio(initial_capital=self._capital)
 
-        # Get mStock auth
-        self._token = get_session_token()
-        self._api_key = os.getenv("MSTOCK_API_KEY", "")
+        if self.mode == "live":
+            # Live mode: need mStock auth
+            self._token = get_session_token()
+            self._api_key = os.getenv("MSTOCK_API_KEY", "")
+            self._security_token = _resolve_security_token(self._api_key, self._token, self._symbol)
+            self._load_historical_bars()
+        else:
+            # Synthetic mode: load historical bars for warmup, no API auth needed
+            self._load_historical_bars()
+            logger.info("Synthetic mode — no mStock auth needed")
 
-        # Resolve security token
-        self._security_token = _resolve_security_token(self._api_key, self._token, self._symbol)
-
-        # Load historical bars from DB for strategy warmup
-        self._load_historical_bars()
-
-        # Start background thread
         self._running = True
         self.status = "running"
         self._save_state()
 
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="live-forward")
         self._thread.start()
-        logger.info("Engine thread started")
+        logger.info("Engine thread started (mode=%s)", self.mode)
 
     def stop(self):
         """Stop the engine."""
@@ -607,6 +652,7 @@ class LiveForwardEngine:
             "symbol": self._symbol,
             "strategy": self._strategy.name if self._strategy else "",
             "timeframe": self._timeframe,
+            "mode": self.mode,
             "capital": self._capital,
             "equity": round(equity, 2),
             "unrealized_pnl": round(unrealized, 2),
@@ -614,7 +660,7 @@ class LiveForwardEngine:
             "total_trades": self.total_trades,
             "bars_in_memory": len(self._bars),
             "last_bar_ts": self._last_bar_ts,
-            "market_open": _is_market_open(),
+            "market_open": _is_market_open() if self.mode == "live" else True,
             "positions": positions,
             "error": self.error,
         }
@@ -625,17 +671,17 @@ _engines: dict[int, LiveForwardEngine] = {}
 _engines_lock = threading.Lock()
 
 
-def get_engine(state_id: int, db_url: str | None = None) -> LiveForwardEngine:
+def get_engine(state_id: int, db_url: str | None = None, mode: str = "live") -> LiveForwardEngine:
     """Get or create a LiveForwardEngine for a state_id."""
     with _engines_lock:
         if state_id not in _engines:
-            _engines[state_id] = LiveForwardEngine(state_id=state_id, db_url=db_url)
+            _engines[state_id] = LiveForwardEngine(state_id=state_id, db_url=db_url, mode=mode)
         return _engines[state_id]
 
 
-def start_engine(state_id: int, db_url: str | None = None) -> LiveForwardEngine:
+def start_engine(state_id: int, db_url: str | None = None, mode: str = "live") -> LiveForwardEngine:
     """Start a live forward engine."""
-    engine = get_engine(state_id, db_url)
+    engine = get_engine(state_id, db_url, mode=mode)
     engine.start()
     return engine
 
