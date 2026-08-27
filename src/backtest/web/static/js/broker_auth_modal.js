@@ -207,6 +207,8 @@ const BrokerAuthUI = (() => {
             await BrokerStatus.refresh();
         }
         showAuthenticated();
+        // Auto-close modal after brief delay so user sees success then continues
+        setTimeout(() => close(), 1500);
     }
 
     // ---- logout ------------------------------------------------------------

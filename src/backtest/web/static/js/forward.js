@@ -1,27 +1,27 @@
 /**
- * Forward Test page controller (PRD Tasks 4.1 + 4.1-gate).
- * Pre-fill from forward_prefill, Start/Stop, live polling of /api/forward/status.
- * Task 4.1-gate: Start button disabled until broker authenticated (broker:status event).
+ * Forward Test page controller — live paper trading.
+ *
+ * Start → launches LiveForwardEngine (background thread).
+ * Status polled every 2 seconds. Equity chart updates in real-time.
+ * Trade feed shows executed paper trades with PnL.
  */
 const $ = (id) => document.getElementById(id);
-const POLL_MS = 1500;
+const POLL_MS = 2000;
 let pollTimer = null;
+let currentStateId = null;
 
-// ---- Task 4.1-gate: auth-aware Start button --------------------------------
+// ---- Auth gate -----------------------------------------------------------
 let brokerAuthenticated = false;
 
 function updateStartButtonForAuth() {
     const btn = $("startBtn");
     if (!btn) return;
-
     if (brokerAuthenticated) {
-        // Authenticated: normal Start button
         btn.disabled = false;
         btn.textContent = "▶ Start";
         btn.title = "";
         btn.classList.remove("btn-disabled-auth");
     } else {
-        // Not authenticated: disabled, red icon, opens modal on click
         btn.disabled = true;
         btn.textContent = "🔴 Connect mStock to Start";
         btn.title = "Authentication required before starting forward test";
@@ -36,7 +36,6 @@ function onBrokerStatusUpdate(event) {
     updateStartButtonForAuth();
 }
 
-// Override Start button click when not authenticated
 function handleStartClick(e) {
     if (!brokerAuthenticated) {
         e.preventDefault();
@@ -48,7 +47,6 @@ function handleStartClick(e) {
         }
         return false;
     }
-    // Authenticated: proceed with normal start
     return startBot();
 }
 
@@ -59,32 +57,66 @@ async function fetchJSON(url, opts) {
     return d;
 }
 
-// ---- status badge ----
+// ---- Status badge --------------------------------------------------------
 function setStatus(status) {
     const badge = $("statusBadge");
-    const label = { idle: "Idle", running: "Running", stopped: "Stopped" }[status] || status;
+    const label = { idle: "Idle", running: "Running", stopped: "Stopped", error: "Error" }[status] || status;
     badge.textContent = label;
     badge.className = `status-badge status-${status}`;
     const running = status === "running";
-    // Combine running state with auth gate: Start is disabled if running OR not authenticated
-    const btn = $("startBtn");
-    btn.disabled = running || !brokerAuthenticated;
+    $("startBtn").disabled = running || !brokerAuthenticated;
     if (running) {
-        btn.textContent = "▶ Start";
-        btn.title = "";
-        btn.classList.remove("btn-disabled-auth");
+        $("startBtn").textContent = "▶ Start";
+        $("startBtn").classList.remove("btn-disabled-auth");
     } else {
         updateStartButtonForAuth();
     }
     $("stopBtn").disabled = !running;
 }
 
-function setProgress(p) {
-    const pct = p ? p.pct : 0;
-    $("progressBar").style.width = `${pct}%`;
-    $("progressText").textContent = p ? `${p.revealed} / ${p.total} bars (${pct}%)` : "";
+// ---- Live status banner --------------------------------------------------
+function updateLiveBanner(data) {
+    const banner = $("liveStatusBanner");
+    if (data.status === "idle" || data.status === "stopped") {
+        banner.style.display = "none";
+        return;
+    }
+    banner.style.display = "block";
+
+    // Market indicator
+    const dot = $("marketDot");
+    const label = $("marketLabel");
+    if (data.market_open) {
+        dot.style.background = "#4caf50";
+        label.textContent = "Market Open";
+    } else {
+        dot.style.background = "#f44336";
+        label.textContent = "Market Closed";
+    }
+
+    // Last bar
+    if (data.last_bar_ts) {
+        const dt = new Date(data.last_bar_ts);
+        $("lastBarInfo").textContent = `Last bar: ${dt.toLocaleString("en-IN")}`;
+    }
+
+    // Stats
+    $("barsProcessed").textContent = `Bars: ${data.total_bars || 0}`;
+    $("tradesCount").textContent = `Trades: ${data.total_trades || 0}`;
+    $("equityDisplay").textContent = `₹${(data.equity || 0).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+
+    // Unrealized PnL
+    const pnlEl = $("unrealizedPnl");
+    if (data.unrealized_pnl && data.unrealized_pnl !== 0) {
+        const cls = data.unrealized_pnl >= 0 ? "pos" : "neg";
+        pnlEl.textContent = ` (${data.unrealized_pnl >= 0 ? "+" : ""}₹${data.unrealized_pnl.toFixed(2)})`;
+        pnlEl.className = cls;
+    } else {
+        pnlEl.textContent = "";
+    }
 }
 
+// ---- Positions table -----------------------------------------------------
 function renderPositions(positions) {
     const body = $("positionsBody");
     if (!positions || !positions.length) {
@@ -95,44 +127,79 @@ function renderPositions(positions) {
         const cls = p.unrealized_pnl_pct >= 0 ? "pos" : "neg";
         return `<tr>
             <td>${p.symbol}</td><td>${p.side}</td>
-            <td>${p.entry}</td><td>${p.current}</td>
-            <td class="${cls}">${p.unrealized_pnl_pct >= 0 ? "+" : ""}${p.unrealized_pnl_pct}%</td>
-            <td>${p.entry_date}</td></tr>`;
+            <td>₹${p.entry}</td><td>₹${p.current || "—"}</td>
+            <td class="${cls}">${p.unrealized_pnl_pct >= 0 ? "+" : ""}${p.unrealized_pnl_pct || 0}%</td>
+            <td>${p.entry_date || "—"}</td></tr>`;
     }).join("");
 }
 
-function renderLive(data) {
-    setStatus(data.status);
-    setProgress(data.progress);
-    renderMetricsCards("metricsCards", data.metrics);
-    renderEquityChart("equityChart", data.equity);
-    renderPositions(data.positions);
-    TradeTable.render("tradeTable-wrap", data.trades);
+// ---- Trade feed ----------------------------------------------------------
+function renderTrades(trades) {
+    if (!trades || !trades.length) return;
+    const tbody = $("tradeTable")?.querySelector("tbody");
+    if (!tbody) return;
+    tbody.innerHTML = trades.map((t, i) => {
+        const pnlCls = (t.pnl || 0) >= 0 ? "pos" : "neg";
+        const result = t.status === "open" ? "Open" : ((t.pnl || 0) >= 0 ? "Win" : "Loss");
+        return `<tr>
+            <td>${i + 1}</td>
+            <td>${t.entry_date || "—"}</td>
+            <td>${t.side}</td>
+            <td>₹${t.entry}</td>
+            <td>${t.exit ? "₹" + t.exit : "—"}</td>
+            <td class="${pnlCls}">${t.pnl != null ? "₹" + t.pnl.toFixed(2) : "—"}</td>
+            <td class="${pnlCls}">${result}</td></tr>`;
+    }).join("");
 }
 
-// ---- start / stop / poll ----
+// ---- Equity chart --------------------------------------------------------
+let equityData = [];
+
+async function fetchEquity() {
+    try {
+        const data = await fetchJSON("/api/forward/equity");
+        if (data && data.length > 0) {
+            equityData = data;
+            renderEquityChart("equityChart", data.map(d => d.equity));
+        }
+    } catch { /* ignore */ }
+}
+
+// ---- Render all ----------------------------------------------------------
+function renderLive(data) {
+    setStatus(data.status);
+    updateLiveBanner(data);
+    renderPositions(data.positions);
+    if (data.trades) renderTrades(data.trades);
+}
+
+// ---- Start / Stop / Poll -------------------------------------------------
 function forwardConfig() {
     return {
-        strategy: $("strategy").value, symbol: $("symbol").value,
-        timeframe: $("timeframe").value, from_date: $("fromDate").value,
-        to_date: $("toDate").value, capital: Number($("capital").value) || 0,
+        strategy: $("strategy").value,
+        symbol: $("symbol").value.toUpperCase(),
+        timeframe: $("timeframe").value,
+        capital: Number($("capital").value) || 100000,
         params: collectParamsFrom($("params-container")),
     };
 }
 
 async function startBot() {
     if (!$("strategy").value) { showToast("Select a strategy first", "warning"); return; }
-    if (!$("fromDate").value || !$("toDate").value) { showToast("Pick a date range", "warning"); return; }
+    if (!$("symbol").value) { showToast("Enter a symbol", "warning"); return; }
+
     $("livePanel").hidden = false;
     setStatus("running");
-    setProgress(null);
+
     try {
-        await fetchJSON("/api/forward/start", {
-            method: "POST", headers: { "Content-Type": "application/json" },
+        const result = await fetchJSON("/api/forward/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify(forwardConfig()),
         });
-        showToast("Forward test started", "success");
-        poll();   // immediate first poll
+        currentStateId = result.state_id;
+        showToast(`Forward test started: ${result.symbol}`, "success");
+        poll();
         pollTimer = setInterval(poll, POLL_MS);
     } catch (err) {
         showToast(err.message || "Start failed", "error");
@@ -141,21 +208,26 @@ async function startBot() {
 }
 
 async function stopBot() {
-    try { await fetch("/api/forward/stop", { method: "POST" }); } catch { /* ignore */ }
+    try {
+        await fetch("/api/forward/stop", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ state_id: currentStateId }),
+        });
+    } catch { /* ignore */ }
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-    await poll();   // final refresh
+    await poll();
     setStatus("stopped");
+    showToast("Forward test stopped", "info");
 }
 
 async function poll() {
     try {
         const data = await fetchJSON("/api/forward/status");
         renderLive(data);
+        await fetchEquity();
         if (data.status !== "running") {
             if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-            if (data.status === "stopped" && data.progress && data.progress.pct >= 100) {
-                showToast("Replay complete", "success");
-            }
         }
     } catch (err) {
         showToast(err.message || "Status failed", "error");
@@ -163,33 +235,32 @@ async function poll() {
     }
 }
 
-// ---- init + pre-fill (Task 4.1) ----
-function applyConfig(cfg) {
-    if (cfg.strategy) $("strategy").value = cfg.strategy;
-    if (cfg.symbol) $("symbol").value = cfg.symbol;
-    if (cfg.timeframe) $("timeframe").value = cfg.timeframe;
-    if (cfg.from_date) $("fromDate").value = cfg.from_date;
-    if (cfg.to_date) $("toDate").value = cfg.to_date;
-    if (cfg.capital) $("capital").value = cfg.capital;
+// ---- Symbol autocomplete from DB -----------------------------------------
+async function loadSymbols() {
+    try {
+        const resp = await fetchJSON("/api/symbols");
+        const symbols = resp.symbols || resp;
+        const list = $("symbolList");
+        if (list && Array.isArray(symbols)) {
+            list.innerHTML = symbols.map(s => `<option value="${s}">`).join("");
+        }
+    } catch { /* ignore */ }
 }
 
+// ---- Init ----------------------------------------------------------------
 async function init() {
-    // Task 4.1-gate: Start button click is gated on broker auth status
     $("startBtn").addEventListener("click", handleStartClick);
     $("stopBtn").addEventListener("click", stopBot);
-
-    // Listen to broker:status events and gate the Start button
     document.addEventListener("broker:status", onBrokerStatusUpdate);
-    // Initial auth state (may already be set if broker_status.js polled before we loaded)
     updateStartButtonForAuth();
 
+    // Load strategies
     let strategies = [];
     try {
         strategies = await fetchJSON("/api/strategies");
         $("strategy").innerHTML = strategies.map((s) => `<option value="${s.name}">${s.name}</option>`).join("");
     } catch {
         $("strategy").innerHTML = '<option value="">failed to load</option>';
-        showToast("Could not load strategies", "error");
     }
 
     $("strategy").addEventListener("change", async () => {
@@ -199,13 +270,33 @@ async function init() {
         } catch (err) { showToast(err.message, "error"); }
     });
 
+    // Load symbol autocomplete + add input filtering
+    await loadSymbols();
+    const symbolInput = $("symbol");
+    symbolInput.addEventListener("input", () => {
+        const val = symbolInput.value.toUpperCase();
+        const list = $("symbolList");
+        if (!list) return;
+        const options = list.querySelectorAll("option");
+        let shown = 0;
+        options.forEach(opt => {
+            const match = opt.value.toUpperCase().includes(val);
+            opt.style.display = match ? "" : "none";
+            if (match && shown < 20) shown++;
+        });
+    });
+
+    // Pre-fill from backtest
     const pre = SessionState.forwardPrefill;
     if (pre && pre.config && pre.config.strategy) {
-        applyConfig(pre.config);
+        $("strategy").value = pre.config.strategy;
+        if (pre.config.symbol) $("symbol").value = pre.config.symbol;
+        if (pre.config.timeframe) $("timeframe").value = pre.config.timeframe;
+        if (pre.config.capital) $("capital").value = pre.config.capital;
         try {
             renderParamsInto($("params-container"),
                 await fetchJSON(`/api/strategies/${encodeURIComponent(pre.config.strategy)}/params`));
-            applyOverridesInto($("params-container"), pre.config.params);
+            if (pre.config.params) applyOverridesInto($("params-container"), pre.config.params);
         } catch { /* ignore */ }
         SessionState.clear(SessionState.keys.forwardPrefill);
         $("prefillBanner").hidden = false;
@@ -215,6 +306,19 @@ async function init() {
                 await fetchJSON(`/api/strategies/${encodeURIComponent($("strategy").value)}/params`));
         } catch { /* ignore */ }
     }
+
+    // Check if engine is already running
+    try {
+        const status = await fetchJSON("/api/forward/status");
+        if (status.status === "running") {
+            currentStateId = status.state_id;
+            $("livePanel").hidden = false;
+            setStatus("running");
+            renderLive(status);
+            pollTimer = setInterval(poll, POLL_MS);
+        }
+    } catch { /* ignore */ }
+
     setStatus("idle");
 }
 

@@ -3,24 +3,43 @@
 
 {% block content %}
 <h1 class="page-title">Forward Test</h1>
-<p class="muted small page-sub">Live paper trading. Promote a backtest result here, then Start.</p>
+<p class="muted small page-sub">Live paper trading. Start a strategy, watch it trade in real-time.</p>
 
 <div id="prefillBanner" class="banner" hidden>Pre-filled from a backtest / compare result</div>
+
+<!-- ================= LIVE STATUS BANNER ================= -->
+<div id="liveStatusBanner" class="card" style="display:none; margin-bottom:16px;">
+    <div style="display:flex; align-items:center; gap:16px; padding:8px 16px;">
+        <span id="marketIndicator" style="font-size:14px;">
+            <span id="marketDot" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#888; margin-right:4px;"></span>
+            <span id="marketLabel">Market Closed</span>
+        </span>
+        <span style="color:#666;">|</span>
+        <span id="lastBarInfo" style="font-size:13px; color:#aaa;">Last bar: —</span>
+        <span style="color:#666;">|</span>
+        <span id="barsProcessed" style="font-size:13px; color:#aaa;">Bars: 0</span>
+        <span style="color:#666;">|</span>
+        <span id="tradesCount" style="font-size:13px; color:#aaa;">Trades: 0</span>
+        <span style="color:#666;">|</span>
+        <span id="equityDisplay" style="font-size:14px; font-weight:600;">₹0</span>
+        <span id="unrealizedPnl" style="font-size:13px;"></span>
+    </div>
+</div>
 
 <!-- ================= CONFIG ================= -->
 <section class="card config-panel">
     <h2 class="card-title">Configuration</h2>
     <div class="forward-grid">
         <div class="form-row"><label>Strategy</label><select id="strategy" class="input"><option value="">Loading…</option></select></div>
-        <div class="form-row"><label>Symbol</label><select id="symbol" class="input">
-            <option>DEMO</option><option>BTCUSD</option><option>ETHUSD</option><option>NIFTY</option><option>INFY</option>
-        </select></div>
+        <div class="form-row"><label>Symbol</label>
+            <input type="text" id="symbol" class="input" placeholder="e.g. MAZDOCK, INFY" list="symbolList">
+            <datalist id="symbolList"></datalist>
+        </div>
         <div class="form-row"><label>Timeframe</label><select id="timeframe" class="input">
-            <option>1D</option><option>1H</option><option>4H</option><option>1W</option>
+            <option value="1min">1min (Live)</option>
+            <option value="day">Day</option>
         </select></div>
-        <div class="form-row"><label>From</label><input type="date" id="fromDate" class="input" value="2024-01-01"></div>
-        <div class="form-row"><label>To</label><input type="date" id="toDate" class="input" value="2024-12-31"></div>
-        <div class="form-row"><label>Capital ($)</label><input type="number" id="capital" class="input" value="10000" min="1"></div>
+        <div class="form-row"><label>Capital (₹)</label><input type="number" id="capital" class="input" value="100000" min="1000"></div>
     </div>
     <fieldset class="params-fieldset"><legend>Strategy Params</legend>
         <div id="params-container"><p class="muted small">Select a strategy…</p></div>
@@ -32,7 +51,6 @@
         <button id="stopBtn" class="btn btn-danger" disabled>■ Stop</button>
         <span id="progressText" class="muted small"></span>
     </div>
-    <div class="progress-track"><div id="progressBar" class="progress-fill"></div></div>
 </section>
 
 <!-- ================= LIVE RESULTS ================= -->
@@ -47,7 +65,7 @@
     <div class="card">
         <h2 class="card-title">Open Positions</h2>
         <table class="data-table">
-            <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Current</th><th>Unrealized</th><th>Entry Date</th></tr></thead>
+            <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Current</th><th>Unrealized PnL</th><th>Entry Date</th></tr></thead>
             <tbody id="positionsBody"></tbody>
         </table>
     </div>
@@ -59,6 +77,7 @@
                 <thead><tr><th>#</th><th>Date</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Result</th></tr></thead>
                 <tbody></tbody>
             </table>
+            <div id="pagination" class="pagination"></div>
         </div>
     </div>
 </section>

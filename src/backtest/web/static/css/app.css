@@ -306,8 +306,9 @@ body[data-active="forward"]   .nav-link[data-key="forward"] {
 
 /* spinner inline with button text */
 .broker-auth-spinner {
-    display: inline-block; width: 16px; height: 16px;
+    width: 16px; height: 16px;
     border: 2px solid rgba(255,255,255,.3); border-top-color: #fff;
     border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle;
     margin-left: 6px;
 }
+.broker-auth-spinner[hidden] { display: none; }

@@ -1,70 +1,46 @@
-"""Forward test endpoints (PRD Task 4.3).
+"""Forward test endpoints — live paper trading via LiveForwardEngine.
 
-* ``POST /api/forward/start``  {strategy, symbol, timeframe, from_date, to_date, capital, params}
+* ``POST /api/forward/start``  {strategy, symbol, timeframe, capital, params}
 * ``POST /api/forward/stop``
-* ``GET  /api/forward/status`` → {status, metrics, equity, drawdown, trades, positions, progress}
-
-Sandbox note: there is no live market feed available (mStock needs credentials),
-so forward testing is implemented as an in-process **paper-trading replay**. On
-``/start`` the strategy is run over the candle range once; on each ``/status``
-poll the revealed bar count advances, and metrics/equity/trades/positions are
-computed on the prefix via ``BacktestAdapter`` + ``compute_metrics`` — the same
-shape the Backtest page consumes, so the frontend components are reusable. State
-is server-side (survives a page refresh; DB persistence is V2).
-
-**Task 4.2** adds a server-side authentication guard: the ``/start`` endpoint
-returns 403 if no broker session is authenticated. This is the security layer
-complementing the client-side button gate (Task 4.1).
+* ``GET  /api/forward/status`` → {status, equity, positions, trades, market_open, ...}
+* ``GET  /api/forward/trades`` → [{id, symbol, side, entry, exit, pnl, ...}]
+* ``GET  /api/forward/equity`` → [{ts, equity, drawdown_pct}]
 """
 
 from __future__ import annotations
 
-import threading
+import json
+import os
 from typing import Any
 
 from flask import Blueprint, current_app, jsonify, request
+from sqlalchemy import text
 
-from backtest.adapters.backtest_adapter import BacktestAdapter
-from backtest.api.backtest import _interval, _resolve_strategy
 from backtest.brokers.session_manager import get_session_manager
-from backtest.engine.backtester import BacktestConfig, BacktestResult
-from backtest.engine.metrics import compute_metrics
-from backtest.runner import build_source, run_on_candles
 
 forward_bp = Blueprint("forward_api", __name__)
 
-_lock = threading.Lock()
-_session: dict[str, Any] = {
-    "result": None,
-    "candles": None,
-    "body": None,
-    "symbol": "DEMO",
-    "revealed": 0,
-    "total": 0,
-    "status": "idle",
-}
+DB_URL = os.getenv("FORWARD_TEST_DB_URL", "")
 
 
-def _reset_session() -> None:
-    _session.update(
-        result=None, candles=None, body=None, symbol="DEMO",
-        revealed=0, total=0, status="idle",
-    )
+def _get_engine():
+    from sqlalchemy import create_engine
+    return create_engine(DB_URL)
 
 
+# ---------------------------------------------------------------------------
+# POST /api/forward/start
+# ---------------------------------------------------------------------------
 @forward_bp.post("/api/forward/start")
 def start() -> tuple:
-    """Start a forward test session (server-side auth guard: Task 4.2).
+    """Start a live forward test.
 
-    Returns 403 if no broker session is authenticated — the client-side
-    button gate (Task 4.1) prevents the user from reaching this endpoint,
-    but the server-side check is the authoritative security boundary.
+    Creates a row in ``forward_test_state``, then launches the
+    ``LiveForwardEngine`` in a background thread.
     """
     data = request.get_json(silent=True) or {}
 
-    # Task 4.2: server-side authentication guard.
-    # The session manager is the single source of truth; the forward engine
-    # must not start without a valid broker session.
+    # Server-side auth guard
     if not get_session_manager().is_authenticated():
         return jsonify({
             "success": False,
@@ -72,117 +48,281 @@ def start() -> tuple:
             "message": "Valid broker session required to start forward test",
         }), 403
 
-    resolution = _resolve_strategy(data.get("strategy"))
-    if isinstance(resolution, str):
-        return jsonify({"error": resolution}), 400
-
+    strategy = data.get("strategy", "")
     symbol = data.get("symbol", "DEMO")
-    from_date = data.get("from_date") or data.get("from")
-    to_date = data.get("to_date") or data.get("to")
-    if not from_date or not to_date:
-        return jsonify({"error": "from_date and to_date are required"}), 400
-    if from_date > to_date:
-        return jsonify({"error": "from_date must be <= to_date"}), 400
+    timeframe = data.get("timeframe", "1min")
     try:
         capital = float(data.get("capital", 100_000))
     except (TypeError, ValueError):
         return jsonify({"error": "capital must be a number"}), 400
-
     params = data.get("params") or {}
-    timeframe = data.get("timeframe", "1D")
-    source = build_source(current_app.config.get("BACKTEST_SOURCE", "synthetic"))
 
-    try:
-        candles = source.get_candles(symbol, from_date, to_date, _interval(timeframe))
-        config = BacktestConfig(initial_capital=capital)
-        result = run_on_candles(candles, data.get("strategy"), params, symbol, config)
-    except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": f"forward start failed: {exc}"}), 400
+    if not strategy:
+        return jsonify({"error": "strategy is required"}), 400
 
-    warmup = min(20, len(candles))
-    with _lock:
-        _session.update(
-            result=result, candles=candles, body=data, symbol=symbol,
-            revealed=warmup, total=len(candles), status="running",
+    # Check if there's already a running engine for this symbol+strategy
+    engine_db = _get_engine()
+    with engine_db.connect() as conn:
+        existing = conn.execute(
+            text("""
+                SELECT id FROM forward_test_state
+                WHERE symbol = :symbol AND strategy = :strategy AND status = 'running'
+                LIMIT 1
+            """),
+            {"symbol": symbol, "strategy": strategy},
+        ).fetchone()
+        if existing:
+            return jsonify({"error": "Forward test already running for this symbol+strategy",
+                            "state_id": existing.id}), 409
+
+        # Insert new state row
+        result = conn.execute(
+            text("""
+                INSERT INTO forward_test_state
+                    (strategy, symbol, timeframe, status, capital, params)
+                VALUES
+                    (:strategy, :symbol, :timeframe, 'running', :capital, :params)
+                RETURNING id
+            """),
+            {
+                "strategy": strategy,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "capital": capital,
+                "params": json.dumps(params),
+            },
         )
-    return jsonify({"status": "running", "total": len(candles), "revealed": warmup}), 200
+        state_id = result.fetchone()[0]
+        conn.commit()
+
+    # Start the live engine
+    from backtest.forward.live_engine import start_engine
+    try:
+        engine = start_engine(state_id, db_url=DB_URL)
+    except Exception as exc:
+        # Mark state as failed
+        with engine_db.connect() as conn:
+            conn.execute(
+                text("UPDATE forward_test_state SET status = 'error' WHERE id = :id"),
+                {"id": state_id},
+            )
+            conn.commit()
+        return jsonify({"error": f"Failed to start engine: {exc}"}), 500
+
+    return jsonify({
+        "status": "running",
+        "state_id": state_id,
+        "symbol": symbol,
+        "strategy": strategy,
+    }), 200
 
 
+# ---------------------------------------------------------------------------
+# POST /api/forward/stop
+# ---------------------------------------------------------------------------
 @forward_bp.post("/api/forward/stop")
 def stop() -> tuple:
-    with _lock:
-        if _session["result"] is None:
-            return jsonify({"status": "idle"}), 200
-        _session["status"] = "stopped"
+    """Stop the running forward test engine."""
+    data = request.get_json(silent=True) or {}
+    state_id = data.get("state_id")
+
+    if state_id:
+        from backtest.forward.live_engine import stop_engine
+        stop_engine(int(state_id))
+        return jsonify({"status": "stopped", "state_id": state_id}), 200
+
+    # Stop all running engines
+    from backtest.forward.live_engine import stop_engine, _engines
+    for sid in list(_engines.keys()):
+        stop_engine(sid)
+
     return jsonify({"status": "stopped"}), 200
 
 
+# ---------------------------------------------------------------------------
+# GET /api/forward/status
+# ---------------------------------------------------------------------------
 @forward_bp.get("/api/forward/status")
 def status() -> tuple:
-    with _lock:
-        if _session["result"] is None:
-            return jsonify({"status": "idle"}), 200
+    """Get live forward test status."""
+    from backtest.forward.live_engine import _engines
 
-        total = _session["total"]
-        if _session["status"] == "running":
-            step = max(1, total // 60)
-            _session["revealed"] = min(total, _session["revealed"] + step)
-            if _session["revealed"] >= total:
-                _session["status"] = "stopped"  # replay finished
+    # Find the most recent running engine
+    engine_db = _get_engine()
+    with engine_db.connect() as conn:
+        row = conn.execute(
+            text("""
+                SELECT id, strategy, symbol, timeframe, status, capital, params,
+                       last_bar_ts, created_at, updated_at
+                FROM forward_test_state
+                ORDER BY id DESC
+                LIMIT 1
+            """),
+        ).fetchone()
 
-        return jsonify(_build_snapshot()), 200
+    if row is None:
+        return jsonify({"status": "idle"}), 200
+
+    # Check if engine is running in memory
+    live_engine = _engines.get(row.id)
+
+    if live_engine:
+        engine_status = live_engine.get_status()
+        engine_status["state_id"] = row.id
+        return jsonify(engine_status), 200
+
+    # Engine not in memory — load from DB
+    with engine_db.connect() as conn:
+        # Get latest trades
+        trades = conn.execute(
+            text("""
+                SELECT * FROM forward_test_trades
+                WHERE state_id = :sid
+                ORDER BY id DESC
+                LIMIT 50
+            """),
+            {"sid": row.id},
+        ).fetchall()
+
+        # Get latest equity
+        equity_rows = conn.execute(
+            text("""
+                SELECT equity, unrealized_pnl, ts
+                FROM forward_test_equity
+                WHERE state_id = :sid
+                ORDER BY id DESC
+                LIMIT 1
+            """),
+            {"sid": row.id},
+        ).fetchall()
+
+        # Get open positions
+        positions = conn.execute(
+            text("""
+                SELECT * FROM forward_test_trades
+                WHERE state_id = :sid AND status = 'open'
+            """),
+            {"sid": row.id},
+        ).fetchall()
+
+    equity = float(equity_rows[0].equity) if equity_rows else float(row.capital)
+    unrealized = float(equity_rows[0].unrealized_pnl) if equity_rows else 0
+
+    trade_list = []
+    for t in trades:
+        trade_list.append({
+            "id": t.id,
+            "symbol": t.symbol,
+            "side": t.side,
+            "entry": float(t.entry_price),
+            "exit": float(t.exit_price) if t.exit_price else None,
+            "pnl": float(t.pnl) if t.pnl else None,
+            "pnl_pct": float(t.pnl_pct) if t.pnl_pct else None,
+            "status": t.status,
+            "date": str(t.entry_ts),
+        })
+
+    position_list = []
+    for p in positions:
+        position_list.append({
+            "symbol": p.symbol,
+            "side": p.side,
+            "entry": float(p.entry_price),
+            "current": 0,  # Unknown without live engine
+            "unrealized_pnl_pct": 0,
+            "entry_date": str(p.entry_ts),
+            "quantity": float(p.quantity),
+        })
+
+    return jsonify({
+        "status": row.status,
+        "state_id": row.id,
+        "symbol": row.symbol,
+        "strategy": row.strategy,
+        "timeframe": row.timeframe,
+        "capital": float(row.capital),
+        "equity": equity,
+        "unrealized_pnl": unrealized,
+        "total_bars": 0,
+        "total_trades": len([t for t in trades if t.status == "closed"]),
+        "bars_in_memory": 0,
+        "last_bar_ts": str(row.last_bar_ts) if row.last_bar_ts else None,
+        "market_open": False,
+        "positions": position_list,
+        "trades": trade_list,
+        "error": None,
+    }), 200
 
 
-def _build_snapshot() -> dict[str, Any]:
-    """Build a live snapshot from the revealed prefix (called under lock)."""
-    full: BacktestResult = _session["result"]
-    candles = _session["candles"]
-    n = _session["revealed"]
-    total = _session["total"]
+# ---------------------------------------------------------------------------
+# GET /api/forward/trades
+# ---------------------------------------------------------------------------
+@forward_bp.get("/api/forward/trades")
+def trades() -> tuple:
+    """Get trade history for the current or most recent forward test."""
+    engine_db = _get_engine()
+    with engine_db.connect() as conn:
+        row = conn.execute(
+            text("SELECT id FROM forward_test_state ORDER BY id DESC LIMIT 1"),
+        ).fetchone()
 
-    partial = BacktestResult(
-        equity=full.equity.iloc[:n],
-        returns=full.returns.iloc[:n],
-        position=full.position.iloc[:n],
-        candles=candles.iloc[:n],
-        config=full.config,
-        metrics={},
-    )
-    partial.metrics = compute_metrics(partial)
-    # carry over metadata that compute_metrics() doesn't emit (adapter reads these)
-    partial.metrics["strategy"] = full.metrics.get("strategy", "")
-    partial.metrics["symbol"] = full.metrics.get("symbol", _session["symbol"])
-    adapter = BacktestAdapter(partial)
-    out = adapter.to_all()
+    if not row:
+        return jsonify([]), 200
 
-    # trades: drop the adapter's forced-close of a still-open position
-    trades = adapter.to_trades()
-    holding = bool(len(partial.position) and float(partial.position.iloc[-1]) != 0)
-    positions: list[dict[str, Any]] = []
-    if holding and trades:
-        open_trade = trades.pop()
-        cur_price = float(candles["close"].iloc[:n].iloc[-1])
-        entry = open_trade["entry"]
-        side = open_trade["side"]
-        if side == "LONG":
-            pct = (cur_price / entry - 1) * 100 if entry else 0.0
-        else:
-            pct = (entry / cur_price - 1) * 100 if cur_price else 0.0
-        positions = [{
-            "symbol": _session["symbol"],
-            "side": side,
-            "entry": entry,
-            "entry_date": open_trade["date"],
-            "current": round(cur_price, 2),
-            "unrealized_pnl_pct": round(pct, 2),
-        }]
+    with engine_db.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT * FROM forward_test_trades
+                WHERE state_id = :sid
+                ORDER BY id DESC
+                LIMIT 100
+            """),
+            {"sid": row.id},
+        ).fetchall()
 
-    out["trades"] = trades
-    out["positions"] = positions
-    out["status"] = _session["status"]
-    out["progress"] = {
-        "revealed": n,
-        "total": total,
-        "pct": round(n / total * 100, 1) if total else 0.0,
-    }
-    return out
+    result = []
+    for t in rows:
+        result.append({
+            "id": t.id,
+            "symbol": t.symbol,
+            "side": t.side,
+            "entry": float(t.entry_price),
+            "exit": float(t.exit_price) if t.exit_price else None,
+            "pnl": float(t.pnl) if t.pnl else None,
+            "pnl_pct": float(t.pnl_pct) if t.pnl_pct else None,
+            "status": t.status,
+            "entry_date": str(t.entry_ts),
+            "exit_date": str(t.exit_ts) if t.exit_ts else None,
+        })
+
+    return jsonify(result), 200
+
+
+# ---------------------------------------------------------------------------
+# GET /api/forward/equity
+# ---------------------------------------------------------------------------
+@forward_bp.get("/api/forward/equity")
+def equity() -> tuple:
+    """Get equity curve for charting."""
+    engine_db = _get_engine()
+    with engine_db.connect() as conn:
+        row = conn.execute(
+            text("SELECT id FROM forward_test_state ORDER BY id DESC LIMIT 1"),
+        ).fetchone()
+
+    if not row:
+        return jsonify([]), 200
+
+    with engine_db.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT ts, equity, unrealized_pnl
+                FROM forward_test_equity
+                WHERE state_id = :sid
+                ORDER BY ts ASC
+            """),
+            {"sid": row.id},
+        ).fetchall()
+
+    result = [{"ts": str(r.ts), "equity": float(r.equity)} for r in rows]
+    return jsonify(result), 200

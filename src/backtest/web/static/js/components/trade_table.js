@@ -67,7 +67,8 @@ const TradeTable = (() => {
                 render();
             };
         });
-        document.getElementById("pagination").onclick = (e) => {
+        const pag = document.getElementById("pagination");
+        if (pag) pag.onclick = (e) => {
             if (e.target.dataset.page) { state.page = +e.target.dataset.page; render(); }
         };
         render();
