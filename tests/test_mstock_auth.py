@@ -74,6 +74,7 @@ def test_login_sends_sdk_headers(monkeypatch):
 
     monkeypatch.setenv("MSTOCK_USERNAME", "user")
     monkeypatch.setenv("MSTOCK_PASSWORD", "pass")
+    monkeypatch.setenv("MSTOCK_API_KEY", "test-api-key")
     monkeypatch.setattr("requests.post", fake_post)
 
     from backtest.live.auth import login

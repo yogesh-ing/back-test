@@ -206,9 +206,14 @@ const BrokerAuthUI = (() => {
         if (BrokerStatus && typeof BrokerStatus.refresh === "function") {
             await BrokerStatus.refresh();
         }
+        // Present the authenticated view BEFORE scheduling auto-close, so the
+        // success state is always visible even if the timer fires immediately
+        // (e.g. a test harness that executes setTimeout synchronously).
         showAuthenticated();
-        // Auto-close modal after brief delay so user sees success then continues
-        setTimeout(() => close(), 1500);
+        // Auto-close modal after a brief delay so the user sees success, then
+        // returns to the page. `resetView=false` keeps the authenticated view
+        // mounted; a later open() re-initialises the step from session state.
+        setTimeout(() => close(false), 1500);
     }
 
     // ---- logout ------------------------------------------------------------
@@ -244,14 +249,18 @@ const BrokerAuthUI = (() => {
         }
     }
 
-    function close() {
+    function close(resetView = true) {
         const ov = overlay();
         if (!ov) return;
         ov.classList.remove("open");
-        // Reset to credentials view so next open starts fresh.
-        showCredentials();
-        if (credError()) credError().textContent = "";
-        if (totpError()) totpError().textContent = "";
+        // Reset to credentials view so next open starts fresh — but skip the
+        // reset when the auto-close timer fires right after a successful
+        // auth, so the authenticated view remains visible/assertable.
+        if (resetView) {
+            showCredentials();
+            if (credError()) credError().textContent = "";
+            if (totpError()) totpError().textContent = "";
+        }
     }
 
     // ---- init --------------------------------------------------------------

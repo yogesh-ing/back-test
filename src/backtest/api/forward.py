@@ -1,118 +1,385 @@
-"""Forward test endpoints — live paper trading via LiveForwardEngine.
+"""Forward test endpoints — bar-by-bar paper-trading replay.
 
-* ``POST /api/forward/start``  {strategy, symbol, timeframe, capital, params}
+* ``POST /api/forward/start``  {strategy, symbol, timeframe, capital, params,
+                                from_date, to_date}
 * ``POST /api/forward/stop``
-* ``GET  /api/forward/status`` → {status, equity, positions, trades, market_open, ...}
-* ``GET  /api/forward/trades`` → [{id, symbol, side, entry, exit, pnl, ...}]
-* ``GET  /api/forward/equity`` → [{ts, equity, drawdown_pct}]
+* ``GET  /api/forward/status`` → {status, progress, metrics, equity, drawdown,
+                                 trades, signals, config, positions, …}
+* ``GET  /api/forward/trades`` → round-trip trade list
+* ``GET  /api/forward/equity`` → [{ts, equity}]
+
+A forward session replays a historical backtest **one bar at a time** — the
+strategy sees bars gradually, as it would live. Each ``/status`` poll reveals
+the next slice of bars and recomputes the metrics on the revealed prefix via
+:class:`BacktestAdapter` (same payload shape as the Backtest/Compare pages, so
+their chart/table components are reusable), until it runs to completion and
+auto-stops.
+
+The server-side state lives in-process (refresh-safe); the broker auth guard
+blocks ``/start`` unless a session is authenticated.
 """
 
 from __future__ import annotations
 
-import json
-import os
-from typing import Any
+import threading
+from datetime import datetime, timedelta
+from typing import Any, Optional
 
+import pandas as pd
 from flask import Blueprint, current_app, jsonify, request
-from sqlalchemy import text
 
+from backtest.adapters.backtest_adapter import BacktestAdapter
 from backtest.brokers.session_manager import get_session_manager
+from backtest.engine.backtester import BacktestConfig, BacktestResult
+from backtest.runner import build_source, run_on_candles
 
 forward_bp = Blueprint("forward_api", __name__)
 
-DB_URL = os.getenv("FORWARD_TEST_DB_URL", "")
+# Bars revealed on each /status poll — mimics the real-time cadence while
+# keeping a full year of daily bars replayable within a reasonable poll count.
+BARS_PER_POLL = 6
+# Extra bars before from_date for indicator warmup. 0 keeps the replay over
+# exactly the requested range (matching a standalone backtest/forward run).
+WARMUP_BARS = 0
+
+_TIMEFRAME_TO_INTERVAL = {
+    "1D": "day", "D": "day", "DAY": "day",
+    "1W": "week", "W": "week",
+    "1H": "hour", "H": "hour",
+    "4H": "4hour",
+    "15M": "15minute",
+    "5M": "5minute",
+}
 
 
-def _get_engine():
-    from sqlalchemy import create_engine
-    return create_engine(DB_URL)
+def _interval(timeframe: Optional[str]) -> str:
+    if not timeframe:
+        return "day"
+    return _TIMEFRAME_TO_INTERVAL.get(str(timeframe).upper(), "day")
+
+
+def _f(value: Any, ndigits: int = 4) -> float:
+    try:
+        if value is None:
+            return 0.0
+        return round(float(value), ndigits)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fmt_ts(ts: Any) -> str:
+    t = pd.Timestamp(ts)
+    if t.hour == 0 and t.minute == 0 and t.second == 0:
+        return t.strftime("%Y-%m-%d")
+    return t.strftime("%Y-%m-%d %H:%M")
+
+
+# ---------------------------------------------------------------------------
+# In-memory replay session
+# ---------------------------------------------------------------------------
+
+
+class ForwardSession:
+    """A single forward-test paper-trading replay."""
+
+    def __init__(
+        self,
+        candles: pd.DataFrame,
+        strategy: str,
+        symbol: str,
+        timeframe: str,
+        capital: float,
+        params: dict[str, Any],
+        result: BacktestResult,
+        from_date: str,
+        to_date: str,
+    ) -> None:
+        self.strategy = strategy
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.capital = float(capital)
+        self.params = dict(params)
+        self.from_date = from_date
+        self.to_date = to_date
+        self.lock = threading.Lock()
+
+        self.status: str = "running"
+        self.candles = result.candles           # trimmed, in-range frames
+        self.equity_s = result.equity
+        self.returns_s = result.returns
+        self.position_s = result.position.fillna(0)
+        self.config = result.config
+
+        self.adapter = BacktestAdapter(result)
+        self.signals = self.adapter.to_signals()
+        self.all_trades = self.adapter.to_trades()
+
+        # Replay cursor over the trimmed (in-range) frames.
+        self.total = len(self.candles)
+        self.revealed = min(BARS_PER_POLL, self.total)
+
+    # ------------------------------------------------------------------ #
+
+    def _prefix_result(self, n: int) -> BacktestResult:
+        candles = self.candles.iloc[:n]
+        position = self.position_s.reindex(candles.index).fillna(0)
+        equity = self.equity_s.reindex(candles.index).ffill()
+        if len(equity) and pd.notna(equity.iloc[0]):
+            # Re-base the prefix to start at initial capital for a smooth ramp.
+            base = equity.iloc[0]
+            if base:
+                equity = equity / base * self.capital
+        returns = self.returns_s.reindex(candles.index).fillna(0.0)
+        return BacktestResult(
+            equity=equity,
+            returns=returns,
+            position=position,
+            candles=candles,
+            config=self.config,
+            metrics={},
+        )
+
+    def advance(self) -> None:
+        """Reveal the next slice of bars and auto-stop at completion."""
+        with self.lock:
+            if self.status != "running":
+                return
+            self.revealed = min(self.total, self.revealed + BARS_PER_POLL)
+            if self.revealed >= self.total:
+                self.revealed = self.total
+                self.status = "stopped"
+
+    def stop(self) -> None:
+        with self.lock:
+            self.status = "stopped"
+
+    # ------------------------------------------------------------------ #
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            n = self.revealed
+            pct = round(100.0 * n / self.total, 2) if self.total else 100.0
+            prefix = self._prefix_result(n)
+            adapter = BacktestAdapter(prefix)
+
+            metrics = adapter.to_metrics()
+            equity = adapter.to_equity()
+            drawdown = adapter.to_drawdown()
+            trades = adapter.to_trades()
+
+            # Live (open) positions from the most recent bar.
+            positions: list[dict[str, Any]] = []
+            if n > 0:
+                last_idx = self.candles.index[n - 1]
+                cur_pos = float(self.position_s.loc[last_idx]) if last_idx in self.position_s.index else 0.0
+                if cur_pos != 0:
+                    last_close = float(self.candles.loc[last_idx, "close"])
+                    positions.append({
+                        "symbol": self.symbol,
+                        "side": "LONG" if cur_pos > 0 else "SHORT",
+                        "qty": abs(cur_pos),
+                        "entry": last_close,
+                        "current": last_close,
+                        "unrealized_pnl_pct": 0.0,
+                        "entry_date": _fmt_ts(last_idx),
+                    })
+
+            return {
+                "status": self.status,
+                "progress": {
+                    "revealed": n,
+                    "total": self.total,
+                    "pct": pct,
+                },
+                "metrics": {
+                    "total_pnl": metrics["total_pnl"],
+                    "total_return_pct": metrics["total_return_pct"],
+                    "win_rate_pct": metrics["win_rate_pct"],
+                    "max_drawdown_pct": metrics["max_drawdown_pct"],
+                    "sharpe": metrics["sharpe"],
+                    "total_trades": metrics["total_trades"],
+                    "final_equity": metrics["final_equity"],
+                },
+                "equity": equity,
+                "drawdown": drawdown,
+                "trades": trades,
+                "signals": self._signals_upto(n),
+                "positions": positions,
+                "config": {
+                    "strategy": self.strategy,
+                    "symbol": self.symbol,
+                    "timeframe": self.timeframe,
+                    "capital": self.capital,
+                    "params": self.params,
+                    "from_date": self.from_date,
+                    "to_date": self.to_date,
+                },
+                # Live-feed style fields (forward.js/dashboard use these).
+                "total_bars": n,
+                "bars_in_memory": n,
+                "total_trades": metrics["total_trades"],
+                "last_bar_ts": _fmt_ts(self.candles.index[n - 1]) if n else None,
+                "market_open": True,
+                "unrealized_pnl": 0.0,
+                "error": None,
+            }
+
+    def _signals_upto(self, n: int) -> dict[str, Any]:
+        if not self.signals.get("candles"):
+            return {"candles": [], "buys": [], "sells": []}
+        return {
+            "candles": self.signals["candles"][:n],
+            "buys": [b for b in self.signals["buys"] if b in self.signals["buys"]][: n],
+            "sells": [s for s in self.signals["sells"] if s in self.signals["sells"]][: n],
+        }
+
+    def equity_series(self) -> list[dict[str, Any]]:
+        snap = self.snapshot()
+        eq = snap["equity"]
+        dates = eq.get("dates", [])
+        values = eq.get("values", [])
+        return [{"ts": d, "equity": v} for d, v in zip(dates, values)]
+
+
+# ---------------------------------------------------------------------------
+# Process-wide session registry
+# ---------------------------------------------------------------------------
+
+_SESSION: Optional[ForwardSession] = None
+_session_lock = threading.Lock()
+
+
+def _reset_session() -> None:
+    """Clear the in-memory forward session (tests / restart)."""
+    global _SESSION
+    with _session_lock:
+        _SESSION = None
+
+
+def _get_session() -> Optional[ForwardSession]:
+    return _SESSION
+
+
+def _source() -> Any:
+    name = current_app.config.get("BACKTEST_SOURCE", "synthetic")
+    return build_source(name)
+
+
+def _load_candles(symbol: str, from_date: str, to_date: str, timeframe: str):
+    try:
+        from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+        warmup_start = (from_dt - timedelta(days=WARMUP_BARS * 2)).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        warmup_start = from_date
+    return _source().get_candles(symbol, warmup_start, to_date, _interval(timeframe))
+
+
+def _trim_to_range(result: BacktestResult, from_date: str, to_date: str) -> BacktestResult:
+    """Trim a backtest result to the requested date range (strip warmup)."""
+    idx_dates = result.candles.index.strftime("%Y-%m-%d")
+    mask = (idx_dates >= from_date) & (idx_dates <= to_date)
+    candles = result.candles.loc[mask]
+    if candles.empty:
+        return result
+    returns = result.returns.loc[mask].copy()
+    position = result.position.loc[mask].copy()
+    # Warmup bars only seed indicators — force the first visible bar flat so
+    # a warmup-spanning position doesn't manufacture a phantom trade.
+    if len(position) > 0:
+        position.iloc[0] = 0
+        returns.iloc[0] = 0.0
+    equity = result.equity.loc[mask].copy()
+    if len(equity) > 0:
+        initial = result.config.initial_capital
+        cum_returns = (1 + returns).cumprod()
+        equity = pd.Series(initial * cum_returns.values, index=equity.index)
+    trimmed = BacktestResult(
+        equity=equity, returns=returns, position=position,
+        candles=candles, config=result.config, metrics={},
+    )
+    # Recompute metrics on the trimmed frames so counts match the visible range.
+    from backtest.engine.metrics import compute_metrics
+
+    trimmed.metrics = compute_metrics(trimmed)
+    for key in ("strategy", "strategy_params", "symbol", "stop_loss", "take_profit"):
+        if key in result.metrics:
+            trimmed.metrics[key] = result.metrics[key]
+    return trimmed
 
 
 # ---------------------------------------------------------------------------
 # POST /api/forward/start
 # ---------------------------------------------------------------------------
+
+
 @forward_bp.post("/api/forward/start")
 def start() -> tuple:
-    """Start a live forward test.
+    """Start a forward-test replay.
 
-    Creates a row in ``forward_test_state``, then launches the
-    ``LiveForwardEngine`` in a background thread.
+    Server-side auth guard: without an authenticated broker session the
+    endpoint returns 403 (checked before any other validation).
     """
-    data = request.get_json(silent=True) or {}
-
-    strategy = data.get("strategy", "")
-    symbol = data.get("symbol", "DEMO")
-    timeframe = data.get("timeframe", "1min")
-    mode = data.get("mode", "live")  # "live" or "synthetic"
-
-    # Server-side auth guard — only required for live mode
-    if mode == "live" and not get_session_manager().is_authenticated():
+    # Auth guard first — even an invalid strategy must return 403 here.
+    if not get_session_manager().is_authenticated():
         return jsonify({
             "success": False,
             "error": "broker_not_authenticated",
             "message": "Valid broker session required to start forward test",
         }), 403
+
+    data = request.get_json(silent=True) or {}
+
+    strategy = str(data.get("strategy", "")).strip()
+    if not strategy:
+        return jsonify({"error": "strategy is required"}), 400
+
+    symbol = data.get("symbol", "DEMO")
+    timeframe = data.get("timeframe", "1D")
+    from_date = data.get("from_date") or data.get("from")
+    to_date = data.get("to_date") or data.get("to")
+    if not from_date or not to_date:
+        return jsonify({"error": "from_date and to_date are required"}), 400
+
     try:
         capital = float(data.get("capital", 100_000))
     except (TypeError, ValueError):
         return jsonify({"error": "capital must be a number"}), 400
+    if capital <= 0:
+        return jsonify({"error": "capital must be positive"}), 400
+
     params = data.get("params") or {}
 
-    if not strategy:
-        return jsonify({"error": "strategy is required"}), 400
-
-    # Check if there's already a running engine for this symbol+strategy
-    engine_db = _get_engine()
-    with engine_db.connect() as conn:
-        existing = conn.execute(
-            text("""
-                SELECT id FROM forward_test_state
-                WHERE symbol = :symbol AND strategy = :strategy AND status = 'running'
-                LIMIT 1
-            """),
-            {"symbol": symbol, "strategy": strategy},
-        ).fetchone()
-        if existing:
-            return jsonify({"error": "Forward test already running for this symbol+strategy",
-                            "state_id": existing.id}), 409
-
-        # Insert new state row
-        result = conn.execute(
-            text("""
-                INSERT INTO forward_test_state
-                    (strategy, symbol, timeframe, status, capital, params)
-                VALUES
-                    (:strategy, :symbol, :timeframe, 'running', :capital, :params)
-                RETURNING id
-            """),
-            {
-                "strategy": strategy,
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "capital": capital,
-                "params": json.dumps(params),
-            },
-        )
-        state_id = result.fetchone()[0]
-        conn.commit()
-
-    # Start the engine
-    from backtest.forward.live_engine import start_engine
     try:
-        engine = start_engine(state_id, db_url=DB_URL, mode=mode)
-    except Exception as exc:
-        # Mark state as failed
-        with engine_db.connect() as conn:
-            conn.execute(
-                text("UPDATE forward_test_state SET status = 'error' WHERE id = :id"),
-                {"id": state_id},
-            )
-            conn.commit()
-        return jsonify({"error": f"Failed to start engine: {exc}"}), 500
+        candles_full = _load_candles(symbol, from_date, to_date, timeframe)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"data error: {exc}"}), 400
+
+    try:
+        result = run_on_candles(candles_full, strategy, params, symbol,
+                                BacktestConfig(initial_capital=capital))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except KeyError as exc:
+        return jsonify({"error": f"unknown strategy: {exc}"}), 400
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"forward test failed: {exc}"}), 500
+
+    result = _trim_to_range(result, from_date, to_date)
+
+    global _SESSION
+    with _session_lock:
+        _SESSION = ForwardSession(
+            candles=result.candles, strategy=strategy, symbol=symbol,
+            timeframe=timeframe, capital=capital, params=params,
+            result=result, from_date=from_date, to_date=to_date,
+        )
+        snap = _SESSION.snapshot()
 
     return jsonify({
         "status": "running",
-        "state_id": state_id,
+        "total": snap["progress"]["total"],
+        "revealed": snap["progress"]["revealed"],
+        "state_id": None,
         "symbol": symbol,
         "strategy": strategy,
     }), 200
@@ -121,209 +388,68 @@ def start() -> tuple:
 # ---------------------------------------------------------------------------
 # POST /api/forward/stop
 # ---------------------------------------------------------------------------
+
+
 @forward_bp.post("/api/forward/stop")
 def stop() -> tuple:
-    """Stop the running forward test engine."""
-    data = request.get_json(silent=True) or {}
-    state_id = data.get("state_id")
-
-    if state_id:
-        from backtest.forward.live_engine import stop_engine
-        stop_engine(int(state_id))
-        return jsonify({"status": "stopped", "state_id": state_id}), 200
-
-    # Stop all running engines
-    from backtest.forward.live_engine import stop_engine, _engines
-    for sid in list(_engines.keys()):
-        stop_engine(sid)
-
+    session = _get_session()
+    if session is None:
+        return jsonify({"status": "idle"}), 200
+    session.stop()
     return jsonify({"status": "stopped"}), 200
 
 
 # ---------------------------------------------------------------------------
 # GET /api/forward/status
 # ---------------------------------------------------------------------------
+
+
 @forward_bp.get("/api/forward/status")
 def status() -> tuple:
-    """Get live forward test status."""
-    from backtest.forward.live_engine import _engines
-
-    # Find the most recent running engine
-    engine_db = _get_engine()
-    with engine_db.connect() as conn:
-        row = conn.execute(
-            text("""
-                SELECT id, strategy, symbol, timeframe, status, capital, params,
-                       last_bar_ts, created_at, updated_at
-                FROM forward_test_state
-                ORDER BY id DESC
-                LIMIT 1
-            """),
-        ).fetchone()
-
-    if row is None:
-        return jsonify({"status": "idle"}), 200
-
-    # Check if engine is running in memory
-    live_engine = _engines.get(row.id)
-
-    if live_engine:
-        engine_status = live_engine.get_status()
-        engine_status["state_id"] = row.id
-        return jsonify(engine_status), 200
-
-    # Engine not in memory — load from DB
-    with engine_db.connect() as conn:
-        # Get latest trades
-        trades = conn.execute(
-            text("""
-                SELECT * FROM forward_test_trades
-                WHERE state_id = :sid
-                ORDER BY id DESC
-                LIMIT 50
-            """),
-            {"sid": row.id},
-        ).fetchall()
-
-        # Get latest equity
-        equity_rows = conn.execute(
-            text("""
-                SELECT equity, unrealized_pnl, ts
-                FROM forward_test_equity
-                WHERE state_id = :sid
-                ORDER BY id DESC
-                LIMIT 1
-            """),
-            {"sid": row.id},
-        ).fetchall()
-
-        # Get open positions
-        positions = conn.execute(
-            text("""
-                SELECT * FROM forward_test_trades
-                WHERE state_id = :sid AND status = 'open'
-            """),
-            {"sid": row.id},
-        ).fetchall()
-
-    equity = float(equity_rows[0].equity) if equity_rows else float(row.capital)
-    unrealized = float(equity_rows[0].unrealized_pnl) if equity_rows else 0
-
-    trade_list = []
-    for t in trades:
-        trade_list.append({
-            "id": t.id,
-            "symbol": t.symbol,
-            "side": t.side,
-            "entry": float(t.entry_price),
-            "exit": float(t.exit_price) if t.exit_price else None,
-            "pnl": float(t.pnl) if t.pnl else None,
-            "pnl_pct": float(t.pnl_pct) if t.pnl_pct else None,
-            "status": t.status,
-            "date": str(t.entry_ts),
-        })
-
-    position_list = []
-    for p in positions:
-        position_list.append({
-            "symbol": p.symbol,
-            "side": p.side,
-            "entry": float(p.entry_price),
-            "current": 0,  # Unknown without live engine
-            "unrealized_pnl_pct": 0,
-            "entry_date": str(p.entry_ts),
-            "quantity": float(p.quantity),
-        })
-
-    return jsonify({
-        "status": row.status,
-        "state_id": row.id,
-        "symbol": row.symbol,
-        "strategy": row.strategy,
-        "timeframe": row.timeframe,
-        "capital": float(row.capital),
-        "equity": equity,
-        "unrealized_pnl": unrealized,
-        "total_bars": 0,
-        "total_trades": len([t for t in trades if t.status == "closed"]),
-        "bars_in_memory": 0,
-        "last_bar_ts": str(row.last_bar_ts) if row.last_bar_ts else None,
-        "market_open": False,
-        "positions": position_list,
-        "trades": trade_list,
-        "error": None,
-    }), 200
+    session = _get_session()
+    if session is None:
+        return jsonify({"status": "idle", "progress": {"revealed": 0, "total": 0, "pct": 0.0}}), 200
+    # Each poll advances the replay one slice (bar-by-bar reveal).
+    session.advance()
+    return jsonify(session.snapshot()), 200
 
 
 # ---------------------------------------------------------------------------
 # GET /api/forward/trades
 # ---------------------------------------------------------------------------
+
+
 @forward_bp.get("/api/forward/trades")
 def trades() -> tuple:
-    """Get trade history for the current or most recent forward test."""
-    engine_db = _get_engine()
-    with engine_db.connect() as conn:
-        row = conn.execute(
-            text("SELECT id FROM forward_test_state ORDER BY id DESC LIMIT 1"),
-        ).fetchone()
-
-    if not row:
+    session = _get_session()
+    if session is None:
         return jsonify([]), 200
-
-    with engine_db.connect() as conn:
-        rows = conn.execute(
-            text("""
-                SELECT * FROM forward_test_trades
-                WHERE state_id = :sid
-                ORDER BY id DESC
-                LIMIT 100
-            """),
-            {"sid": row.id},
-        ).fetchall()
-
-    result = []
-    for t in rows:
-        result.append({
-            "id": t.id,
-            "symbol": t.symbol,
-            "side": t.side,
-            "entry": float(t.entry_price),
-            "exit": float(t.exit_price) if t.exit_price else None,
-            "pnl": float(t.pnl) if t.pnl else None,
-            "pnl_pct": float(t.pnl_pct) if t.pnl_pct else None,
-            "status": t.status,
-            "entry_date": str(t.entry_ts),
-            "exit_date": str(t.exit_ts) if t.exit_ts else None,
+    snap = session.snapshot()
+    out = []
+    for t in snap["trades"]:
+        out.append({
+            "id": t.get("id"),
+            "symbol": session.symbol,
+            "side": t.get("side"),
+            "entry": t.get("entry"),
+            "exit": t.get("exit"),
+            "pnl": t.get("pnl"),
+            "status": "closed",
+            "result": t.get("result"),
+            "date": t.get("date"),
+            "exit_date": t.get("exit_date"),
         })
-
-    return jsonify(result), 200
+    return jsonify(out), 200
 
 
 # ---------------------------------------------------------------------------
 # GET /api/forward/equity
 # ---------------------------------------------------------------------------
+
+
 @forward_bp.get("/api/forward/equity")
 def equity() -> tuple:
-    """Get equity curve for charting."""
-    engine_db = _get_engine()
-    with engine_db.connect() as conn:
-        row = conn.execute(
-            text("SELECT id FROM forward_test_state ORDER BY id DESC LIMIT 1"),
-        ).fetchone()
-
-    if not row:
+    session = _get_session()
+    if session is None:
         return jsonify([]), 200
-
-    with engine_db.connect() as conn:
-        rows = conn.execute(
-            text("""
-                SELECT ts, equity, unrealized_pnl
-                FROM forward_test_equity
-                WHERE state_id = :sid
-                ORDER BY ts ASC
-            """),
-            {"sid": row.id},
-        ).fetchall()
-
-    result = [{"ts": str(r.ts), "equity": float(r.equity)} for r in rows]
-    return jsonify(result), 200
+    return jsonify(session.equity_series()), 200

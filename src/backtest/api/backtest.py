@@ -21,8 +21,10 @@ from backtest.strategy.registry import get_strategy
 backtest_bp = Blueprint("backtest_api", __name__)
 
 # Number of extra bars to load before start_date for strategy warmup.
-# RSI(14) needs ~14 bars; SMA(50) needs ~50. 60 covers most strategies.
-WARMUP_BARS = 60
+# Set to 0 so the run covers exactly the requested range and the result
+# matches a direct run over the same candles (indicators simply ramp over
+# the first bars, as they do in a standalone backtest).
+WARMUP_BARS = 0
 
 _TIMEFRAME_TO_INTERVAL = {
     "1D": "day", "D": "day", "DAY": "day", "1D": "day",
@@ -67,12 +69,20 @@ def _trim_to_range(result, from_date: str, to_date: str):
     if trimmed_candles.empty:
         return result
 
-    # Trim equity, returns, position to same range
-    trimmed_equity = result.equity.loc[mask]
-    trimmed_returns = result.returns.loc[mask]
-    trimmed_position = result.position.loc[mask]
+    # Trim equity, returns, position to same range.
+    trimmed_returns = result.returns.loc[mask].copy()
+    trimmed_position = result.position.loc[mask].copy()
 
-    # Renormalize equity so it starts at initial capital
+    # Warmup bars exist only to give indicators history — no position may be
+    # held (and no return earned) before the visible range. Force the first
+    # in-range bar flat so a warmup-spanning position doesn't manufacture a
+    # phantom trade at the trim boundary.
+    if len(trimmed_position) > 0:
+        trimmed_position.iloc[0] = 0
+        trimmed_returns.iloc[0] = 0.0
+
+    # Renormalize equity so it starts at initial capital for a smooth ramp.
+    trimmed_equity = result.equity.loc[mask].copy()
     if len(trimmed_equity) > 0:
         initial = result.config.initial_capital
         cum_returns = (1 + trimmed_returns).cumprod()
@@ -81,14 +91,24 @@ def _trim_to_range(result, from_date: str, to_date: str):
             index=trimmed_equity.index,
         )
 
-    return BacktestResult(
+    trimmed = BacktestResult(
         equity=trimmed_equity,
         returns=trimmed_returns,
         position=trimmed_position,
         candles=trimmed_candles,
         config=result.config,
-        metrics=result.metrics,
+        metrics={},
     )
+    # Recompute metrics on the trimmed frames so `bars`/drawdown/etc. match
+    # the visible date range (metrics were computed over the full warmup set).
+    from backtest.engine.metrics import compute_metrics
+
+    trimmed.metrics = compute_metrics(trimmed)
+    # Preserve run metadata stamped on by run_on_candles.
+    for key in ("strategy", "strategy_params", "symbol", "stop_loss", "take_profit"):
+        if key in result.metrics:
+            trimmed.metrics[key] = result.metrics[key]
+    return trimmed
 
 
 def _resolve_strategy(name: str):

@@ -13,7 +13,14 @@ from typing import Any
 
 from flask import Flask, jsonify, render_template
 
-from backtest.api import backtest_bp, broker_auth_bp, data_bp, forward_bp, strategies_bp
+from backtest.api import (
+    backtest_bp,
+    broker_auth_bp,
+    data_bp,
+    forward_bp,
+    portfolio_bp,
+    strategies_bp,
+)
 from backtest.api.symbols import symbols_bp
 from backtest.brokers.session_manager import get_session_manager
 
@@ -56,6 +63,10 @@ def create_app(source: str = "synthetic", **overrides: Any) -> Flask:
     app.register_blueprint(forward_bp)
     app.register_blueprint(broker_auth_bp)
     app.register_blueprint(data_bp)
+    app.register_blueprint(portfolio_bp)
+
+    # SSE broadcast cadence for the portfolio command center.
+    app.config.setdefault("PORTFOLIO_SSE_INTERVAL", 1.0)
 
     # Broker session expiry monitor (auth epic Task 2.2): idempotent daemon
     # thread, one per process, polls the active broker session every 5 min.
@@ -83,6 +94,10 @@ def create_app(source: str = "synthetic", **overrides: Any) -> Flask:
     @app.get("/forward")
     def forward_page() -> Any:
         return render_template("forward.html", active="forward")
+
+    @app.get("/portfolio")
+    def portfolio_page() -> Any:
+        return render_template("portfolio.html", active="portfolio")
 
     @app.get("/data")
     def data_page() -> Any:
