@@ -7,6 +7,8 @@ Blueprints:
 * ``forward_bp``     — forward paper-trading (``/api/forward/start|stop|status``)
 * ``broker_auth_bp`` — generic broker authentication
   (``/api/broker/login|verify-totp|status|logout``), auth epic Task 2.1
+* ``portfolio_bp``   — multi-strategy portfolio command center
+  (``/api/portfolio/*`` + SSE stream), forward-testing multi-strategy epic
 
 Mounted by :func:`backtest.web.app.create_app`.
 """
@@ -15,7 +17,16 @@ from backtest.api.backtest import backtest_bp
 from backtest.api.broker_auth import broker_auth_bp
 from backtest.api.data_manager import data_bp
 from backtest.api.forward import forward_bp
+from backtest.api.portfolio import portfolio_bp
 from backtest.api.strategies import strategies_bp
 from backtest.api.symbols import symbols_bp
 
-__all__ = ["strategies_bp", "symbols_bp", "backtest_bp", "forward_bp", "broker_auth_bp", "data_bp"]
+__all__ = [
+    "strategies_bp",
+    "symbols_bp",
+    "backtest_bp",
+    "forward_bp",
+    "broker_auth_bp",
+    "data_bp",
+    "portfolio_bp",
+]

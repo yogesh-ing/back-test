@@ -38,7 +38,7 @@ function onBrokerStatusUpdate(event) {
 }
 
 function handleStartClick(e) {
-    const mode = $("dataMode").value;
+    const mode = dataMode();
     // Synthetic mode doesn't need broker auth
     if (mode === "synthetic") {
         return startBot();
@@ -47,8 +47,10 @@ function handleStartClick(e) {
     if (!brokerAuthenticated) {
         e.preventDefault();
         e.stopPropagation();
-        if (window.BrokerAuthUI && typeof window.BrokerAuthUI.open === "function") {
-            window.BrokerAuthUI.open();
+        const authUI = (typeof window !== "undefined" && window.BrokerAuthUI) ||
+                       (typeof BrokerAuthUI !== "undefined" ? BrokerAuthUI : null);
+        if (authUI && typeof authUI.open === "function") {
+            authUI.open();
         } else {
             showToast("Broker authentication required for live mode", "warning");
         }
@@ -181,21 +183,32 @@ function renderLive(data) {
 }
 
 // ---- Start / Stop / Poll -------------------------------------------------
+function val(id, fallback = "") {
+    const el = $(id);
+    return el ? el.value : fallback;
+}
+
 function forwardConfig() {
-    const mode = $("dataMode").value;
+    const mode = dataMode();
+    const symbol = (val("symbol", "DEMO") || "DEMO").toUpperCase();
     return {
-        strategy: $("strategy").value,
-        symbol: $("symbol").value.toUpperCase(),
-        timeframe: $("timeframe").value,
-        capital: Number($("capital").value) || 100000,
+        strategy: val("strategy"),
+        symbol,
+        timeframe: val("timeframe", "1D"),
+        capital: Number(val("capital")) || 100000,
         mode: mode,
+        from_date: val("fromDate"),
+        to_date: val("toDate"),
         params: collectParamsFrom($("params-container")),
     };
 }
 
 async function startBot() {
     if (!$("strategy").value) { showToast("Select a strategy first", "warning"); return; }
-    if (!$("symbol").value) { showToast("Enter a symbol", "warning"); return; }
+    // Symbol defaults to DEMO (the synthetic source understands it) so an
+    // empty field never blocks a run.
+    const symbolEl = $("symbol");
+    if (symbolEl && !symbolEl.value) symbolEl.value = "DEMO";
 
     $("livePanel").hidden = false;
     setStatus("running");
@@ -257,10 +270,22 @@ async function loadSymbols() {
 }
 
 // ---- Init ----------------------------------------------------------------
+// Bind a handler only when the element exists (guards partial/test DOMs).
+function on(id, event, handler) {
+    const el = $(id);
+    if (el) el.addEventListener(event, handler);
+}
+
+// Data-source mode ("synthetic" | "live"); defaults to live when the control
+// is absent so the auth gate still applies in a minimal/partial DOM.
+function dataMode() {
+    return $("dataMode")?.value || "live";
+}
+
 async function init() {
-    $("startBtn").addEventListener("click", handleStartClick);
-    $("stopBtn").addEventListener("click", stopBot);
-    $("dataMode").addEventListener("change", updateStartButtonForAuth);
+    on("startBtn", "click", handleStartClick);
+    on("stopBtn", "click", stopBot);
+    on("dataMode", "change", updateStartButtonForAuth);
     document.addEventListener("broker:status", onBrokerStatusUpdate);
     updateStartButtonForAuth();
 
@@ -309,7 +334,8 @@ async function init() {
             if (pre.config.params) applyOverridesInto($("params-container"), pre.config.params);
         } catch { /* ignore */ }
         SessionState.clear(SessionState.keys.forwardPrefill);
-        $("prefillBanner").hidden = false;
+        const banner = $("prefillBanner");
+        if (banner) banner.hidden = false;
     } else if ($("strategy").value) {
         try {
             renderParamsInto($("params-container"),
