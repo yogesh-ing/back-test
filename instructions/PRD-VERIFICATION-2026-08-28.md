@@ -19,6 +19,7 @@ The verdicts below are kept as they were found. Three things have since changed:
 |---|---|
 | **U1** logging | Done — `backtest/logging_config.py`, `--log-level`/`--log-file`, request ids tying a UI toast to a traceback, log lines on every previously-silent path. See `docs/LOGGING.md`. |
 | **G5** red suite | Done — forward date contract settled (optional-but-reported), stale Node harness fixed and extended (11 tests), Postgres-driver tests skip with a reason instead of failing falsely. **Suite is green.** |
+| **G3 + G4** forward stack | Done — the page's live equity chart / metric cards / progress / positions now render from the snapshot (and were *structurally* unable to before, because `_prefix_result` passed an empty metrics dict), the payload no longer leaks future signals, sessions are keyed by `state_id` in a bounded registry, and the replay advances on a **server-side clock** (`--replay-speed`, 0 = manual) so `/status` is a pure read. New: `GET /api/config`, `GET /api/forward/sessions`, shared `Money` formatter with `--currency` (₹ default). |
 | **G1 + G2** metric bugs | Done at the root — new `engine/trades.py` is the single source of truth for both `compute_metrics` and `BacktestAdapter.to_trades()`, so the cards and the table cannot disagree; `win_rate` is realised P&L over **closed** trades, `num_trades` counts round trips (open position included, marked to the final close), and **G14** was superseded by the same change (no price reconstruction left). The adapter now asserts `Σ trade P&L == total P&L`. |
 
 Everything else below is still open; the live list is the **Gap backlog** in
@@ -119,10 +120,14 @@ Backtest/Compare/session-state (only the three broker-auth ones under `tests/js/
 | 2 | Compare up to 4 combos side by side | 🟡 Works, but under `--source synthetic` (the only credential-free source) every timeframe returns identical bars — slot 1 (`1D`) and slot 2 (`1H`) both returned 262 bars / −2.40% in the live check → "across timeframes" is cosmetic today (**G6**). |
 | 3 | Promote a winning backtest to forward test | 🟡 Promote + prefill works, but date range is dropped and the timeframe doesn't exist in forward's `<select>` (G11). |
 | 4 | Drop a strategy `.py` → UI auto-populates | ✅ Verified live. |
-| 5 | Forward page shows live updates from a running bot | ❌ Banner/positions/trades update; **equity chart and metric cards do not render** (G3). |
+| 5 | Forward page shows live updates from a running bot | ✅ **Fixed after the pass** (G3+G4) — see the table above. |
 | 6 | All pages share one registry + data source | 🟡 One registry ✅ (`/api/strategies` on all pages); symbol lists are per-page hardcodes (G12). |
 
 ---
+
+> Rows marked 🟡/❌ above for Epic 4 (4.2, 4.3), Epic 1 (1.4) and Epic 3 (3.5) were
+> **fixed later the same day** — see "Resolved after the pass". 4.1's promote-dates half and
+> everything else is still open in the tracker's Gap backlog.
 
 ## Gap backlog (now tracked in `TASK-TRACKER.md`)
 

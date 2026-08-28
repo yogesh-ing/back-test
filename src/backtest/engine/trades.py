@@ -44,11 +44,11 @@ class Trade:
     id: int
     entry_date: str
     exit_date: str
-    side: str                      # "LONG" | "SHORT"
-    entry: Optional[float]         # close at the first held bar (None if no prices)
-    exit: Optional[float]          # close at the exit bar (final close if still open)
-    pnl: float                     # equity-based, costs included
-    result: str                    # "Win" | "Loss" | "Flat"
+    side: str  # "LONG" | "SHORT"
+    entry: Optional[float]  # close at the first held bar (None if no prices)
+    exit: Optional[float]  # close at the exit bar (final close if still open)
+    pnl: float  # equity-based, costs included
+    result: str  # "Win" | "Loss" | "Flat"
     is_open: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -85,7 +85,7 @@ def walk_trades(
     px = close.reindex(index).ffill() if close is not None else None
 
     trades: list[Trade] = []
-    entry_i: int | None = None      # index of the first held bar of the open trade
+    entry_i: int | None = None  # index of the first held bar of the open trade
     entry_side = 0
     prev = 0.0
 
@@ -121,7 +121,7 @@ def walk_trades(
             entry_side = cur
         prev = cur
 
-    if entry_i is not None:                     # still held at the last bar
+    if entry_i is not None:  # still held at the last bar
         close_trade(len(index) - 1, is_open=True)
 
     return trades

@@ -57,10 +57,21 @@ Polling endpoints (`/api/forward/status`, `/api/broker/status`,
 `/api/portfolio/summary|stream`, `/health`) log their request lines at `DEBUG`
 only, so an INFO log stays readable while a bot is running.
 
+Forward replays are tagged with a **session id** — `[forward:9f3c1a7e]` — because
+several can run at once (`GET /api/forward/sessions` lists them):
+
+```
+[forward:9f3c1a7e] session created for RELIANCE/sma_crossover — 262 bars @ 5 bars/s
+[forward:9f3c1a7e] revealed 57/262 (21.8%) — RELIANCE/sma_crossover
+[forward:9f3c1a7e] replay complete — 262/262 bars for RELIANCE/sma_crossover, auto-stopped
+```
+
 ## Recipes for the usual suspects
 
 | Symptom | What the log says | Fix |
 |---|---|---|
+| Forward bot seems stuck | `[forward:<id>] replay paused (… clock frozen)` — the server clock is at 0 bars/s (`--replay-speed 0`) |
+| Two tabs race each other forward | no longer possible: `/status` is a pure read; the clock is server-side |
 | Backtest runs, results are empty | `sma_crossover produced NO signals on DEMO (262 bars, params={'fast':200,'slow':250})` + `[engine] result is flat` | Shorten the indicator windows or widen the date range — warmup must fit inside it |
 | Metric card disagrees with the trade table | `[adapter] metrics say trades=4 win_rate=100.00% but the trade table has 2 round trips with 0 wins` | Known defects **G1/G2** in `instructions/TASK-TRACKER.md` |
 | `1D` and `1H` give identical charts | `[synthetic] interval 'hour' is not supported — returning daily business bars` | Only `--source db` honours timeframes today (**G6**) |

@@ -42,6 +42,12 @@ from backtest.logging_config import (
 
 logger = get_logger(__name__)
 
+#: Re-exported for /api/config so the UI can show what the active source honours.
+try:
+    from backtest.api.backtest import SUPPORTED_TIMEFRAMES as _SUPPORTED_TIMEFRAMES
+except Exception:  # pragma: no cover - defensive: never break boot on a constant
+    _SUPPORTED_TIMEFRAMES = ("1D",)
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _TEMPLATE_DIR = os.path.join(_HERE, "templates")
 _STATIC_DIR = os.path.join(_HERE, "static")
@@ -58,6 +64,37 @@ QUIET_PATHS = frozenset(
         "/health",
     }
 )
+
+
+#: Currency presets. Default is ₹ because this platform trades NSE via mStock;
+#: the old UI mixed `$` (Backtest/Compare) with `₹` (Forward) for the same number.
+CURRENCY_PRESETS: dict[str, dict[str, str]] = {
+    "INR": {"symbol": "₹", "locale": "en-IN"},
+    "USD": {"symbol": "$", "locale": "en-US"},
+    "EUR": {"symbol": "€", "locale": "de-DE"},
+    "GBP": {"symbol": "£", "locale": "en-GB"},
+    "JPY": {"symbol": "¥", "locale": "ja-JP"},
+    "AUD": {"symbol": "A$", "locale": "en-AU"},
+    "SGD": {"symbol": "S$", "locale": "en-SG"},
+}
+
+#: Replay clock: bars revealed per second by a running forward session.
+DEFAULT_REPLAY_SPEED = 1.0
+
+
+def _resolve_currency(value: "str | None") -> dict[str, str]:
+    """Map ``--currency``/``BACKTEST_CURRENCY`` (a code or a bare symbol) to config."""
+    raw = (value or os.getenv("BACKTEST_CURRENCY") or "INR").strip()
+    preset = CURRENCY_PRESETS.get(raw.upper())
+    if preset:
+        return {"code": raw.upper(), **preset}
+    if len(raw) <= 3 and not raw.isalpha():      # a symbol: "Rp", "R$", "$"
+        return {"code": "CUSTOM", "symbol": raw, "locale": "en-US"}
+    logger.warning(
+        "unknown currency %r — falling back to INR (known: %s)",
+        raw, ", ".join(sorted(CURRENCY_PRESETS)),
+    )
+    return {"code": "INR", **CURRENCY_PRESETS["INR"]}
 
 
 def _register_request_logging(app: Flask) -> None:
@@ -153,6 +190,8 @@ def create_app(
     *,
     log_level: str | int | None = None,
     log_file: str | None = None,
+    currency: str | None = None,
+    replay_speed: float | None = None,
     **overrides: Any,
 ) -> Flask:
     """Create the unified Flask app.
@@ -166,6 +205,13 @@ def create_app(
         Logging level for the whole process; ``None`` → ``$BACKTEST_LOG_LEVEL``
         → INFO. ``log_file`` (``None`` → ``$BACKTEST_LOG_FILE``) mirrors output
         to a file.
+    currency:
+        ISO code (INR, USD, …) or a bare symbol, used by every money display in
+        the UI. ``None`` → ``$BACKTEST_CURRENCY`` → INR.
+    replay_speed:
+        Bars per second a forward-test replay advances at, on the server clock.
+        ``0`` freezes it (manual stepping). ``None`` → ``$FORWARD_REPLAY_SPEED``
+        → 1.0.
     """
     configure_logging(log_level, log_file)
     app = Flask(
@@ -174,14 +220,40 @@ def create_app(
         static_folder=_STATIC_DIR,
     )
     app.config["BACKTEST_SOURCE"] = source
+    money = _resolve_currency(currency)
+    app.config["CURRENCY"] = money["code"]
+    app.config["CURRENCY_SYMBOL"] = money["symbol"]
+    app.config["CURRENCY_LOCALE"] = money["locale"]
+    speed = replay_speed
+    if speed is None:
+        speed = os.getenv("FORWARD_REPLAY_SPEED", DEFAULT_REPLAY_SPEED)
+    try:
+        app.config["FORWARD_REPLAY_BARS_PER_SECOND"] = max(0.0, float(speed))
+    except (TypeError, ValueError):
+        logger.warning("FORWARD_REPLAY_SPEED=%r is not a number — using %s bars/s",
+                       speed, DEFAULT_REPLAY_SPEED)
+        app.config["FORWARD_REPLAY_BARS_PER_SECOND"] = DEFAULT_REPLAY_SPEED
     app.config.update(overrides)
+
+    @app.context_processor
+    def inject_globals() -> dict[str, Any]:
+        """Available to every template (base.html tags <body> with these)."""
+        return {
+            "currency_code": app.config["CURRENCY"],
+            "currency_symbol": app.config["CURRENCY_SYMBOL"],
+            "currency_locale": app.config["CURRENCY_LOCALE"],
+            "replay_speed": app.config["FORWARD_REPLAY_BARS_PER_SECOND"],
+        }
 
     _register_request_logging(app)
     _register_error_handlers(app)
 
     logger.info(
-        "app created: source=%s log_level=%s python=%s",
+        "app created: source=%s currency=%s(%s) replay_speed=%s bars/s log_level=%s python=%s",
         source,
+        app.config["CURRENCY"],
+        app.config["CURRENCY_SYMBOL"],
+        app.config["FORWARD_REPLAY_BARS_PER_SECOND"],
         logging.getLevelName(logging.getLogger("backtest").getEffectiveLevel()),
         sys.version.split()[0],
     )
@@ -247,6 +319,23 @@ def create_app(
     def data_page() -> Any:
         return render_template("data_manager.html", active="data")
 
+    @app.get("/api/config")
+    def config_view() -> tuple:
+        """What the UI needs to know about this deployment (no secrets)."""
+        return jsonify({
+            "source": app.config["BACKTEST_SOURCE"],
+            "currency": {
+                "code": app.config["CURRENCY"],
+                "symbol": app.config["CURRENCY_SYMBOL"],
+                "locale": app.config["CURRENCY_LOCALE"],
+            },
+            "forward_replay_bars_per_second": app.config["FORWARD_REPLAY_BARS_PER_SECOND"],
+            "strategies_supported_timeframes": list(_SUPPORTED_TIMEFRAMES),
+            "log_level": logging.getLevelName(
+                logging.getLogger("backtest").getEffectiveLevel()
+            ),
+        }), 200
+
     @app.get("/health")
     def health() -> tuple:
         return jsonify({"status": "ok", "source": app.config["BACKTEST_SOURCE"]}), 200
@@ -261,9 +350,12 @@ def run_app(
     debug: bool = False,
     log_level: "str | int | None" = None,
     log_file: "str | None" = None,
+    currency: "str | None" = None,
+    replay_speed: "float | None" = None,
 ) -> None:
-    """Boot the app and serve it. ``log_level``/``log_file`` default to the env vars."""
-    app = create_app(source=source, log_level=log_level, log_file=log_file, debug=debug)
+    """Boot the app and serve it. Unset options fall back to their env vars."""
+    app = create_app(source=source, log_level=log_level, log_file=log_file,
+                     currency=currency, replay_speed=replay_speed, debug=debug)
     routes = sorted(str(r) for r in app.url_map.iter_rules())
     logger.info("serving %d routes on http://%s:%s — %d api endpoints",
                 len(routes), host, port,
@@ -288,6 +380,19 @@ def main() -> None:
         help="DEBUG | INFO | WARNING | ERROR (env: BACKTEST_LOG_LEVEL)",
     )
     parser.add_argument(
+        "--currency",
+        default=os.getenv("BACKTEST_CURRENCY", "INR"),
+        help="Money display for every page: INR (default, ₹) | USD | EUR | GBP | "
+             "JPY | AUD | SGD, or a bare symbol (env: BACKTEST_CURRENCY)",
+    )
+    parser.add_argument(
+        "--replay-speed",
+        type=float,
+        default=float(os.getenv("FORWARD_REPLAY_SPEED", "1.0")),
+        help="Bars per second a forward-test replay advances at; 0 = manual "
+             "(env: FORWARD_REPLAY_SPEED)",
+    )
+    parser.add_argument(
         "--log-file",
         default=os.getenv("BACKTEST_LOG_FILE"),
         help="also append every log line to this file (env: BACKTEST_LOG_FILE)",
@@ -300,6 +405,8 @@ def main() -> None:
         debug=args.debug,
         log_level=args.log_level,
         log_file=args.log_file,
+        currency=args.currency,
+        replay_speed=args.replay_speed,
     )
 
 

@@ -19,10 +19,12 @@ async function loadStrategies() {
         : '<span class="muted small">none</span>';
 }
 
-function fmtPnl(v) {
+function fmtPnl(v, metrics) {
     const cls = v >= 0 ? "pos" : "neg";
-    const sign = v >= 0 ? "+" : "-";
-    return `<span class="${cls}">${sign}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>`;
+    const text = (typeof Money !== "undefined") ? Money.signed(v)
+        : `${v >= 0 ? "+" : "-"}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+    const detail = metrics && metrics.closed_trades === 0 ? ' <span class="muted small">nothing closed</span>' : "";
+    return `<span class="${cls}">${text}</span>${detail}`;
 }
 
 async function refreshBot() {
@@ -39,11 +41,12 @@ async function refreshBot() {
     $("botBadge").textContent = s.status === "running" ? "Running" : "Stopped";
     $("botBadge").className = `status-badge status-${s.status}`;
     $("botSymbol").textContent = (s.config && s.config.symbol) || "—";
-    $("botPnl").innerHTML = fmtPnl(s.metrics.total_pnl);
+    $("botPnl").innerHTML = fmtPnl(s.metrics.total_pnl, s.metrics);
     const p = s.progress || {};
     $("botDetail").innerHTML =
         `Strategy <strong>${(s.config && s.config.strategy) || "—"}</strong> · ` +
-        `${s.metrics.total_trades} trades · ${p.pct || 0}% replayed · win rate ${s.metrics.win_rate_pct}%`;
+        `${s.metrics.total_trades} trades · ${p.pct || 0}% replayed · win rate ` +
+        (s.metrics.closed_trades === 0 ? "— (nothing closed)" : `${s.metrics.win_rate_pct}%`);
     if (s.status === "running" && p.total) {
         $("botProgressTrack").hidden = false;
         $("botProgressBar").style.width = `${p.pct}%`;

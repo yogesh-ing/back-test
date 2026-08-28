@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import math
 
-import pandas as pd
-
 from backtest.engine.trades import trade_stats, walk_trades
 
 
@@ -22,7 +20,11 @@ def compute_metrics(result) -> dict:
     years = len(equity) / ppy if ppy else 1.0
 
     total_return = equity.iloc[-1] / capital - 1 if capital else 0.0
-    cagr = (equity.iloc[-1] / equity.iloc[0]) ** (1 / years) - 1 if len(equity) > 0 and equity.iloc[0] else 0.0
+    cagr = (
+        (equity.iloc[-1] / equity.iloc[0]) ** (1 / years) - 1
+        if len(equity) > 0 and equity.iloc[0]
+        else 0.0
+    )
 
     returns = result.returns.fillna(0)
     volatility = returns.std(ddof=0) * math.sqrt(ppy) if len(returns) > 0 else 0.0
@@ -49,7 +51,7 @@ def compute_metrics(result) -> dict:
         "sharpe": sharpe,
         "max_drawdown": max_drawdown,
         "calmar": calmar,
-        "num_trades": stats["num_trades"],          # round trips, incl. one open trade
+        "num_trades": stats["num_trades"],  # round trips, incl. one open trade
         "closed_trades": stats["closed_trades"],
         "open_trades": stats["open_trades"],
         "winning_trades": stats["winning_trades"],

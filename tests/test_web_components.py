@@ -28,10 +28,23 @@ def test_metrics_cards_and_trade_table_behaviour():
         text=True,
         timeout=60,
     )
-    assert result.returncode == 0, (
-        f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "10 tests passed" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_forward_live_widgets_render():
+    """G3: the forward page's equity chart, metric cards, progress and positions."""
+    harness = _REPO_ROOT / "tests" / "js" / "test_forward_widgets.mjs"
+    result = subprocess.run(
+        ["node", str(harness)], cwd=_REPO_ROOT, capture_output=True, text=True, timeout=60
     )
-    assert "9 tests passed" in result.stdout
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "7 tests passed" in result.stdout
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
@@ -48,7 +61,8 @@ function makeEl(id) {
     return el;
 }
 const els = {};
-const sandbox = { console, document: { getElementById: (id) => (els[id] = els[id] || makeEl(id)) } };
+const sandbox = { console, document: {
+    getElementById: (id) => (els[id] = els[id] || makeEl(id)) } };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(code + "\\n;globalThis.T = TradeTable;", sandbox);
@@ -60,11 +74,13 @@ const count = (html) => (html.match(/<tr>/g) || []).length;
 console.log(JSON.stringify({ a: count(els["a"].querySelector("tbody").innerHTML),
                             b: count(els["b"].querySelector("tbody").innerHTML) }));
 """
-    result = subprocess.run(["node", "-e", script], cwd=_REPO_ROOT, capture_output=True,
-                            text=True, timeout=60)
+    result = subprocess.run(
+        ["node", "-e", script], cwd=_REPO_ROOT, capture_output=True, text=True, timeout=60
+    )
     assert result.returncode == 0, result.stderr
     # 3 rows in container "a", 7 in "b" — both under the 20-row page size, so a
     # shared/hardcoded container would have left "a" empty or overwritten.
-    assert json.loads(result.stdout.strip()) == {"a": 3, "b": 7}, (
-        f"containers must render independently: {result.stdout}{result.stderr}"
-    )
+    assert json.loads(result.stdout.strip()) == {
+        "a": 3,
+        "b": 7,
+    }, f"containers must render independently: {result.stdout}{result.stderr}"

@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import logging
 import pathlib
+import re
 import threading
 
 import pytest
@@ -348,8 +349,10 @@ def test_forward_lifecycle_is_logged(client, caplog):
                     json={"strategy": "sma_crossover", "symbol": "DEMO", "mode": "live"})
     text = caplog.text
     assert "[forward] /start strategy=sma_crossover symbol=DEMO mode=synthetic" in text
-    assert "replay running: 130 bars" in text
-    assert "[forward] stopped at bar" in text
+    # Session-scoped lines are tagged [forward:<short id>] so two replays can be
+    # told apart in the log.
+    assert re.search(r"\[forward:[0-9a-f]{8}\] replay running: 130 bars", text)
+    assert re.search(r"\[forward:[0-9a-f]{8}\] stopped at bar", text)
     assert "broker session not authenticated" in text
 
 

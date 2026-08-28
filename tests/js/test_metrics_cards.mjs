@@ -22,6 +22,9 @@ const cardsCode = readFileSync(
 const tableCode = readFileSync(
     path.join(root, "src/backtest/web/static/js/components/trade_table.js"), "utf8",
 );
+const currencyCode = readFileSync(
+    path.join(root, "src/backtest/web/static/js/components/currency.js"), "utf8",
+);
 
 // ------------------------------------------------------------------ tiny DOM
 function makeEl(id) {
@@ -49,18 +52,25 @@ function el(id) {
 
 const sandbox = {
     console,
-    document: { getElementById: (id) => el(id), createElement: () => makeEl("created") },
+    // body.dataset carries what the server rendered (₹ by default — gap G3 was
+    // the Forward page hard-coding ₹ while every other page hard-coded $).
+    document: {
+        getElementById: (id) => el(id),
+        createElement: () => makeEl("created"),
+        body: { dataset: { currencySymbol: "₹", currencyCode: "INR", currencyLocale: "en-IN" } },
+    },
     Number, String, Math,
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
+vm.runInContext(currencyCode, sandbox, { filename: "currency.js" });
 vm.runInContext(cardsCode, sandbox, { filename: "metrics_cards.js" });
 // trade_table.js declares TradeTable with a top-level `const`, which never lands
 // on the sandbox object — re-export it explicitly so we can drive it.
 vm.runInContext(`${tableCode}\n;globalThis.TradeTable = TradeTable;`, sandbox,
                 { filename: "trade_table.js" });
 
-const { renderMetricsCards, TradeTable } = sandbox;
+const { renderMetricsCards, TradeTable, Money } = sandbox;
 const $ = (id) => el(id);
 
 let passed = 0;
@@ -124,6 +134,18 @@ test("trades card flags an open position", () => {
     renderMetricsCards("w4", { total_pnl: 5, win_rate_pct: 50, max_drawdown_pct: -2,
                               sharpe: 0.5, total_trades: 4, closed_trades: 3, open_trades: 1 });
     assert.match($("w4").innerHTML, /1 still open/);
+});
+
+test("one currency formatter drives every page (₹ from the server)", () => {
+    assert.equal(Money.symbol(), "₹");
+    assert.equal(Money.signed(-1234.5), "-₹1,234.50");
+    // en-IN grouping is lakh/crore style — that is the point of carrying a locale.
+    assert.equal(Money.format(100000, 0), "₹1,00,000");
+    // The card renderer must use it, not a hard-coded "$" (old behaviour).
+    renderMetricsCards("cur", { total_pnl: 500, win_rate_pct: 50, max_drawdown_pct: -2,
+                               sharpe: 1, total_trades: 2, closed_trades: 2, open_trades: 0 });
+    assert.match($("cur").innerHTML, /\+₹500\.00/);
+    assert.ok(!$("cur").innerHTML.includes("$"), "no stray $ on a ₹ deployment");
 });
 
 // ---------------------------------------------------------------- trade table

@@ -9,20 +9,25 @@
 * ``GET  /api/forward/equity`` → [{ts, equity}]
 
 A forward session replays a historical backtest **one bar at a time** — the
-strategy sees bars gradually, as it would live. Each ``/status`` poll reveals
-the next slice of bars and recomputes the metrics on the revealed prefix via
-:class:`BacktestAdapter` (same payload shape as the Backtest/Compare pages, so
-their chart/table components are reusable), until it runs to completion and
-auto-stops.
+strategy sees bars gradually, as it would live. The clock runs on the server:
+a daemon thread reveals bars at ``bars_per_second`` whether or not anyone polls,
+and ``/status`` is a pure read (so two open tabs cannot double-advance one run).
+Each snapshot recomputes the metrics on the revealed prefix through
+:class:`BacktestAdapter`, i.e. the same payload shape as the Backtest/Compare
+pages, so their chart/table components are reusable.
 
-The server-side state lives in-process (refresh-safe); the broker auth guard
-blocks ``/start`` unless a session is authenticated.
+Sessions are keyed by ``state_id`` (``GET /api/forward/sessions`` lists them);
+omitting the id addresses the most recently started one. State lives in-process,
+so it survives a page refresh but not a restart (V2 persistence). The broker auth
+guard blocks ``/start`` in live mode unless a session is authenticated.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import uuid
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -32,15 +37,13 @@ from flask import Blueprint, current_app, jsonify, request
 from backtest.adapters.backtest_adapter import BacktestAdapter
 from backtest.brokers.session_manager import get_session_manager
 from backtest.engine.backtester import BacktestConfig, BacktestResult
+from backtest.engine.metrics import compute_metrics
 from backtest.logging_config import get_logger, timed
 from backtest.runner import build_source, run_on_candles
 
 forward_bp = Blueprint("forward_api", __name__)
 log = get_logger(__name__)
 
-# Bars revealed on each /status poll — mimics the real-time cadence while
-# keeping a full year of daily bars replayable within a reasonable poll count.
-BARS_PER_POLL = 6
 # Extra bars before from_date for indicator warmup. 0 keeps the replay over
 # exactly the requested range (matching a standalone backtest/forward run).
 WARMUP_BARS = 0
@@ -75,22 +78,48 @@ def _fmt_ts(ts: Any) -> str:
 # In-memory replay session
 # ---------------------------------------------------------------------------
 
+#: Bars revealed per second of wall-clock time by the replay clock. One year of
+#: daily bars therefore plays in ~4 minutes at the default, instantly at 2000.
+DEFAULT_BARS_PER_SECOND = 1.0
+#: How often the clock thread wakes up.
+TICK_SECONDS = 0.25
+#: Finished/stopped sessions kept readable for late pollers (refresh-safe UI).
+MAX_SESSIONS = 20
+#: Guard rail for a client-supplied speed — a typo must not spin the CPU.
+MAX_BARS_PER_SECOND = 5000.0
+
 
 class ForwardSession:
-    """A single forward-test paper-trading replay."""
+    """One forward-test paper-trading replay.
+
+    **The clock is server-side** (gap G4): a daemon thread reveals bars at
+    ``bars_per_second`` whether or not anyone polls, and ``/status`` only *reads*
+    state. Poll-driven advance meant two open tabs (or a Dashboard refresh)
+    advanced one run twice as fast, and a closed browser froze the bot.
+
+    ``bars_per_second=0`` freezes the clock so tests (and a "step through it"
+    UI) can drive :meth:`tick` deterministically.
+
+    The strategy still only ever sees the revealed prefix — the same
+    no-lookahead rule as the paper-trade loop — and the payload is built with
+    :class:`BacktestAdapter` so the Backtest/Compare components are reusable.
+    """
 
     def __init__(
         self,
-        candles: pd.DataFrame,
+        *,
+        state_id: str,
+        result: BacktestResult,
         strategy: str,
         symbol: str,
         timeframe: str,
         capital: float,
         params: dict[str, Any],
-        result: BacktestResult,
         from_date: str,
         to_date: str,
+        bars_per_second: float = DEFAULT_BARS_PER_SECOND,
     ) -> None:
+        self.state_id = state_id
         self.strategy = strategy
         self.symbol = symbol
         self.timeframe = timeframe
@@ -98,24 +127,132 @@ class ForwardSession:
         self.params = dict(params)
         self.from_date = from_date
         self.to_date = to_date
-        self.lock = threading.Lock()
 
+        self.lock = threading.RLock()
         self.status: str = "running"
-        self.candles = result.candles           # trimmed, in-range frames
+        self.error: Optional[str] = None
+        self.created_at = datetime.now()
+        self.stopped_at: Optional[datetime] = None
+
+        # Trimmed, in-range frames: the replay only ever covers what was asked for.
+        self.candles = result.candles
         self.equity_s = result.equity
         self.returns_s = result.returns
         self.position_s = result.position.fillna(0)
         self.config = result.config
 
-        self.adapter = BacktestAdapter(result)
-        self.signals = self.adapter.to_signals()
-        self.all_trades = self.adapter.to_trades()
+        # Views over the whole run, prepared once: each snapshot slices these by
+        # date instead of recomputing markers per poll.
+        full = BacktestAdapter(result)
+        signals = full.to_signals()
+        self.candles_rows = signals["candles"]
+        self.buy_signals = signals["buys"]
+        self.sell_signals = signals["sells"]
+        self._dates = [c["date"] for c in self.candles_rows]
 
-        # Replay cursor over the trimmed (in-range) frames.
+        self.bars_per_second = max(0.0, min(float(bars_per_second), MAX_BARS_PER_SECOND))
+
+        # Cursor over the revealed prefix. One bar is visible immediately so the
+        # first /status after /start already renders something.
         self.total = len(self.candles)
-        self.revealed = min(BARS_PER_POLL, self.total)
+        self._revealed = min(1, self.total)
+        self._pending = 0.0
 
-    # ------------------------------------------------------------------ #
+        self._wake = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+        log.info("[forward:%s] session created for %s/%s — %d bars @ %s",
+                 self.short_id, symbol, strategy, self.total,
+                 f"{self.bars_per_second:g} bars/s" if self.bars_per_second else "manual clock")
+        if self.bars_per_second > 0 and self.total > 1:
+            self._start_clock()
+
+    # -- identity helpers -------------------------------------------------- #
+
+    @property
+    def short_id(self) -> str:
+        return self.state_id[:8]
+
+    @property
+    def revealed(self) -> int:
+        with self.lock:
+            return self._revealed
+
+    @property
+    def running(self) -> bool:
+        with self.lock:
+            return self.status == "running"
+
+    # -- the clock --------------------------------------------------------- #
+
+    def _start_clock(self) -> None:
+        self._thread = threading.Thread(
+            target=self._loop, name=f"forward-replay-{self.short_id}", daemon=True
+        )
+        self._thread.start()
+
+    def _loop(self) -> None:
+        """Reveal bars on wall-clock time, then retire the thread at completion."""
+        while not self._wake.wait(TICK_SECONDS):
+            self.tick(TICK_SECONDS)
+            if not self.running:
+                return
+
+    def tick(self, seconds: float) -> int:
+        """Reveal whatever ``seconds`` of wall-clock time is worth. Returns the cursor.
+
+        Fractional bars accumulate in ``_pending`` so a slow clock (1 bar/s) is
+        never starved by rounding, and a fast one can reveal many bars per wake-up.
+        """
+        with self.lock:
+            if self.bars_per_second <= 0:
+                return self._revealed          # frozen clock: only advance() steps it
+            self._pending += max(0.0, float(seconds)) * self.bars_per_second
+            whole = int(self._pending)
+            if whole <= 0:
+                return self._revealed
+            self._pending -= whole
+        return self.advance(whole)
+
+    def advance(self, bars: int) -> int:
+        """Reveal exactly ``bars`` more bars. Returns the new cursor.
+
+        The thread path goes through :meth:`tick`; this is the direct door, which
+        is what tests (and any future "step one bar" control) use — with a frozen
+        clock (``bars_per_second=0``) it is the only way to move.
+        """
+        with self.lock:
+            if self.status != "running" or self.total == 0 or bars <= 0:
+                return self._revealed
+            before = self._revealed
+            self._revealed = min(self.total, self._revealed + int(bars))
+            if self._revealed >= self.total:
+                self._revealed = self.total
+                self.status = "stopped"
+                self.stopped_at = datetime.now()
+                log.info("[forward:%s] replay complete — %d/%d bars for %s/%s, auto-stopped",
+                         self.short_id, self.total, self.total, self.symbol, self.strategy)
+            elif self._revealed != before:
+                log.debug("[forward:%s] revealed %d/%d (%.1f%%) — %s/%s", self.short_id,
+                          self._revealed, self.total,
+                          100.0 * self._revealed / self.total, self.symbol, self.strategy)
+            return self._revealed
+
+    def stop(self) -> None:
+        with self.lock:
+            already = self.status != "running"
+            if not already:
+                self.status = "stopped"
+                self.stopped_at = datetime.now()
+        self._wake.set()
+        if already:
+            log.debug("[forward:%s] stop ignored — status is already %s", self.short_id,
+                      self.status)
+        else:
+            log.info("[forward:%s] stopped at bar %d/%d (%s/%s)", self.short_id,
+                     self._revealed, self.total, self.symbol, self.strategy)
+
+    # -- state derivation --------------------------------------------------- #
 
     def _prefix_result(self, n: int) -> BacktestResult:
         candles = self.candles.iloc[:n]
@@ -127,7 +264,7 @@ class ForwardSession:
             if base:
                 equity = equity / base * self.capital
         returns = self.returns_s.reindex(candles.index).fillna(0.0)
-        return BacktestResult(
+        prefix = BacktestResult(
             equity=equity,
             returns=returns,
             position=position,
@@ -135,36 +272,87 @@ class ForwardSession:
             config=self.config,
             metrics={},
         )
+        # BacktestAdapter reads result.metrics for the cards — an empty dict here
+        # used to make every live metric (P&L, return, Sharpe, win rate, trade
+        # count) report zero no matter how the replay was doing. Compute the
+        # metrics for the revealed prefix, and stamp the run metadata the adapter
+        # surfaces on the config block.
+        prefix.metrics = compute_metrics(prefix)
+        prefix.metrics.update({
+            "strategy": self.strategy,
+            "symbol": self.symbol,
+            "strategy_params": self.params,
+            "stop_loss": self.config.stop_loss,
+            "take_profit": self.config.take_profit,
+        })
+        return prefix
 
-    def advance(self) -> None:
-        """Reveal the next slice of bars and auto-stop at completion."""
-        with self.lock:
-            if self.status != "running":
-                return
-            self.revealed = min(self.total, self.revealed + BARS_PER_POLL)
-            if self.revealed >= self.total:
-                self.revealed = self.total
-                self.status = "stopped"
-                log.info("[forward] replay complete: %s/%s %s bars — auto-stopped",
-                         self.symbol, self.strategy, self.total)
-            else:
-                log.debug("[forward] replay %s/%s → revealed %d/%d (%.1f%%)",
-                          self.symbol, self.strategy, self.revealed, self.total,
-                          100.0 * self.revealed / self.total if self.total else 100.0)
+    def _signals_upto(self, cutoff: Any) -> dict[str, Any]:
+        """Signals the strategy could actually have seen by ``cutoff``.
 
-    def stop(self) -> None:
-        with self.lock:
-            if self.status != "running":
-                log.debug("[forward] stop ignored: status is already %s", self.status)
-            self.status = "stopped"
-            log.info("[forward] stopped at bar %d/%d (%s/%s)", self.revealed, self.total,
-                     self.symbol, self.strategy)
+        The previous version filtered with ``if b in self.signals["buys"]`` —
+        always true — and then sliced by *count*, so a replay at 4% progress was
+        already advertising entries months ahead (a lookahead leak in the payload,
+        gap G4). Filtering on the bar date is the actual rule.
+        """
+        cutoff_str = _fmt_ts(cutoff) if cutoff is not None else ""
+        candles = [c for c in self.candles_rows if c["date"] <= cutoff_str]
+        return {
+            "candles": candles,
+            "buys": [b for b in self.buy_signals if b["date"] <= cutoff_str],
+            "sells": [s for s in self.sell_signals if s["date"] <= cutoff_str],
+        }
 
-    # ------------------------------------------------------------------ #
+    def _positions(self, n: int, prefix_trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The position still open at the revealed bar, marked to its close.
+
+        Previously ``entry`` and ``current`` were both the last close, so the
+        unrealised P&L column was always 0 — a live panel that could never move.
+        """
+        if n <= 0:
+            return []
+        last_idx = self.candles.index[n - 1]
+        cur_pos = float(self.position_s.loc[last_idx]) if last_idx in self.position_s.index else 0.0
+        if cur_pos == 0:
+            return []
+
+        # The open leg of the *revealed* prefix — not of the full run.
+        open_trade = next((t for t in prefix_trades if t.get("is_open")), None)
+        last_close = float(self.candles.loc[last_idx, "close"])
+        entry = float(open_trade["entry"]) if open_trade and open_trade["entry"] else last_close
+        entry_equity = (self.capital + float(open_trade["pnl"])) if open_trade else self.capital
+        direction = 1.0 if cur_pos > 0 else -1.0
+        price_change = (last_close / entry - 1.0) * direction if entry else 0.0
+        pnl = float(open_trade["pnl"]) if open_trade else 0.0
+        entry_date = open_trade["date"] if open_trade else _fmt_ts(last_idx)
+        bars_held = max(0, (n - 1) - self._index_of(entry_date)) if open_trade else 0
+        return [{
+            "symbol": self.symbol,
+            "side": "LONG" if cur_pos > 0 else "SHORT",
+            # This engine sizes in exposure units (1.0 = fully invested), not lots.
+            "qty": abs(cur_pos),
+            "exposure_pct": round(abs(cur_pos) * 100.0, 2),
+            "entry": _f(entry, 2),
+            "current": _f(last_close, 2),
+            "price_change_pct": round(price_change * 100.0, 2),
+            "unrealized_pnl": _f(pnl, 2),
+            "unrealized_pnl_pct": round((pnl / entry_equity * 100.0) if entry_equity else 0.0, 2),
+            "entry_date": entry_date,
+            "bars_held": bars_held,
+        }]
+
+    def _index_of(self, date_str: str) -> int:
+        try:
+            return [c["date"] for c in self.candles_rows].index(date_str)
+        except ValueError:
+            return 0
+
+    # -- payload ------------------------------------------------------------ #
 
     def snapshot(self) -> dict[str, Any]:
+        """The current state — pure read, never advances the replay."""
         with self.lock:
-            n = self.revealed
+            n = self._revealed
             pct = round(100.0 * n / self.total, 2) if self.total else 100.0
             prefix = self._prefix_result(n)
             adapter = BacktestAdapter(prefix)
@@ -173,31 +361,13 @@ class ForwardSession:
             equity = adapter.to_equity()
             drawdown = adapter.to_drawdown()
             trades = adapter.to_trades()
-
-            # Live (open) positions from the most recent bar.
-            positions: list[dict[str, Any]] = []
-            if n > 0:
-                last_idx = self.candles.index[n - 1]
-                cur_pos = float(self.position_s.loc[last_idx]) if last_idx in self.position_s.index else 0.0
-                if cur_pos != 0:
-                    last_close = float(self.candles.loc[last_idx, "close"])
-                    positions.append({
-                        "symbol": self.symbol,
-                        "side": "LONG" if cur_pos > 0 else "SHORT",
-                        "qty": abs(cur_pos),
-                        "entry": last_close,
-                        "current": last_close,
-                        "unrealized_pnl_pct": 0.0,
-                        "entry_date": _fmt_ts(last_idx),
-                    })
+            positions = self._positions(n, trades)
+            last_idx = self.candles.index[n - 1] if n else None
 
             return {
+                "state_id": self.state_id,
                 "status": self.status,
-                "progress": {
-                    "revealed": n,
-                    "total": self.total,
-                    "pct": pct,
-                },
+                "progress": {"revealed": n, "total": self.total, "pct": pct},
                 "metrics": {
                     "total_pnl": metrics["total_pnl"],
                     "total_return_pct": metrics["total_return_pct"],
@@ -214,7 +384,7 @@ class ForwardSession:
                 "equity": equity,
                 "drawdown": drawdown,
                 "trades": trades,
-                "signals": self._signals_upto(n),
+                "signals": self._signals_upto(last_idx),
                 "positions": positions,
                 "config": {
                     "strategy": self.strategy,
@@ -225,50 +395,99 @@ class ForwardSession:
                     "from_date": self.from_date,
                     "to_date": self.to_date,
                 },
-                # Live-feed style fields (forward.js/dashboard use these).
+                # Live-feed style fields (forward.js / dashboard.js read these).
                 "total_bars": n,
                 "bars_in_memory": n,
                 "total_trades": metrics["total_trades"],
-                "last_bar_ts": _fmt_ts(self.candles.index[n - 1]) if n else None,
+                "last_bar_ts": _fmt_ts(last_idx) if last_idx is not None else None,
                 "market_open": True,
-                "unrealized_pnl": 0.0,
-                "error": None,
+                "unrealized_pnl": round(sum(p["unrealized_pnl"] for p in positions), 2),
+                "error": self.error,
             }
 
-    def _signals_upto(self, n: int) -> dict[str, Any]:
-        if not self.signals.get("candles"):
-            return {"candles": [], "buys": [], "sells": []}
-        return {
-            "candles": self.signals["candles"][:n],
-            "buys": [b for b in self.signals["buys"] if b in self.signals["buys"]][: n],
-            "sells": [s for s in self.signals["sells"] if s in self.signals["sells"]][: n],
-        }
+    def summary(self) -> dict[str, Any]:
+        """Row for the session list — no heavy computation."""
+        with self.lock:
+            return {
+                "state_id": self.state_id,
+                "short_id": self.short_id,
+                "strategy": self.strategy,
+                "symbol": self.symbol,
+                "status": self.status,
+                "revealed": self._revealed,
+                "total": self.total,
+                "pct": round(100.0 * self._revealed / self.total, 2) if self.total else 100.0,
+                "bars_per_second": self.bars_per_second,
+                "created_at": self.created_at.isoformat(timespec="seconds"),
+            }
 
     def equity_series(self) -> list[dict[str, Any]]:
-        snap = self.snapshot()
-        eq = snap["equity"]
-        dates = eq.get("dates", [])
-        values = eq.get("values", [])
-        return [{"ts": d, "equity": v} for d, v in zip(dates, values)]
+        eq = self.snapshot()["equity"]
+        return [{"ts": d, "equity": v} for d, v in zip(eq.get("dates", []), eq.get("values", []))]
 
 
 # ---------------------------------------------------------------------------
 # Process-wide session registry
 # ---------------------------------------------------------------------------
 
-_SESSION: Optional[ForwardSession] = None
+_SESSIONS: "OrderedDict[str, ForwardSession]" = OrderedDict()
+_ACTIVE_ID: Optional[str] = None
 _session_lock = threading.Lock()
 
 
-def _reset_session() -> None:
-    """Clear the in-memory forward session (tests / restart)."""
-    global _SESSION
+def _register(session: ForwardSession) -> None:
+    global _ACTIVE_ID
     with _session_lock:
-        _SESSION = None
+        _SESSIONS[session.state_id] = session
+        _ACTIVE_ID = session.state_id
+        # Keep the map bounded: drop the oldest finished session.
+        while len(_SESSIONS) > MAX_SESSIONS:
+            for key, existing in list(_SESSIONS.items()):
+                if existing is not session and existing.status != "running":
+                    _SESSIONS.pop(key, None)
+                    break
+            else:
+                _SESSIONS.pop(next(iter(_SESSIONS)), None)
+    log.info("[forward:%s] started (%d session(s) in memory, active id is now this one)",
+             session.short_id, len(_SESSIONS))
 
 
-def _get_session() -> Optional[ForwardSession]:
-    return _SESSION
+def _reset_session() -> None:
+    """Stop and forget every session (tests / restart)."""
+    global _ACTIVE_ID
+    with _session_lock:
+        sessions = list(_SESSIONS.values())
+        _SESSIONS.clear()
+        _ACTIVE_ID = None
+    for session in sessions:
+        session.stop()
+
+
+def _get_session(state_id: Optional[str] = None) -> Optional[ForwardSession]:
+    """Look a session up by id, or return the most recently started one.
+
+    The fallback keeps ``GET /api/forward/status`` working for callers that do
+    not track ids (the Dashboard), while an *unknown explicit* id resolves to
+    ``None`` so the endpoint can answer 404 instead of lying about another run.
+    """
+    with _session_lock:
+        if state_id:
+            return _SESSIONS.get(state_id)
+        if _ACTIVE_ID and _ACTIVE_ID in _SESSIONS:
+            return _SESSIONS[_ACTIVE_ID]
+        for session in reversed(list(_SESSIONS.values())):
+            if session.status == "running":
+                return session
+        return None
+
+
+def _list_sessions() -> list[dict[str, Any]]:
+    with _session_lock:
+        rows = [s.summary() for s in _SESSIONS.values()]
+        active = _ACTIVE_ID
+    for row in rows:
+        row["active"] = row["state_id"] == active
+    return list(reversed(rows))
 
 
 def _source() -> Any:
@@ -381,8 +600,6 @@ def _trim_to_range(result: BacktestResult, from_date: str, to_date: str) -> Back
         candles=candles, config=result.config, metrics={},
     )
     # Recompute metrics on the trimmed frames so counts match the visible range.
-    from backtest.engine.metrics import compute_metrics
-
     trimmed.metrics = compute_metrics(trimmed)
     for key in ("strategy", "strategy_params", "symbol", "stop_loss", "take_profit"):
         if key in result.metrics:
@@ -395,12 +612,30 @@ def _trim_to_range(result: BacktestResult, from_date: str, to_date: str) -> Back
 # ---------------------------------------------------------------------------
 
 
+def _resolve_speed(data: dict, cfg: Any) -> float:
+    """Bars/second for this replay: body override, then app config, then default."""
+    raw = data.get("bars_per_second")
+    if raw in (None, ""):
+        raw = cfg.get("FORWARD_REPLAY_BARS_PER_SECOND", DEFAULT_BARS_PER_SECOND)
+    try:
+        speed = float(raw)
+    except (TypeError, ValueError):
+        log.warning("[forward] bars_per_second=%r is not a number — using default %s",
+                    raw, DEFAULT_BARS_PER_SECOND)
+        return DEFAULT_BARS_PER_SECOND
+    if speed < 0:
+        log.warning("[forward] bars_per_second=%s is negative — clock starts frozen (manual)",
+                    speed)
+        return 0.0
+    return speed
+
+
 @forward_bp.post("/api/forward/start")
 def start() -> tuple:
     """Start a forward-test replay.
 
-    Server-side auth guard: without an authenticated broker session the
-    endpoint returns 403 (checked before any other validation).
+    Server-side auth guard: without an authenticated broker session live mode
+    returns 403 (checked before any other validation).
     """
     data = request.get_json(silent=True) or {}
 
@@ -442,10 +677,11 @@ def start() -> tuple:
         return jsonify({"error": "capital must be positive"}), 400
 
     params = data.get("params") or {}
+    speed = _resolve_speed(data, current_app.config)
     log.info(
         "[forward] /start strategy=%s symbol=%s mode=%s timeframe=%s range=%s..%s "
-        "capital=%s params=%s", strategy, symbol, mode, timeframe, from_date, to_date,
-        capital, params,
+        "capital=%s speed=%s params=%s", strategy, symbol, mode, timeframe, from_date,
+        to_date, capital, speed, params,
     )
 
     try:
@@ -470,30 +706,33 @@ def start() -> tuple:
 
     result = _trim_to_range(result, from_date, to_date)
 
-    global _SESSION
-    with _session_lock:
-        if _SESSION is not None and _SESSION.status == "running":
-            log.warning("[forward] replacing the running replay %s/%s (only one session at a "
-                        "time is supported — gap G4)", _SESSION.strategy, _SESSION.symbol)
-        _SESSION = ForwardSession(
-            candles=result.candles, strategy=strategy, symbol=symbol,
-            timeframe=timeframe, capital=capital, params=params,
-            result=result, from_date=from_date, to_date=to_date,
-        )
-        snap = _SESSION.snapshot()
+    session = ForwardSession(
+        state_id=uuid.uuid4().hex, strategy=strategy, symbol=symbol, timeframe=timeframe,
+        capital=capital, params=params, result=result, from_date=from_date, to_date=to_date,
+        bars_per_second=speed,
+    )
+    _register(session)
+    snap = session.snapshot()
+    total = snap["progress"]["total"]
+    if speed > 0:
+        log.info("[forward:%s] replay running: %d bars @ %g/s ≈ %.0fs — poll "
+                 "GET /api/forward/status?state_id=%s", session.short_id, total, speed,
+                 total / speed, session.state_id)
+    else:
+        log.info("[forward:%s] replay paused (%d bars, clock frozen) — step it with "
+                 "session.advance(bars) or start with bars_per_second > 0",
+                 session.short_id, total)
 
-    log.info("[forward] replay running: %d bars, revealing %d per poll (≈%d polls to finish)",
-             snap["progress"]["total"], BARS_PER_POLL,
-             max(1, -(-snap["progress"]["total"] // BARS_PER_POLL)))
     return jsonify({
         "status": "running",
-        "total": snap["progress"]["total"],
+        "total": total,
         "revealed": snap["progress"]["revealed"],
-        "state_id": None,
+        "state_id": session.state_id,
         "symbol": symbol,
         "strategy": strategy,
+        "bars_per_second": session.bars_per_second,
         # What the replay actually runs on, including anything we filled in for
-        # the caller — the UI shows this whenever defaults_applied is non-empty.
+        # the caller (see _resolve_dates / gap G5).
         "config": snap["config"],
         "defaults_applied": date_defaults,
     }), 200
@@ -506,39 +745,59 @@ def start() -> tuple:
 
 @forward_bp.post("/api/forward/stop")
 def stop() -> tuple:
-    session = _get_session()
+    """Stop one replay (``state_id`` in the body or query), or the active one."""
+    data = request.get_json(silent=True) or {}
+    state_id = data.get("state_id") or request.args.get("state_id")
+    session = _get_session(state_id)
+    if state_id and session is None:
+        log.warning("[forward] /stop for unknown session %r", state_id)
+        return jsonify({"error": f"unknown session: {state_id}"}), 404
     if session is None:
         log.info("[forward] /stop with no active session — nothing to do")
         return jsonify({"status": "idle"}), 200
     session.stop()
-    return jsonify({"status": "stopped"}), 200
+    return jsonify({"status": "stopped", "state_id": session.state_id,
+                    "progress": session.snapshot()["progress"]}), 200
 
 
 # ---------------------------------------------------------------------------
-# GET /api/forward/status
+# GET /api/forward/status  ·  /sessions  ·  /trades  ·  /equity
 # ---------------------------------------------------------------------------
+
+
+def _session_or_404():
+    """Resolve the requested session; ``(None, (payload, status))`` when unknown."""
+    state_id = request.args.get("state_id")
+    session = _get_session(state_id)
+    if session is None:
+        if state_id:
+            log.warning("[forward] status/trades/equity for unknown session %r", state_id)
+            return None, (jsonify({"error": f"unknown session: {state_id}"}), 404)
+        return None, (jsonify({"status": "idle",
+                               "progress": {"revealed": 0, "total": 0, "pct": 0.0}}), 200)
+    return session, None
 
 
 @forward_bp.get("/api/forward/status")
 def status() -> tuple:
-    session = _get_session()
-    if session is None:
-        return jsonify({"status": "idle", "progress": {"revealed": 0, "total": 0, "pct": 0.0}}), 200
-    # Each poll advances the replay one slice (bar-by-bar reveal).
-    session.advance()
+    """Read the current replay state. Never advances the clock."""
+    session, early = _session_or_404()
+    if early is not None:
+        return early
     return jsonify(session.snapshot()), 200
 
 
-# ---------------------------------------------------------------------------
-# GET /api/forward/trades
-# ---------------------------------------------------------------------------
+@forward_bp.get("/api/forward/sessions")
+def sessions() -> tuple:
+    """Every replay in memory, newest first (the active one flagged)."""
+    return jsonify({"sessions": _list_sessions()}), 200
 
 
 @forward_bp.get("/api/forward/trades")
 def trades() -> tuple:
-    session = _get_session()
-    if session is None:
-        return jsonify([]), 200
+    session, early = _session_or_404()
+    if early is not None:
+        return early
     snap = session.snapshot()
     out = []
     for t in snap["trades"]:
@@ -549,7 +808,7 @@ def trades() -> tuple:
             "entry": t.get("entry"),
             "exit": t.get("exit"),
             "pnl": t.get("pnl"),
-            "status": "closed",
+            "status": "open" if t.get("is_open") else "closed",
             "result": t.get("result"),
             "date": t.get("date"),
             "exit_date": t.get("exit_date"),
@@ -557,14 +816,14 @@ def trades() -> tuple:
     return jsonify(out), 200
 
 
-# ---------------------------------------------------------------------------
-# GET /api/forward/equity
-# ---------------------------------------------------------------------------
-
-
 @forward_bp.get("/api/forward/equity")
 def equity() -> tuple:
-    session = _get_session()
-    if session is None:
-        return jsonify([]), 200
+    """``[{ts, equity}]`` — the shape ``/status`` already carries as ``equity``.
+
+    Kept for any caller that only wants the curve; the forward page reads the
+    ``/status`` payload instead so one poll costs one snapshot.
+    """
+    session, early = _session_or_404()
+    if early is not None:
+        return early
     return jsonify(session.equity_series()), 200

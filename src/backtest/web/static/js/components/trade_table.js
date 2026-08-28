@@ -58,8 +58,9 @@ const TradeTable = (() => {
     }
 
     function fmtTradePnl(v) {
-        const s = v >= 0 ? "+" : "-";
-        return `${s}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+        return (typeof Money !== "undefined")
+            ? Money.signed(v)
+            : `${v >= 0 ? "+" : "-"}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
     }
 
     function renderTable(containerId, trades) {
