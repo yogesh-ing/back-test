@@ -319,26 +319,32 @@ def start() -> tuple:
     Server-side auth guard: without an authenticated broker session the
     endpoint returns 403 (checked before any other validation).
     """
-    # Auth guard first — even an invalid strategy must return 403 here.
-    if not get_session_manager().is_authenticated():
-        return jsonify({
-            "success": False,
-            "error": "broker_not_authenticated",
-            "message": "Valid broker session required to start forward test",
-        }), 403
-
     data = request.get_json(silent=True) or {}
 
     strategy = str(data.get("strategy", "")).strip()
     if not strategy:
         return jsonify({"error": "strategy is required"}), 400
 
-    symbol = data.get("symbol", "DEMO")
+    mode = data.get("mode", "live")
+    symbol = (data.get("symbol") or "").strip().upper()
+    if not symbol:
+        return jsonify({"error": "symbol is required"}), 400
+
+    # Auth guard — only required for live mode (synthetic uses DB/API data)
+    if mode == "live" and not get_session_manager().is_authenticated():
+        return jsonify({
+            "success": False,
+            "error": "broker_not_authenticated",
+            "message": "Valid broker session required to start live forward test",
+        }), 403
     timeframe = data.get("timeframe", "1D")
     from_date = data.get("from_date") or data.get("from")
     to_date = data.get("to_date") or data.get("to")
-    if not from_date or not to_date:
-        return jsonify({"error": "from_date and to_date are required"}), 400
+    # Forward testing can run without date range — defaults to all available data
+    if not from_date:
+        from_date = "2020-01-01"
+    if not to_date:
+        to_date = datetime.now().strftime("%Y-%m-%d")
 
     try:
         capital = float(data.get("capital", 100_000))

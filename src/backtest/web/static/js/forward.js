@@ -190,25 +190,22 @@ function val(id, fallback = "") {
 
 function forwardConfig() {
     const mode = dataMode();
-    const symbol = (val("symbol", "DEMO") || "DEMO").toUpperCase();
+    const symbol = (val("symbol") || "").toUpperCase();
     return {
         strategy: val("strategy"),
         symbol,
         timeframe: val("timeframe", "1D"),
         capital: Number(val("capital")) || 100000,
         mode: mode,
-        from_date: val("fromDate"),
-        to_date: val("toDate"),
+        from_date: val("fromDate") || "2024-01-01",
+        to_date: val("toDate") || new Date().toISOString().slice(0, 10),
         params: collectParamsFrom($("params-container")),
     };
 }
 
 async function startBot() {
     if (!$("strategy").value) { showToast("Select a strategy first", "warning"); return; }
-    // Symbol defaults to DEMO (the synthetic source understands it) so an
-    // empty field never blocks a run.
-    const symbolEl = $("symbol");
-    if (symbolEl && !symbolEl.value) symbolEl.value = "DEMO";
+    if (!$("symbol").value.trim()) { showToast("Enter a symbol (e.g. MAZDOCK)", "warning"); return; }
 
     $("livePanel").hidden = false;
     setStatus("running");
