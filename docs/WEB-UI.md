@@ -18,7 +18,11 @@ Single-strategy deep dive. Configure → Run → See results.
 - "Run Backtest" button
 
 **Results Panel:**
-- Metrics cards (P&L, Win Rate, Max Drawdown, Sharpe, Trades)
+- Metrics cards (P&L, Win Rate, Max Drawdown, Sharpe, Trades). Win Rate is
+  measured over **closed** trades only: a run that is still holding shows `—`
+  with "nothing closed yet" rather than a misleading 0.00%, and the Trades card
+  notes how many positions are still open. Trade rows for open positions read
+  `⏳ Open` instead of ✅/❌.
 - Chart tabs (Equity Curve, Drawdown, Price + Signals)
 - Trade table with pagination
 - Save to Compare / Export CSV / Promote to Forward buttons

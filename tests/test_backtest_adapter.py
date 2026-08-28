@@ -3,6 +3,7 @@
 import json
 
 import pandas as pd
+import pytest
 
 from backtest.adapters.backtest_adapter import BacktestAdapter
 from backtest.data.synthetic import SyntheticSource
@@ -52,12 +53,17 @@ def test_to_drawdown_worst_is_non_positive():
 def test_to_trades_fields_and_results():
     trades = _adapter().to_trades()
     assert trades, "expected at least one trade"
-    required = {"id", "date", "side", "entry", "exit", "pnl", "result"}
+    required = {"id", "date", "side", "entry", "exit", "pnl", "result", "is_open"}
     for t in trades:
         assert required <= set(t)
         assert t["side"] in {"LONG", "SHORT"}
-        assert t["result"] in {"Win", "Loss"}
-        assert (t["result"] == "Win") == (t["pnl"] >= 0)
+        # Result is decided by realised P&L (G1): a zero-P&L trade is "Flat",
+        # not a win — and win_rate in the cards excludes open rows entirely.
+        assert t["result"] in {"Win", "Loss", "Flat"}
+        assert (t["result"] == "Win") == (t["pnl"] > 0)
+        assert (t["result"] == "Loss") == (t["pnl"] < 0)
+    ids = [t["id"] for t in trades]
+    assert ids == sorted(ids) == list(range(1, len(ids) + 1))
     # ids are sequential 1..N
     assert [t["id"] for t in trades] == list(range(1, len(trades) + 1))
 
@@ -98,3 +104,18 @@ def test_adapter_does_not_mutate_input():
     equity_before = result.equity.copy()
     BacktestAdapter(result).to_all()
     pd.testing.assert_series_equal(result.equity, equity_before)
+
+
+def test_trades_are_the_same_numbers_the_cards_show():
+    """G1/G2: the adapter no longer re-derives trades, so cards == table."""
+    _, result = _run()
+    payload = BacktestAdapter(result).to_all()
+    metrics, rows = payload["metrics"], payload["trades"]
+    assert metrics["total_trades"] == len(rows)
+    assert metrics["closed_trades"] == sum(1 for r in rows if not r["is_open"])
+    assert metrics["open_trades"] == sum(1 for r in rows if r["is_open"])
+    assert sum(r["pnl"] for r in rows) == pytest.approx(metrics["total_pnl"], abs=1.0)
+    closed = [r for r in rows if not r["is_open"]]
+    wins = sum(1 for r in closed if r["result"] == "Win")
+    expected = 100.0 * wins / len(closed) if closed else 0.0
+    assert metrics["win_rate_pct"] == pytest.approx(expected, abs=0.01)

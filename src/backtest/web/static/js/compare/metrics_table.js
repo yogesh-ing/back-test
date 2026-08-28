@@ -12,7 +12,10 @@ function renderCompareTable(containerId, slots, onAction) {
     const pct = (v) => `${v >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`;
     const rows = [
         { label: "Total Return", get: (s) => s.result.metrics.total_return_pct, best: "max", fmt: pct },
-        { label: "Win Rate",     get: (s) => s.result.metrics.win_rate_pct,     best: "max", fmt: (v) => `${Number(v).toFixed(2)}%` },
+        // A slot with nothing closed has no win rate to rank — render "—" and
+        // keep it out of the best-per-row contest instead of awarding it 0%.
+        { label: "Win Rate",     get: (s) => (s.result.metrics.closed_trades === 0 ? null : s.result.metrics.win_rate_pct),
+          best: "max", fmt: (v) => (v == null ? "—" : `${Number(v).toFixed(2)}%`) },
         { label: "Max Drawdown", get: (s) => s.result.metrics.max_drawdown_pct, best: "max", fmt: (v) => `${Number(v).toFixed(2)}%` },
         { label: "Sharpe",       get: (s) => s.result.metrics.sharpe,           best: "max", fmt: (v) => Number(v).toFixed(2) },
         { label: "Total Trades", get: (s) => s.result.metrics.total_trades,     best: null, fmt: (v) => String(v) },

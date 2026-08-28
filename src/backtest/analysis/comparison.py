@@ -249,11 +249,19 @@ class ComparisonAnalyzer:
             drawdown = equity / equity.cummax() - 1
             max_dd = float(drawdown.min()) if len(drawdown) > 0 else 0
 
-            num_trades = len(trades) if trades else 0
+            # Same accounting rule as engine/trades.py: every trade counts in the
+            # total, but only CLOSED ones decide the win rate — an open position
+            # is not evidence either way (gap G1).
+            rows = list(trades) if trades else []
+            num_trades = len(rows)
+            closed = [
+                t for t in rows
+                if not (t.get("is_open") or str(t.get("status", "")).lower() == "open")
+            ]
             win_rate = 0
-            if trades:
-                wins = sum(1 for t in trades if float(t.get("net_pnl", t.get("pnl", 0)) or 0) > 0)
-                win_rate = wins / len(trades) if trades else 0
+            if closed:
+                wins = sum(1 for t in closed if float(t.get("net_pnl", t.get("pnl", 0)) or 0) > 0)
+                win_rate = wins / len(closed)
 
             return {
                 "total_return": total_return,

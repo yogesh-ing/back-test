@@ -20,6 +20,12 @@ src/backtest/
 3. **Per-bar consistency**: risk-aware path mirrors vectorized math
 4. **Stop/target exits**: exit forced intrabar, position zeroed, cost added, re-entry blocked
 5. **Walkforward reconciliation**: equity matches vectorized backtest (tol 1e-5)
+6. **Trade accounting**: one source of truth — `engine/trades.py` feeds both `compute_metrics`
+   and `BacktestAdapter`. Trade P&L is equity-based (costs included), `num_trades` counts
+   round trips (an open position counts, marked to final close) and `win_rate` is over
+   **closed** trades only. Never re-derive either number from the position sign.
+7. **Everything is observable**: `backtest.logging_config.configure_logging()` is installed by
+   every entry point; `--log-level DEBUG` must explain any empty/flat result (`docs/LOGGING.md`).
 
 ## Data Contract
 Canonical OHLCV frame: lowercase cols (open, high, low, close, volume), tz-naive DatetimeIndex ascending.
@@ -34,14 +40,18 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 ```
 
 ## Test Status
-- ✅ 19 passed (all active acceptance tests)
-- ⏳ 3 skipped (mStock auth — require credentials)
+- ✅ 1875 passed, 4 skipped (mStock credentials) — `PYTHONPATH=src pytest tests/ -q`
+- ✅ 36 JS behaviour assertions across 4 Node harnesses (`tests/js/*.mjs`)
+- ⚠ Sandbox note: rebuild the venv each session —
+  `python3 -m venv /home/user/.venv && /home/user/.venv/bin/pip install -q -r requirements.txt pytest-cov flake8`
 
 ## Key Files & Current State
 
 | File | Purpose | Status |
 |------|---------|--------|
 | backtester.py | Vectorized + risk-aware engine | ✅ Fixed (lagged signals, return calc before zeroing) |
+| engine/trades.py | Trade walk + stats (cards and table share it) | ✅ New (G1/G2) — equity-based, open trade excluded from win_rate |
+| logging_config.py | Handlers, levels, request ids | ✅ New (U1) — see docs/LOGGING.md |
 | paper.py | Walk-forward runner | ✅ Fixed (pre-computed shifted signals) |
 | broker.py | Per-bar fills reconciliation | ✅ Working |
 | auth.py | TOTP (HMAC-SHA1) + OTP flows, session cache | ✅ Complete |
@@ -50,6 +60,8 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 | cli.py | All 5 commands wired | ✅ Complete |
 
 ## Known Limitations
+- Timeframe is cosmetic on synthetic/CSV sources (daily bars only) — see gap G6 / U2
+- Forward page live widgets still broken (gap G3)
 - Live mode not implemented (stub with instructions)
 - State persistence deferred
 - Auth tests require mStock credentials (skipped)

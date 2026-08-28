@@ -205,6 +205,10 @@ class ForwardSession:
                     "max_drawdown_pct": metrics["max_drawdown_pct"],
                     "sharpe": metrics["sharpe"],
                     "total_trades": metrics["total_trades"],
+                    # win_rate_pct covers closed trades only, so the UI can say
+                    # "—" instead of a misleading 0% before anything has closed.
+                    "closed_trades": metrics["closed_trades"],
+                    "open_trades": metrics["open_trades"],
                     "final_equity": metrics["final_equity"],
                 },
                 "equity": equity,

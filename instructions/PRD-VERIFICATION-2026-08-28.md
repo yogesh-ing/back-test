@@ -8,8 +8,22 @@ now tracks. Companion doc: `instructions/ENGINEERING-NOTES.md`.
 running app/API (`/home/user/.venv/bin/python`, `PYTHONPATH=src`), (3) ran the suite.
 
 ```
-PYTHONPATH=src pytest tests/ -q            →  1813 passed, 4 skipped, 3 FAILED
+PYTHONPATH=src pytest tests/ -q            →  1813 passed, 4 skipped, 3 FAILED   (at the pass)
 ```
+
+### Resolved after the pass (same day)
+
+The verdicts below are kept as they were found. Three things have since changed:
+
+| Gap | Outcome |
+|---|---|
+| **U1** logging | Done — `backtest/logging_config.py`, `--log-level`/`--log-file`, request ids tying a UI toast to a traceback, log lines on every previously-silent path. See `docs/LOGGING.md`. |
+| **G5** red suite | Done — forward date contract settled (optional-but-reported), stale Node harness fixed and extended (11 tests), Postgres-driver tests skip with a reason instead of failing falsely. **Suite is green.** |
+| **G1 + G2** metric bugs | Done at the root — new `engine/trades.py` is the single source of truth for both `compute_metrics` and `BacktestAdapter.to_trades()`, so the cards and the table cannot disagree; `win_rate` is realised P&L over **closed** trades, `num_trades` counts round trips (open position included, marked to the final close), and **G14** was superseded by the same change (no price reconstruction left). The adapter now asserts `Σ trade P&L == total P&L`. |
+
+Everything else below is still open; the live list is the **Gap backlog** in
+`instructions/TASK-TRACKER.md` (next up: **G3** — forward page live widgets).
+
 
 The three failures are all real and are tracked below (G5):
 
