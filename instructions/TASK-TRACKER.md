@@ -5,7 +5,17 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-26 · **Branch:** `arena/01a03e5a-back-test` (broker auth effort) / `arena/01a03438-back-test` (PRD effort) / `arena/01a02caa-back-test` (simulator) · **Simulator Steps 1–20 complete · PRD Epic 1 complete · Broker Auth Epic COMPLETE (all 5 phases, 13/13 tasks)**
+**Last updated:** 2026-08-28 · **Branch:** `arena/01a0478e-back-test` (PRD verification pass) /
+`arena/01a03e5a-back-test` (broker auth effort) / `arena/01a03438-back-test` (PRD effort) /
+`arena/01a02caa-back-test` (simulator) · **Simulator Steps 1–20 complete · PRD Epics 1–6 built,
+verification pass done → 14 gaps open (see Gap backlog) · Broker Auth Epic COMPLETE (all 5 phases,
+13/13 tasks)**
+
+> **2026-08-28 — PRD V1 was audited task by task.** Full evidence, per-task verdicts and repro
+> commands: **`instructions/PRD-VERIFICATION-2026-08-28.md`**. Headline: the UI layer is built and
+> wired end to end, but **the suite is red (3 failures)** and **PRD criterion #5 (forward page live
+> updates) is not actually working** — the live equity chart never renders and the metric cards are
+> never called. Fix **G1–G3** before anything else.
 
 ---
 
@@ -14,11 +24,68 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 Tracks progress against `instructions/PRDandTASK_DECOMPOSITION.md` — the unified
 web UI (Dashboard / Backtest / Compare / Forward) layered on top of the mature
 simulator + backtester (this tracker's Steps 1–24). Active branch:
-`arena/01a03438-back-test`.
+`arena/01a0478e-back-test` (was `arena/01a03438-back-test`).
 
-> **V1 is complete (Epics 1–6 + Dashboard). Pick up here in a new session:**
+> **V1 is built (Epics 1–6 + Dashboard) — verified task by task on 2026-08-28, 14 gaps open.**
+> Pick up in the **Gap backlog** below, then the V2 list.
+
+### 🔧 Gap backlog — PRD verification findings (implement one at a time)
+
+Source: `instructions/PRD-VERIFICATION-2026-08-28.md`. Work top-down; a task is only **Done** when
+the listed acceptance check passes and the full suite is green. `P0` = correctness/user-visible
+break, `P1` = contract/breaking, `P2` = PRD requirement partially met, `P3` = polish.
+
+Legend: ✅ done · 🟡 in progress · ⬜ not started
+
+**P0 — numbers are wrong / widgets don't render**
+
+| ID | Task | Files | Acceptance (how we prove it) | Status |
+|---|---|---|---|---|
+| G1 | **Fix `win_rate`:** it is computed from the *sign* of the position, not trade P&L, so every long-only run reports 100% (rsi_reversion: 2 trades, 0 winners → card "100%"). Compute it from realised round-trip P&L. | `src/backtest/engine/metrics.py:36-47` (+ reuse the round-trip walk in `adapters/backtest_adapter.py`) | New test: a strategy with a known losing trade reports `win_rate == 0.0`; a 1-win/1-loss run reports `0.5`. `compare` Win-Rate 🏆 changes when a slot's trade P&Ls change (currently it cannot). | ⬜ |
+| G2 | **Fix `num_trades`:** counts entry *and* exit transitions (4) while the trade table counts round trips (2) → metric card and table disagree. Count round trips; expose open-trade count separately if wanted. | `src/backtest/engine/metrics.py:28-34`, `adapters/backtest_adapter.py:60` | `metrics.total_trades == len(trades)` for every built-in strategy on the same run; assert it in `test_api_backtest.py` + `test_backtest_adapter.py`. | ⬜ |
+| G3 | **Make the Forward page actually show live updates (PRD 4.2 / §4.4):** (a) `fetchEquity()` feeds a bare array into `renderEquityChart({dates,values})` → the chart never draws; use the `equity` object already on `/api/forward/status`; (b) `renderMetricsCards()` is never called although the div + script ship → wire return/DD/win-rate; (c) `#progressText` never updated → render `progress.revealed/total + pct`; (d) single currency for the whole app (`$` on Backtest/Compare vs hard-coded `₹` on Forward); (e) positions table shows `entry == current` / `0%` — either compute unrealized P&L or drop the column. | `src/backtest/web/static/js/forward.js:165-190`, `src/backtest/web/templates/forward.html:58,66-72`, `src/backtest/api/forward.py:176-189` | With a running replay: chart has ≥1 dataset whose point count grows between polls, 5 metric cards visible, progress text shows `12 / 262 (4.6%)`. Add a Node harness under `tests/js/` (pattern: `test_forward_auth_gate.mjs`) that asserts `renderEquityChart`/`renderMetricsCards` are called with adapter-shaped data. | ⬜ |
+
+**P1 — broken contracts / red suite**
+
+| ID | Task | Files | Acceptance | Status |
+|---|---|---|---|---|
+| G4 | **Forward replay must not see the future:** `_signals_upto()` filters with `if b in self.signals["buys"]` (always true) then slices by *count*, so at `revealed=12` the payload already lists buys dated 2024-03-29 / 2024-09-03. Filter by the revealed date; also replace the process-global `_SESSION` + `state_id: None` with a real keyed session registry so `/stop` can honour `state_id` and two tabs can't double-advance one cursor (or advance on a timer instead of per poll). | `src/backtest/api/forward.py:232-240,246-330` | Test: every `signals.buys[].date <= candles[-1].date` at each poll; `/start` twice → two `state_id`s; `stop(A)` leaves `B` running. | ⬜ |
+| G5 | **Get the suite green:** (1) `/api/forward/start` now defaults missing dates (`2020-01-01 → today`) while `test_start_missing_dates_returns_400` demands 400 — decide the contract and fix both sides; (2) `tests/js/test_forward_auth_gate.mjs` never sets `#symbol`, so `startBot()` bails → update the harness; (3) add `psycopg2-binary` to the dev env so `test_db_manager` can build an engine (it fails on `No module named 'psycopg2'`). | `api/forward.py:325-330`, `tests/test_api_forward.py:136-138`, `tests/js/test_forward_auth_gate.mjs:251-266`, `requirements.txt` | `PYTHONPATH=src pytest tests/ -q` → 0 failures (4 skips allowed for mStock credentials). | ⬜ |
+| G6 | **Make the timeframe control real:** Synthetic and CSV sources ignore `interval`, so Compare's "across timeframes" premise is cosmetic (slot `1D` and slot `1H` returned identical 262 bars / −2.40%). Options: resample synthetic/CSV bars to the requested interval, or hide/disable the TF selector when the source can't honour it; and validate the mStock interval (`4hour` is passed through verbatim today). Then align forward's `<select>` values (`1min`/`day`) with backtest's (`1D/1H/4H/1W`) and share one `_TIMEFRAME_TO_INTERVAL`. | `data/synthetic.py`, `data/csv_source.py`, `api/backtest.py:29-47`, `api/forward.py:44-58`, `web/templates/forward.html:38-41` | `1D` vs `1H` on the same symbol/range produce different bar counts; unknown TF → 400 (not silent `day`); one shared interval map for backtest+forward. | ⬜ |
+
+**P2 — PRD requirements only partially met**
+
+| ID | Task | Files | Acceptance | Status |
+|---|---|---|---|---|
+| G7 | Drawdown charts (PRD 2.5 / 3.7): annotate the worst-drawdown point (data already ships as `worst_dd_pct`/`worst_dd_date`) and make axis direction + `fill` consistent between the single and compare charts. | `web/static/js/charts/drawdown_chart.js`, `web/static/js/compare/drawdown_compare_chart.js` | A labelled marker at the min point on both charts; both plot drawdowns in the same direction. | ⬜ |
+| G8 | Compare tooltips (PRD 3.6/3.7) show only the series label — no value at the hovered date. Show `label: value` for every series (`mode:'index'` already returns them). | `web/static/js/compare/equity_compare_chart.js`, `compare/drawdown_compare_chart.js` | Hovering date X lists all N slots with their $/% values. | ⬜ |
+| G9 | Export (PRD 2.10): add the server endpoint `GET /api/backtest/export` (trades + a metrics/config header block) or formally retire it as a V2 item; keep the client-side download as a fallback. | `api/backtest.py`, `web/static/js/backtest.js:95-108` | `curl` on the endpoint returns `text/csv` with the same rows the table shows, including a config header. | ⬜ |
+| G10 | Signals chart (PRD 2.6): red **down**-arrow for sells (`rectRot` today) and an OHLC line in the tooltip. | `web/static/js/charts/signals_chart.js` | Marker glyphs match the PRD mock; tooltip shows O/H/L/C + signal. | ⬜ |
+| G11 | Validate params server-side against the declared schema (out-of-range `fast=9999` today returns a vacuous 200 → 400 with the offending param, min and max) — and make **Promote** carry `from_date`/`to_date` (forward currently ignores them and keeps its stale template default `to=2026-08-28`). | `api/backtest.py` (`run` + `run-many`), `web/static/js/forward.js:315-341`, `web/templates/forward.html:52-53` | Out-of-range → 400 from both endpoints; a promoted run replays the promoted window exactly. | ⬜ |
+| G12 | One symbol source for every page: Backtest/Compare hold two different hardcoded lists and only Backtest knows about the DB. Fetch `/api/symbols` on all three pages (or pass it from the view, as PRD 2.1 literally says) and share one `<datalist>` component. | `web/templates/{backtest,compare,forward}.html`, `api/symbols.py` | Backtest, Compare and Forward offer the identical symbol list for `--source db` *and* `synthetic`. | ⬜ |
+
+**P3 — polish / hygiene**
+
+| ID | Task | Files | Acceptance | Status |
+|---|---|---|---|---|
+| G13 | Small inconsistencies: `/data` nav item never highlighted (no CSS rule) and no footer in `base.html` (PRD 5.1); `.toast.info` used but unstyled; `hideLoader()` never called (loader cleared ad hoc); duplicate `"1D"` key in `_TIMEFRAME_TO_INTERVAL`; dead `if False else None` in `_infer_schema`; `GET /api/strategies/<name>/params` bypasses `validate()` so a catalogue-skipped strategy still answers 200; `TradeTable.render(containerId, …)` hard-codes `#tradeTable-wrap`/`#pagination` so it is not reusable. | `web/static/css/app.css:53-56`, `web/templates/base.html`, `web/static/js/{components/loader.js,components/toast.js,components/trade_table.js,forward.js}`, `strategy/base.py:88`, `strategy/registry.py:92-99`, `api/strategies.py:27-34`, `api/backtest.py:30` | Each page (incl. `/data`, `/portfolio`) highlights its nav item; `hideLoader` called or deleted; `/params` 404s for a strategy hidden from the catalogue; no duplicate dict keys (`flake8 F601` clean). | ⬜ |
+| G14 | Trade rows are reconstructed, not taken from the engine (short P&L uses `entry/exit-1` and is scaled by equity rather than notional) → the table's `pnl` disagrees slightly with the equity curve. Emit trades from the engine (or reconcile against `equity`). | `engine/backtester.py`, `adapters/backtest_adapter.py:120-180` | Σ trade `pnl` ≈ final equity − initial capital within rounding; short-side row matches an analytic value in a unit test. | ⬜ |
+
+**Open slot — user's own list (to be appended, then worked in the same one-at-a-time flow)**
+
+| ID | Task | Files | Acceptance | Status |
+|---|---|---|---|---|
+| U1 | _awaiting input_ | — | — | ⬜ |
+| U2 | _awaiting input_ | — | — | ⬜ |
+| U3 | _awaiting input_ | — | — | ⬜ |
+
+**Suggested order:** `G5` (green suite = a safe baseline) → `G1` → `G2` → `G3` → `G4` → `G6` →
+`G11` → `G7`–`G10`, `G12`–`G14` as polish. Commit per gap, referencing the ID.
+
+---
 
 ### 🟡 Pending / Next session (V2 backlog)
+
 
 **Housekeeping (do first)**
 1. **Commit & open a PR** — Epic 1–6 + Dashboard are built but **not yet committed/pushed**. Suggested target: `feature/UI-rediness`.
@@ -44,14 +111,14 @@ simulator + backtester (this tracker's Steps 1–24). Active branch:
 
 `████████████████████████████████████████░░` **Epics 1–6 complete (PRD V1 = 100%)**
 
-| Epic | Theme | Tasks | Status |
-|---|---|---|---|
-| 1 · Foundation | BaseStrategy contract, registry, BacktestAdapter, REST APIs | 1.1–1.6 | ✅ **Complete** |
-| 2 · Backtest Page | Route, template, dynamic params, charts, trade table | 2.1–2.10 | ✅ **Complete** |
-| 3 · Compare Page | Slots, Run All, overlaid charts, per-slot actions | 3.1–3.8 | ✅ **Complete** |
-| 4 · Forward Page | Pre-fill, template cleanup, forward API alignment | 4.1–4.3 | ✅ **Complete** |
-| 5 · Cross-Page | Shared nav, session state, toast, loader | 5.1–5.4 | ✅ **Complete** (built alongside Epic 2) |
-| 6 · Testing | Contract/adapter/API/e2e tests, strategy migration | 6.1–6.6 | ✅ **Complete** |
+| Epic | Theme | Tasks | Status | Verification (2026-08-28) |
+|---|---|---|---|---|
+| 1 · Foundation | BaseStrategy contract, registry, BacktestAdapter, REST APIs | 1.1–1.6 | ✅ Complete (1.4/1.5 🟡) | 5/6 fully verified; **G1, G2, G11** hit the adapter/API values |
+| 2 · Backtest Page | Route, template, dynamic params, charts, trade table | 2.1–2.10 | ✅ Complete (2.1/2.5/2.6/2.10 🟡) | 6/10 fully verified → **G7, G9, G10, G12, G13** |
+| 3 · Compare Page | Slots, Run All, overlaid charts, per-slot actions | 3.1–3.8 | ✅ Complete (3.5/3.6/3.7 🟡) | **G6, G7, G8** (+ G1 makes the Win-Rate trophy meaningless) |
+| 4 · Forward Page | Pre-fill, template cleanup, forward API alignment | 4.1–4.3 | ❌ **Not complete** — 4.2 materially broken | **G3, G4, G5, G11** — the page ships but its live chart/metric cards never render |
+| 5 · Cross-Page | Shared nav, session state, toast, loader | 5.1–5.4 | ✅ (5.1/5.4 🟡) | **G13** |
+| 6 · Testing | Contract/adapter/API/e2e tests, strategy migration | 6.1–6.6 | ✅ Complete (6.2 🟡 shapes-only) | Suite is **red** → **G5**; 6.2 needs value-level assertions (**G1/G2**) |
 
 ### Epic 1 — Foundation ✅ (2026-08-24)
 
@@ -91,7 +158,7 @@ on port 5000 → `/backtest`.
 | 2.2 | Template structure | `web/templates/backtest.html` — two-column config/results |
 | 2.3 | Dynamic params (JS) | `web/static/js/backtest.js` — type-aware form from `/params` |
 | 2.4 | Equity curve chart | `web/static/js/charts/equity_chart.js` (+ buy&hold benchmark) |
-| 2.5 | Drawdown chart | `web/static/js/charts/drawdown_chart.js` (+ worst-DD marker) |
+| 2.5 | Drawdown chart | `web/static/js/charts/drawdown_chart.js` — area + fill done; ⚠ **worst-DD marker was never built** (only named in the docstring) → tracked as **G7** |
 | 2.6 | Price + signals chart | `web/static/js/charts/signals_chart.js` (▲ buys / ▼ sells) |
 | 2.7 | Metrics cards | `web/static/js/components/metrics_cards.js` |
 | 2.8 | Trade table | `web/static/js/components/trade_table.js` (paginated + sortable) |
@@ -137,7 +204,7 @@ and now used by Backtest / Compare / Forward.
 | # | Task | Deliverable |
 |---|------|-------------|
 | 4.1 | Forward pre-fill | `web/static/js/forward.js` — reads `forward_prefill`, pre-fills, banner, clears |
-| 4.2 | Template cleanup | `web/templates/forward.html` — config + status/Start-Stop + live equity/metrics/positions/trade feed |
+| 4.2 | Template cleanup | `web/templates/forward.html` — config + status/Start-Stop + positions/trade feed render. ⚠ **live equity chart and live metrics cards ship but never render** (see **G3**) |
 | 4.3 | Forward API | `api/forward.py` — `POST /start`, `POST /stop`, `GET /status` (adapter shape + positions/progress) |
 
 **Tests:** `tests/test_api_forward.py` — 8 tests (idle before start, valid/unknown/missing,
@@ -184,6 +251,13 @@ Signal logic unchanged; flat-form support retained for any future strategy.
 
 **Final test status: 1582 passing, 0 regressions.** All 6 PRD success criteria
 are satisfied and demonstrable on the live preview.
+
+> ⚠ **Re-verified 2026-08-28 — the picture is more nuanced than the line above.** Suite is now
+> **1813 passed / 4 skipped / 3 failed** (`G5`). Criteria #4 (strategy auto-discovery) and #6
+> (shared registry) hold; #1, #2, #3, #5 are only partly met — see the per-criterion table in
+> `instructions/PRD-VERIFICATION-2026-08-28.md`. Epic 6's own coverage is sound, but 6.2 asserts
+> adapter *shapes* only, which is why the two engine-level metric bugs (**G1**, **G2**) went
+> unnoticed.
 
 ---
 
