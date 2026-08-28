@@ -24,19 +24,25 @@ bodies are ``400``; unexpected server errors are ``500``.
 
 from __future__ import annotations
 
-import logging
-
 from flask import Blueprint, jsonify, request
 
 from backtest.brokers.session_manager import get_session_manager
+from backtest.logging_config import get_logger
 
 __all__ = ["broker_auth_bp"]
 
-logger = logging.getLogger("backtest.api.broker_auth")
+logger = get_logger(__name__)
 
 broker_auth_bp = Blueprint("broker_auth_api", __name__)
 
 _GENERIC_ERROR_MESSAGE = "Internal server error"
+
+
+def _mask(value: str) -> str:
+    """`trader@x.com` → `tra…com` — enough to correlate a session, no PII dump."""
+    if not value:
+        return "-"
+    return value if len(value) <= 6 else f"{value[:3]}…{value[-3:]}"
 
 
 def _string_field(data: dict, key: str) -> str | None:
@@ -55,6 +61,10 @@ def login() -> tuple:
     password = data.get("password")
     password = password if isinstance(password, str) and password else None
     if username is None or password is None:
+        # Only which *fields* were missing — never the values.
+        logger.warning("login rejected: missing %s",
+                       " and ".join(n for n, v in (("username", username), ("password", password))
+                                    if v is None))
         return (
             jsonify(
                 {
@@ -70,6 +80,10 @@ def login() -> tuple:
         # Credentials are passed as call arguments only — never stored or
         # logged anywhere past this line.
         result = get_session_manager().login(username, password)
+        outcome = "accepted" if result.get("success") else "rejected"
+        reason = result.get("message") or (
+            "TOTP required" if result.get("requires_totp") else "ok")
+        logger.info("login %s for user=%s → %s", outcome, _mask(username), reason)
     except Exception:  # noqa: BLE001 — generic message to browser, detail to log
         logger.exception("broker login endpoint failed")
         return (
@@ -92,6 +106,10 @@ def verify_totp() -> tuple:
 
     try:
         result = get_session_manager().verify_totp(code)
+        verified = bool(result.get("success"))
+        detail = "" if verified or not result.get("message") else f" ({result['message']})"
+        logger.info("TOTP %s — session %s%s", "verified" if verified else "rejected",
+                    result.get("expires_at") or "-", detail)
     except Exception:  # noqa: BLE001
         logger.exception("broker TOTP verification endpoint failed")
         return (
@@ -126,6 +144,7 @@ def logout() -> tuple:
     """Clear the active session and all notification state."""
     try:
         get_session_manager().logout()
+        logger.info("broker session logged out")
     except Exception:  # noqa: BLE001
         logger.exception("broker logout endpoint failed")
         return jsonify({"success": False, "message": _GENERIC_ERROR_MESSAGE}), 500

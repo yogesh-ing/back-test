@@ -103,3 +103,19 @@ PYTHONPATH=src python -m backtest.web.app --host 0.0.0.0 --port 5000 --source db
 ```
 
 Open `http://localhost:5000` → Backtest tab → Pick a strategy → Hit **Run Backtest**.
+
+## Debugging
+
+Nothing is silent any more: every request gets an id, and every `/api` error
+quotes it in the response so the toast, the log line and the traceback all match.
+
+```bash
+PYTHONPATH=src python -m backtest.web.app --source synthetic --log-level DEBUG   # web app
+PYTHONPATH=src python -m backtest run --strategy sma_crossover \
+    --symbol DEMO --from 2024-01-01 --to 2024-12-31 --log-level DEBUG            # CLI
+```
+
+Levels (`BACKTEST_LOG_LEVEL`) and file output (`--log-file logs/app.log`) are
+documented in **[docs/LOGGING.md](docs/LOGGING.md)**, along with a
+symptom→what-the-log-says table for the usual suspects (empty results,
+0 trades, card/table mismatches, 403 on Forward Start).

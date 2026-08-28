@@ -21,6 +21,7 @@ blocks ``/start`` unless a session is authenticated.
 
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -31,9 +32,11 @@ from flask import Blueprint, current_app, jsonify, request
 from backtest.adapters.backtest_adapter import BacktestAdapter
 from backtest.brokers.session_manager import get_session_manager
 from backtest.engine.backtester import BacktestConfig, BacktestResult
+from backtest.logging_config import get_logger, timed
 from backtest.runner import build_source, run_on_candles
 
 forward_bp = Blueprint("forward_api", __name__)
+log = get_logger(__name__)
 
 # Bars revealed on each /status poll — mimics the real-time cadence while
 # keeping a full year of daily bars replayable within a reasonable poll count.
@@ -50,12 +53,6 @@ _TIMEFRAME_TO_INTERVAL = {
     "15M": "15minute",
     "5M": "5minute",
 }
-
-
-def _interval(timeframe: Optional[str]) -> str:
-    if not timeframe:
-        return "day"
-    return _TIMEFRAME_TO_INTERVAL.get(str(timeframe).upper(), "day")
 
 
 def _f(value: Any, ndigits: int = 4) -> float:
@@ -148,10 +145,20 @@ class ForwardSession:
             if self.revealed >= self.total:
                 self.revealed = self.total
                 self.status = "stopped"
+                log.info("[forward] replay complete: %s/%s %s bars — auto-stopped",
+                         self.symbol, self.strategy, self.total)
+            else:
+                log.debug("[forward] replay %s/%s → revealed %d/%d (%.1f%%)",
+                          self.symbol, self.strategy, self.revealed, self.total,
+                          100.0 * self.revealed / self.total if self.total else 100.0)
 
     def stop(self) -> None:
         with self.lock:
+            if self.status != "running":
+                log.debug("[forward] stop ignored: status is already %s", self.status)
             self.status = "stopped"
+            log.info("[forward] stopped at bar %d/%d (%s/%s)", self.revealed, self.total,
+                     self.symbol, self.strategy)
 
     # ------------------------------------------------------------------ #
 
@@ -265,13 +272,33 @@ def _source() -> Any:
     return build_source(name)
 
 
+def _interval(timeframe: Optional[str]) -> str:
+    if not timeframe:
+        return "day"
+    key = str(timeframe).upper()
+    if key not in _TIMEFRAME_TO_INTERVAL:
+        log.warning(
+            "[forward] unsupported timeframe %r — falling back to 'day' (supported: %s)",
+            timeframe, ", ".join(sorted(_TIMEFRAME_TO_INTERVAL)),
+        )
+    return _TIMEFRAME_TO_INTERVAL.get(key, "day")
+
+
 def _load_candles(symbol: str, from_date: str, to_date: str, timeframe: str):
     try:
         from_dt = datetime.strptime(from_date, "%Y-%m-%d")
         warmup_start = (from_dt - timedelta(days=WARMUP_BARS * 2)).strftime("%Y-%m-%d")
     except (ValueError, TypeError):
+        log.warning("[forward] unparseable from_date %r — no warmup applied", from_date)
         warmup_start = from_date
-    return _source().get_candles(symbol, warmup_start, to_date, _interval(timeframe))
+    interval = _interval(timeframe)
+    candles = _source().get_candles(symbol, warmup_start, to_date, interval)
+    log.debug("[forward] fetched %d bars for %s @ %s (%s..%s)", len(candles), symbol,
+              interval, warmup_start, to_date)
+    if len(candles) < 2:
+        log.warning("[forward] only %d bar(s) available for %s in %s..%s — the replay will "
+                    "complete instantly", len(candles), symbol, from_date, to_date)
+    return candles
 
 
 def _trim_to_range(result: BacktestResult, from_date: str, to_date: str) -> BacktestResult:
@@ -323,15 +350,20 @@ def start() -> tuple:
 
     strategy = str(data.get("strategy", "")).strip()
     if not strategy:
+        log.warning("[forward] /start rejected: no strategy (body keys=%s)", sorted(data))
         return jsonify({"error": "strategy is required"}), 400
 
     mode = data.get("mode", "live")
     symbol = (data.get("symbol") or "").strip().upper()
     if not symbol:
+        log.warning("[forward] /start rejected: no symbol (body keys=%s)", sorted(data))
         return jsonify({"error": "symbol is required"}), 400
 
     # Auth guard — only required for live mode (synthetic uses DB/API data)
     if mode == "live" and not get_session_manager().is_authenticated():
+        log.warning("[forward] /start refused for %s/%s: broker session not authenticated "
+                    "(client=%s) — open the broker auth modal or use mode=synthetic",
+                    strategy, symbol, request.remote_addr)
         return jsonify({
             "success": False,
             "error": "broker_not_authenticated",
@@ -343,37 +375,55 @@ def start() -> tuple:
     # Forward testing can run without date range — defaults to all available data
     if not from_date:
         from_date = "2020-01-01"
+        log.info("[forward] /start without from_date — defaulting to %s "
+                 "(a promoted backtest should carry its own range)", from_date)
     if not to_date:
         to_date = datetime.now().strftime("%Y-%m-%d")
+        log.info("[forward] /start without to_date — defaulting to today (%s)", to_date)
 
     try:
         capital = float(data.get("capital", 100_000))
     except (TypeError, ValueError):
+        log.warning("[forward] /start rejected: capital=%r", data.get("capital"))
         return jsonify({"error": "capital must be a number"}), 400
     if capital <= 0:
+        log.warning("[forward] /start rejected: capital=%s must be positive", capital)
         return jsonify({"error": "capital must be positive"}), 400
 
     params = data.get("params") or {}
+    log.info(
+        "[forward] /start strategy=%s symbol=%s mode=%s timeframe=%s range=%s..%s "
+        "capital=%s params=%s", strategy, symbol, mode, timeframe, from_date, to_date,
+        capital, params,
+    )
 
     try:
-        candles_full = _load_candles(symbol, from_date, to_date, timeframe)
+        with timed(log, "[forward] load candles", logging.DEBUG):
+            candles_full = _load_candles(symbol, from_date, to_date, timeframe)
     except Exception as exc:  # noqa: BLE001
+        log.warning("[forward] /start data error: %s: %s", exc.__class__.__name__, exc)
         return jsonify({"error": f"data error: {exc}"}), 400
 
     try:
         result = run_on_candles(candles_full, strategy, params, symbol,
                                 BacktestConfig(initial_capital=capital))
     except ValueError as exc:
+        log.warning("[forward] /start rejected by strategy/engine: %s", exc)
         return jsonify({"error": str(exc)}), 400
     except KeyError as exc:
+        log.warning("[forward] /start unknown strategy: %s", exc)
         return jsonify({"error": f"unknown strategy: {exc}"}), 400
     except Exception as exc:  # noqa: BLE001
+        log.exception("[forward] /start failed for %s/%s", strategy, symbol)
         return jsonify({"error": f"forward test failed: {exc}"}), 500
 
     result = _trim_to_range(result, from_date, to_date)
 
     global _SESSION
     with _session_lock:
+        if _SESSION is not None and _SESSION.status == "running":
+            log.warning("[forward] replacing the running replay %s/%s (only one session at a "
+                        "time is supported — gap G4)", _SESSION.strategy, _SESSION.symbol)
         _SESSION = ForwardSession(
             candles=result.candles, strategy=strategy, symbol=symbol,
             timeframe=timeframe, capital=capital, params=params,
@@ -381,6 +431,9 @@ def start() -> tuple:
         )
         snap = _SESSION.snapshot()
 
+    log.info("[forward] replay running: %d bars, revealing %d per poll (≈%d polls to finish)",
+             snap["progress"]["total"], BARS_PER_POLL,
+             max(1, -(-snap["progress"]["total"] // BARS_PER_POLL)))
     return jsonify({
         "status": "running",
         "total": snap["progress"]["total"],
@@ -400,6 +453,7 @@ def start() -> tuple:
 def stop() -> tuple:
     session = _get_session()
     if session is None:
+        log.info("[forward] /stop with no active session — nothing to do")
         return jsonify({"status": "idle"}), 200
     session.stop()
     return jsonify({"status": "stopped"}), 200

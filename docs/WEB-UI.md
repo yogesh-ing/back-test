@@ -59,6 +59,15 @@ Paper-trading replay. Bar-by-bar progression.
 
 Overview of all strategies and their status.
 
+## Debugging a request
+
+Every response carries `X-Request-Id`; every `/api` error body carries the same
+value as `request_id`, and the UI appends it to the error toast
+(`data error: … [req 979be616]`). Grep that id in the server log — or in
+`--log-file` output — for the exact traceback and the decisions that produced it
+(bars fetched, engine path, per-slot results). Run the app with
+`--log-level DEBUG`; see [LOGGING.md](LOGGING.md).
+
 ## API Endpoints
 
 ### Backtest

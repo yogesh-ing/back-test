@@ -12,6 +12,9 @@ from typing import Any
 import pandas as pd
 
 from backtest.engine.backtester import BacktestResult
+from backtest.logging_config import get_logger
+
+log = get_logger(__name__)
 
 
 def _fmt_dt(ts: Any) -> str:
@@ -107,6 +110,15 @@ class BacktestAdapter:
     # ------------------------------------------------------------------
 
     def to_trades(self) -> list[dict[str, Any]]:
+        """Round trips reconstructed from the position series (memoised)."""
+        cached = self.__dict__.get("_trades_cache")
+        if cached is not None:
+            return cached
+        cached = self._build_trades()
+        self.__dict__["_trades_cache"] = cached
+        return cached
+
+    def _build_trades(self) -> list[dict[str, Any]]:
         pos = self._position
         close = self._candles["close"]
         equity = self._equity
@@ -232,6 +244,26 @@ class BacktestAdapter:
 
     def to_all(self) -> dict[str, Any]:
         m = self._metrics
+        log.debug(
+            "[adapter] %s/%s → metrics(trades=%s win_rate=%.2f%%) vs trades[]=%s rows",
+            m.get("strategy"), m.get("symbol"), m.get("num_trades"),
+            100.0 * float(m.get("win_rate", 0.0)), len(self.to_trades()),
+        )
+        round_trips = len(self.to_trades())
+        wins = sum(1 for t in self.to_trades() if t["result"] == "Win")
+        claimed_win_rate = 100.0 * float(m.get("win_rate", 0.0))
+        actual_win_rate = 100.0 * wins / round_trips if round_trips else 0.0
+        if round_trips != int(m.get("num_trades", 0)) or (
+            round_trips and round(actual_win_rate, 2) != round(claimed_win_rate, 2)
+        ):
+            # num_trades counts entry+exit transitions and win_rate is derived from the
+            # position sign, not P&L — both disagree with the table below (gaps G1/G2).
+            log.warning(
+                "[adapter] metrics say trades=%s win_rate=%.2f%% but the trade table has "
+                "%s round trips with %s wins (%.2f%%) for %s — card/table disagree (gap G1/G2)",
+                m.get("num_trades"), claimed_win_rate, round_trips, wins,
+                actual_win_rate, m.get("strategy"),
+            )
         return {
             "config": {
                 "strategy": m.get("strategy", ""),

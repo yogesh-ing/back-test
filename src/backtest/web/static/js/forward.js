@@ -62,7 +62,11 @@ function handleStartClick(e) {
 async function fetchJSON(url, opts) {
     const r = await fetch(url, opts);
     const d = await r.json();
-    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    // `d.request_id` is also in the server log, so a toast can be traced exactly.
+    if (!r.ok) {
+        const id = d && d.request_id ? ` [req ${d.request_id}]` : "";
+        throw new Error(`${(d && d.error) || `HTTP ${r.status}`}${id}`);
+    }
     return d;
 }
 

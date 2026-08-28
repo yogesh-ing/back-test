@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import importlib
-import logging
 import pkgutil
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .base import Strategy
 
-logger = logging.getLogger("backtest.strategy.registry")
+from backtest.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 _REGISTRY: dict[str, type["Strategy"]] = {}
 
@@ -19,6 +20,7 @@ def register(cls: type["Strategy"]) -> type["Strategy"]:
     if cls.name in _REGISTRY:
         raise ValueError(f"duplicate strategy name: {cls.name}")
     _REGISTRY[cls.name] = cls
+    logger.info("registered strategy %r (%s)", cls.name, cls.__name__)
     return cls
 
 
@@ -32,6 +34,7 @@ def _discover() -> None:
     import backtest.strategies  # noqa: F401
 
     pkg_path = backtest.strategies.__path__
+    logger.debug("discovery: scanning %s", list(pkg_path))
     seen: set[str] = set()
     for _, modname, _ in pkgutil.iter_modules(pkg_path):
         full_name = f"backtest.strategies.{modname}"
@@ -41,7 +44,9 @@ def _discover() -> None:
         try:
             importlib.import_module(full_name)
         except Exception as exc:  # noqa: BLE001 — must not crash discovery
-            logger.warning("Skipping strategy module %s: %s", full_name, exc)
+            logger.warning("Skipping strategy module %s: %s: %s",
+                           full_name, exc.__class__.__name__, exc)
+            logger.debug("Strategy module %s failed to import", full_name, exc_info=True)
 
 
 def list_strategies() -> list[str]:
@@ -71,11 +76,13 @@ def get_all() -> list[dict[str, Any]]:
     """
     _discover()
     catalogue: list[dict[str, Any]] = []
+    skipped = 0
     for name in sorted(_REGISTRY):
         cls = _REGISTRY[name]
         try:
             cls.validate()
         except Exception as exc:  # noqa: BLE001 — skip invalid, keep going
+            skipped += 1
             logger.warning("Skipping invalid strategy %s: %s", name, exc)
             continue
         catalogue.append(
@@ -87,6 +94,9 @@ def get_all() -> list[dict[str, Any]]:
                 "params": cls.param_schema(),
             }
         )
+    logger.info("catalogue: %d strategies (%s)%s", len(catalogue),
+                ", ".join(c["name"] for c in catalogue) or "none",
+                f", {skipped} skipped" if skipped else "")
     return catalogue
 
 

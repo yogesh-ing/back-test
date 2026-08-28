@@ -22,8 +22,10 @@ from flask import Blueprint, current_app, jsonify, request
 from sqlalchemy import create_engine, text
 
 from backtest.data.db_source import DbSource
+from backtest.logging_config import get_logger
 
 data_bp = Blueprint("data_api", __name__)
+log = get_logger(__name__)
 
 # -----------------------------------------------------------------------
 # Fetch job state (single job at a time)
@@ -184,16 +186,27 @@ def _run_fetch_job(token: str, timeframe: str, from_date: str, to_date: str, sym
     api_key = os.getenv("MSTOCK_API_KEY", "")
     mstock_tf = _MSTOCK_INTERVAL_MAP.get(timeframe, timeframe)
     chunk_days = CHUNK_DAYS_MAP.get(timeframe, 800)
+    log.info("[data] fetch job starting: timeframe=%s range=%s..%s mstock_tf=%s chunk_days=%d "
+             "symbols=%s api_key=%s", timeframe, from_date, to_date, mstock_tf, chunk_days,
+             "all" if not symbols else f"{len(symbols)} requested",
+             "set" if api_key else "MISSING — every request will fail")
 
     # Load instruments
     instruments = _load_instruments(engine, symbols)
     total = len(instruments)
+    if not total:
+        log.warning("[data] no instruments matched (symbols=%s) — is the `instruments` table "
+                    "populated? Run scripts/fetch_nifty500_historical.py first",
+                    ",".join(symbols) if symbols else "NSE/BSE equities")
+    else:
+        log.info("[data] %d instruments to fetch", total)
 
     with _lock:
         _job["total"] = total
 
     for i, inst in enumerate(instruments, 1):
         if _job.get("cancel"):
+            log.info("[data] fetch job cancelled after %d/%d symbols", i - 1, total)
             with _lock:
                 _job["status"] = "done"
                 _job["error"] = "Cancelled by user"
@@ -210,18 +223,25 @@ def _run_fetch_job(token: str, timeframe: str, from_date: str, to_date: str, sym
         try:
             bars = _fetch_bars_chunked(api_key, token, sec_token, from_date, to_date, inst_exchange, mstock_tf, chunk_days)
             if not bars:
+                log.warning("[data] %s: API returned no bars for %s..%s (%s) — nothing stored",
+                            symbol, from_date, to_date, mstock_tf)
                 with _lock:
                     _job["fetched"] += 1
                 continue
 
             inserted = _persist_bars(engine, bars, symbol, inst_exchange, timeframe)
+            log.info("[data] %s: %d bars fetched, %d inserted (%d/%d done)",
+                     symbol, len(bars), inserted, i, total)
 
             with _lock:
                 _job["fetched"] += 1
                 _job["bars_total"] += inserted
                 _job["bars_symbol"] = inserted
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — a bad symbol must not kill the job
+            log.warning("[data] %s failed (%d/%d): %s: %s", symbol, i, total,
+                        exc.__class__.__name__, exc)
+            log.debug("[data] %s traceback", symbol, exc_info=True)
             with _lock:
                 _job["failed"] += 1
                 _job["failed_list"].append((symbol, str(exc)[:120]))
@@ -237,6 +257,8 @@ def _run_fetch_job(token: str, timeframe: str, from_date: str, to_date: str, sym
     with _lock:
         _job["status"] = "done"
         _job["symbol"] = ""
+        log.info("[data] fetch job finished: %d/%d symbols ok, %d failed, %d bars inserted",
+                 _job["fetched"] - _job["failed"], total, _job["failed"], _job["bars_total"])
 
     engine.dispose()
 
@@ -292,8 +314,9 @@ def _fetch_bars_chunked(api_key: str, token: str, sec_token: str,
             payload = resp.json()
             bars = _extract_bars(payload)
             all_bars.extend(bars)
-        except Exception:
-            pass  # skip bad chunks
+        except Exception as exc:  # noqa: BLE001 — skip bad chunks, but say so
+            log.warning("[data] chunk %s..%s failed (%s: %s) — those bars are missing",
+                        chunk_start, chunk_end, exc.__class__.__name__, exc)
         chunk_start = chunk_end + timedelta(days=1)
         time.sleep(0.15)
 
@@ -335,6 +358,7 @@ def _persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timefram
     """)
 
     rows = []
+    skipped: list[str] = []
     for bar in bars:
         try:
             if isinstance(bar, dict):
@@ -354,8 +378,10 @@ def _persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timefram
                 continue
 
             if o <= 0 or h <= 0 or l <= 0 or c <= 0:
+                skipped.append(f"{ts}: non-positive price")
                 continue
             if h < l or h < o or h < c or l > o or l > c:
+                skipped.append(f"{ts}: OHLC inconsistent (o={o} h={h} l={l} c={c})")
                 continue
 
             rows.append({
@@ -363,10 +389,18 @@ def _persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timefram
                 "ts": ts.to_pydatetime(), "open": o, "high": h, "low": l, "close": c,
                 "volume": v, "source": "mstock",
             })
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — one malformed bar must not lose the rest
+            skipped.append(f"{bar!r:.60}: {exc.__class__.__name__}: {exc}")
             continue
 
+    if skipped:
+        log.warning("[data] %s: dropped %d/%d bars while parsing (e.g. %s)", symbol,
+                    len(skipped), len(bars), skipped[0])
+        log.debug("[data] %s full drop list: %s", symbol, "; ".join(skipped[:50]))
+
     if not rows:
+        log.warning("[data] %s: %d bars fetched but none were usable — nothing to insert",
+                    symbol, len(bars))
         return 0
 
     total = 0

@@ -16,6 +16,10 @@ verification pass done → 14 gaps open (see Gap backlog) · Broker Auth Epic CO
 > wired end to end, but **the suite is red (3 failures)** and **PRD criterion #5 (forward page live
 > updates) is not actually working** — the live equity chart never renders and the metric cards are
 > never called. Fix **G1–G3** before anything else.
+>
+> **Also 2026-08-28: U1 (logging) landed** — the app is now debuggable (`--log-level DEBUG`,
+> request ids tying a UI toast to a traceback, `docs/LOGGING.md`), which is what the G1/G2/G3
+> fixes will be worked against. Suite: **1849 passed / 4 skipped / 3 failed** (the 3 are G5).
 
 ---
 
@@ -71,16 +75,24 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 | G13 | Small inconsistencies: `/data` nav item never highlighted (no CSS rule) and no footer in `base.html` (PRD 5.1); `.toast.info` used but unstyled; `hideLoader()` never called (loader cleared ad hoc); duplicate `"1D"` key in `_TIMEFRAME_TO_INTERVAL`; dead `if False else None` in `_infer_schema`; `GET /api/strategies/<name>/params` bypasses `validate()` so a catalogue-skipped strategy still answers 200; `TradeTable.render(containerId, …)` hard-codes `#tradeTable-wrap`/`#pagination` so it is not reusable. | `web/static/css/app.css:53-56`, `web/templates/base.html`, `web/static/js/{components/loader.js,components/toast.js,components/trade_table.js,forward.js}`, `strategy/base.py:88`, `strategy/registry.py:92-99`, `api/strategies.py:27-34`, `api/backtest.py:30` | Each page (incl. `/data`, `/portfolio`) highlights its nav item; `hideLoader` called or deleted; `/params` 404s for a strategy hidden from the catalogue; no duplicate dict keys (`flake8 F601` clean). | ⬜ |
 | G14 | Trade rows are reconstructed, not taken from the engine (short P&L uses `entry/exit-1` and is scaled by equity rather than notional) → the table's `pnl` disagrees slightly with the equity curve. Emit trades from the engine (or reconcile against `equity`). | `engine/backtester.py`, `adapters/backtest_adapter.py:120-180` | Σ trade `pnl` ≈ final equity − initial capital within rounding; short-side row matches an analytic value in a unit test. | ⬜ |
 
-**Open slot — user's own list (to be appended, then worked in the same one-at-a-time flow)**
+**User-requested items (added 2026-08-28 alongside the verification gaps)**
 
 | ID | Task | Files | Acceptance | Status |
 |---|---|---|---|---|
-| U1 | _awaiting input_ | — | — | ⬜ |
-| U2 | _awaiting input_ | — | — | ⬜ |
-| U3 | _awaiting input_ | — | — | ⬜ |
+| U1 | **Make the app debuggable — logging.** "The logging is not right, doesn't show anything, so I can't debug myself." → one shared logging setup for web + CLI + engine; INFO/DEBUG levels from flag or env; request ids that tie a UI error toast to a server traceback; log lines everywhere the app used to fail silently (no signals, interval ignored, params out of range, forward replay, swallowed `except: pass` in the data fetcher). | `src/backtest/logging_config.py` (new), `web/app.py`, `api/{backtest,forward,strategies,symbols,broker_auth,data_manager,portfolio}.py`, `runner.py`, `engine/backtester.py`, `adapters/backtest_adapter.py`, `data/{synthetic,csv_source,db_source}.py`, `strategy/registry.py`, `forward/engine.py`, `cli.py`, 3 JS `fetchJSON`s, `docs/LOGGING.md` | `--log-level DEBUG` shows the path of one `/api/backtest/run`; every response has `X-Request-Id` and every `/api` error body has `request_id`; grep that id in `--log-file` output and you get the traceback; 36 tests in `tests/test_logging_config.py` (incl. a guard against re-introducing silent `except: pass`). | ✅ **Done** (2026-08-28) |
+| U2 | **Market data simulator** (replace the toy synthetic source). Wanted behaviour: generate intraday (≈60 min cadence) bars whose path *deliberately* triggers the selected strategy's entry, then moves enough within the next 1–2 minutes to close the trade at a profit or loss — so entry/exit, stop/target, fills and the whole live-loop can be exercised while the market is closed and without credentials. Should honour `interval` (fixes G6 as a side effect) and be swappable for `mStock` behind the same `DataSource` protocol. **Scope first:** this is its own epic — write `instructions/MARKET-SIMULATOR-PRD.md` (task decomposition + acceptance tests) before coding. | `src/backtest/data/synthetic.py` → new `src/backtest/marketdata/simulator.py` (or `data/scenario_source.py`), wired via `runner.build_source("simulator")` | Open question to settle in the PRD: deterministic scripted scenarios (replayable, assertable) vs random walk with a volatility knob — recommend scripted scenarios with a seeded random filler for length. Acceptance: for each of the 4 built-in strategies the simulator yields ≥1 round trip inside a 1-year range; `1min`/`1H`/`4H`/`1D` all produce different bar counts; stop-loss and take-profit both fire in the sample scenario; the forward page's replay shows trades executing. | ⬜ **Not started — needs epic planning** |
 
-**Suggested order:** `G5` (green suite = a safe baseline) → `G1` → `G2` → `G3` → `G4` → `G6` →
-`G11` → `G7`–`G10`, `G12`–`G14` as polish. Commit per gap, referencing the ID.
+**Suggested order:** `U1` ✅ → `G5` (green suite = a safe baseline) → `G1` → `G2` → `G3` → `G4` →
+`G6` → `G11` → `G7`–`G10`, `G12`–`G14` as polish; `U2` gets its own planning pass (it also
+satisfies G6). Commit per gap, referencing the ID.
+
+**Decisions taken 2026-08-28 (so they are not relitigated)**
+
+| Topic | Decision |
+|---|---|
+| G1/G2 fix location | **Full solution at the root:** fix `engine/metrics.py` (realised round-trip P&L → `win_rate`; round-trip counting → `num_trades`) *and* have `BacktestAdapter` consume it, so CLI, API, Compare and Forward all agree. No adapter-only patch, nothing skipped — including updating `test_backtest.py`/`test_backtest_adapter.py` to pin the values. The `[adapter] … card/table disagree (gap G1/G2)` WARNING added with U1 is the tripwire that proves the fix landed; delete it once they agree. |
+| G6 (timeframe) | Don't just gate it — the real answer is **U2**, the market data simulator. Until U2 lands, the sources log a WARNING when they ignore `interval`, so nobody reads a flat comparison as a result. |
+| Start order | Suite-green (`G5`) before behaviour changes; `U1` (logging) came first so every later fix is observable. |
 
 ---
 
@@ -571,4 +583,6 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_alert_manager.py` (Step 21) | 33 |
 | `test_comparison.py` (Step 22) | 13 |
 | `test_config_manager.py` (Step 23) | 13 |
-| **Total** | **1683 passing, 4 skipped** |
+| `test_logging_config.py` (U1, 2026-08-28) | 36 |
+| PRD/API suites (`test_api_*`, `test_strategy_base`, `test_backtest_adapter`, `test_e2e_workflow`, `test_broker_*`, `test_security_verification`, `test_portfolio_engine`, `test_circuit_breakers`) | ~500 |
+| **Total** | **1849 passing / 4 skipped / 3 failing** (the 3 failures are gap **G5**; `pip install psycopg2-binary` clears the db-manager one) |

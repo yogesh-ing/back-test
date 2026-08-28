@@ -5,8 +5,10 @@ from __future__ import annotations
 from flask import Blueprint, jsonify, current_app
 
 from backtest.data.db_source import DbSource
+from backtest.logging_config import get_logger
 
 symbols_bp = Blueprint("symbols_api", __name__)
+log = get_logger(__name__)
 
 # Process-level cache: symbols don't change during a single run.
 _CACHED_SYMBOLS: dict[str, list[str]] = {}
@@ -19,6 +21,9 @@ def list_symbols() -> tuple:
     timeframe = "day"
 
     if source != "db":
+        # Backtest/Compare pages keep their own static symbol list in that mode,
+        # so an empty payload here is expected, not an error.
+        log.debug("/api/symbols: source=%s has no dynamic list (only 'db' does)", source)
         return jsonify({"symbols": [], "count": 0, "timeframe": timeframe}), 200
 
     # Use module-level cache so we don't hit DB on every request.
@@ -30,7 +35,10 @@ def list_symbols() -> tuple:
     try:
         syms = DbSource().list_symbols(timeframe=timeframe)
         _CACHED_SYMBOLS[cache_key] = syms
+        log.info("/api/symbols: %d symbols @ %s", len(syms), timeframe)
         return jsonify({"symbols": syms, "count": len(syms), "timeframe": timeframe}), 200
     except Exception as exc:
-        current_app.logger.warning(f"[DB] Could not list symbols: {exc}")
+        log.warning("Could not list symbols from the database: %s: %s",
+                    exc.__class__.__name__, exc)
+        log.debug("symbol listing traceback", exc_info=True)
         return jsonify({"error": "Database unavailable", "symbols": [], "count": 0}), 500
