@@ -301,6 +301,58 @@ def _load_candles(symbol: str, from_date: str, to_date: str, timeframe: str):
     return candles
 
 
+#: First date a replay may fall back to when the caller supplies no range.
+#: PRD Task 4.3 defines the start body as ``{strategy, symbol, params}`` — the
+#: date range is optional, so "everything we have" is the intended fallback.
+#: What is *not* allowed is doing that silently (see gap G5).
+DEFAULT_FROM_DATE = "2020-01-01"
+
+
+def _normalise_date(value: Any, field: str) -> str:
+    """Validate a ``YYYY-MM-DD`` date, returning it unchanged.
+
+    Raises :class:`ValueError` (→ 400) instead of letting a data source fail
+    later with an opaque parse error three layers away.
+    """
+    text = str(value).strip()
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} must be a YYYY-MM-DD date, got {value!r}") from None
+    return parsed.strftime("%Y-%m-%d")
+
+
+def _resolve_dates(data: dict) -> tuple[str, str, list[str]]:
+    """Return ``(from_date, to_date, defaults_applied)`` for a /start body.
+
+    Missing dates are not an error — a forward test is often "start from
+    whatever data exists". But every value we fill in is reported back as
+    ``defaults_applied``, so a caller can never mistake a defaulted window for
+    one they chose, and a bad range is rejected before any work happens.
+    """
+    raw_from = data.get("from_date") or data.get("from")
+    raw_to = data.get("to_date") or data.get("to")
+    defaults: list[str] = []
+
+    if raw_from:
+        from_date = _normalise_date(raw_from, "from_date")
+    else:
+        from_date = DEFAULT_FROM_DATE
+        defaults.append("from_date")
+    if raw_to:
+        to_date = _normalise_date(raw_to, "to_date")
+    else:
+        to_date = datetime.now().strftime("%Y-%m-%d")
+        defaults.append("to_date")
+
+    if from_date > to_date:
+        raise ValueError(f"from_date ({from_date}) must be <= to_date ({to_date})")
+    if defaults:
+        log.info("[forward] /start defaulted %s → replay window %s..%s",
+                 ", ".join(defaults), from_date, to_date)
+    return from_date, to_date, defaults
+
+
 def _trim_to_range(result: BacktestResult, from_date: str, to_date: str) -> BacktestResult:
     """Trim a backtest result to the requested date range (strip warmup)."""
     idx_dates = result.candles.index.strftime("%Y-%m-%d")
@@ -370,16 +422,11 @@ def start() -> tuple:
             "message": "Valid broker session required to start live forward test",
         }), 403
     timeframe = data.get("timeframe", "1D")
-    from_date = data.get("from_date") or data.get("from")
-    to_date = data.get("to_date") or data.get("to")
-    # Forward testing can run without date range — defaults to all available data
-    if not from_date:
-        from_date = "2020-01-01"
-        log.info("[forward] /start without from_date — defaulting to %s "
-                 "(a promoted backtest should carry its own range)", from_date)
-    if not to_date:
-        to_date = datetime.now().strftime("%Y-%m-%d")
-        log.info("[forward] /start without to_date — defaulting to today (%s)", to_date)
+    try:
+        from_date, to_date, date_defaults = _resolve_dates(data)
+    except ValueError as exc:
+        log.warning("[forward] /start rejected: %s", exc)
+        return jsonify({"error": str(exc)}), 400
 
     try:
         capital = float(data.get("capital", 100_000))
@@ -441,6 +488,10 @@ def start() -> tuple:
         "state_id": None,
         "symbol": symbol,
         "strategy": strategy,
+        # What the replay actually runs on, including anything we filled in for
+        # the caller — the UI shows this whenever defaults_applied is non-empty.
+        "config": snap["config"],
+        "defaults_applied": date_defaults,
     }), 200
 
 

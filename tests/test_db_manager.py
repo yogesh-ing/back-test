@@ -28,6 +28,25 @@ from backtest.db.manager import (
     DatabaseManager,
     TransactionError,
 )
+
+
+def _has_psycopg2() -> bool:
+    """The two "real Postgres is unreachable" tests need the driver to get as
+    far as an actual connection attempt — without it SQLAlchemy fails while
+    *building* the engine, and the assertion would be testing the wrong thing.
+    """
+    try:
+        import psycopg2  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+requires_psycopg2 = pytest.mark.skipif(
+    not _has_psycopg2(),
+    reason="needs the PostgreSQL driver: pip install -r requirements.txt "
+           "(psycopg2-binary) — otherwise engine creation fails before any connect",
+)
 from backtest.db.models import Base, Portfolio
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -262,6 +281,7 @@ class TestLifecycle:
                 raise ValueError("boom")
         assert not m.is_connected
 
+    @requires_psycopg2
     def test_unreachable_database_raises_connection_error(self):
         m = DatabaseManager.from_env(
             path=str(CONFIG_FILE),
@@ -274,6 +294,7 @@ class TestLifecycle:
             m.connect()
         assert not m.is_connected  # must not be left half-initialised
 
+    @requires_psycopg2
     def test_connection_error_never_leaks_the_password(self):
         m = DatabaseManager.from_env(
             path=str(CONFIG_FILE),

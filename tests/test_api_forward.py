@@ -133,9 +133,54 @@ def test_start_unknown_strategy_returns_400(client):
     assert resp.status_code == 400 and "error" in resp.get_json()
 
 
-def test_start_missing_dates_returns_400(client):
+# --- date-range contract (gap G5) -------------------------------------------
+# PRD Task 4.3 defines the start body as {strategy, symbol, params}, so the
+# window is optional. Optional must mean "explicitly defaulted", never silent:
+# the response reports what it filled in, and a range that cannot work is 400.
+
+
+def test_start_without_dates_defaults_and_reports_it(client):
     body = {k: v for k, v in _CFG.items() if k not in ("from_date", "to_date")}
-    assert client.post("/api/forward/start", json=body).status_code == 400
+    resp = client.post("/api/forward/start", json=body)
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["defaults_applied"] == ["from_date", "to_date"]
+    assert data["config"]["from_date"] == fwd.DEFAULT_FROM_DATE
+    assert data["config"]["to_date"] >= "2024-12-31"
+
+
+def test_start_with_dates_reports_no_defaults(client):
+    resp = client.post("/api/forward/start", json=_CFG)
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["defaults_applied"] == []
+    assert data["config"]["from_date"] == "2024-01-01"
+    assert data["config"]["to_date"] == "2024-12-31"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"from_date": "01-01-2024"},                       # wrong format
+        {"from_date": "not-a-date"},                      # nonsense
+        {"to_date": "2024-13-45"},                        # impossible date
+        {"from_date": "2024-12-31", "to_date": "2024-01-01"},   # inverted
+    ],
+)
+def test_start_rejects_unusable_dates(client, overrides):
+    body = {**_CFG, **overrides}
+    resp = client.post("/api/forward/start", json=body)
+    assert resp.status_code == 400
+    assert "date" in resp.get_json()["error"] or "to_date" in resp.get_json()["error"]
+
+
+def test_start_date_errors_are_logged(client, caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="backtest.api.forward"):
+        resp = client.post("/api/forward/start", json={**_CFG, "to_date": "yesterday"})
+    assert resp.status_code == 400
+    assert "YYYY-MM-DD" in caplog.text
 
 
 def test_status_shape_matches_adapter_plus_live_fields(client):

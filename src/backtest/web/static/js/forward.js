@@ -222,6 +222,14 @@ async function startBot() {
         });
         currentStateId = result.state_id;
         showToast(`Forward test started: ${result.symbol}`, "success");
+        // A window the server had to invent is not a window we chose — say so
+        // loudly instead of showing a replay that looks like the user's range.
+        if (result.defaults_applied && result.defaults_applied.length && result.config) {
+            showToast(
+                `Date range defaulted by the server (${result.defaults_applied.join(", ")}): ` +
+                `${result.config.from_date} → ${result.config.to_date}`, "warning", 6000,
+            );
+        }
         poll();
         pollTimer = setInterval(poll, POLL_MS);
     } catch (err) {

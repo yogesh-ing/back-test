@@ -11,11 +11,16 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 verification pass done → 14 gaps open (see Gap backlog) · Broker Auth Epic COMPLETE (all 5 phases,
 13/13 tasks)**
 
+> **Suite today: 1859 passed / 4 skipped / 0 failed** — see G5.
+>
 > **2026-08-28 — PRD V1 was audited task by task.** Full evidence, per-task verdicts and repro
-> commands: **`instructions/PRD-VERIFICATION-2026-08-28.md`**. Headline: the UI layer is built and
-> wired end to end, but **the suite is red (3 failures)** and **PRD criterion #5 (forward page live
+> commands: **`instructions/PRD-VERIFICATION-2026-08-28.md`**. Headline (pre-G5): the UI layer is
+> built and wired end to end, **the suite was red (3 failures — now green)** and **PRD criterion #5 (forward page live
 > updates) is not actually working** — the live equity chart never renders and the metric cards are
 > never called. Fix **G1–G3** before anything else.
+>
+> **2026-08-28 later: G5 landed — the suite is GREEN (1859 passed / 4 skipped / 0 failed).**
+> Next in order: **G1 → G2** (the metric bugs), then **G3** (forward page live widgets).
 >
 > **Also 2026-08-28: U1 (logging) landed** — the app is now debuggable (`--log-level DEBUG`,
 > request ids tying a UI toast to a traceback, `docs/LOGGING.md`), which is what the G1/G2/G3
@@ -54,7 +59,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 | ID | Task | Files | Acceptance | Status |
 |---|---|---|---|---|
 | G4 | **Forward replay must not see the future:** `_signals_upto()` filters with `if b in self.signals["buys"]` (always true) then slices by *count*, so at `revealed=12` the payload already lists buys dated 2024-03-29 / 2024-09-03. Filter by the revealed date; also replace the process-global `_SESSION` + `state_id: None` with a real keyed session registry so `/stop` can honour `state_id` and two tabs can't double-advance one cursor (or advance on a timer instead of per poll). | `src/backtest/api/forward.py:232-240,246-330` | Test: every `signals.buys[].date <= candles[-1].date` at each poll; `/start` twice → two `state_id`s; `stop(A)` leaves `B` running. | ⬜ |
-| G5 | **Get the suite green:** (1) `/api/forward/start` now defaults missing dates (`2020-01-01 → today`) while `test_start_missing_dates_returns_400` demands 400 — decide the contract and fix both sides; (2) `tests/js/test_forward_auth_gate.mjs` never sets `#symbol`, so `startBot()` bails → update the harness; (3) add `psycopg2-binary` to the dev env so `test_db_manager` can build an engine (it fails on `No module named 'psycopg2'`). | `api/forward.py:325-330`, `tests/test_api_forward.py:136-138`, `tests/js/test_forward_auth_gate.mjs:251-266`, `requirements.txt` | `PYTHONPATH=src pytest tests/ -q` → 0 failures (4 skips allowed for mStock credentials). | ⬜ |
+| G5 | **Get the suite green.** ✅ Done 2026-08-28: (1) forward date contract settled — dates stay **optional** (PRD 4.3 defines `{strategy, symbol, params}`) but every filled-in value is reported as `defaults_applied` + echoed in `config`, malformed/inverted ranges now 400 instead of failing deep in the data source, and `forward.js` warns in the UI when the server defaulted the window; (2) the stale Node harness now sets the required `#symbol` and was extended to pin the payload contract (symbol upper-cased, `mode`), the missing-symbol block, synthetic-mode start and the defaulted-window toast → 11 tests, with a complete-enough stub DOM so `renderLive()` runs; (3) the psycopg2-dependent db-manager tests skip with a reason instead of reporting a false failure. | `api/forward.py`, `web/static/js/forward.js`, `tests/test_api_forward.py`, `tests/js/test_forward_auth_gate.mjs`, `tests/test_db_manager.py`, `docs/FORWARD-TESTING.md` | `PYTHONPATH=src pytest tests/ -q` → **1859 passed / 4 skipped / 0 failed** (was 3 failed); +10 date-contract tests, +3 harness tests; `node tests/js/*.mjs` → 11 / 14 / 12 passing. | ✅ **Done** (2026-08-28) |
 | G6 | **Make the timeframe control real:** Synthetic and CSV sources ignore `interval`, so Compare's "across timeframes" premise is cosmetic (slot `1D` and slot `1H` returned identical 262 bars / −2.40%). Options: resample synthetic/CSV bars to the requested interval, or hide/disable the TF selector when the source can't honour it; and validate the mStock interval (`4hour` is passed through verbatim today). Then align forward's `<select>` values (`1min`/`day`) with backtest's (`1D/1H/4H/1W`) and share one `_TIMEFRAME_TO_INTERVAL`. | `data/synthetic.py`, `data/csv_source.py`, `api/backtest.py:29-47`, `api/forward.py:44-58`, `web/templates/forward.html:38-41` | `1D` vs `1H` on the same symbol/range produce different bar counts; unknown TF → 400 (not silent `day`); one shared interval map for backtest+forward. | ⬜ |
 
 **P2 — PRD requirements only partially met**
@@ -82,7 +87,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 | U1 | **Make the app debuggable — logging.** "The logging is not right, doesn't show anything, so I can't debug myself." → one shared logging setup for web + CLI + engine; INFO/DEBUG levels from flag or env; request ids that tie a UI error toast to a server traceback; log lines everywhere the app used to fail silently (no signals, interval ignored, params out of range, forward replay, swallowed `except: pass` in the data fetcher). | `src/backtest/logging_config.py` (new), `web/app.py`, `api/{backtest,forward,strategies,symbols,broker_auth,data_manager,portfolio}.py`, `runner.py`, `engine/backtester.py`, `adapters/backtest_adapter.py`, `data/{synthetic,csv_source,db_source}.py`, `strategy/registry.py`, `forward/engine.py`, `cli.py`, 3 JS `fetchJSON`s, `docs/LOGGING.md` | `--log-level DEBUG` shows the path of one `/api/backtest/run`; every response has `X-Request-Id` and every `/api` error body has `request_id`; grep that id in `--log-file` output and you get the traceback; 36 tests in `tests/test_logging_config.py` (incl. a guard against re-introducing silent `except: pass`). | ✅ **Done** (2026-08-28) |
 | U2 | **Market data simulator** (replace the toy synthetic source). Wanted behaviour: generate intraday (≈60 min cadence) bars whose path *deliberately* triggers the selected strategy's entry, then moves enough within the next 1–2 minutes to close the trade at a profit or loss — so entry/exit, stop/target, fills and the whole live-loop can be exercised while the market is closed and without credentials. Should honour `interval` (fixes G6 as a side effect) and be swappable for `mStock` behind the same `DataSource` protocol. **Scope first:** this is its own epic — write `instructions/MARKET-SIMULATOR-PRD.md` (task decomposition + acceptance tests) before coding. | `src/backtest/data/synthetic.py` → new `src/backtest/marketdata/simulator.py` (or `data/scenario_source.py`), wired via `runner.build_source("simulator")` | Open question to settle in the PRD: deterministic scripted scenarios (replayable, assertable) vs random walk with a volatility knob — recommend scripted scenarios with a seeded random filler for length. Acceptance: for each of the 4 built-in strategies the simulator yields ≥1 round trip inside a 1-year range; `1min`/`1H`/`4H`/`1D` all produce different bar counts; stop-loss and take-profit both fire in the sample scenario; the forward page's replay shows trades executing. | ⬜ **Not started — needs epic planning** |
 
-**Suggested order:** `U1` ✅ → `G5` (green suite = a safe baseline) → `G1` → `G2` → `G3` → `G4` →
+**Suggested order:** `U1` ✅ → `G5` ✅ (green suite = safe baseline) → **`G1` → `G2`** → `G3` → `G4` →
 `G6` → `G11` → `G7`–`G10`, `G12`–`G14` as polish; `U2` gets its own planning pass (it also
 satisfies G6). Commit per gap, referencing the ID.
 
@@ -101,7 +106,11 @@ satisfies G6). Commit per gap, referencing the ID.
 
 **Housekeeping (do first)**
 1. **Commit & open a PR** — Epic 1–6 + Dashboard are built but **not yet committed/pushed**. Suggested target: `feature/UI-rediness`.
-2. **Run it:** `PYTHONPATH=src python -m backtest.web.app --host 0.0.0.0 --port 5000 --source synthetic` (venv `/home/user/.venv`; deps via `pip install -r requirements.txt`). Data is **synthetic only** — swap `--source csv|mstock` when real data is wired.
+2. **Run it:** `PYTHONPATH=src python -m backtest.web.app --host 0.0.0.0 --port 5000 --source synthetic --log-level INFO` (see `docs/LOGGING.md`). Data is **synthetic only** — swap `--source csv|mstock|db` when real data is wired.
+   - Sandbox note: `/home/user/.venv` is **not** persisted between sessions; rebuild it in one line:
+     `python3 -m venv /home/user/.venv && /home/user/.venv/bin/pip install -q -r requirements.txt pytest-cov flake8`
+     (needs `psycopg2-binary` from requirements for the two Postgres-driver tests, else they skip).
+   - Tests: `PYTHONPATH=src FORWARD_TEST_DB_URL="sqlite:///:memory:" /home/user/.venv/bin/python -m pytest tests/ -q`.
 
 **V2 — product (PRD §7)**
 3. **Persistence layer** — store run history / saved comparisons / forward state to DB (`forward/engine.py` + `db/` exist). Unblocks refresh-survives-restart, save/load compare configs, Dashboard history.
@@ -158,6 +167,7 @@ failure (`test_mstock_auth::test_login_sends_sdk_headers`, needs `MSTOCK_API_KEY
 | 2 | New `BaseStrategy` class | Extend existing `Strategy` | Avoid duplicating a working abstraction (matches existing simulator deviation #5) |
 | 3 | `generate_signals(candles, params)` | `generate_signals(candles)` (params bound to instance attrs) | Existing contract; schema still drives dynamic UI forms |
 | 4 | `params` = schema dict only | Accept flat (legacy) **and** schema forms | Zero regressions on the 4 existing strategies |
+| 5 | `POST /api/forward/start` body is `{strategy, symbol, params}` | Dates accepted but **optional**; missing ones are defaulted (`2020-01-01 → today`) and reported as `defaults_applied` | Keeps the PRD contract, and "start from what we have" is the point of forward testing. Silent defaulting was the actual bug — now it is echoed, logged and warned about in the UI (G5) |
 
 ### Epic 2 — Backtest Page ✅ (2026-08-24)
 
@@ -583,6 +593,6 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_alert_manager.py` (Step 21) | 33 |
 | `test_comparison.py` (Step 22) | 13 |
 | `test_config_manager.py` (Step 23) | 13 |
-| `test_logging_config.py` (U1, 2026-08-28) | 36 |
+| `test_logging_config.py` (U1, 2026-08-28) | 37 |
 | PRD/API suites (`test_api_*`, `test_strategy_base`, `test_backtest_adapter`, `test_e2e_workflow`, `test_broker_*`, `test_security_verification`, `test_portfolio_engine`, `test_circuit_breakers`) | ~500 |
-| **Total** | **1849 passing / 4 skipped / 3 failing** (the 3 failures are gap **G5**; `pip install psycopg2-binary` clears the db-manager one) |
+| **Total** | **1859 passing / 4 skipped / 0 failing** (post-G5). The 4 skips are mStock-credential tests; with `psycopg2` absent the 2 Postgres-driver tests skip too (6 total) |

@@ -56,15 +56,18 @@ function makeElement(id, tag) {
         },
         appendChild(child) { this.children.push(child); return child; },
         remove() { this.removed = true; },
-        click() {
+        /** Dispatch a real event so tests drive the same handlers the browser would. */
+        _fire(type, extra) {
             const syntheticEvent = {
                 preventDefault: () => {},
                 stopPropagation: () => {},
                 target: el,
-                type: "click",
+                type,
+                ...(extra || {}),
             };
-            (this.handlers.click || []).forEach((fn) => fn(syntheticEvent));
+            (this.handlers[type] || []).forEach((fn) => fn(syntheticEvent));
         },
+        click() { this._fire("click"); },
         focus() { this._focused = true; },
         querySelector() { return null; },
         style: { width: "0%" },
@@ -76,7 +79,11 @@ function makeElement(id, tag) {
 const ids = [
     "startBtn", "stopBtn", "statusBadge", "progressBar", "progressText",
     "strategy", "symbol", "timeframe", "fromDate", "toDate", "capital",
-    "params-container", "livePanel", "statusBadge",
+    "params-container", "livePanel", "dataMode", "prefillBanner", "symbolList",
+    // Live panel widgets touched by renderLive() — without them a successful
+    // start throws inside poll() and the error toast hides the one under test.
+    "liveStatusBanner", "marketDot", "marketLabel", "lastBarInfo", "barsProcessed",
+    "tradesCount", "equityDisplay", "unrealizedPnl", "positionsBody",
 ];
 const elements = {};
 for (const id of ids) {
@@ -116,7 +123,10 @@ const sandbox = {
 sandbox.globalThis = sandbox;
 
 // Stubs for functions forward.js calls that we don't care about in these tests
-sandbox.showToast = (msg, cls) => { sandbox._lastToast = { msg, cls }; };
+sandbox.showToast = (msg, cls) => {
+    sandbox._lastToast = { msg, cls };
+    (sandbox._toasts = sandbox._toasts || []).push({ msg, cls });
+};
 sandbox.renderMetricsCards = () => {};
 sandbox.renderEquityChart = () => {};
 sandbox.renderParamsInto = () => {};
@@ -148,9 +158,11 @@ sandbox.fetch = async (url, opts) => {
     }
     if (url === "/api/forward/start") {
         sandbox._forwardStarted = (sandbox._forwardStarted || 0) + 1;
+        sandbox._startBody = opts && opts.body ? JSON.parse(opts.body) : null;
         return {
             ok: true, status: 200,
-            json: async () => ({ status: "running", total: 200, revealed: 20 }),
+            json: async () => sandbox._startResponse
+                || { status: "running", total: 200, revealed: 20 },
         };
     }
     if (url === "/api/forward/status") {
@@ -253,8 +265,12 @@ await test("clicking enabled Start button does NOT open auth modal (calls startB
     await flush();
     const before = authUIOpenCalls;
     sandbox._forwardStarted = 0;
-    // Set required form values so startBot doesn't bail out on validation
+    // Set every form value startBot validates (symbol became required with the
+    // live-mode work — leaving it out here is what let this test go stale).
     $("strategy").value = "sma_crossover";
+    $("symbol").value = "reliance";
+    $("timeframe").value = "1D";
+    $("capital").value = "10000";
     $("fromDate").value = "2024-01-01";
     $("toDate").value = "2024-12-31";
     $("startBtn").click();
@@ -263,6 +279,70 @@ await test("clicking enabled Start button does NOT open auth modal (calls startB
     assert.equal(authUIOpenCalls, before, "BrokerAuthUI.open() should NOT be called when authenticated");
     // The start bot should have been triggered (fetch to /api/forward/start)
     assert.ok(sandbox._forwardStarted >= 1, "Forward start should have been called");
+
+    // …and the payload must carry the whole config, symbol upper-cased.
+    const body = sandbox._startBody;
+    assert.equal(body.strategy, "sma_crossover");
+    assert.equal(body.symbol, "RELIANCE");
+    assert.equal(body.timeframe, "1D");
+    assert.equal(body.from_date, "2024-01-01");
+    assert.equal(body.to_date, "2024-12-31");
+    assert.equal(body.capital, 10000);
+    // No #dataMode selection in this scenario ⇒ the safe default is live mode,
+    // which is exactly why auth was required to get here.
+    assert.equal(body.mode, "live");
+});
+
+await test("missing symbol blocks the start and warns instead of posting", async () => {
+    dispatchBrokerStatus("authenticated");
+    await flush();
+    sandbox._forwardStarted = 0;
+    $("symbol").value = "";
+    $("startBtn").click();
+    await flush();
+    await flush();
+    assert.equal(sandbox._forwardStarted, 0, "startBot must not POST without a symbol");
+    assert.match(sandbox._lastToast.msg, /symbol/i, "the user is told what is missing");
+    sandbox._toasts = [];
+    $("symbol").value = "reliance";
+});
+
+await test("synthetic mode starts without broker auth and sends mode=synthetic", async () => {
+    dispatchBrokerStatus("unauthenticated");
+    await flush();
+    $("dataMode").value = "synthetic";
+    $("dataMode")._fire("change");   // as a real <select> would
+    await flush();
+    assert.equal($("startBtn").disabled, false, "synthetic replay needs no broker session");
+
+    sandbox._forwardStarted = 0;
+    $("startBtn").click();
+    await flush();
+    await flush();
+    assert.ok(sandbox._forwardStarted >= 1, "synthetic mode should start immediately");
+    assert.equal(sandbox._startBody.mode, "synthetic");
+    $("dataMode").value = "";
+});
+
+await test("server-defaulted date range is announced as a warning toast", async () => {
+    dispatchBrokerStatus("authenticated");
+    await flush();
+    sandbox._forwardStarted = 0;
+    sandbox._startResponse = {
+        status: "running", total: 200, revealed: 20,
+        defaults_applied: ["from_date", "to_date"],
+        config: { from_date: "2020-01-01", to_date: "2026-08-28" },
+    };
+    $("startBtn").click();
+    await flush();
+    await flush();
+    // Assert against the whole toast log: poll() may toast afterwards.
+    const warned = (sandbox._toasts || []).filter(
+        (t) => t.cls === "warning" && /2020-01-01 → 2026-08-28/.test(t.msg),
+    );
+    assert.equal(warned.length, 1, "a server-defaulted window must be announced once");
+    assert.match(warned[0].msg, /from_date, to_date/);
+    sandbox._startResponse = null;
 });
 
 await test("transitioning from authenticated → unauthenticated disables the button", async () => {

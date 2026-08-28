@@ -50,7 +50,23 @@ POST /api/forward/start
     "params": {"fast": 20, "slow": 50}
 }
 ```
-**Response:** `{status: "running"}` or 403 if not authenticated.
+**Response:**
+
+```json
+{
+  "status": "running",
+  "total": 262, "revealed": 6,
+  "symbol": "RELIANCE", "strategy": "sma_crossover",
+  "config":  { "from_date": "2024-01-01", "to_date": "2024-12-31", "timeframe": "1D", "capital": 100000 },
+  "defaults_applied": []
+}
+```
+
+`403` if not authenticated (mode `live`). The date range is **optional** — the
+PRD's start body is `{strategy, symbol, params}` — but anything the server fills
+in is listed in `defaults_applied` and echoed in `config`, and the UI warns when
+it is non-empty. Malformed (`01-01-2024`) or inverted ranges are rejected with
+`400` before any data is fetched.
 
 ### Check Status
 ```bash
