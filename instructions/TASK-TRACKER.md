@@ -512,7 +512,8 @@ Things the agent cannot do; tracked so nothing is silently skipped.
 | 5 | Review & merge PR #3 | — | ✅ Merged 2026-08-19 (`4e01d65`) |
 | 6 | Review & merge the Phase 3 PR (Steps 8–9) | — | ✅ Merged 2026-08-23 as PR [#5](https://github.com/yogesh-ing/back-test/pull/5) (`43abb57`) — user pushed & merged manually |
 | 7 | Review & merge the Phase 4 PR (Steps 10–12) | — | ✅ Merged as PR [#6](https://github.com/yogesh-ing/back-test/pull/6) |
-| 8 | Review & merge the Phase 5-8 PR (Steps 13-20) | — | ⬜ Pending — current PR |
+| 8 | Review & merge the Phase 5-8 PR (Steps 13-20) | — | ⬜ Pending |
+| 10 | Review & merge **PR #17** — logging (U1), trade accounting (G1/G2), live forward replay (G3/G4), green suite (G5), PRD verification + U2 plan | [pull/17](https://github.com/yogesh-ing/back-test/pull/17) | ⬜ Pending — `main` ← `arena/01a0478e-back-test`, 9 commits, 54 files, 1893 tests green |
 | 9 | Verify `config/calendar.yaml` NSE holiday list against the official NSE circular; add each new year's list every December | Step 12 | ⬜ Ongoing |
 
 ---
