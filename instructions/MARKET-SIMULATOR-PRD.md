@@ -1,6 +1,7 @@
 # PRD & Task Decomposition — Market Data Simulator (U2)
 
-**Status:** proposal — for review before any code.
+**Status:** proposal under revision — Q1 and Q2 are **decided** (below); Q3–Q5 default to
+the recommendation unless you object. No code written yet; the shape is still open to change.
 **Author:** agent verification pass, 2026-08-28–29. **Tracker:** `instructions/TASK-TRACKER.md` → gap `U2`, closes `G6`.
 **Sizing:** ~6 phases, 21 tasks, ≈ 5–7 focused days. Phase 1 alone ships value.
 
@@ -370,6 +371,16 @@ Tick-level bars beneath the 1-min atomic layer, `simulator/execution.py` order r
 | Portfolio centre | `SyntheticFeed` stays until 4.3; no half-migrated state |
 
 ---
+
+## 7b. Decisions log
+
+| # | Decision | Outcome | Consequence in the design |
+|---|---|---|---|
+| Q1 | Atomic resolution | **60 s now, permanently a config knob** (`base_seconds`) | `base_seconds: 60` in `profiles.default`; every cost/resolution claim in §2b/§D6 is stated per atomic bar, so flipping the knob re-derives them by multiplying, and nothing in the code assumes 60. A 15 s change is a config edit + re-measure, not a phase. |
+| Q2 | Scenario authoring surface | **YAML + Python registry underneath** | `config/scenarios.yaml` is the authoring format; `data/simulator/registry.py` is the loader and the place other code registers programmatically; validation errors are load-time and worded for a human editing YAML. |
+| Q3 | Default source after Phase 3 | *recommendation stands* (keep `synthetic`, document simulator as recommended) | Revisit at 5.3 (docs) rather than at 1.2, so behaviour and docs flip together. |
+| Q4 | `persist_to_db` (4.4) | *recommendation stands* (defer) | 4.4 stays in the plan but marked deferrable; the `source='simulator'` tag on rows is still designed in now, so deferring costs no rework. |
+| Q5 | Extra families in 2.1 | *recommendation stands* (add `gap_open`, defer the rest) | `gap_open` lands with the family builders; `range_bound_chop` / `earnings_jump` become a follow-up task against a settled abstraction. |
 
 ## 8. Risks
 
