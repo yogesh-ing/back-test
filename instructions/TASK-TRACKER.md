@@ -47,6 +47,11 @@ break, `P1` = contract/breaking, `P2` = PRD requirement partially met, `P3` = po
 
 Legend: ✅ done · 🟡 in progress · ⬜ not started
 
+> **Status after 2026-08-28: 6 of 14 closed** — `U1` (logging), `G5` (green suite), `G1`+`G2`
+> (trade accounting), `G3`+`G4` (forward page + forward API), `G14` (superseded by G1/G2).
+> **Open: G6, G7, G8, G9, G10, G11, G12, G13** — and `U2` (market data simulator), which G6 waits on.
+> Next recommended: plan `U2`, then `G11` + `G7`–`G10` as quick visible wins.
+
 **P0 — numbers are wrong / widgets don't render**
 
 | ID | Task | Files | Acceptance (how we prove it) | Status |
@@ -108,10 +113,21 @@ satisfies G6). Commit per gap, referencing the ID.
 **Housekeeping (do first)**
 1. **Commit & open a PR** — Epic 1–6 + Dashboard are built but **not yet committed/pushed**. Suggested target: `feature/UI-rediness`.
 2. **Run it:** `PYTHONPATH=src python -m backtest.web.app --host 0.0.0.0 --port 5000 --source synthetic --log-level INFO` (see `docs/LOGGING.md`). Data is **synthetic only** — swap `--source csv|mstock|db` when real data is wired.
+   - Useful switches: `--log-level DEBUG`, `--log-file logs/app.log`, `--currency INR|USD|…`,
+     `--replay-speed 5` (forward replay bars/second).
    - Sandbox note: `/home/user/.venv` is **not** persisted between sessions; rebuild it in one line:
-     `python3 -m venv /home/user/.venv && /home/user/.venv/bin/pip install -q -r requirements.txt pytest-cov flake8`
-     (needs `psycopg2-binary` from requirements for the two Postgres-driver tests, else they skip).
-   - Tests: `PYTHONPATH=src FORWARD_TEST_DB_URL="sqlite:///:memory:" /home/user/.venv/bin/python -m pytest tests/ -q`.
+     `python3 -m venv /home/user/.venv && /home/user/.venv/bin/pip install -q -r requirements.txt pytest flake8`
+     (`requirements.txt` already pins `psycopg2-binary`, needed for the two Postgres-driver tests — without it they skip, by design since G5).
+   - Tests: `PYTHONPATH=src FORWARD_TEST_DB_URL="sqlite:///:memory:" /home/user/.venv/bin/python -m pytest tests/ -q`
+     plus `node tests/js/*.mjs` (54 assertions across 5 harnesses).
+
+   **Sandbox recovery (seen twice).** The sandbox can reset mid-session: the venv disappears
+   *and* the branch pointer rolls back to the session's base commit while the working tree keeps
+   the newer files. Nothing is lost **if you pushed** — every unit ends with
+   `git push origin arena/01a0478e-back-test`. To recover:
+   `git fetch origin <branch> && git diff --stat FETCH_HEAD` (untracked-but-present new files show
+   as deletions there; verify a couple with `git show FETCH_HEAD:<path> | diff - <path>`) then
+   `git reset --hard FETCH_HEAD`. That is exactly how the G1/G2 and G3/G4 commits were restored.
 
 **V2 — product (PRD §7)**
 3. **Persistence layer** — store run history / saved comparisons / forward state to DB (`forward/engine.py` + `db/` exist). Unblocks refresh-survives-restart, save/load compare configs, Dashboard history.
