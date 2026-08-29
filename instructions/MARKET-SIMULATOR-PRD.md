@@ -278,6 +278,23 @@ Rules the loader enforces (each is a test in Phase 1): unknown `family` → warn
 
 ---
 
+## 4b. Two gaps `U2` *activates* — treat them as in-scope
+
+The verification pass found these only because generating intraday data made them
+measurable. Both are currently invisible because nothing can produce a non-daily run; the
+moment Phase 1 lands, every intraday result is wrong (M1) or enormous (M2). Doing U2
+without them ships a feature that produces bad numbers faster than before.
+
+| Tracker | Gap | What it does to a U2 result | Where it must be handled |
+|---|---|---|---|
+| `M1` | `periods_per_year` is hardcoded 252; no caller sets it | Measured: a `15M` run reports vol 0.92% / Sharpe −0.53 where the interval implies **4.68% / −2.69**; a `1min` run reports CAGR −0.44% for a year that **lost 82%**. So the Compare page would rank scenarios on garbage | Task 1.2 must derive `periods_per_year` (and `cagr`'s year count) from the interval — one shared table next to `marketdata/timeframes.py`, used by `api/backtest.py`, `api/forward.py` and `compute_metrics`. Add a test: same walk, `1D` vs `1min`, annualised vol scales by √(periods ratio) |
+| `M2` | Whole run is serialised per request and pushed into `sessionStorage`; `Save to Compare` has no error handling | Measured payloads: `1D` 45 KB · `15M` **1.16 MB** · `1min` **16.7 MB** → 4 slots at `15M` already sit at the ~5 MB quota, and one `1min` slot exceeds it, so the click fails with an uncaught exception and no message | Task 1.2 ships **chart decimation** (downsample to N≈1500 points for display, keep `total_bars`/final values honest) and **store-config-only** slots. `Save to Compare` gains a try/catch → warning toast |
+
+Both are small, both belong in Phase 1 rather than a follow-up: they change the shape of
+the response (`metrics.periods_per_year`, `equity.decimated_from`, slot contents), and
+retro-fitting a response shape is how the G1/G2 card-vs-table drift happened in the first
+place.
+
 ## 5. Task decomposition
 
 Legend: size **S** ≤ half day · **M** ~1 day · **L** 2 days. Every task ends green: full suite + its own new tests.
@@ -293,7 +310,7 @@ Legend: size **S** ≤ half day · **M** ~1 day · **L** 2 days. Every task ends
 | # | Task | Files | DoD | Size |
 |---|---|---|---|---|
 | 1.1 | `AtomicGenerator`: 1-min OHLCV from (drift, vol, volume, seed) — vectorised numpy, session-anchored or continuous via `TimeManager`; returns frame + bars metadata. | `data/simulator/generate.py` | 1 year ≈ 94k rows in < 150 ms; identical inputs → identical digest; no bar outside 09:15–15:30 IST in `anchored`; `low ≤ min(open,close)` and `high ≥ max(open,close)` on every row | M |
-| 1.2 | `ScenarioSource` implementing the `DataSource` protocol (`get_candles(symbol, start, end, interval)`), wired into `runner.build_source("simulator")` + `--source simulator` + `/api/config` advertising it. Default profile = walk-compatible (no scenario). | `data/simulator/source.py`, `runner.py`, `web/app.py` | `1D` and `1H` on the same symbol/range now differ in row count **and** results (assert in `test_api_backtest.py`-style test); `4H`/`15M`/`1min` all produce distinct bar counts; the `[synthetic] interval not supported` warning is replaced by `[simulator] generated N × 1min → M bars @ 1H` at INFO | M |
+| 1.2 | **(incl. M1 annualisation + M2 decimation, §4b)** `ScenarioSource` implementing the `DataSource` protocol (`get_candles(symbol, start, end, interval)`), wired into `runner.build_source("simulator")` + `--source simulator` + `/api/config` advertising it. Default profile = walk-compatible (no scenario). | `data/simulator/source.py`, `runner.py`, `web/app.py` | `1D` and `1H` on the same symbol/range now differ in row count **and** results (assert in `test_api_backtest.py`-style test); `4H`/`15M`/`1min` all produce distinct bar counts; the `[synthetic] interval not supported` warning is replaced by `[simulator] generated N × 1min → M bars @ 1H` at INFO | M |
 | 1.3 | Guard rails: `max_bars_per_request`, empty range → clear error (not the `> 50 rows` message), `log warning` when a window has fewer bars than the strategy's warmup. | `source.py` | 400 with an actionable message for an over-budget request; a 10-bar window returns 10 bars, not an error | S |
 | 1.4 | Close **G6** in the tracker + docs: `docs/DATA-SOURCES.md` gains the simulator section; the "timeframe is cosmetic" startup WARNING is downgraded to fire only for `synthetic`/`csv`. | docs, `web/app.py` | Grep for "cosmetic" in docs matches only the legacy-sources note | S |
 
@@ -337,6 +354,10 @@ Tick-level bars beneath the 1-min atomic layer, `simulator/execution.py` order r
 
 ## 6. Acceptance criteria (epic DoD)
 
+0. **No wrong numbers at any interval:** for the same walk, annualised vol scales by
+   √(bars-per-year ratio) and CAGR's year count equals the real span (M1); and the JSON
+   for a `1min` year stays under 1 MB after decimation (M2) with `Save to Compare` never
+   throwing.
 1. `--source simulator`, any of the 4 built-in strategies, **default params**, 1 year → ≥ 1 closed trade **and** ≥ 1 exit for `trend-reversal`; the run is deterministic (digest equal across two processes).
 2. The user's sentence, testable: `breakout-stop-out` at `1min` — entry at the bar the
    strategy actually took, `e + after_entry`'s low trips the stop, the trade closes as a
