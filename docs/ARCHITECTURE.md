@@ -103,6 +103,10 @@ src/backtest/
 │   ├── mstock.py            # mStock broker adapter
 │   └── session_manager.py   # Session lifecycle + expiry monitor
 │
+├── logging_config.py         # CROSS-CUTTING: handlers, levels, request ids
+│                             #   configure_logging / get_logger / timed()
+│                             #   (docs/LOGGING.md)
+│
 ├── cli.py                   # CLI ENTRY POINT
 │   ├── backtest list        # List strategies
 │   ├── backtest run         # Run single backtest
@@ -180,4 +184,5 @@ class BacktestResult:
 | Frontend | Vanilla JS, Chart.js |
 | Data | pandas, numpy |
 | ORM | SQLAlchemy 2.0 |
+| Logging | stdlib `logging`, configured in `logging_config.py` |
 | Auth | mStock API (login + TOTP) |

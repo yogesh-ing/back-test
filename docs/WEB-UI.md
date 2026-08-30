@@ -18,7 +18,11 @@ Single-strategy deep dive. Configure → Run → See results.
 - "Run Backtest" button
 
 **Results Panel:**
-- Metrics cards (P&L, Win Rate, Max Drawdown, Sharpe, Trades)
+- Metrics cards (P&L, Win Rate, Max Drawdown, Sharpe, Trades). Win Rate is
+  measured over **closed** trades only: a run that is still holding shows `—`
+  with "nothing closed yet" rather than a misleading 0.00%, and the Trades card
+  notes how many positions are still open. Trade rows for open positions read
+  `⏳ Open` instead of ✅/❌.
 - Chart tabs (Equity Curve, Drawdown, Price + Signals)
 - Trade table with pagination
 - Save to Compare / Export CSV / Promote to Forward buttons
@@ -43,21 +47,43 @@ Run 2-4 strategies side-by-side on the same data.
 **Template:** `templates/forward.html`
 **JS:** `static/js/forward.js`
 
-Paper-trading replay. Bar-by-bar progression.
+Paper-trading replay driven by a **server-side clock** — the bars keep being
+revealed with the tab closed, and the page re-attaches to its own `state_id`
+after a refresh.
 
 **UI Elements:**
-- Strategy + symbol + date range config
-- "Start" / "Stop" buttons
-- Progress bar (bars revealed / total)
-- Live equity chart
-- Positions table
-- Trade log
+- Strategy + symbol + date range + capital + **replay speed** (bars/s; the
+  server default comes from `--replay-speed`)
+- "Start" / "Stop", status badge (Idle / Running / Stopped)
+- Progress line + bar (`revealed / total · %`)
+- Live metric cards, live equity curve (mark-to-market on the revealed prefix,
+  with the buy & hold benchmark)
+- Positions table with entry vs current price, move %, unrealised P&L, bars held
+- Trade feed via the shared `TradeTable` (pagination, ✅/❌/⏳ Open)
 
 ### 4. Dashboard (`/dashboard`)
 **Template:** `templates/dashboard.html`
 **JS:** `static/js/dashboard.js`
 
 Overview of all strategies and their status.
+
+## Money formatting
+
+Every amount goes through `static/js/components/currency.js` (`Money.format`,
+`Money.signed`), configured by `--currency` / `BACKTEST_CURRENCY` (default **INR**
+→ `₹` with `en-IN` lakh/crore grouping). The page picks it up from
+`<body data-currency-symbol="…">`, rendered by a template context processor, and
+`GET /api/config` exposes the same values. This replaced the old split where
+Backtest/Compare printed `$` and Forward printed `₹` for identical numbers.
+
+## Debugging a request
+
+Every response carries `X-Request-Id`; every `/api` error body carries the same
+value as `request_id`, and the UI appends it to the error toast
+(`data error: … [req 979be616]`). Grep that id in the server log — or in
+`--log-file` output — for the exact traceback and the decisions that produced it
+(bars fetched, engine path, per-slot results). Run the app with
+`--log-level DEBUG`; see [LOGGING.md](LOGGING.md).
 
 ## API Endpoints
 
@@ -66,6 +92,17 @@ Overview of all strategies and their status.
 |--------|----------|------|----------|
 | POST | `/api/backtest/run` | `{strategy, symbol, from_date, to_date, capital, params, timeframe}` | `{config, metrics, equity, drawdown, trades}` |
 | POST | `/api/backtest/run-many` | `{shared: {...}, slots: [{id, strategy, params}]}` | `{results: {id: payload}}` |
+
+### Forward
+
+| Method | Endpoint | Notes |
+|--------|----------|-------|
+| POST | `/api/forward/start` | `{strategy, symbol, timeframe?, from_date?, to_date?, capital?, params?, mode?, bars_per_second?}` → `{state_id, total, revealed, config, defaults_applied}` |
+| GET | `/api/forward/status?state_id=` | snapshot (pure read — never advances the clock) |
+| POST | `/api/forward/stop` | `{state_id?}` — defaults to the active session |
+| GET | `/api/forward/sessions` | replays in memory |
+
+Details: [FORWARD-TESTING.md](FORWARD-TESTING.md).
 
 ### Strategies
 | Method | Endpoint | Response |

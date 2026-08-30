@@ -489,3 +489,6 @@ body[data-active="portfolio"] .nav-link[data-key="portfolio"] {
 }
 .chip-active { background: rgba(34,197,94,.18); border-color: var(--success); color: #86efac; }
 .card-error { color: var(--danger); padding: 20px; text-align: center; }
+
+/* Open (marked-to-market) trade row — deliberately not green/red (gap G1 rule). */
+.tag-open { color: var(--muted); font-weight: 600; }

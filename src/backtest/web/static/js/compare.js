@@ -12,10 +12,17 @@ let nextId = 1;
 let lastResults = null;       // successful slots from last run (for tab charts)
 
 const $ = (id) => document.getElementById(id);
+/** Server errors carry a request_id that also appears in the app log — quoting it
+ *  here means a screenshot of a toast is enough to find the traceback. */
+function _apiError(data, status) {
+    const id = data && data.request_id ? ` [req ${data.request_id}]` : "";
+    return `${(data && data.error) || `HTTP ${status}`}${id}`;
+}
+
 async function fetchJSON(url, opts) {
     const r = await fetch(url, opts);
     const d = await r.json();
-    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    if (!r.ok) throw new Error(_apiError(d, r.status));
     return d;
 }
 

@@ -675,14 +675,14 @@ class ForwardTestingEngine:
     # -- setup -------------------------------------------------------------
 
     def _setup_logging(self):
-        level = getattr(logging, self.config.system.log_level, logging.INFO)
-        logging.basicConfig(
-            level=level,
-            format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
+        # Delegates to the project-wide setup so the engine, the web app and the
+        # simulator all share one format/handler (see backtest.logging_config).
+        from backtest.logging_config import configure_logging
+
+        configure_logging(self.config.system.log_level)
+        logging.getLogger(__name__).debug(
+            "engine logging at %s", logging.getLevelName(logging.getLogger().level)
         )
-        # Reduce noise from libs
-        logging.getLogger("urllib3").setLevel(logging.WARNING)
 
     def _setup_signal_handlers(self):
         def _handle_signal(signum, frame):

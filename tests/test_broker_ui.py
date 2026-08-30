@@ -128,4 +128,4 @@ def test_forward_auth_gate_js_behaviour():
     assert result.returncode == 0, (
         f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-    assert "8 tests passed" in result.stdout
+    assert "11 tests passed" in result.stdout

@@ -12,6 +12,10 @@ from typing import Any
 import pandas as pd
 
 from backtest.engine.backtester import BacktestResult
+from backtest.engine.trades import walk_trades
+from backtest.logging_config import get_logger
+
+log = get_logger(__name__)
 
 
 def _fmt_dt(ts: Any) -> str:
@@ -58,6 +62,16 @@ class BacktestAdapter:
             "max_drawdown_pct": _f(m.get("max_drawdown", 0.0) * 100, 2),
             "sharpe": _f(m.get("sharpe", 0.0), 2),
             "total_trades": int(m.get("num_trades", 0)),
+            # Breakdown behind the two numbers above: win_rate only covers closed
+            # trades, so a run with an open position says so explicitly.
+            "closed_trades": int(m.get("closed_trades", 0)),
+            "open_trades": int(m.get("open_trades", 0)),
+            "winning_trades": int(m.get("winning_trades", 0)),
+            "losing_trades": int(m.get("losing_trades", 0)),
+            "realised_pnl": _f(m.get("realised_pnl", 0.0), 2),
+            "avg_trade_pnl": _f(m.get("avg_trade_pnl", 0.0), 2),
+            "best_trade_pnl": _f(m.get("best_trade_pnl", 0.0), 2),
+            "worst_trade_pnl": _f(m.get("worst_trade_pnl", 0.0), 2),
             # extras surfaced for richer cards
             "final_equity": _f(m.get("final_equity", self._equity.iloc[-1]), 2),
             "cagr_pct": _f(m.get("cagr", 0.0) * 100, 2),
@@ -107,78 +121,34 @@ class BacktestAdapter:
     # ------------------------------------------------------------------
 
     def to_trades(self) -> list[dict[str, Any]]:
-        pos = self._position
-        close = self._candles["close"]
-        equity = self._equity
+        """Rows for the trade table.
 
-        trades: list[dict[str, Any]] = []
-        holding = False
-        side = ""
-        entry_price = 0.0
-        entry_date: Any = None
-        entry_equity = 0.0
-        tid = 0
-
-        prev = 0.0
-        for idx in pos.index:
-            cur = float(pos.loc[idx])
-            entered = cur != 0 and prev == 0
-            exited = cur == 0 and prev != 0
-            flipped = cur != 0 and prev != 0 and (cur > 0) != (prev > 0)
-
-            if (exited or flipped) and holding:
-                exit_price = float(close.loc[idx])
-                if side == "LONG":
-                    ret = exit_price / entry_price - 1 if entry_price else 0.0
-                else:
-                    ret = entry_price / exit_price - 1 if exit_price else 0.0
-                pnl = entry_equity * ret
-                tid += 1
-                trades.append(
-                    {
-                        "id": tid,
-                        "date": _fmt_dt(entry_date),
-                        "exit_date": _fmt_dt(idx),
-                        "side": side,
-                        "entry": _f(entry_price, 2),
-                        "exit": _f(exit_price, 2),
-                        "pnl": _f(pnl, 2),
-                        "result": "Win" if pnl >= 0 else "Loss",
-                    }
-                )
-                holding = False
-
-            if entered or (flipped and cur != 0):
-                holding = True
-                side = "LONG" if cur > 0 else "SHORT"
-                entry_date = idx
-                entry_price = float(close.loc[idx])
-                entry_equity = float(equity.loc[idx])
-            prev = cur
-
-        # close an open position at the final bar
-        if holding:
-            idx = pos.index[-1]
-            exit_price = float(close.loc[idx])
-            if side == "LONG":
-                ret = exit_price / entry_price - 1 if entry_price else 0.0
-            else:
-                ret = entry_price / exit_price - 1 if exit_price else 0.0
-            pnl = entry_equity * ret
-            tid += 1
-            trades.append(
-                {
-                    "id": tid,
-                    "date": _fmt_dt(entry_date),
-                    "exit_date": _fmt_dt(idx),
-                    "side": side,
-                    "entry": _f(entry_price, 2),
-                    "exit": _f(exit_price, 2),
-                    "pnl": _f(pnl, 2),
-                    "result": "Win" if pnl >= 0 else "Loss",
-                }
-            )
-        return trades
+        These are the *same* trades :func:`~backtest.engine.metrics.compute_metrics`
+        counted, via :func:`backtest.engine.trades.walk_trades` — so the "Trades"
+        and "Win Rate" cards cannot drift from the table below them (gaps G1/G2),
+        and each row's P&L is equity-based (costs included) rather than
+        reconstructed from prices (gap G14).
+        """
+        cached = self.__dict__.get("_trades_cache")
+        if cached is not None:
+            return cached
+        trades = walk_trades(self._equity, self._position, self._candles["close"])
+        cached = [
+            {
+                "id": t.id,
+                "date": t.entry_date,
+                "exit_date": t.exit_date,
+                "side": t.side,
+                "entry": _f(t.entry, 2),
+                "exit": _f(t.exit, 2),
+                "pnl": _f(t.pnl, 2),
+                "result": t.result,
+                "is_open": t.is_open,
+            }
+            for t in trades
+        ]
+        self.__dict__["_trades_cache"] = cached
+        return cached
 
     # ------------------------------------------------------------------
     # Price + signals markers
@@ -232,6 +202,25 @@ class BacktestAdapter:
 
     def to_all(self) -> dict[str, Any]:
         m = self._metrics
+        trades = self.to_trades()
+        if trades:
+            # Σ trade P&L must equal the equity the run actually produced: flat bars
+            # move nothing, so the trade spans tile the whole curve (and each span
+            # carries its own entry/exit costs). A gap here means the accounting and
+            # the equity curve are being computed differently again.
+            total_pnl = self._capital * float(m.get("total_return", 0.0))
+            summed = sum(t["pnl"] for t in trades)
+            if abs(summed - total_pnl) > max(1.0, 0.005 * abs(self._capital)):
+                log.warning(
+                    "[adapter] trades don't reconcile for %s/%s: Σpnl=%.2f vs total_pnl=%.2f",
+                    m.get("strategy"), m.get("symbol"), summed, total_pnl,
+                )
+        log.debug(
+            "[adapter] %s/%s → %d trades (%d closed, %d open), win_rate=%.2f%% over closed",
+            m.get("strategy"), m.get("symbol"), m.get("num_trades"),
+            m.get("closed_trades", 0), m.get("open_trades", 0),
+            100.0 * float(m.get("win_rate", 0.0)),
+        )
         return {
             "config": {
                 "strategy": m.get("strategy", ""),
@@ -240,10 +229,11 @@ class BacktestAdapter:
                 "stop_loss": m.get("stop_loss"),
                 "take_profit": m.get("take_profit"),
                 "bars": int(m.get("bars", len(self._equity))),
+                "strategy_params": m.get("strategy_params"),
             },
             "metrics": self.to_metrics(),
             "equity": self.to_equity(),
             "drawdown": self.to_drawdown(),
-            "trades": self.to_trades(),
+            "trades": trades,
             "signals": self.to_signals(),
         }

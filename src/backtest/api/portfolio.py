@@ -25,10 +25,12 @@ from flask import Blueprint, Response, current_app, jsonify, request, stream_wit
 
 from backtest.data.universe import is_universe, list_universes
 from backtest.forward.portfolio_manager import get_portfolio_manager
+from backtest.logging_config import get_logger
 from backtest.forward.risk_supervisor import GlobalRiskConfig
 from backtest.forward.runner import RunnerConfig, TARGET_POOL, TARGET_SINGLE
 
 portfolio_bp = Blueprint("portfolio_api", __name__)
+log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +43,8 @@ def _manager():
 
 
 def _error(message: str, status: int = 400) -> Tuple[Response, int]:
+    # Every rejected portfolio request now leaves a trace (these were silent).
+    log.warning("rejected (%d): %s", status, message)
     return jsonify({"success": False, "error": message}), status
 
 
@@ -179,6 +183,7 @@ def control_runner(instance_id: str) -> Tuple[Response, int]:
         return _error(f"unknown runner: {instance_id}", 404)
     except (ValueError, RuntimeError) as exc:
         return _error(str(exc), 409)
+    log.info("runner %s: action=%s → %s", instance_id, action, state.get("status", "?"))
     return jsonify({"success": True, "action": action, "runner": state}), 200
 
 
@@ -186,6 +191,7 @@ def control_runner(instance_id: str) -> Tuple[Response, int]:
 def remove_runner(instance_id: str) -> Tuple[Response, int]:
     if not _manager().remove_runner(instance_id):
         return _error(f"unknown runner: {instance_id}", 404)
+    log.info("runner %s removed", instance_id)
     return jsonify({"success": True, "removed": instance_id}), 200
 
 
@@ -214,6 +220,7 @@ def bulk_control(action: str) -> Tuple[Response, int]:
             return _error(f"unknown bulk action: {action}")
     except RuntimeError as exc:
         return _error(str(exc), 409)
+    log.info("bulk action %s affected %d runner(s)", action, n)
     return jsonify({"success": True, "action": action, "affected": n,
                     "portfolio": manager.get_portfolio_summary()}), 200
 
@@ -268,12 +275,23 @@ def stream() -> Response:
     @stream_with_context
     def event_stream():
         # SSE hello — lets the client confirm the channel immediately.
+        log.info("SSE stream opened (cadence %.1fs, client=%s)", interval, request.remote_addr)
+        errors = 0
         yield ": connected to /api/portfolio/stream\n\n"
         while True:
             try:
                 payload = _manager().get_portfolio_summary()
+                errors = 0
                 yield f"event: portfolio\ndata: {json.dumps(payload, default=str)}\n\n"
+            except GeneratorExit:
+                raise
             except Exception as exc:  # noqa: BLE001 — keep the stream alive
+                errors += 1
+                # Log once, then at most every 10th repeat, so a broken manager
+                # cannot flood the log at 1 Hz.
+                if errors == 1 or errors % 10 == 0:
+                    log.warning("SSE snapshot failed (%d in a row): %s: %s", errors,
+                                exc.__class__.__name__, exc)
                 yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
             time.sleep(interval)
 

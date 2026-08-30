@@ -10,6 +10,22 @@ const POLL_MS = 2000;
 let pollTimer = null;
 let currentStateId = null;
 
+/** Sessions are keyed server-side, so a refresh has to re-attach to *this*
+ *  browser's replay rather than whatever started most recently. */
+const SESSION_KEY = "forward_***";
+
+function rememberSession(stateId) {
+    currentStateId = stateId || null;
+    try {
+        if (stateId) sessionStorage.setItem(SESSION_KEY, stateId);
+        else sessionStorage.removeItem(SESSION_KEY);
+    } catch { /* private mode: memory only */ }
+}
+
+function rememberedSession() {
+    try { return sessionStorage.getItem(SESSION_KEY); } catch { return null; }
+}
+
 // ---- Auth gate -----------------------------------------------------------
 let brokerAuthenticated = false;
 
@@ -62,7 +78,11 @@ function handleStartClick(e) {
 async function fetchJSON(url, opts) {
     const r = await fetch(url, opts);
     const d = await r.json();
-    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    // `d.request_id` is also in the server log, so a toast can be traced exactly.
+    if (!r.ok) {
+        const id = d && d.request_id ? ` [req ${d.request_id}]` : "";
+        throw new Error(`${(d && d.error) || `HTTP ${r.status}`}${id}`);
+    }
     return d;
 }
 
@@ -112,14 +132,14 @@ function updateLiveBanner(data) {
     // Stats
     $("barsProcessed").textContent = `Bars: ${data.total_bars || 0}`;
     $("tradesCount").textContent = `Trades: ${data.total_trades || 0}`;
-    $("equityDisplay").textContent = `₹${(data.equity || 0).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+    $("equityDisplay").textContent = data.equity != null
+        ? Money.format(data.equity, 0) : Money.format(0, 0);
 
     // Unrealized PnL
     const pnlEl = $("unrealizedPnl");
     if (data.unrealized_pnl && data.unrealized_pnl !== 0) {
-        const cls = data.unrealized_pnl >= 0 ? "pos" : "neg";
-        pnlEl.textContent = ` (${data.unrealized_pnl >= 0 ? "+" : ""}₹${data.unrealized_pnl.toFixed(2)})`;
-        pnlEl.className = cls;
+        pnlEl.textContent = ` (${Money.signed(data.unrealized_pnl)})`;
+        pnlEl.className = data.unrealized_pnl >= 0 ? "pos" : "neg";
     } else {
         pnlEl.textContent = "";
     }
@@ -128,56 +148,63 @@ function updateLiveBanner(data) {
 // ---- Positions table -----------------------------------------------------
 function renderPositions(positions) {
     const body = $("positionsBody");
+    if (!body) return;
     if (!positions || !positions.length) {
-        body.innerHTML = '<tr><td colspan="6" class="muted">No open positions</td></tr>';
+        body.innerHTML = '<tr><td colspan="7" class="muted">No open positions</td></tr>';
         return;
     }
+    // Entry and current are different prices now, and the P&L is the open trade's
+    // equity delta — this table used to be structurally unable to move (gap G3).
     body.innerHTML = positions.map((p) => {
-        const cls = p.unrealized_pnl_pct >= 0 ? "pos" : "neg";
+        const cls = (p.unrealized_pnl || 0) >= 0 ? "pos" : "neg";
+        const pct = p.unrealized_pnl_pct || 0;
+        const exposure = p.exposure_pct != null ? p.exposure_pct : 100;
         return `<tr>
-            <td>${p.symbol}</td><td>${p.side}</td>
-            <td>₹${p.entry}</td><td>₹${p.current || "—"}</td>
-            <td class="${cls}">${p.unrealized_pnl_pct >= 0 ? "+" : ""}${p.unrealized_pnl_pct || 0}%</td>
-            <td>${p.entry_date || "—"}</td></tr>`;
+            <td>${p.symbol}</td>
+            <td>${p.side} <span class="muted small">(${exposure}%)</span></td>
+            <td>${Money.format(p.entry)}</td>
+            <td>${Money.format(p.current)}</td>
+            <td class="${cls}">${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%</td>
+            <td class="${cls}">${Money.signed(p.unrealized_pnl || 0)}</td>
+            <td>${p.entry_date || "-"}${p.bars_held ? ` <span class="muted small">${p.bars_held}b</span>` : ""}</td>
+        </tr>`;
     }).join("");
 }
 
 // ---- Trade feed ----------------------------------------------------------
 function renderTrades(trades) {
-    if (!trades || !trades.length) return;
-    const tbody = $("tradeTable")?.querySelector("tbody");
-    if (!tbody) return;
-    tbody.innerHTML = trades.map((t, i) => {
-        const pnlCls = (t.pnl || 0) >= 0 ? "pos" : "neg";
-        const result = t.status === "open" ? "Open" : ((t.pnl || 0) >= 0 ? "Win" : "Loss");
-        return `<tr>
-            <td>${i + 1}</td>
-            <td>${t.entry_date || "—"}</td>
-            <td>${t.side}</td>
-            <td>₹${t.entry}</td>
-            <td>${t.exit ? "₹" + t.exit : "—"}</td>
-            <td class="${pnlCls}">${t.pnl != null ? "₹" + t.pnl.toFixed(2) : "—"}</td>
-            <td class="${pnlCls}">${result}</td></tr>`;
-    }).join("");
+    // TradeTable is container-scoped and already renders ✅ Win / ❌ Loss /
+    // ⏳ Open with pagination, so the feed reuses it instead of duplicating rows.
+    if (typeof TradeTable !== "undefined") TradeTable.render("tradeTable-wrap", trades || []);
 }
 
 // ---- Equity chart --------------------------------------------------------
-let equityData = [];
+function renderLiveEquity(equity) {
+    // /status already returns the adapter shape {dates, values, benchmark}. The
+    // old code fetched /api/forward/equity and handed renderEquityChart a bare
+    // number array, which it rejects — so the "live" chart never drew a point.
+    if (!equity || !equity.dates || !equity.dates.length) return;
+    renderEquityChart("equityChart", equity);
+}
 
-async function fetchEquity() {
-    try {
-        const data = await fetchJSON("/api/forward/equity");
-        if (data && data.length > 0) {
-            equityData = data;
-            renderEquityChart("equityChart", data.map(d => d.equity));
-        }
-    } catch { /* ignore */ }
+// ---- Progress ------------------------------------------------------------
+function renderProgress(progress) {
+    const p = progress || {};
+    const el = $("progressText");
+    if (el) el.textContent = p.total ? `${p.revealed} / ${p.total} bars · ${p.pct}%` : "";
+    const fill = $("progressFill");
+    if (fill) fill.style.width = `${Math.max(0, Math.min(100, p.pct || 0))}%`;
 }
 
 // ---- Render all ----------------------------------------------------------
 function renderLive(data) {
     setStatus(data.status);
     updateLiveBanner(data);
+    renderProgress(data.progress);
+    // The live panels PRD 4.2 asks for: running metrics, equity curve, positions
+    // and the trade feed — all off this one snapshot.
+    if (data.metrics) renderMetricsCards("metricsCards", data.metrics);
+    renderLiveEquity(data.equity);
     renderPositions(data.positions);
     if (data.trades) renderTrades(data.trades);
 }
@@ -191,7 +218,7 @@ function val(id, fallback = "") {
 function forwardConfig() {
     const mode = dataMode();
     const symbol = (val("symbol") || "").toUpperCase();
-    return {
+    const cfg = {
         strategy: val("strategy"),
         symbol,
         timeframe: val("timeframe", "1D"),
@@ -201,6 +228,11 @@ function forwardConfig() {
         to_date: val("toDate") || new Date().toISOString().slice(0, 10),
         params: collectParamsFrom($("params-container")),
     };
+    // Bars/second for the server clock. Only sent when the picker is set, so the
+    // server default (--replay-speed) otherwise applies.
+    const speed = val("replaySpeed");
+    if (speed !== "") cfg.bars_per_second = Number(speed);
+    return cfg;
 }
 
 async function startBot() {
@@ -216,8 +248,17 @@ async function startBot() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(forwardConfig()),
         });
-        currentStateId = result.state_id;
-        showToast(`Forward test started: ${result.symbol}`, "success");
+        rememberSession(result.state_id);
+        showToast(`Forward test started: ${result.symbol} · ${result.total} bars @ ` +
+                  `${result.bars_per_second} bars/s`, "success");
+        // A window the server had to invent is not a window we chose — say so
+        // loudly instead of showing a replay that looks like the user's range.
+        if (result.defaults_applied && result.defaults_applied.length && result.config) {
+            showToast(
+                `Date range defaulted by the server (${result.defaults_applied.join(", ")}): ` +
+                `${result.config.from_date} → ${result.config.to_date}`, "warning", 6000,
+            );
+        }
         poll();
         pollTimer = setInterval(poll, POLL_MS);
     } catch (err) {
@@ -235,20 +276,24 @@ async function stopBot() {
         });
     } catch { /* ignore */ }
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    rememberSession(null);
     await poll();
     setStatus("stopped");
-    showToast("Forward test stopped", "info");
+    showToast("Forward test stopped", "warning");
 }
 
 async function poll() {
+    const qs = currentStateId ? `?state_id=${encodeURIComponent(currentStateId)}` : "";
     try {
-        const data = await fetchJSON("/api/forward/status");
+        const data = await fetchJSON(`/api/forward/status${qs}`);
         renderLive(data);
-        await fetchEquity();
         if (data.status !== "running") {
             if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
         }
     } catch (err) {
+        // A 404 means our session is gone (the server restarted) — forget the id
+        // rather than polling something that can never answer.
+        if (/404/.test(err.message || "")) rememberSession(null);
         showToast(err.message || "Status failed", "error");
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     }
@@ -340,15 +385,20 @@ async function init() {
         } catch { /* ignore */ }
     }
 
-    // Check if engine is already running
+    // Re-attach to this browser's session after a refresh, else to whatever runs.
+    const stored = rememberedSession();
+    if (stored) rememberSession(stored);
     try {
-        const status = await fetchJSON("/api/forward/status");
+        const qs = currentStateId ? `?state_id=${encodeURIComponent(currentStateId)}` : "";
+        const status = await fetchJSON(`/api/forward/status${qs}`);
         if (status.status === "running") {
-            currentStateId = status.state_id;
+            if (status.state_id) rememberSession(status.state_id);
             $("livePanel").hidden = false;
             setStatus("running");
             renderLive(status);
-            pollTimer = setInterval(poll, POLL_MS);
+            if (!pollTimer) pollTimer = setInterval(poll, POLL_MS);
+        } else if (stored) {
+            rememberSession(null);
         }
     } catch { /* ignore */ }
 

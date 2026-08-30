@@ -5,7 +5,30 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 > **Debugging?** See `instructions/ENGINEERING-NOTES.md` — symptom→cause playbook,
 > conventions and invariants, and every bug found so far with its root cause.
 
-**Last updated:** 2026-08-26 · **Branch:** `arena/01a03e5a-back-test` (broker auth effort) / `arena/01a03438-back-test` (PRD effort) / `arena/01a02caa-back-test` (simulator) · **Simulator Steps 1–20 complete · PRD Epic 1 complete · Broker Auth Epic COMPLETE (all 5 phases, 13/13 tasks)**
+**Last updated:** 2026-08-28 · **Branch:** `arena/01a0478e-back-test` (PRD verification pass) /
+`arena/01a03e5a-back-test` (broker auth effort) / `arena/01a03438-back-test` (PRD effort) /
+`arena/01a02caa-back-test` (simulator) · **Simulator Steps 1–20 complete · PRD Epics 1–6 built,
+verification pass done → 14 gaps open (see Gap backlog) · Broker Auth Epic COMPLETE (all 5 phases,
+13/13 tasks)**
+
+> **Suite today: 1893 passed / 4 skipped / 0 failed** — G5, G1/G2, G3 and G4 are done.
+> **2026-08-29:** `U2` planned (`instructions/MARKET-SIMULATOR-PRD.md`); a 12-item
+> **Missing points** sweep (`M1`–`M12`) added below the gap backlog — includes a silent
+> annualisation bug (`M1`) and a 16.7 MB payload problem (`M2`), both of which `U2` turns on.
+>
+> **2026-08-28 — PRD V1 was audited task by task.** Full evidence, per-task verdicts and repro
+> commands: **`instructions/PRD-VERIFICATION-2026-08-28.md`**. Headline (pre-G5): the UI layer is
+> built and wired end to end, **the suite was red (3 failures — now green)** and **PRD criterion #5 (forward page live
+> updates) is not actually working** — the live equity chart never renders and the metric cards are
+> never called. Fix **G1–G3** before anything else.
+>
+> **2026-08-28 later: G5 then G1+G2 landed — suite GREEN at 1875 passed / 4 skipped / 0 failed.**
+> G1/G2 are fixed at the root behind one trade-accounting module (`engine/trades.py`);
+> **next in order is G3** — the forward page's live widgets.
+>
+> **Also 2026-08-28: U1 (logging) landed** — the app is now debuggable (`--log-level DEBUG`,
+> request ids tying a UI toast to a traceback, `docs/LOGGING.md`), which is what the G1/G2/G3
+> fixes will be worked against. Suite: **1849 passed / 4 skipped / 3 failed** (the 3 are G5).
 
 ---
 
@@ -14,15 +37,143 @@ Tracks progress against `instructions/forword-testing.md` (24 steps, 8 phases).
 Tracks progress against `instructions/PRDandTASK_DECOMPOSITION.md` — the unified
 web UI (Dashboard / Backtest / Compare / Forward) layered on top of the mature
 simulator + backtester (this tracker's Steps 1–24). Active branch:
-`arena/01a03438-back-test`.
+`arena/01a0478e-back-test` (was `arena/01a03438-back-test`).
 
-> **V1 is complete (Epics 1–6 + Dashboard). Pick up here in a new session:**
+> **V1 is built (Epics 1–6 + Dashboard) — verified task by task on 2026-08-28, 14 gaps open.**
+> Pick up in the **Gap backlog** below, then the V2 list.
+
+### 🔧 Gap backlog — PRD verification findings (implement one at a time)
+
+Source: `instructions/PRD-VERIFICATION-2026-08-28.md`. Work top-down; a task is only **Done** when
+the listed acceptance check passes and the full suite is green. `P0` = correctness/user-visible
+break, `P1` = contract/breaking, `P2` = PRD requirement partially met, `P3` = polish.
+
+Legend: ✅ done · 🟡 in progress · ⬜ not started
+
+> **Status after 2026-08-28: 6 of 14 closed** — `U1` (logging), `G5` (green suite), `G1`+`G2`
+> (trade accounting), `G3`+`G4` (forward page + forward API), `G14` (superseded by G1/G2).
+> **Open: G6, G7, G8, G9, G10, G11, G12, G13** — and `U2` (market data simulator), which G6 waits on.
+> Next recommended: plan `U2`, then `G11` + `G7`–`G10` as quick visible wins.
+
+**P0 — numbers are wrong / widgets don't render**
+
+| ID | Task | Files | Acceptance (how we prove it) | Status |
+|---|---|---|---|---|
+| G1 | **Fix `win_rate`:** it counted the *sign* of the position, not P&L. ✅ Done 2026-08-28 (with G2): realised P&L per trade comes from `engine/trades.py::walk_trades` (equity-based, costs included), and `win_rate = wins / closed trades`. Semantics chosen for this fix: a position still open at the last bar **counts in `num_trades`** (marked to the final close) but is **excluded from `win_rate`**; P&L of exactly 0 is `Flat`, not a win. UI honesty: the Win-Rate card renders an em-dash + "nothing closed yet" instead of a fake 0.00%, trade rows read ⏳ Open, and Compare no longer crowns a slot that has nothing closed. Redefined in place (no compat aliases) with every consumer updated: `compute_metrics`, `BacktestAdapter`, `analysis/comparison.py`, forward `/status`, cards, compare table. | `src/backtest/engine/trades.py` (new), `engine/metrics.py`, `adapters/backtest_adapter.py`, `analysis/comparison.py`, `api/forward.py`, `web/static/js/components/metrics_cards.js`, `components/trade_table.js`, `compare/metrics_table.js`, `web/static/css/app.css` | `tests/test_engine_trades.py` (14) pins a losing long-only run at `win_rate == 0.0`, the flip-tiling rule and card/table agreement for all 4 strategies; `tests/js/test_metrics_cards.mjs` (9) pins the em-dash / Open rendering | ✅ **Done** (2026-08-28) |
+| G2 | **Fix `num_trades`:** counted entry *and* exit transitions (4) while the table showed round trips (2). ✅ Done 2026-08-28 with G1 — the cards and the table share one trade walk, so they cannot diverge by construction. `closed_trades` / `open_trades` / `winning_trades` / `losing_trades` / `realised_pnl` / avg-best-worst are exposed alongside. The `[adapter] card/table disagree` tripwire added with U1 was replaced by a stronger invariant: **Σ trade P&L == total P&L**, warned on if it ever breaks. | same files as G1 | `metrics.total_trades == len(trades)` for every built-in strategy (asserted in `test_engine_trades.py` and `test_backtest_adapter.py`); Σ row pnl == `total_pnl` within $1 on a 100k run | ✅ **Done** (2026-08-28) |
+| G3 | **Forward page live updates.** ✅ Done 2026-08-28: (a) `renderLiveEquity()` now feeds the adapter-shaped `equity` object from `/status` into `renderEquityChart` (it had been passed a bare number array, which the chart rejects — so it never drew), and the redundant `/api/forward/equity` round-trip is gone; (b) `renderMetricsCards("metricsCards", data.metrics)` is now actually called; (c) `#progressText` + a `#progressFill` bar track `progress.revealed/total/pct`; (d) positions carry real marks — entry vs current, move %, unrealised P&L (₹-grouped), bars held — with the API computing them from the open trade instead of welding entry to current; (e) the trade feed reuses the shared `TradeTable` (pagination + ⏳ Open); (f) one `Money` formatter for the whole app via `--currency`/`BACKTEST_CURRENCY` (₹ default, `en-IN` grouping), replacing the `$`-vs-`₹` split; (g) the page re-attaches to its own `state_id` after a refresh (sessionStorage) and a new **replay speed** picker sends `bars_per_second`. Deeper cause also fixed: `_prefix_result` built a result with an empty `metrics` dict, so every live metric read 0.0 regardless of performance. | `web/static/js/forward.js`, `components/currency.js` (new), `components/metrics_cards.js`, `components/trade_table.js`, `js/dashboard.js`, `web/templates/{base,forward}.html`, `api/forward.py`, `web/app.py` | `node tests/js/test_forward_widgets.mjs` → 7 tests (chart receives `{dates,values,benchmark}`, cards get the metrics, progress text/bar, marks, no extra fetch, idle snapshot safe); `tests/js/test_metrics_cards.mjs` → 10 incl. the ₹ formatter; API-side: `test_metrics_are_real_numbers_not_zeros`, `test_positions_are_marked_to_market_as_the_replay_runs`, `test_equity_payload_is_component_compatible` | ✅ **Done** (2026-08-28) |
+
+**P1 — broken contracts / red suite**
+
+| ID | Task | Files | Acceptance | Status |
+|---|---|---|---|---|
+| G4 | **Forward replay: no future signals, real sessions, server clock.** ✅ Done 2026-08-28: `_signals_upto()` now cuts candles/buys/sells at the revealed bar's **date** (the old `if b in self.signals["buys"]` filter was always true and then sliced by count, so a replay at 4% progress listed entries from month 8); sessions live in a bounded `OrderedDict` keyed by `state_id` (uuid) with `_ACTIVE_ID` fallback so no-id callers keep working and an unknown id is a 404 rather than a lie; `/stop` honours the id; **and the clock moved to the server** as a per-session daemon thread (`bars_per_second`, default `--replay-speed` 1.0, clamped 0–5000, `0` = manual via `session.advance(bars)`), so `/status` is a pure read — two tabs can no longer double-advance one run and closing the browser doesn't freeze the bot. `GET /api/forward/sessions` lists them. | `src/backtest/api/forward.py` | `test_polling_never_advances_the_clock`, `test_clock_advances_without_any_polling`, `test_signals_never_leak_beyond_the_revealed_prefix`, `test_two_sessions_are_independent`, `test_unknown_state_id_is_404`, `test_sessions_endpoint_lists_replays`, `test_negative_speed_freezes_the_clock` | ✅ **Done** (2026-08-28) |
+| G5 | **Get the suite green.** ✅ Done 2026-08-28: (1) forward date contract settled — dates stay **optional** (PRD 4.3 defines `{strategy, symbol, params}`) but every filled-in value is reported as `defaults_applied` + echoed in `config`, malformed/inverted ranges now 400 instead of failing deep in the data source, and `forward.js` warns in the UI when the server defaulted the window; (2) the stale Node harness now sets the required `#symbol` and was extended to pin the payload contract (symbol upper-cased, `mode`), the missing-symbol block, synthetic-mode start and the defaulted-window toast → 11 tests, with a complete-enough stub DOM so `renderLive()` runs; (3) the psycopg2-dependent db-manager tests skip with a reason instead of reporting a false failure. | `api/forward.py`, `web/static/js/forward.js`, `tests/test_api_forward.py`, `tests/js/test_forward_auth_gate.mjs`, `tests/test_db_manager.py`, `docs/FORWARD-TESTING.md` | `PYTHONPATH=src pytest tests/ -q` → **1859 passed / 4 skipped / 0 failed** (was 3 failed); +10 date-contract tests, +3 harness tests; `node tests/js/*.mjs` → 11 / 14 / 12 passing. | ✅ **Done** (2026-08-28) |
+| G6 | **Make the timeframe control real.** ⏳ **Blocked on U2 Phase 0–1** (planned; see `instructions/MARKET-SIMULATOR-PRD.md`). Until it lands the interim stays: sources log a WARNING when they ignore `interval`. Original scope:  Synthetic and CSV sources ignore `interval`, so Compare's "across timeframes" premise is cosmetic (slot `1D` and slot `1H` returned identical 262 bars / −2.40%). Options: resample synthetic/CSV bars to the requested interval, or hide/disable the TF selector when the source can't honour it; and validate the mStock interval (`4hour` is passed through verbatim today). Then align forward's `<select>` values (`1min`/`day`) with backtest's (`1D/1H/4H/1W`) and share one `_TIMEFRAME_TO_INTERVAL`. | `data/synthetic.py`, `data/csv_source.py`, `api/backtest.py:29-47`, `api/forward.py:44-58`, `web/templates/forward.html:38-41` | `1D` vs `1H` on the same symbol/range produce different bar counts; unknown TF → 400 (not silent `day`); one shared interval map for backtest+forward. | ⬜ |
+
+**P2 — PRD requirements only partially met**
+
+| ID | Task | Files | Acceptance | Status |
+|---|---|---|---|---|
+| G7 | Drawdown charts (PRD 2.5 / 3.7): annotate the worst-drawdown point (data already ships as `worst_dd_pct`/`worst_dd_date`) and make axis direction + `fill` consistent between the single and compare charts. | `web/static/js/charts/drawdown_chart.js`, `web/static/js/compare/drawdown_compare_chart.js` | A labelled marker at the min point on both charts; both plot drawdowns in the same direction. | ⬜ |
+| G8 | Compare tooltips (PRD 3.6/3.7) show only the series label — no value at the hovered date. Show `label: value` for every series (`mode:'index'` already returns them). | `web/static/js/compare/equity_compare_chart.js`, `compare/drawdown_compare_chart.js` | Hovering date X lists all N slots with their $/% values. | ⬜ |
+| G9 | Export (PRD 2.10): add the server endpoint `GET /api/backtest/export` (trades + a metrics/config header block) or formally retire it as a V2 item; keep the client-side download as a fallback. | `api/backtest.py`, `web/static/js/backtest.js:95-108` | `curl` on the endpoint returns `text/csv` with the same rows the table shows, including a config header. | ⬜ |
+| G10 | Signals chart (PRD 2.6): red **down**-arrow for sells (`rectRot` today) and an OHLC line in the tooltip. | `web/static/js/charts/signals_chart.js` | Marker glyphs match the PRD mock; tooltip shows O/H/L/C + signal. | ⬜ |
+| G11 | Validate params server-side against the declared schema (out-of-range `fast=9999` today returns a vacuous 200 → 400 with the offending param, min and max) — and make **Promote** carry `from_date`/`to_date` (forward currently ignores them and keeps its stale template default `to=2026-08-28`). | `api/backtest.py` (`run` + `run-many`), `web/static/js/forward.js:315-341`, `web/templates/forward.html:52-53` | Out-of-range → 400 from both endpoints; a promoted run replays the promoted window exactly. | ⬜ |
+| G12 | **[superseded by M12** — same problem, wider scope] One symbol source for every page: Backtest/Compare hold two different hardcoded lists and only Backtest knows about the DB. Fetch `/api/symbols` on all three pages (or pass it from the view, as PRD 2.1 literally says) and share one `<datalist>` component. | `web/templates/{backtest,compare,forward}.html`, `api/symbols.py` | Backtest, Compare and Forward offer the identical symbol list for `--source db` *and* `synthetic`. | ⬜ |
+
+**P3 — polish / hygiene**
+
+| ID | Task | Files | Acceptance | Status |
+|---|---|---|---|---|
+| G13 | Small inconsistencies: `/data` nav item never highlighted (no CSS rule) and no footer in `base.html` (PRD 5.1); `.toast.info` used but unstyled; `hideLoader()` never called (loader cleared ad hoc); duplicate `"1D"` key in `_TIMEFRAME_TO_INTERVAL`; dead `if False else None` in `_infer_schema`; `GET /api/strategies/<name>/params` bypasses `validate()` so a catalogue-skipped strategy still answers 200; ~~`TradeTable.render(containerId, …)` hard-codes `#tradeTable-wrap`/`#pagination`~~ ✅ fixed alongside G1/G2: per-container state, pinned by `tests/test_web_components.py`. | `web/static/css/app.css:53-56`, `web/templates/base.html`, `web/static/js/{components/loader.js,components/toast.js,components/trade_table.js,forward.js}`, `strategy/base.py:88`, `strategy/registry.py:92-99`, `api/strategies.py:27-34`, `api/backtest.py:30` | Each page (incl. `/data`, `/portfolio`) highlights its nav item; `hideLoader` called or deleted; `/params` 404s for a strategy hidden from the catalogue; no duplicate dict keys (`flake8 F601` clean). | ⬜ |
+| G14 | Trade rows were reconstructed from prices (short P&L used `entry/exit-1`, scaled by equity). ✅ **Superseded by G1/G2** (2026-08-28): the adapter no longer reconstructs anything — `to_trades()` returns the same `walk_trades` rows the metrics use, P&L is equity-based, and `Σpnl == total_pnl` is asserted. | `adapters/backtest_adapter.py`, `engine/trades.py` | closed by the G1/G2 commit | ✅ **Done** (superseded) |
+
+**User-requested items (added 2026-08-28 alongside the verification gaps)**
+
+| ID | Task | Files | Acceptance | Status |
+|---|---|---|---|---|
+| U1 | **Make the app debuggable — logging.** "The logging is not right, doesn't show anything, so I can't debug myself." → one shared logging setup for web + CLI + engine; INFO/DEBUG levels from flag or env; request ids that tie a UI error toast to a server traceback; log lines everywhere the app used to fail silently (no signals, interval ignored, params out of range, forward replay, swallowed `except: pass` in the data fetcher). | `src/backtest/logging_config.py` (new), `web/app.py`, `api/{backtest,forward,strategies,symbols,broker_auth,data_manager,portfolio}.py`, `runner.py`, `engine/backtester.py`, `adapters/backtest_adapter.py`, `data/{synthetic,csv_source,db_source}.py`, `strategy/registry.py`, `forward/engine.py`, `cli.py`, 3 JS `fetchJSON`s, `docs/LOGGING.md` | `--log-level DEBUG` shows the path of one `/api/backtest/run`; every response has `X-Request-Id` and every `/api` error body has `request_id`; grep that id in `--log-file` output and you get the traceback; 36 tests in `tests/test_logging_config.py` (incl. a guard against re-introducing silent `except: pass`). | ✅ **Done** (2026-08-28) |
+| U2 | **Market data simulator.** 📄 **Planned 2026-08-29 — `instructions/MARKET-SIMULATOR-PRD.md` (21 tasks / 6 phases), awaiting your go on the 5 open questions (§8).** Core proposal: generate **1-min atomic bars** and resample up, so every interval the UI offers is honoured (this is what closes `G6`); scenarios are **constructed then verified** against the strategy's own signals so a trade is *guaranteed* — including the user's requirement that a stop/target fires within 1–2 minutes of entry, which needs **two-pass** forcing (place the spike relative to the measured entry price, not a guessed bar — the one-pass version was tried and silently did nothing). Determinism via seed+digest manifest; NSE-session-anchored timestamps with a `continuous` escape hatch; optional `persist_to_db` so the real `DbSource` path is exercisable without credentials. Phase 0–1 (shared timeframe map + resample + `--source simulator`) ships value on its own. | `src/backtest/data/simulator/*` (new), `marketdata/timeframes.py`, `runner.py`, `api/scenarios.py`, `config/scenarios.yaml`, `web/*` picker | see the PRD §6 acceptance criteria — incl. the measured prototype result that one walk gives `1D/1H/15M/1min` → +355% / +332% / +230% / **−48%** where today all four are identical | ⬜ **Planned — needs approval** |
+
+**Missing points — agent sweep, for review/discussion (2026-08-29)**
+
+Found while planning `U2`, verified against the code (each row cites the evidence I
+measured, not a hunch). These are *not* in the PRD's 37 tasks and were not caught by the
+verification pass because most of them only become visible once intraday data exists —
+which is exactly what `U2` delivers. Please push back on any of these; several are
+judgement calls about what "correct" means for this platform.
+
+| ID | Missing point | Evidence | Size | Status |
+|---|---|---|---|---|
+| M1 | **Risk metrics are not annualised per interval.** `periods_per_year` is hardcoded 252 and no caller ever changes it: `api/backtest.py` and `api/forward.py` both build `BacktestConfig(initial_capital=capital)` and nothing else. Vol/Sharpe/CAGR/Calmar are therefore wrong for every non-daily run. | Measured on one walk: `15M` reports vol **0.92%** / Sharpe **−0.53** where the interval implies **4.68%** / **−2.69**; `1min` reports CAGR **−0.44%** for a year that actually lost **82.4%** (6,812 → 98,250 bars ÷ 252 = "372 years"). `1D` is correct, which is why nobody noticed. | M | ⬜ |
+| M2 | **Run payloads don't scale to intraday, and `Save to Compare` fails silently when they overflow.** The whole result (equity/drawdown/signals/trades) is JSON-dumped per request and stored in `sessionStorage`, which has a ~5 MB quota; `saveToCompare()` has no try/catch. | Measured payload size per run: `1D` 45 KB · `1H` 269 KB · `15M` **1.16 MB** · `1min` **16.7 MB** (98,250 equity points). 4 slots × 15M = 4.6 MB ≈ quota limit; at 1min one slot exceeds it → uncaught `QuotaExceededError`, no toast, nothing saved. Needs (a) store-config-not-result, (b) chart decimation to ~500–2000 points with the full series available via a separate endpoint, (c) a try/catch + warning. | M | ⬜ |
+| M3 | **No cost or risk parameters are reachable from the UI or the API** — commission, slippage, stop-loss, take-profit, periods_per_year, warmup are all engine defaults. The config panel has capital only. | `grep -rn "commission\|slippage" src/backtest/api/*.py src/backtest/web/templates/*.html` → nothing. Consequence: the single most interesting U2 finding — that the same strategy is +355% at `1D` and **−48%** at `1min` because costs dominate — cannot be probed at all, since costs are unchangeable. Also blocks any "what commission does my broker actually charge?" question. | M | ⬜ |
+| M4 | **The engine and the `simulator/` fee/sizing machinery are two disconnected worlds.** ~2,000 lines of tested Indian-market realism exist but nothing in the backtest or forward path uses it. | `grep -rln "simulator.fees\|simulator.position_sizing\|simulator.execution\|simulator.slippage" src/backtest/api src/backtest/engine src/backtest/runner.py` → **no matches**. So: `simulator/fees.py` has the real NSE stack (STT, exchange txn charges, SEBI, GST, stamp duty, DP) and 10 broker presets; the engine uses a flat `0.03% + 0.05%`. For equities that omits STT on delivery/exposure and DP charges → **backtests systematically overstate Indian returns**. `position_sizing.py` (6 methods incl. ATR/Kelly), `execution.py` (liquidity caps, partial fills), `slippage.py` (5 models), `stop_manager.py` (trailing/OCO/breakeven) are likewise unused by `api/forward.py`'s replay, so "forward test" ≠ "backtest" even for the same strategy. Decide: wire a `FeeModel`/`Sizer` into `Backtester`, or delete/section them off as "portfolio centre only". | L | ⬜ |
+| M5 | **No auth guard on mutating endpoints.** Only `/api/forward/start` checks a broker session. | `grep -rn "is_authenticated" src/backtest/api/*.py` → one file. Unguarded today: `/api/data/fetch` (spends real mStock quota and **writes** to `market_data_cache`), `/api/data/stop`, every `/api/portfolio/*` control incl. `emergency_stop`/`test/breach`, and `/api/backtest/run-many` (a cheap CPU DoS: 4 parallel full runs per request). On the preview host that's reachable by anyone. Needs a decision: local-only binding, a session cookie, or a dev-mode flag that logs a warning. | M | ⬜ |
+| M6 | **The documented "tz-naive DatetimeIndex" invariant is not enforced anywhere**, and `market_data_cache.ts` is `TIMESTAMPTZ`. | `grep -n tz src/backtest/data/base.py` → nothing; `DbSource` does `pd.to_datetime(df["ts"])` and keeps whatever the driver returns. The authors already tripped over it: `api/backtest.py::_trim_to_range` carries the comment "Use string date comparison — avoids tz-aware/tz-naive issues". Fix at the source (`normalize_candles` should convert to a declared tz then drop it, one place, loudly logged) and delete the string-comparison workaround. | S | ⬜ |
+| M7 | **Config dir has duplicates and dead files.** Two live files for the same concern, two that nothing reads. | Measured: `market_data.yaml` and `time_sync.yaml` are referenced by **no** module (dead, but they look authoritative); `quality.yaml` is read by `marketdata/quality.py` *and* `live/data_validator.py`, while `data_quality.yaml` is read by `live/data_validator.py` too → the validator has two possible sources of truth. Either delete the dead ones or make one loader own each concern. | S | ⬜ |
+| M8 | **There is no CI.** Step 24 ("Testing & CI/CD setup") is still ⬜, so every "suite green" claim in this tracker is a manual, per-session assertion in a sandbox that keeps resetting. | No `.github/`, no `.gitlab-ci.yml`. `tox.ini` and `.pre-commit-config.yaml` are written and unused by any runner. A 20-line Actions workflow (pytest + the 5 node harnesses + flake8/black) would make this tracker's numbers reproducible and would have caught the 3 red tests in G5 the day they were introduced. | S | ⬜ |
+| M9 | **Compare slots are write-only.** They can be added but never removed or cleared from the UI, and a saved slot carries no capital/date range (only strategy+timeframe+params), so a reloaded slot silently runs under whatever the shared bar says at the time. | `grep -rn "compare_slots\|compareSlots" src/backtest/web/static/js/*.js` shows only read + append paths; `SessionState` exposes `addCompareSlot` but no remove/clear. So "Compare is full (4/4)" is a dead end until the user opens devtools. Needs per-slot remove, a "clear all", and storing the shared config with the slot. | S | ⬜ |
+| M10 | **Market-model constraints are absent from the backtest engine**: no lot sizes, no splits/dividends, and short selling is freely allowed. | `grep -rn "lot_size\|split\|dividend" src/backtest/engine/*.py` → nothing, while `simulator/lots.py` implements lot handling and `position.py` implements splits/dividends (Steps 3–4). The engine's `target.clip(-1, 1)` lets a cash-segment equity strategy hold an overnight short, which NSE cash equities don't permit; and a `1D` backtest across 2020–2026 ignores corporate actions in the cached data. At minimum: an explicit `allow_short` flag + a documented "adjusted prices are your responsibility" note; better: reuse `LotBook`. | M | ⬜ |
+| M11 | **`/health` is decorative and logs never rotate.** | `health()` returns `{status: ok, source}` — it says `ok` with Postgres down, no active-session count, no source-readiness, so it's useless for the systemd unit (`forward_testing.service`) that runs this long-lived. `logging_config.configure_logging` uses a plain `FileHandler`; a `--log-level DEBUG --log-file` session grows without bound. Add a `RotatingFileHandler` and make `/health` ping the DB + report `FORWARD_REPLAY` session count. | S | ⬜ |
+| M12 | **Symbol discovery doesn't know about timeframes or sources** — this will bite `U2` immediately. | `/api/symbols` hardcodes `timeframe = "day"` and returns `[]` for any non-`db` source; the Backtest page only fetches it when `SOURCE == "db"`, and Compare never fetches it at all (two different hardcoded lists: RELIANCE/HDFCBANK/INFY/TCS vs DEMO/BTCUSD/ETHUSD/NIFTY/INFY), while Forward uses a free-text input. So a scenario with only intraday bars is invisible to the picker, and `--source mstock` offers 4 symbols on Backtest for a DB/API that has hundreds. Supersedes `G12` (fold that into this one): one endpoint, `?timeframe=`-aware, consumed by all three pages. | M | ⬜ |
+
+**Proposed ordering with these included:** `M1` → `M8` → (U2 Phase 0–1) → `M2` → `M3` →
+`M12` → `M5` → `G11` → `M4` → `M6`/`M7`/`M9`/`M11` → `G7`–`M10`.
+Rationale: `M1` is a silent wrong-number bug that `U2` turns on for every user; `M8` makes
+everything else cheap to verify; `M2`/`M12` are the two things that break the moment
+intraday data exists; `M4`/`M10` are the "is this backtest even about Indian equities?"
+set and want a product decision from you first.
+
+**Four decisions I need from you (they change the plan, not just the backlog):**
+1. `M4` — wire the real Indian fee stack into the backtest engine (returns get *smaller*,
+   every existing number in docs/tests shifts), or scope `simulator/` to the portfolio
+   centre and document the engine as a flat-fee approximation?
+2. `M5` — is this app ever exposed beyond localhost? If yes, the mutating endpoints need a
+   session, not just the forward guard.
+3. `M3` — should cost/risk knobs be per-run inputs in the UI (more API surface, more
+   validation) or deployment config (one `.yaml`, no UI)?
+4. `M1` — annualisation: derive `periods_per_year` from the interval via a table, or from
+   the actual median bar spacing (handles half-days/short sessions, but noisier)?
+
+---
+
+**Suggested order:** `U1` ✅ → `G5` ✅ → `G1`+`G2` ✅ → `G3`+`G4` ✅ →
+`G6` → `G11` → `G7`–`G10`, `G12`–`G14` as polish; `U2` gets its own planning pass (it also
+satisfies G6). Commit per gap, referencing the ID.
+
+**Decisions taken 2026-08-28 (so they are not relitigated)**
+
+| Topic | Decision |
+|---|---|
+| G1/G2 fix location | **Full solution at the root:** fix `engine/metrics.py` (realised round-trip P&L → `win_rate`; round-trip counting → `num_trades`) *and* have `BacktestAdapter` consume it, so CLI, API, Compare and Forward all agree. No adapter-only patch, nothing skipped — including updating `test_backtest.py`/`test_backtest_adapter.py` to pin the values. The `[adapter] … card/table disagree (gap G1/G2)` WARNING added with U1 is the tripwire that proves the fix landed; delete it once they agree. |
+| G6 (timeframe) | Don't just gate it — the real answer is **U2**, the market data simulator. Until U2 lands, the sources log a WARNING when they ignore `interval`, so nobody reads a flat comparison as a result. |
+| Start order | Suite-green (`G5`) before behaviour changes; `U1` (logging) came first so every later fix is observable. |
+
+---
 
 ### 🟡 Pending / Next session (V2 backlog)
 
+
 **Housekeeping (do first)**
 1. **Commit & open a PR** — Epic 1–6 + Dashboard are built but **not yet committed/pushed**. Suggested target: `feature/UI-rediness`.
-2. **Run it:** `PYTHONPATH=src python -m backtest.web.app --host 0.0.0.0 --port 5000 --source synthetic` (venv `/home/user/.venv`; deps via `pip install -r requirements.txt`). Data is **synthetic only** — swap `--source csv|mstock` when real data is wired.
+2. **Run it:** `PYTHONPATH=src python -m backtest.web.app --host 0.0.0.0 --port 5000 --source synthetic --log-level INFO` (see `docs/LOGGING.md`). Data is **synthetic only** — swap `--source csv|mstock|db` when real data is wired.
+   - Useful switches: `--log-level DEBUG`, `--log-file logs/app.log`, `--currency INR|USD|…`,
+     `--replay-speed 5` (forward replay bars/second).
+   - Sandbox note: `/home/user/.venv` is **not** persisted between sessions; rebuild it in one line:
+     `python3 -m venv /home/user/.venv && /home/user/.venv/bin/pip install -q -r requirements.txt pytest flake8`
+     (`requirements.txt` already pins `psycopg2-binary`, needed for the two Postgres-driver tests — without it they skip, by design since G5).
+   - Tests: `PYTHONPATH=src FORWARD_TEST_DB_URL="sqlite:///:memory:" /home/user/.venv/bin/python -m pytest tests/ -q`
+     plus `node tests/js/*.mjs` (54 assertions across 5 harnesses).
+
+   **Sandbox recovery (seen twice).** The sandbox can reset mid-session: the venv disappears
+   *and* the branch pointer rolls back to the session's base commit while the working tree keeps
+   the newer files. Nothing is lost **if you pushed** — every unit ends with
+   `git push origin arena/01a0478e-back-test`. To recover:
+   `git fetch origin <branch> && git diff --stat FETCH_HEAD` (untracked-but-present new files show
+   as deletions there; verify a couple with `git show FETCH_HEAD:<path> | diff - <path>`) then
+   `git reset --hard FETCH_HEAD`. That is exactly how the G1/G2 and G3/G4 commits were restored.
 
 **V2 — product (PRD §7)**
 3. **Persistence layer** — store run history / saved comparisons / forward state to DB (`forward/engine.py` + `db/` exist). Unblocks refresh-survives-restart, save/load compare configs, Dashboard history.
@@ -44,14 +195,14 @@ simulator + backtester (this tracker's Steps 1–24). Active branch:
 
 `████████████████████████████████████████░░` **Epics 1–6 complete (PRD V1 = 100%)**
 
-| Epic | Theme | Tasks | Status |
-|---|---|---|---|
-| 1 · Foundation | BaseStrategy contract, registry, BacktestAdapter, REST APIs | 1.1–1.6 | ✅ **Complete** |
-| 2 · Backtest Page | Route, template, dynamic params, charts, trade table | 2.1–2.10 | ✅ **Complete** |
-| 3 · Compare Page | Slots, Run All, overlaid charts, per-slot actions | 3.1–3.8 | ✅ **Complete** |
-| 4 · Forward Page | Pre-fill, template cleanup, forward API alignment | 4.1–4.3 | ✅ **Complete** |
-| 5 · Cross-Page | Shared nav, session state, toast, loader | 5.1–5.4 | ✅ **Complete** (built alongside Epic 2) |
-| 6 · Testing | Contract/adapter/API/e2e tests, strategy migration | 6.1–6.6 | ✅ **Complete** |
+| Epic | Theme | Tasks | Status | Verification (2026-08-28) |
+|---|---|---|---|---|
+| 1 · Foundation | BaseStrategy contract, registry, BacktestAdapter, REST APIs | 1.1–1.6 | ✅ Complete (1.5 🟡) | **G1+G2 fixed** → 1.4 verified clean; G11 (params → 400) still open |
+| 2 · Backtest Page | Route, template, dynamic params, charts, trade table | 2.1–2.10 | ✅ Complete (2.1/2.5/2.6/2.10 🟡) | 6/10 fully verified → **G7, G9, G10, G12, G13** |
+| 3 · Compare Page | Slots, Run All, overlaid charts, per-slot actions | 3.1–3.8 | ✅ Complete (3.6/3.7 🟡) | **G6, G7, G8** open; the Win-Rate 🏆 is honest now (G1 fixed) |
+| 4 · Forward Page | Pre-fill, template cleanup, forward API alignment | 4.1–4.3 | ✅ Complete (4.1 🟡) | **G3 + G4 fixed** → live widgets and payload verified; G11's promote-date piece still open |
+| 5 · Cross-Page | Shared nav, session state, toast, loader | 5.1–5.4 | ✅ (5.1/5.4 🟡) | **G13** |
+| 6 · Testing | Contract/adapter/API/e2e tests, strategy migration | 6.1–6.6 | ✅ Complete | **G5 done → suite green**; 6.2 now asserts values, not just shapes (`tests/test_engine_trades.py`) |
 
 ### Epic 1 — Foundation ✅ (2026-08-24)
 
@@ -79,6 +230,7 @@ failure (`test_mstock_auth::test_login_sends_sdk_headers`, needs `MSTOCK_API_KEY
 | 2 | New `BaseStrategy` class | Extend existing `Strategy` | Avoid duplicating a working abstraction (matches existing simulator deviation #5) |
 | 3 | `generate_signals(candles, params)` | `generate_signals(candles)` (params bound to instance attrs) | Existing contract; schema still drives dynamic UI forms |
 | 4 | `params` = schema dict only | Accept flat (legacy) **and** schema forms | Zero regressions on the 4 existing strategies |
+| 5 | `POST /api/forward/start` body is `{strategy, symbol, params}` | Dates accepted but **optional**; missing ones are defaulted (`2020-01-01 → today`) and reported as `defaults_applied` | Keeps the PRD contract, and "start from what we have" is the point of forward testing. Silent defaulting was the actual bug — now it is echoed, logged and warned about in the UI (G5) |
 
 ### Epic 2 — Backtest Page ✅ (2026-08-24)
 
@@ -91,7 +243,7 @@ on port 5000 → `/backtest`.
 | 2.2 | Template structure | `web/templates/backtest.html` — two-column config/results |
 | 2.3 | Dynamic params (JS) | `web/static/js/backtest.js` — type-aware form from `/params` |
 | 2.4 | Equity curve chart | `web/static/js/charts/equity_chart.js` (+ buy&hold benchmark) |
-| 2.5 | Drawdown chart | `web/static/js/charts/drawdown_chart.js` (+ worst-DD marker) |
+| 2.5 | Drawdown chart | `web/static/js/charts/drawdown_chart.js` — area + fill done; ⚠ **worst-DD marker was never built** (only named in the docstring) → tracked as **G7** |
 | 2.6 | Price + signals chart | `web/static/js/charts/signals_chart.js` (▲ buys / ▼ sells) |
 | 2.7 | Metrics cards | `web/static/js/components/metrics_cards.js` |
 | 2.8 | Trade table | `web/static/js/components/trade_table.js` (paginated + sortable) |
@@ -137,8 +289,8 @@ and now used by Backtest / Compare / Forward.
 | # | Task | Deliverable |
 |---|------|-------------|
 | 4.1 | Forward pre-fill | `web/static/js/forward.js` — reads `forward_prefill`, pre-fills, banner, clears |
-| 4.2 | Template cleanup | `web/templates/forward.html` — config + status/Start-Stop + live equity/metrics/positions/trade feed |
-| 4.3 | Forward API | `api/forward.py` — `POST /start`, `POST /stop`, `GET /status` (adapter shape + positions/progress) |
+| 4.2 | Template cleanup | ✅ `web/templates/forward.html` + `forward.js` — config (now incl. replay speed), status/Start-Stop, live equity chart, live metric cards, positions with real marks, shared trade feed, progress bar. (G3 closed 2026-08-28.) |
+| 4.3 | Forward API | ✅ `api/forward.py` — `POST /start`, `POST /stop`, `GET /status`, plus `/sessions`, `/trades`, `/equity`; `state_id`-keyed sessions and a server-side clock (G4 closed 2026-08-28) |
 
 **Tests:** `tests/test_api_forward.py` — 8 tests (idle before start, valid/unknown/missing,
 shape, progress→complete, stop freezes, refresh-safe). **1575 passing.**
@@ -184,6 +336,13 @@ Signal logic unchanged; flat-form support retained for any future strategy.
 
 **Final test status: 1582 passing, 0 regressions.** All 6 PRD success criteria
 are satisfied and demonstrable on the live preview.
+
+> ⚠ **Re-verified 2026-08-28 — the picture is more nuanced than the line above.** Suite is now
+> **1813 passed / 4 skipped / 3 failed** (`G5`). Criteria #4 (strategy auto-discovery) and #6
+> (shared registry) hold; #1, #2, #3, #5 are only partly met — see the per-criterion table in
+> `instructions/PRD-VERIFICATION-2026-08-28.md`. Epic 6's own coverage is sound, but 6.2 asserts
+> adapter *shapes* only, which is why the two engine-level metric bugs (**G1**, **G2**) went
+> unnoticed.
 
 ---
 
@@ -353,7 +512,8 @@ Things the agent cannot do; tracked so nothing is silently skipped.
 | 5 | Review & merge PR #3 | — | ✅ Merged 2026-08-19 (`4e01d65`) |
 | 6 | Review & merge the Phase 3 PR (Steps 8–9) | — | ✅ Merged 2026-08-23 as PR [#5](https://github.com/yogesh-ing/back-test/pull/5) (`43abb57`) — user pushed & merged manually |
 | 7 | Review & merge the Phase 4 PR (Steps 10–12) | — | ✅ Merged as PR [#6](https://github.com/yogesh-ing/back-test/pull/6) |
-| 8 | Review & merge the Phase 5-8 PR (Steps 13-20) | — | ⬜ Pending — current PR |
+| 8 | Review & merge the Phase 5-8 PR (Steps 13-20) | — | ⬜ Pending |
+| 10 | Review & merge **PR #17** — logging (U1), trade accounting (G1/G2), live forward replay (G3/G4), green suite (G5), PRD verification + U2 plan | [pull/17](https://github.com/yogesh-ing/back-test/pull/17) | ⬜ Pending — `main` ← `arena/01a0478e-back-test`, 9 commits, 54 files, 1893 tests green |
 | 9 | Verify `config/calendar.yaml` NSE holiday list against the official NSE circular; add each new year's list every December | Step 12 | ⬜ Ongoing |
 
 ---
@@ -497,4 +657,10 @@ import from `engine/` or `forward/`. It talks to the database only through
 | `test_alert_manager.py` (Step 21) | 33 |
 | `test_comparison.py` (Step 22) | 13 |
 | `test_config_manager.py` (Step 23) | 13 |
-| **Total** | **1683 passing, 4 skipped** |
+| `test_logging_config.py` (U1, 2026-08-28) | 37 |
+| `test_engine_trades.py` (G1/G2, 2026-08-28) | 14 |
+| `test_api_forward.py` (G3/G4 rework, 2026-08-28) | 36 |
+| `tests/js/test_forward_widgets.mjs` (G3 live widgets) | 7 node |
+| `test_web_components.py` + `tests/js/test_metrics_cards.mjs` (G1/G2 in the UI) | 2 + 9 node |
+| PRD/API suites (`test_api_*`, `test_strategy_base`, `test_backtest_adapter`, `test_e2e_workflow`, `test_broker_*`, `test_security_verification`, `test_portfolio_engine`, `test_circuit_breakers`) | ~500 |
+| **Total** | **1893 passing / 4 skipped / 0 failing** (post-G3/G4). The 4 skips are mStock-credential tests; with `psycopg2` absent the 2 Postgres-driver tests skip too (6). Node harnesses: 11 + 14 + 12 + 10 + 7 |

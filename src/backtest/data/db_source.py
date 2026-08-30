@@ -12,6 +12,9 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 
 from backtest.data.base import normalize_candles
+from backtest.logging_config import get_logger
+
+log = get_logger(__name__)
 
 # Pandas resample rule mapping: our interval names -> pandas offset aliases
 _INTERVAL_TO_RULE = {
@@ -52,6 +55,8 @@ class DbSource:
 
     def _get_engine(self):
         if self._engine is None:
+            masked = self.db_url.rsplit("@", 1)[-1] if "@" in self.db_url else self.db_url
+            log.debug("[db] creating engine for %s", masked)
             self._engine = create_engine(self.db_url)
         return self._engine
 
@@ -94,7 +99,11 @@ class DbSource:
             },
         )
 
+        log.debug("[db] %s tf=%s %s..%s → %d rows", symbol, source_tf, start, end, len(df))
         if df.empty:
+            log.warning("[db] no bars for %s (timeframe=%s, %s..%s) — check the symbol exists "
+                        "in market_data_cache: SELECT DISTINCT timeframe FROM market_data_cache "
+                        "WHERE symbol='%s'", symbol, source_tf, start, end, symbol)
             raise ValueError(
                 f"Symbol '{symbol}' not found in database for timeframe '{source_tf}' "
                 f"between {start} and {end}. "
@@ -105,10 +114,19 @@ class DbSource:
         df = df.set_index("ts")
 
         # Resample if the requested interval differs from what we stored
-        if source_tf != interval and interval in _INTERVAL_TO_RULE:
-            df = self._resample(df, interval)
+        if source_tf != interval:
+            if interval in _INTERVAL_TO_RULE:
+                log.debug("[db] resampling %s: %s → %s", symbol, source_tf, interval)
+                df = self._resample(df, interval)
+            else:
+                log.warning("[db] interval %r has no resample rule (known: %s) — returning "
+                            "stored %s bars unsampled", interval, sorted(_INTERVAL_TO_RULE),
+                            source_tf)
 
-        return normalize_candles(df)
+        out = normalize_candles(df)
+        log.info("[db] %s %s..%s → %d bars @ %s (stored as %s)", symbol, start, end, len(out),
+                 interval, source_tf)
+        return out
 
     def _find_best_source_tf(self, engine, symbol: str, requested: str) -> str:
         """Find the finest-grained timeframe available for this symbol.
@@ -180,4 +198,8 @@ class DbSource:
         with engine.connect() as conn:
             result = conn.execute(query, {"timeframe": timeframe})
             rows = [row[0] for row in result.fetchall()]
+        log.info("[db] list_symbols(timeframe=%s) → %d symbols", timeframe, len(rows))
+        if not rows:
+            log.warning("[db] market_data_cache has no rows for timeframe=%r — check what was "
+                        "ingested (SELECT DISTINCT timeframe FROM market_data_cache)", timeframe)
         return rows

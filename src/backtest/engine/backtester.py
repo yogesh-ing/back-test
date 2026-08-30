@@ -7,6 +7,9 @@ import numpy as np
 import pandas as pd
 
 from backtest.engine.metrics import compute_metrics
+from backtest.logging_config import get_logger
+
+log = get_logger(__name__)
 
 
 @dataclass
@@ -34,11 +37,29 @@ class Backtester:
         self.config = config or BacktestConfig()
 
     def run(self, candles: pd.DataFrame, signals: pd.Series) -> BacktestResult:
+        if candles is None or len(candles) == 0:
+            log.error("[engine] run() called with an empty candle frame")
+            raise ValueError("candles frame is empty")
+        if candles.index.duplicated().any():
+            log.warning("[engine] %d duplicate index entries in the candle frame",
+                        int(candles.index.duplicated().sum()))
+
         target = pd.Series(signals, index=candles.index, copy=True)
         target = target.reindex(candles.index).fillna(0)
+        dropped = len(signals) - len(target)
+        if dropped > 0:
+            log.warning("[engine] %d signal bars had no matching candle and were dropped",
+                        dropped)
         target = target.clip(-1, 1)
 
-        if self.config.stop_loss is not None or self.config.take_profit is not None:
+        risk_managed = self.config.stop_loss is not None or self.config.take_profit is not None
+        log.debug(
+            "[engine] %s path over %d bars (commission=%.5f slippage=%.5f stop=%s tp=%s)",
+            "risk-managed" if risk_managed else "vectorized", len(candles),
+            self.config.commission_pct, self.config.slippage_pct,
+            self.config.stop_loss, self.config.take_profit,
+        )
+        if risk_managed:
             equity, returns, position = self._run_with_risk(candles, target)
         else:
             equity, returns, position = self._run_vectorized(candles, target)
@@ -52,6 +73,17 @@ class Backtester:
             metrics={},
         )
         result.metrics = compute_metrics(result)
+        flat = abs(float(equity.iloc[-1] / self.config.initial_capital - 1)) < 1e-12
+        log.debug(
+            "[engine] done: equity %s → %s, in-market %.1f%% of bars%s",
+            f"{self.config.initial_capital:,.2f}", f"{equity.iloc[-1]:,.2f}",
+            100.0 * float((position.abs() > 0).mean()) if len(position) else 0.0,
+            " — FLAT: equity never moved (no signals, or every entry was blocked)"
+            if flat else "",
+        )
+        if flat:
+            log.warning("[engine] result is flat (equity == initial capital) — see the "
+                        "no-signal warning from backtest.runner for the cause")
         return result
 
     def _run_vectorized(self, candles: pd.DataFrame, target: pd.Series) -> tuple[pd.Series, pd.Series, pd.Series]:
@@ -81,6 +113,7 @@ class Backtester:
         equity_curve = [equity]
         net_series = []
         position_series = []
+        forced_exits = 0
 
         for idx, row in candles.iterrows():
             prev_close_value = prev_close if prev_close is not None else row["close"]
@@ -142,6 +175,7 @@ class Backtester:
                     held = 0
                     blocked = True
                     entry_price = None
+                    forced_exits += 1
 
             net = r - bar_cost
             equity *= 1 + net
@@ -154,4 +188,6 @@ class Backtester:
 
         equity_series = pd.Series(equity_curve[1:], index=candles.index)
         position_series = pd.Series(position_series, index=candles.index)
+        log.debug("[engine] risk-managed path: %d forced stop/target exits over %d bars",
+                  forced_exits, len(candles))
         return equity_series, pd.Series(net_series, index=candles.index), position_series

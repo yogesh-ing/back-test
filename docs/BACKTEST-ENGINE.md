@@ -74,10 +74,27 @@ Used when stop_loss or take_profit is set:
 | Sharpe Ratio | `sharpe` | Return / volatility |
 | Max Drawdown | `max_drawdown` | Worst peak-to-trough decline |
 | Calmar Ratio | `calmar` | CAGR / abs(max_drawdown) |
-| Win Rate | `win_rate` | % of profitable trades |
-| Num Trades | `num_trades` | Total round-trip trades |
+| Win Rate | `win_rate` | Share of **closed** trades with P&L > 0 (0.0 when nothing has closed) |
+| Num Trades | `num_trades` | Round trips, **including** a position still open at the last bar |
+| Closed / Open | `closed_trades`, `open_trades` | The split behind those two numbers |
+| Win / Loss count | `winning_trades`, `losing_trades` | Ties (P&L == 0) are neither |
+| Trade P&L | `realised_pnl`, `avg_trade_pnl`, `best_trade_pnl`, `worst_trade_pnl` | Per-trade equity deltas, closed trades only |
 | Exposure | `exposure` | % of time in market |
 | Final Equity | `final_equity` | End dollar value |
+
+## Trade Accounting (`engine/trades.py`)
+
+`compute_metrics` and `BacktestAdapter.to_trades()` both read
+:func:`backtest.engine.trades.walk_trades`, so the "Trades"/"Win Rate" cards and
+the trade table are literally the same computation:
+
+| Rule | Why |
+|---|---|
+| A trade = a run of bars holding the same sign | Entry and exit are one trade, not two |
+| P&L = `equity[exit] − equity[entry−1]` | Costs are booked on the bars where the position changes, so they land on the trade that paid them, and Σ trade P&L == total P&L exactly |
+| A position open at the last bar counts in `num_trades`, marked to the final close | The table needs to show it; it is not a result yet |
+| …and is **excluded from `win_rate`** | An unrealised trade is neither a win nor a loss; the UI shows "—" instead of a fake 0.00% when nothing has closed |
+| A sign flip closes at the previous bar and re-opens on the flip bar | Every bar is attributed exactly once — no double counting |
 
 ## Commission Model
 

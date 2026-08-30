@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
 
 from backtest.engine.backtester import BacktestConfig
 from backtest.engine.plotting import plot_comparison, plot_result
+from backtest.logging_config import configure_logging
 from backtest.runner import RunSpec, build_source, compare_strategies, run_backtest
 from backtest.strategy.registry import get_strategy, list_strategies
 
@@ -138,16 +140,27 @@ def papertrade_command(args):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="backtest")
+    # Diagnostics live on a parent parser so they work after the subcommand
+    # (`backtest run … --log-level DEBUG`), which is where people type them.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--log-level",
+        default="WARNING",
+        help="DEBUG | INFO | WARNING (default) | ERROR — go to DEBUG to see the "
+             "strategy/engine path and the traceback of any failure",
+    )
+    common.add_argument("--log-file", default=None, help="also append log lines to this file")
+
+    parser = argparse.ArgumentParser(prog="backtest", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
 
-    list_parser = sub.add_parser("list")
+    list_parser = sub.add_parser("list", parents=[common])
     list_parser.set_defaults(func=list_command)
 
-    preflight_parser = sub.add_parser("preflight")
+    preflight_parser = sub.add_parser("preflight", parents=[common])
     preflight_parser.set_defaults(func=preflight_command)
 
-    run_parser = sub.add_parser("run")
+    run_parser = sub.add_parser("run", parents=[common])
     run_parser.add_argument("--strategy", required=True)
     run_parser.add_argument("--source", default="synthetic")
     run_parser.add_argument("--symbol", default="DEMO")
@@ -167,7 +180,7 @@ def build_parser():
     run_parser.add_argument("--no-chart", action="store_true")
     run_parser.set_defaults(func=run_command)
 
-    compare_parser = sub.add_parser("compare")
+    compare_parser = sub.add_parser("compare", parents=[common])
     compare_parser.add_argument("--strategies", required=True)
     compare_parser.add_argument("--source", default="synthetic")
     compare_parser.add_argument("--symbol", default="DEMO")
@@ -186,7 +199,7 @@ def build_parser():
     compare_parser.add_argument("--no-chart", action="store_true")
     compare_parser.set_defaults(func=compare_command)
 
-    papertrade_parser = sub.add_parser("papertrade")
+    papertrade_parser = sub.add_parser("papertrade", parents=[common])
     papertrade_parser.add_argument("--mode", choices=["walkforward", "live"], default="walkforward")
     papertrade_parser.add_argument("--strategies", required=True)
     papertrade_parser.add_argument("--source", default="synthetic")
@@ -211,8 +224,18 @@ def build_parser():
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    # CLI stays quiet by default (stdout is the product); --log-level DEBUG turns
+    # on the same diagnostics the web app shows, including tracebacks.
+    log = configure_logging(args.log_level, args.log_file)
     try:
         args.func(args)
+    except SystemExit:
+        raise
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
+        # Without this the CLI swallowed the traceback entirely and a failure was
+        # one line of prose. DEBUG prints it inline; otherwise point at the switch.
+        log.debug("command %s failed", args.command, exc_info=True)
+        if not log.isEnabledFor(logging.DEBUG):
+            print("hint: re-run with --log-level DEBUG for the full traceback", file=sys.stderr)
         raise SystemExit(1)

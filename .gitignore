@@ -23,6 +23,7 @@ env/
 
 # Build / run artefacts
 /charts/
+logs/
 dist/
 build/
 htmlcov/

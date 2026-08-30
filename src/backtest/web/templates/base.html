@@ -8,7 +8,9 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
     {% block head %}{% endblock %}
 </head>
-<body data-active="{{ active }}">
+<body data-active="{{ active }}"
+      data-currency-code="{{ currency_code }}" data-currency-symbol="{{ currency_symbol }}"
+      data-currency-locale="{{ currency_locale }}" data-replay-speed="{{ replay_speed }}">
     <nav class="topnav">
         <div class="brand">🤖 Trading Bot</div>
         <div class="nav-links">
@@ -34,6 +36,7 @@
 
     {% include "components/broker_auth_modal.html" %}
 
+    <script src="{{ url_for('static', filename='js/components/currency.js') }}"></script>
     <script src="{{ url_for('static', filename='js/session_state.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/toast.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/loader.js') }}"></script>

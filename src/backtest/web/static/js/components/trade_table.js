@@ -4,7 +4,10 @@
  */
 const TradeTable = (() => {
     const PAGE_SIZE = 20;
-    let state = { rows: [], sortKey: "id", sortDir: 1, page: 1 };
+    // One state per container id, so two tables on a page are independent
+    // (pagination/sort of the forward trade feed must not steer the backtest one).
+    const instances = {};
+    let state = { rows: [], sortKey: "id", sortDir: 1, page: 1, containerId: "tradeTable-wrap" };
 
     function sorted() {
         const k = state.sortKey, dir = state.sortDir;
@@ -17,10 +20,12 @@ const TradeTable = (() => {
     }
 
     function render() {
-        const wrap = document.getElementById("tradeTable-wrap");
+        const wrap = document.getElementById(state.containerId);
         if (!wrap) return;
         const tbody = wrap.querySelector("tbody");
-        const pager = document.getElementById("pagination");
+        // The pager lives inside the same container (backtest.html and
+        // forward.html both nest it), falling back to the legacy global id.
+        const pager = wrap.querySelector(".pagination") || document.getElementById("pagination");
         const rows = sorted();
         const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
         state.page = Math.min(state.page, pages);
@@ -29,13 +34,16 @@ const TradeTable = (() => {
 
         tbody.innerHTML = slice.length ? slice.map(t => {
             const pnlCls = t.pnl >= 0 ? "pos" : "neg";
-            const resCls = t.result === "Win" ? "tag-win" : "tag-loss";
-            const icon = t.result === "Win" ? "✅" : "❌";
+            // An open trade is marked to the last bar, not finished: say so, and
+            // keep it out of the win/loss colouring (it is not a result yet).
+            const resCls = t.is_open ? "tag-open" : (t.result === "Win" ? "tag-win" : "tag-loss");
+            const icon = t.is_open ? "⏳" : (t.result === "Win" ? "✅" : "❌");
+            const label = t.is_open ? "Open" : t.result;
             return `<tr>
                 <td>${t.id}</td><td>${t.date}</td>
                 <td>${t.side}</td><td>${t.entry}</td><td>${t.exit}</td>
                 <td class="${pnlCls}">${fmtTradePnl(t.pnl)}</td>
-                <td class="${resCls}">${icon} ${t.result}</td>
+                <td class="${resCls}">${icon} ${label}</td>
             </tr>`;
         }).join("") : `<tr><td colspan="7" class="muted">No trades</td></tr>`;
 
@@ -50,12 +58,17 @@ const TradeTable = (() => {
     }
 
     function fmtTradePnl(v) {
-        const s = v >= 0 ? "+" : "-";
-        return `${s}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+        return (typeof Money !== "undefined")
+            ? Money.signed(v)
+            : `${v >= 0 ? "+" : "-"}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
     }
 
     function renderTable(containerId, trades) {
-        state = { rows: trades || [], sortKey: "id", sortDir: 1, page: 1 };
+        state = instances[containerId]
+            || (instances[containerId] = { rows: [], sortKey: "id", sortDir: 1, page: 1 });
+        state.containerId = containerId;
+        state.rows = trades || [];
+        state.page = 1;
         const wrap = document.getElementById(containerId);
         if (!wrap) return;
         // sortable headers
