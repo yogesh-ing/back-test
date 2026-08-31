@@ -98,7 +98,7 @@ def compare_command(args):
 
 
 def papertrade_command(args):
-    from backtest.forward.paper import run_live_papertrade, run_walkforward
+    from backtest.forward.paper_runner import run_live_papertrade, run_walkforward
 
     if args.mode == "walkforward":
         if not args.from_date or not args.to_date:
@@ -166,7 +166,7 @@ def build_parser():
     run_parser.add_argument("--symbol", default="DEMO")
     run_parser.add_argument("--from", dest="from_date", required=True)
     run_parser.add_argument("--to", dest="to_date", required=True)
-    run_parser.add_argument("--interval", default="day")
+    run_parser.add_argument("--interval", default="1day")
     run_parser.add_argument("--capital", type=float, default=100_000.0)
     run_parser.add_argument("--commission", type=float, default=0.0003)
     run_parser.add_argument("--slippage", type=float, default=0.0005)
@@ -186,7 +186,7 @@ def build_parser():
     compare_parser.add_argument("--symbol", default="DEMO")
     compare_parser.add_argument("--from", dest="from_date", required=True)
     compare_parser.add_argument("--to", dest="to_date", required=True)
-    compare_parser.add_argument("--interval", default="day")
+    compare_parser.add_argument("--interval", default="1day")
     compare_parser.add_argument("--capital", type=float, default=100_000.0)
     compare_parser.add_argument("--commission", type=float, default=0.0003)
     compare_parser.add_argument("--slippage", type=float, default=0.0005)
@@ -204,7 +204,7 @@ def build_parser():
     papertrade_parser.add_argument("--strategies", required=True)
     papertrade_parser.add_argument("--source", default="synthetic")
     papertrade_parser.add_argument("--symbol", default="DEMO")
-    papertrade_parser.add_argument("--interval", default="day")
+    papertrade_parser.add_argument("--interval", default="1day")
     papertrade_parser.add_argument("--from", dest="from_date", default=None)
     papertrade_parser.add_argument("--to", dest="to_date", default=None)
     papertrade_parser.add_argument("--capital", type=float, default=100_000.0)

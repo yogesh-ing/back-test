@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% from "_macros.html" import badge %}
+{% block title %}Paper Portfolio{% endblock %}
+
+{% block content %}
+<style>
+    .pcc-scope-banner { margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; background: rgba(64,120,255,.08); border: 1px solid rgba(64,120,255,.35); }
+</style>
+<div class="card pcc-header">
+    <div class="pcc-title-row">
+        <div>
+            <h1 class="pcc-title">📄 Paper Portfolio</h1>
+            <div class="muted">Instances in the <code>paper</code> bucket only — live instances never appear on this page.</div>
+        </div>
+    </div>
+    <div class="table-scroll">
+        <table class="matrix-table">
+            <thead>
+                <tr>
+                    <th>Name</th><th>Strategy</th><th>Mode/Source</th><th>Target</th><th>TF</th>
+                    <th class="num">Alloc (₹)</th><th class="num">Equity (₹)</th>
+                    <th class="num">Daily P&amp;L</th><th class="num">Realized P&amp;L</th><th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in instances %}
+                <tr>
+                    <td>{{ r.name }}</td>
+                    <td>{{ r.strategy_name }}</td>
+                    <td>{{ badge(r.mode, r.source) }}</td>
+                    <td>{{ r.target_label }}</td>
+                    <td>{{ r.timeframe }}</td>
+                    <td class="num">{{ "{:,.0f}".format(r.allocated_capital) }}</td>
+                    <td class="num">{{ "{:,.0f}".format(r.equity) }}</td>
+                    <td class="num">{{ "{:,.0f}".format(r.daily_pnl) }}</td>
+                    <td class="num">{{ "{:,.0f}".format(r.realized_pnl) }}</td>
+                    <td>{{ r.status }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="10" class="muted">No paper instances deployed yet.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% include "_portfolio_center.html" %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/deep_dive.js') }}"></script>
+<script src="{{ url_for('static', filename='js/portfolio.js') }}"></script>
+{% endblock %}

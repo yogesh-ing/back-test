@@ -61,7 +61,7 @@ def test_create_single_runner(client):
         "strategy": "rsi_reversion",
         "target_type": "SINGLE_SYMBOL",
         "symbol": "BTC/USD",
-        "timeframe": "1h",
+        "timeframe": "1hour",
         "allocated_capital": 1_000_000,
     })
     assert r.status_code == 201

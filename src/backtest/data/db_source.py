@@ -5,30 +5,31 @@ Supports on-the-fly resampling: stores 1min data, queries resample to any interv
 
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 import pandas as pd
 from sqlalchemy import create_engine, text
 
 from backtest.data.base import normalize_candles
+from backtest.db.config import get_db_url
 from backtest.logging_config import get_logger
 
 log = get_logger(__name__)
 
-# Pandas resample rule mapping: our interval names -> pandas offset aliases
+# Pandas resample rule mapping: canonical timeframe names -> pandas offsets
+# (ticket P4.3: ONE vocabulary end to end).
 _INTERVAL_TO_RULE = {
     "1min": "1min",
     "5min": "5min",
     "15min": "15min",
-    "30min": "30min",
-    "60min": "1h",
     "1hour": "1h",
     "4hour": "4h",
-    "day": "1D",
-    "week": "1W",
-    "month": "1ME",
+    "1day": "1D",
+    "1week": "1W",
 }
+
+#: Finest-grained first — used to pick the stored timeframe to read from.
+_SOURCE_TF_PRIORITY = ["1min", "5min", "15min", "1hour", "1day", "1week"]
 
 
 class DbSource:
@@ -44,13 +45,12 @@ class DbSource:
 
     def __init__(self, db_url: Optional[str] = None):
         """
-        db_url: SQLAlchemy connection string.
-                Falls back to DATABASE_URL env var.
-                Falls back to default local Postgres.
+        db_url: SQLAlchemy connection string. When omitted, resolved via the
+                single DB-URL authority (:func:`backtest.db.config.get_db_url`).
         """
-        self.db_url = db_url or os.getenv("DATABASE_URL") or os.getenv(
-            "FORWARD_TEST_DB_URL", "postgresql+psycopg2://postgres:postgres@localhost:5432/forward_test"
-        )
+        # Single DB-URL authority (ticket P4.3): explicit arg >
+        # FORWARD_TEST_DB_URL env > config/database.yaml profile.
+        self.db_url = get_db_url(db_url)
         self._engine = None
 
     def _get_engine(self):
@@ -65,7 +65,7 @@ class DbSource:
         symbol: str,
         start: str,
         end: str,
-        interval: str = "day",
+        interval: str = "1day",
     ) -> pd.DataFrame:
         """
         Queries market_data_cache for symbol, then resamples to requested interval.
@@ -131,21 +131,22 @@ class DbSource:
     def _find_best_source_tf(self, engine, symbol: str, requested: str) -> str:
         """Find the finest-grained timeframe available for this symbol.
 
-        Priority: 1min > 5min > 15min > 30min > 60min > day
+        Priority: 1min > 5min > 15min > 1hour > 1day > 1week
         We want the finest so we can resample UP to any coarser interval.
         """
-        # If requesting day and we have day data, use it directly (fast, no resample needed)
-        if requested == "day":
+        # If requesting daily-or-coarser and we have it stored, use it
+        # directly (fast, no resample needed)
+        if requested in ("1day", "1week"):
             check = text("""
                 SELECT 1 FROM market_data_cache
-                WHERE symbol = :sym AND timeframe = 'day' LIMIT 1
+                WHERE symbol = :sym AND timeframe = :tf LIMIT 1
             """)
             with engine.connect() as conn:
-                if conn.execute(check, {"sym": symbol}).fetchone():
-                    return "day"
+                if conn.execute(check, {"sym": symbol, "tf": requested}).fetchone():
+                    return requested
 
         # For intraday: find finest available
-        for tf in ["1min", "5min", "15min", "30min", "60min", "1hour"]:
+        for tf in _SOURCE_TF_PRIORITY:
             check = text("""
                 SELECT 1 FROM market_data_cache
                 WHERE symbol = :sym AND timeframe = :tf LIMIT 1
@@ -184,7 +185,7 @@ class DbSource:
 
         return resampled
 
-    def list_symbols(self, timeframe: str = "day") -> list[str]:
+    def list_symbols(self, timeframe: str = "1day") -> list[str]:
         """
         Returns sorted list of distinct symbols available in DB
         for the given timeframe.

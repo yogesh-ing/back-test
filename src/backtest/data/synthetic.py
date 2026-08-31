@@ -7,16 +7,26 @@ import pandas as pd
 
 from backtest.logging_config import get_logger
 
-from .base import CANDLE_COLUMNS, normalize_candles
+from .base import normalize_candles
 
 log = get_logger(__name__)
 
 
 class SyntheticSource:
-    #: Synthetic bars are always business-day spaced; other intervals are ignored.
-    SUPPORTED_INTERVALS = ("day", "B")
+    #: Synthetic bars are always business-day spaced; other canonical
+    #: intervals are ignored (gap G6).
+    SUPPORTED_INTERVALS = ("1day",)
 
-    def get_candles(self, symbol: str, start: str, end: str, interval: str = "day") -> pd.DataFrame:
+    def __init__(self, replay_speed: float = 1.0) -> None:
+        """
+        replay_speed: bars per wall-clock second when this source is replayed
+        by the forward runner (ticket P1.2; 1.0 = real-time pace).
+        """
+        if replay_speed <= 0:
+            raise ValueError("replay_speed must be > 0")
+        self.replay_speed = float(replay_speed)
+
+    def get_candles(self, symbol: str, start: str, end: str, interval: str = "1day") -> pd.DataFrame:
         start_dt = pd.Timestamp(start)
         end_dt = pd.Timestamp(end)
         idx = pd.date_range(start=start_dt, end=end_dt, freq="B")

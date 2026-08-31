@@ -30,6 +30,7 @@ from backtest.api import (
     portfolio_bp,
     strategies_bp,
 )
+from backtest.api.portfolio import list_instances
 from backtest.api.symbols import symbols_bp
 from backtest.brokers.session_manager import get_session_manager
 from backtest.logging_config import (
@@ -46,7 +47,7 @@ logger = get_logger(__name__)
 try:
     from backtest.api.backtest import SUPPORTED_TIMEFRAMES as _SUPPORTED_TIMEFRAMES
 except Exception:  # pragma: no cover - defensive: never break boot on a constant
-    _SUPPORTED_TIMEFRAMES = ("1D",)
+    _SUPPORTED_TIMEFRAMES = ("1day",)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _TEMPLATE_DIR = os.path.join(_HERE, "templates")
@@ -185,6 +186,25 @@ def _register_error_handlers(app: Flask) -> None:
         return "Internal error — see server log", 500
 
 
+def _portfolio_buckets() -> dict[str, dict[str, Any]]:
+    """Per-bucket (paper/live) aggregates for the /portfolio landing page.
+
+    Each bucket lists its own instances only, so the landing shows a
+    combined summary without one bucket leaking into the other (P4.1).
+    """
+    buckets: dict[str, dict[str, Any]] = {}
+    for mode in ("paper", "live"):
+        rows = list_instances(mode)
+        buckets[mode] = {
+            "count": len(rows),
+            "allocated": round(sum(r.get("allocated_capital", 0.0) for r in rows), 2),
+            "equity": round(sum(r.get("equity", 0.0) for r in rows), 2),
+            "daily_pnl": round(sum(r.get("daily_pnl", 0.0) for r in rows), 2),
+            "realized_pnl": round(sum(r.get("realized_pnl", 0.0) for r in rows), 2),
+        }
+    return buckets
+
+
 def create_app(
     source: str = "synthetic",
     *,
@@ -313,7 +333,30 @@ def create_app(
 
     @app.get("/portfolio")
     def portfolio_page() -> Any:
-        return render_template("portfolio.html", active="portfolio")
+        """Landing: combined summary of the paper + live buckets (P4.1)."""
+        return render_template(
+            "portfolio.html", active="portfolio", buckets=_portfolio_buckets()
+        )
+
+    @app.get("/portfolio/paper")
+    def portfolio_paper_page() -> Any:
+        """Paper bucket only — live instances never render here (P4.1)."""
+        return render_template(
+            "portfolio_paper.html",
+            active="portfolio",
+            mode="paper",
+            instances=list_instances("paper"),
+        )
+
+    @app.get("/portfolio/live")
+    def portfolio_live_page() -> Any:
+        """Live bucket only — paper instances never render here (P4.1)."""
+        return render_template(
+            "portfolio_live.html",
+            active="portfolio",
+            mode="live",
+            instances=list_instances("live"),
+        )
 
     @app.get("/data")
     def data_page() -> Any:

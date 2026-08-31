@@ -23,6 +23,7 @@ __all__ = [
     "DatabaseConfig",
     "ConfigError",
     "load_config",
+    "get_db_url",
     "DEFAULT_CONFIG_PATH",
     "ENV_PREFIX",
 ]
@@ -354,3 +355,16 @@ def load_config(
 
     return DatabaseConfig(profile=chosen, _source=source, **parsed).validated()
 
+
+def get_db_url(explicit: str | None = None) -> str:
+    """The single authority for database-URL resolution (ticket P4.3).
+
+    ``explicit`` (e.g. a caller-constructed value) wins; otherwise the URL
+    comes from :func:`load_config` — the ``FORWARD_TEST_DB_URL`` environment
+    variable, then the active profile in ``config/database.yaml``. Every
+    component that needs a DB URL must call this instead of reading
+    environment variables (or hard-coded defaults) on its own.
+    """
+    if explicit:
+        return str(explicit)
+    return load_config().url

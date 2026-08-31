@@ -86,7 +86,7 @@ default:
     market: NSE
     dry_run: false
     backtest_mode: false
-    state_file: "state/forward_test_state.json"
+    state_file: "state/forward_state.json"
     log_level: INFO
 
   # Alerts (Telegram preferred)

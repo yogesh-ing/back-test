@@ -24,17 +24,18 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from backtest.forward.feed import SyntheticFeed
-from backtest.forward.order_ledger import OrderLedger, PaperBroker
+from backtest.forward.paper_runner import OrderLedger, PaperBroker
 from backtest.forward.risk_supervisor import (
     HALT_FLATTEN,
     STATE_HALTED,
     GlobalRiskConfig,
     RiskSupervisor,
 )
-from backtest.forward.runner import (
+from backtest.forward.paper_runner import (
     STATUS_PAUSED,
     STATUS_RUNNING,
     STATUS_STOPPED,
+    VALID_INSTANCE_MODES,
     RunnerConfig,
     StrategyRunner,
 )
@@ -296,10 +297,44 @@ class PortfolioManager:
         if self._day_start_equity <= 0:
             self._day_start_equity = equity
 
-    def get_portfolio_summary(self) -> Dict[str, Any]:
-        """Aggregate stats + per-instance rows for the command center."""
+    def list_instances(self, mode: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Per-instance rows, optionally filtered to one bucket (ticket P4.1).
+
+        ``mode`` is ``None`` (all buckets), ``"paper"`` or ``"live"``;
+        any other value raises :class:`ValueError`.
+        """
+        if mode is not None:
+            mode = str(mode).strip().lower()
+            if mode not in VALID_INSTANCE_MODES:
+                raise ValueError(
+                    f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}"
+                )
         with self._lock:
             states = [r.get_state() for r in self._runners.values()]
+        if mode is not None:
+            states = [s for s in states if s.get("mode") == mode]
+        return states
+
+    def get_portfolio_summary(self, mode: Optional[str] = None) -> Dict[str, Any]:
+        """Aggregate stats + per-instance rows for the command center.
+
+        ``mode`` scopes the view to one bucket ('paper'/'live'); ``None``
+        keeps the classic combined view. Scoped views aggregate only over
+        that bucket's instances — peak/drawdown tracking is manager-level,
+        so a scoped view reports the bucket's current equity as its peak
+        (v1; bucket-level risk anchors land with the live wiring, F-12).
+        """
+        if mode is not None:
+            mode = str(mode).strip().lower()
+            if mode not in VALID_INSTANCE_MODES:
+                raise ValueError(
+                    f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}"
+                )
+        with self._lock:
+            states = [r.get_state() for r in self._runners.values()]
+        if mode is not None:
+            states = [s for s in states if s.get("mode") == mode]
+        with self._lock:
             equity = sum(s["equity"] for s in states)
             deployed = sum(s["deployed_capital"] for s in states)
             daily = sum(s["daily_pnl"] for s in states)
@@ -310,14 +345,20 @@ class PortfolioManager:
             stopped = sum(1 for s in states if s["status"] == STATUS_STOPPED)
             errors = sum(1 for s in states if s["status"] == "ERROR")
 
-            drawdown = ((self.peak_equity - equity) / self.peak_equity) if self.peak_equity > 0 else 0.0
+            if mode is not None:
+                total_capital = round(sum(s["allocated_capital"] for s in states), 2)
+                peak_equity = equity  # scoped: no bucket-level peak tracking (v1)
+            else:
+                total_capital = self.total_capital
+                peak_equity = self.peak_equity
+            drawdown = ((peak_equity - equity) / peak_equity) if peak_equity > 0 else 0.0
             limit = abs(self.supervisor.config.daily_loss_limit)
 
             warnings = self.last_report.get("warnings", []) if self.last_report else []
 
             return {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "total_capital": round(self.total_capital, 2),
+                "total_capital": round(total_capital, 2),
                 "total_equity": round(equity, 2),
                 "deployed_capital": round(deployed, 2),
                 "deployed_pct": round(deployed / self.total_capital, 4) if self.total_capital > 0 else 0.0,
@@ -333,7 +374,7 @@ class PortfolioManager:
                 "daily_loss_limit": limit,
                 "daily_loss_used": max(0.0, -daily),
                 "daily_loss_pct": round(max(0.0, -daily) / limit, 4) if limit > 0 else 0.0,
-                "peak_equity": round(self.peak_equity, 2),
+                "peak_equity": round(peak_equity, 2),
                 "drawdown_pct": round(drawdown, 4),
                 "max_drawdown_limit_pct": self.supervisor.config.max_drawdown_pct,
                 "halted": self.halted,

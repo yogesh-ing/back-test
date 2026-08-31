@@ -1,19 +1,30 @@
-"""mStock broker authentication (mStock Authentication UI epic, Task 1.2).
+"""mStock broker (mStock Authentication UI epic, Task 1.2; orders: P3.1/P3.2).
 
-Implements the generic :class:`~backtest.brokers.base.BrokerAuthBase` contract
-for mStock's TypeA connect API, mirroring the endpoint contract already used
-by :mod:`backtest.live.auth`:
+Implements both generic contracts from :mod:`backtest.brokers.base` for
+mStock's TypeA connect API:
 
-* step 1 — ``POST /openapi/typea/connect/login`` (Username + Password)
-* step 2 — ``POST /openapi/typea/session/verifytotp`` (api_key + totp)
+* :class:`BrokerAuthBase` — mirroring the endpoint contract already used by
+  :mod:`backtest.live.auth`:
+  step 1 — ``POST /openapi/typea/connect/login`` (Username + Password)
+  step 2 — ``POST /openapi/typea/session/verifytotp`` (api_key + totp)
+* :class:`BrokerOrderBase` (ticket P3.2) — order lifecycle against the
+  TypeA order endpoints, reusing the session established by the auth flow:
+  authenticated calls carry ``Authorization: token <api_key>:<access_token>``.
+  ``place_order`` → ``POST /openapi/typea/orders/regular`` (form packet)
+  ``modify_order`` → ``PUT /openapi/typea/orders/regular/{id}``
+  ``cancel_order`` → ``DELETE /openapi/typea/orders/regular/{id}``
+  ``get_order_book`` → ``GET /openapi/typea/orders``
+  ``calculate_order_margin`` → ``POST /openapi/typea/margins/orders`` (JSON)
+  (endpoint map: ``docs/archive/mstock-typea-api-reference.md``)
 
 API credentials (``MSTOCK_API_KEY`` etc.) come from ``.env`` — loaded at
 import time via python-dotenv by ``backtest/__init__.py``. The username and
 password arrive at runtime from the UI and are never stored: they live in
 local variables for the duration of the ``login()`` call only.
 
-All session state is in-memory only, per the PRD. The raw session token never
-appears in any return value of the contract methods.
+All session state is in-memory only, per the PRD. The raw session token
+never appears in any return value of the contract methods, and no order
+call may go out without a live session (fail cleanly, never half-send).
 """
 
 from __future__ import annotations
@@ -32,15 +43,26 @@ from backtest.brokers.base import (
     STATUS_EXPIRING_SOON,
     STATUS_UNAUTHENTICATED,
     BrokerAuthBase,
+    BrokerOrder,
+    BrokerOrderBase,
+    BrokerOrderId,
+    MarginInfo,
 )
 
-__all__ = ["MStockBroker"]
+__all__ = ["MStockBroker", "MStockOrderError"]
 
 logger = logging.getLogger("backtest.brokers.mstock")
 
 # mStock TypeA endpoints (same contract as backtest.live.auth).
 _LOGIN_PATH = "/openapi/typea/connect/login"
 _VERIFY_TOTP_PATH = "/openapi/typea/session/verifytotp"
+
+# mStock TypeA order endpoints (ticket P3.2; route table in
+# docs/archive/mstock-typea-api-reference.md).
+_ORDER_PLACEMENT_PATH = "/openapi/typea/orders/regular"
+_ORDER_PATH_TEMPLATE = "/openapi/typea/orders/regular/"
+_ORDER_BOOK_PATH = "/openapi/typea/orders"
+_ORDER_MARGIN_PATH = "/openapi/typea/margins/orders"
 
 _TYPEA_HEADERS = {
     "X-Mirae-Version": "1",
@@ -66,6 +88,15 @@ class _MStockAuthError(Exception):
     """mStock rejected the request (bad credentials, bad TOTP, error payload)."""
 
 
+class MStockOrderError(RuntimeError):
+    """An order lifecycle call could not be completed (ticket P3.2).
+
+    Raised when there is no active session, the order has no broker id,
+    mStock answers non-2xx, or the payload carries an error reason. The
+    message is user-facing (no stack traces or internal details).
+"""
+
+
 def _rejection_reason(payload: Any) -> str | None:
     """Extract a user-facing rejection reason from an mStock payload, if any."""
     if not isinstance(payload, dict):
@@ -83,13 +114,17 @@ def _rejection_reason(payload: Any) -> str | None:
     return None
 
 
-class MStockBroker(BrokerAuthBase):
-    """mStock implementation of the two-step broker auth contract.
+class MStockBroker(BrokerAuthBase, BrokerOrderBase):
+    """mStock implementation of the auth + order contracts.
 
     State held in-memory only; lost on restart by design (this epic). The
     temp auth context links a successful ``login()`` to the subsequent
     ``verify_totp()`` call and holds *server-returned* data only — never the
     username or password.
+
+    Order calls (P3.2) reuse the session established by the auth flow;
+    every one is guarded by :meth:`_require_session` so an unauthenticated
+    broker can never half-send an order.
     """
 
     broker_name = "mstock"
@@ -269,6 +304,81 @@ class MStockBroker(BrokerAuthBase):
             logger.info("mStock session cleared (logout)")
 
     # ------------------------------------------------------------------
+    # Order lifecycle (ticket P3.2) — all guarded by an active session
+    # ------------------------------------------------------------------
+
+    def place_order(self, order: BrokerOrder) -> BrokerOrderId:
+        """Place ``order`` — ``POST /openapi/typea/orders/regular`` (form packet).
+
+        Returns the broker's order id (what modify/cancel reference).
+        """
+        token = self._require_session()
+        payload = self._request(
+            "POST", _ORDER_PLACEMENT_PATH, token,
+            form=self._map_order_to_broker_payload(order),
+        )
+        order_id = self._extract_order_id(payload)
+        if order_id is None:
+            raise MStockOrderError("mStock did not return an order id for the placed order")
+        logger.info("mStock order placed: %s %s x%s", order.side, order.symbol, order.quantity)
+        return BrokerOrderId(order_id)
+
+    def modify_order(self, order: BrokerOrder) -> None:
+        """Amend an open order — ``PUT /openapi/typea/orders/regular/{id}``."""
+        token = self._require_session()
+        path = f"{_ORDER_PATH_TEMPLATE}{self._require_broker_order_id(order)}"
+        self._request("PUT", path, token, form=self._map_order_to_broker_payload(order))
+
+    def cancel_order(self, order: BrokerOrder) -> None:
+        """Cancel an open order — ``DELETE /openapi/typea/orders/regular/{id}``."""
+        token = self._require_session()
+        path = f"{_ORDER_PATH_TEMPLATE}{self._require_broker_order_id(order)}"
+        self._request("DELETE", path, token)
+
+    def get_order_book(self) -> list[BrokerOrder]:
+        """Every order mStock currently knows — ``GET /openapi/typea/orders``."""
+        token = self._require_session()
+        payload = self._request("GET", _ORDER_BOOK_PATH, token)
+        if isinstance(payload, dict):
+            payload = payload.get("data")
+        if payload is None:
+            return []
+        if not isinstance(payload, list):
+            raise MStockOrderError("mStock order book response was not a list of orders")
+        return [self._order_from_row(row) for row in payload if isinstance(row, dict)]
+
+    def calculate_order_margin(self, order: BrokerOrder) -> MarginInfo:
+        """Pre-trade margin check — ``POST /openapi/typea/margins/orders`` (JSON)."""
+        token = self._require_session()
+        payload = self._request(
+            "POST", _ORDER_MARGIN_PATH, token,
+            json_body=self._map_order_to_broker_payload(order),
+        )
+        data = payload if isinstance(payload, dict) else {}
+        inner = data.get("data") if isinstance(data.get("data"), dict) else {}
+
+        def _num(*keys: str) -> float | None:
+            for key in keys:
+                value = data.get(key)
+                if value is None:
+                    value = inner.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    return float(value)
+            return None
+
+        initial = _num("initial_margin", "buy_margin", "margin")
+        maintenance = _num("maintenance_margin", "maintenance")
+        available = _num("available_margin", "available_funds")
+        if initial is None:
+            raise MStockOrderError("mStock margin response carried no margin amount")
+        return MarginInfo(
+            initial_margin=initial,
+            maintenance_margin=maintenance if maintenance is not None else initial,
+            available_margin=available,
+            is_funded=(available is None) or (available >= initial),
+        )
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
@@ -302,6 +412,141 @@ class MStockBroker(BrokerAuthBase):
         if reason:
             raise _MStockAuthError(reason)
         return payload if isinstance(payload, dict) else {}
+
+    # -- order internals (ticket P3.2) -------------------------------------
+
+    def _require_session(self) -> str:
+        """Return the live session token or fail cleanly — never half-send."""
+        token = self.get_session_token()
+        if not token:
+            raise MStockOrderError(
+                "no active mStock session — log in (credentials + TOTP) before placing orders"
+            )
+        return token
+
+    @staticmethod
+    def _require_broker_order_id(order: BrokerOrder) -> str:
+        if order.broker_order_id is None:
+            raise MStockOrderError("order has no broker_order_id — place it before modify/cancel")
+        return str(order.broker_order_id)
+
+    def _session_token_headers(self, token: str) -> dict[str, str]:
+        """TypeA headers + the authenticated session (api_key:access_token)."""
+        return {
+            **_TYPEA_HEADERS,
+            "Authorization": f"token {self._api_key()}:{token}",
+        }
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        token: str,
+        form: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> Any:
+        """One authenticated TypeA order call; return the parsed payload.
+
+        Raises :class:`MStockOrderError` on non-2xx or an error payload.
+        """
+        headers = self._session_token_headers(token)
+        kwargs: dict[str, Any] = {"headers": headers, "timeout": self._http_timeout}
+        url = f"{self._base_url()}{path}"
+        if method == "GET":
+            resp = requests.get(url, **kwargs)
+        elif method == "PUT":
+            resp = requests.put(url, data=form, **kwargs)
+        elif method == "DELETE":
+            resp = requests.delete(url, **kwargs)
+        else:  # POST — form packet for orders, JSON packet for margin
+            if json_body is not None:
+                headers["Content-Type"] = "application/json"
+                resp = requests.post(url, json=json_body, **kwargs)
+            else:
+                resp = requests.post(url, data=form, **kwargs)
+        try:
+            payload: Any = resp.json()
+        except ValueError:
+            payload = None
+
+        if not resp.ok:
+            raise MStockOrderError(
+                _rejection_reason(payload)
+                or f"mStock {method} failed (HTTP {resp.status_code})"
+            )
+        reason = _rejection_reason(payload)
+        if reason:
+            raise MStockOrderError(reason)
+        return payload
+
+    @staticmethod
+    def _map_order_to_broker_payload(order: BrokerOrder) -> dict[str, Any]:
+        """Generic :class:`BrokerOrder` → mStock TypeA order packet (form fields).
+
+        Field names per docs/archive/mstock-typea-api-reference.md; defaults
+        match the V1 intraday delivery flow.
+        """
+        order_type = (order.order_type or "MARKET").upper()
+        return {
+            "tradingsymbol": order.symbol.strip().upper(),
+            "exchange": (order.exchange or "NSE").strip().upper(),
+            "transaction_type": (order.side or "BUY").strip().upper(),
+            "order_type": order_type,
+            "quantity": int(order.quantity),
+            "product": (order.product or "INTRADAY").strip().upper(),
+            "validity": "DAY",
+            "price": float(order.limit_price) if order_type == "LIMIT" and order.limit_price else 0,
+            "trigger_price": 0,
+            "disclosed_quantity": 0,
+            "tag": str(order.tag.get("tag", "")) if order.tag else "",
+        }
+
+    @staticmethod
+    def _extract_order_id(payload: Any) -> str | None:
+        """Pull the new order id out of either known response shape."""
+        if not isinstance(payload, dict):
+            return None
+        order_id = payload.get("order_id") or (payload.get("data") or {}).get("order_id")
+        if isinstance(order_id, str) and order_id.strip():
+            return order_id.strip()
+        if isinstance(order_id, int):
+            return str(order_id)
+        return None
+
+    @staticmethod
+    def _order_from_row(row: dict[str, Any]) -> BrokerOrder:
+        """Lenient row → :class:`BrokerOrder` mapping.
+
+        The archived reference documents the endpoints but not the exact
+        order-book row schema; fields are read best-effort by their
+        documented names (order_id/tradingsymbol/transaction_type/...).
+        """
+        def _str(key: str) -> str | None:
+            value = row.get(key)
+            return str(value) if value is not None else None
+
+        def _num(key: str) -> float:
+            value = row.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return 0.0
+            return float(value)
+
+        order_id = _str("order_id")
+        limit_price = _num("price")
+        average_price = _num("average_price")
+        return BrokerOrder(
+            broker_order_id=BrokerOrderId(order_id) if order_id else None,
+            symbol=_str("tradingsymbol") or "",
+            side=(_str("transaction_type") or "BUY").upper(),
+            quantity=int(_num("quantity")),
+            order_type=(_str("order_type") or "MARKET").upper(),
+            limit_price=limit_price if limit_price else None,
+            status=(_str("status") or "OPEN").upper(),
+            filled_quantity=int(_num("filled_quantity")),
+            average_fill_price=average_price if average_price else None,
+            exchange=_str("exchange"),
+            product=_str("product"),
+        )
 
     @staticmethod
     def _extract_token(payload: dict[str, Any]) -> str | None:

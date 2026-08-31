@@ -20,7 +20,7 @@ class RunSpec:
     symbol: str
     start: str
     end: str
-    interval: str = "day"
+    interval: str = "1day"
     strategy_params: dict[str, Any] | None = None
 
 
@@ -94,7 +94,7 @@ def run_backtest(source, spec: RunSpec, config: BacktestConfig | None = None):
     return run_on_candles(candles, spec.strategy, spec.strategy_params, spec.symbol, config)
 
 
-def compare_strategies(source, symbol: str, start: str, end: str, strategies: list[str], interval: str = "day", config: BacktestConfig | None = None) -> dict[str, Any]:
+def compare_strategies(source, symbol: str, start: str, end: str, strategies: list[str], interval: str = "1day", config: BacktestConfig | None = None) -> dict[str, Any]:
     candles = source.get_candles(symbol, start, end, interval)
     results = {}
     for name in strategies:

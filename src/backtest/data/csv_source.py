@@ -15,12 +15,12 @@ class CsvSource:
     """Reads ``{root}/{symbol}.csv`` (daily bars only — ``interval`` is ignored)."""
 
     #: CSV files are pre-aggregated; we cannot honour intraday requests.
-    SUPPORTED_INTERVALS = ("day", "D")
+    SUPPORTED_INTERVALS = ("1day",)
 
     def __init__(self, root: str = "data") -> None:
         self.root = root
 
-    def get_candles(self, symbol: str, start: str, end: str, interval: str = "day") -> pd.DataFrame:
+    def get_candles(self, symbol: str, start: str, end: str, interval: str = "1day") -> pd.DataFrame:
         path = os.path.join(self.root, f"{symbol}.csv")
         if interval not in self.SUPPORTED_INTERVALS:
             log.warning(
