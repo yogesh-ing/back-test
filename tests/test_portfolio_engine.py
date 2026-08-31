@@ -22,7 +22,7 @@ from backtest.data.universe import (
     list_universes,
     correlation_group_for,
 )
-from backtest.forward.order_ledger import (
+from backtest.forward.paper_runner import (
     FillEvent,
     OrderLedger,
     OrderRequest,
@@ -38,7 +38,7 @@ from backtest.forward.risk_supervisor import (
     RiskSupervisor,
     STATE_HALTED,
 )
-from backtest.forward.runner import (
+from backtest.forward.paper_runner import (
     MAX_BARS_PER_SYMBOL,
     RunnerConfig,
     STATUS_PAUSED,
@@ -173,7 +173,7 @@ class TestStrategyRunner:
     def _runner(self, ledger, **overrides):
         cfg = RunnerConfig(
             name="R1", strategy_name="rsi_reversion", allocated_capital=100_000,
-            target_type=TARGET_SINGLE, symbols=["AAA"], timeframe="1h",
+            target_type=TARGET_SINGLE, symbols=["AAA"], timeframe="1hour",
         )
         for k, v in overrides.items():
             setattr(cfg, k, v)
@@ -266,7 +266,7 @@ class TestStrategyRunner:
         cfg = RunnerConfig(
             name="Pool", strategy_name="donchian_breakout", allocated_capital=500_000,
             target_type=TARGET_POOL, symbols=[f"S{j}" for j in range(8)],
-            timeframe="1d", max_pool_positions=3,
+            timeframe="1day", max_pool_positions=3,
         )
         r = StrategyRunner(cfg, ledger=ledger, broker=PaperBroker(ledger))
         r.start()
@@ -301,14 +301,14 @@ class TestPortfolioManager:
     def _add_demo_runners(self, mgr):
         id1 = mgr.add_runner(RunnerConfig(
             name="RSI", strategy_name="rsi_reversion", allocated_capital=1_000_000,
-            target_type=TARGET_SINGLE, symbols=["BTC/USD"], timeframe="1h"))
+            target_type=TARGET_SINGLE, symbols=["BTC/USD"], timeframe="1hour"))
         id2 = mgr.add_runner(RunnerConfig(
             name="Pool", strategy_name="donchian_breakout", allocated_capital=2_500_000,
-            target_type=TARGET_POOL, universe_id="NIFTY_50", timeframe="1d",
+            target_type=TARGET_POOL, universe_id="NIFTY_50", timeframe="1day",
             max_pool_positions=5))
         id3 = mgr.add_runner(RunnerConfig(
             name="MACD", strategy_name="sma_crossover", allocated_capital=800_000,
-            target_type=TARGET_SINGLE, symbols=["ETH/USD"], timeframe="15m"))
+            target_type=TARGET_SINGLE, symbols=["ETH/USD"], timeframe="15min"))
         return id1, id2, id3
 
     def test_add_and_aggregate(self, manager):
@@ -391,7 +391,7 @@ class TestRiskSupervisor:
         """3+ LONG positions in crypto group → HIGH_CONCENTRATION warning."""
         rid = manager.add_runner(RunnerConfig(
             name="Crypto", strategy_name="rsi_reversion", allocated_capital=1_000_000,
-            target_type=TARGET_POOL, universe_id="TOP_10_CRYPTO", timeframe="1h",
+            target_type=TARGET_POOL, universe_id="TOP_10_CRYPTO", timeframe="1hour",
             max_pool_positions=5))
         r = manager.get_runner(rid)
         broker = manager.broker
@@ -413,7 +413,7 @@ class TestCircuitBreakerIntegration:
             mgr.add_runner(RunnerConfig(
                 name="Pool", strategy_name="donchian_breakout", allocated_capital=1_000_000,
                 target_type=TARGET_POOL, symbols=[f"S{j}" for j in range(8)],
-                timeframe="1d", max_pool_positions=4))
+                timeframe="1day", max_pool_positions=4))
             mgr.feed.warmup()
             for _ in range(10):
                 mgr.tick()
@@ -443,7 +443,7 @@ class TestCircuitBreakerIntegration:
             rid = mgr.add_runner(RunnerConfig(
                 name="P", strategy_name="donchian_breakout", allocated_capital=1_000_000,
                 target_type=TARGET_POOL, symbols=[f"S{j}" for j in range(6)],
-                timeframe="1d", max_pool_positions=3))
+                timeframe="1day", max_pool_positions=3))
             mgr.feed.warmup()
             for _ in range(5):
                 mgr.tick()

@@ -274,7 +274,7 @@ def test_backtest_run_logs_config_and_result(client, caplog):
             "params": {"fast": 20, "slow": 50},
         })
     text = caplog.text
-    assert "[run] strategy=sma_crossover symbol=DEMO timeframe=1D→day" in text
+    assert "[run] strategy=sma_crossover symbol=DEMO timeframe=1D→1day" in text
     assert "[result] run/sma_crossover" in text and "bars=262" in text
     assert "→ POST /api/backtest/run" in text and "← POST /api/backtest/run 200" in text
 

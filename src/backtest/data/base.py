@@ -6,10 +6,27 @@ import pandas as pd
 
 CANDLE_COLUMNS = ["open", "high", "low", "close", "volume"]
 
+#: The ONE canonical timeframe vocabulary (ticket P4.3). Every layer — API,
+#: config, DB (``market_data_cache.timeframe`` CHECK), UI, feeds — speaks
+#: these names. Resolved with the lead as the descriptive set.
+CANONICAL_TIMEFRAMES = ("1min", "5min", "15min", "1hour", "4hour", "1day", "1week")
+
+#: Canonical timeframe -> mStock TypeA wire interval. Broker-specific
+#: translation only; the rest of the codebase never speaks these names.
+#: ``4hour`` has no mStock historical equivalent (intentionally absent).
+MSTOCK_INTERVAL_MAP = {
+    "1min": "minute",
+    "5min": "5minute",
+    "15min": "15minute",
+    "1hour": "60minute",
+    "1day": "day",
+    "1week": "week",
+}
+
 
 @runtime_checkable
 class DataSource(Protocol):
-    def get_candles(self, symbol: str, start: str, end: str, interval: str = "day") -> pd.DataFrame:
+    def get_candles(self, symbol: str, start: str, end: str, interval: str = "1day") -> pd.DataFrame:
         ...
 
 

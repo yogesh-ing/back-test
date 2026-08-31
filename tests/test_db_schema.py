@@ -45,7 +45,9 @@ from backtest.db.models import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SQLITE_MIGRATION = REPO_ROOT / "db" / "migrations" / "001_initial_schema.sqlite.sql"
+SQLITE_MIGRATION_002 = REPO_ROOT / "db" / "migrations" / "002_add_mode_source.sqlite.sql"
 PG_MIGRATION = REPO_ROOT / "db" / "migrations" / "001_initial_schema.sql"
+PG_MIGRATION_002 = REPO_ROOT / "db" / "migrations" / "002_add_mode_source.sql"
 
 EXPECTED_TABLES = {
     "portfolios",
@@ -534,10 +536,11 @@ def test_deleting_portfolio_cascades_but_preserves_logs(engine):
 
 
 def test_sqlite_migration_file_matches_orm(tmp_path):
-    """Applying the .sql file by hand yields the same tables/columns as the ORM."""
+    """Applying the .sql files by hand yields the same tables/columns as the ORM."""
     db_path = tmp_path / "hand.db"
     conn = sqlite3.connect(db_path)
     conn.executescript(SQLITE_MIGRATION.read_text())
+    conn.executescript(SQLITE_MIGRATION_002.read_text())
     conn.close()
 
     hand = inspect(create_engine(f"sqlite:///{db_path}"))
@@ -568,6 +571,8 @@ def test_sqlite_migration_is_idempotent(tmp_path):
 def test_migration_files_exist():
     assert PG_MIGRATION.exists()
     assert SQLITE_MIGRATION.exists()
+    assert PG_MIGRATION_002.exists()
+    assert SQLITE_MIGRATION_002.exists()
     assert (REPO_ROOT / "db" / "migrations" / "001_initial_schema_rollback.sql").exists()
     assert (REPO_ROOT / "db" / "DB-IMPLEMENTATION-GUIDE.md").exists()
 

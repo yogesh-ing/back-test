@@ -19,15 +19,14 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Tuple
+from typing import Tuple
 
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
 from backtest.data.universe import is_universe, list_universes
 from backtest.forward.portfolio_manager import get_portfolio_manager
 from backtest.logging_config import get_logger
-from backtest.forward.risk_supervisor import GlobalRiskConfig
-from backtest.forward.runner import RunnerConfig, TARGET_POOL, TARGET_SINGLE
+from backtest.forward.paper_runner import RunnerConfig, TARGET_POOL, TARGET_SINGLE
 
 portfolio_bp = Blueprint("portfolio_api", __name__)
 log = get_logger(__name__)
@@ -40,6 +39,19 @@ log = get_logger(__name__)
 
 def _manager():
     return get_portfolio_manager()
+
+
+#: Bucket modes accepted by :func:`list_instances` / ``?mode=`` (ticket P4.1).
+VALID_INSTANCE_MODES = ("paper", "live")
+
+
+def list_instances(mode: str | None = None) -> list[dict]:
+    """Command-center instance rows, optionally filtered by bucket mode.
+
+    ``mode`` is ``None`` (all buckets) or one of :data:`VALID_INSTANCE_MODES`;
+    anything else raises :class:`ValueError` (the HTTP layer maps it to 400).
+    """
+    return _manager().list_instances(mode)
 
 
 def _error(message: str, status: int = 400) -> Tuple[Response, int]:
@@ -84,7 +96,14 @@ def _parse_target(data: dict) -> Tuple[str, list, str | None]:
 
 @portfolio_bp.get("/api/portfolio/summary")
 def summary() -> Tuple[Response, int]:
-    return jsonify({"success": True, "portfolio": _manager().get_portfolio_summary()}), 200
+    """Combined stats + instance rows; ``?mode=paper|live`` scopes a bucket."""
+    mode = request.args.get("mode") or None
+    try:
+        return jsonify(
+            {"success": True, "portfolio": _manager().get_portfolio_summary(mode)}
+        ), 200
+    except ValueError as exc:
+        return _error(str(exc))
 
 
 @portfolio_bp.get("/api/portfolio/universes")
@@ -139,10 +158,12 @@ def create_runner() -> Tuple[Response, int]:
             target_type=target_type,
             symbols=symbols,
             universe_id=universe_id,
-            timeframe=str(data.get("timeframe", "1h")),
+            timeframe=str(data.get("timeframe", "1hour")),
             strategy_params=params,
             max_pool_positions=int(data.get("max_pool_positions", 5)),
             position_pct=float(data["position_pct"]) if data.get("position_pct") is not None else None,
+            mode=data.get("mode") or "paper",
+            source=data.get("source") or "synthetic",
         )
         auto_start = bool(data.get("auto_start", True))
         instance_id = _manager().add_runner(config, start=auto_start)

@@ -46,18 +46,25 @@ from __future__ import annotations
 import logging
 import random
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime, timezone
+from datetime import datetime, time as dtime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
-from backtest.simulator.enums import OrderSide, OrderStatus, OrderType, TimeInForce
+from backtest.simulator.enums import OrderStatus, OrderType, TimeInForce
 from backtest.simulator.errors import ValidationError
 from backtest.simulator.fees import CommissionCalculator, TradeSegment
-from backtest.simulator.fill import Fill, LiquidityFlag
+from backtest.simulator.fill import Fill
+from backtest.simulator.fill_providers import (
+    BrokerFillProvider,
+    FillDecision,
+    FillProvider,
+    SimulatedFillProvider,
+    apply_price_improvement as _apply_price_improvement_impl,
+    simulate_latency as _simulate_latency_impl,
+)
 from backtest.simulator.money import (
     ZERO,
-    price as to_price,
     quantize_price,
     to_decimal,
 )
@@ -77,6 +84,11 @@ __all__ = [
     "OrderExecutor",
     "load_execution_config",
     "DEFAULT_EXECUTION_CONFIG_PATH",
+    # ticket P3.3 — the pluggable fill seam (re-exported for convenience)
+    "FillDecision",
+    "FillProvider",
+    "SimulatedFillProvider",
+    "BrokerFillProvider",
 ]
 
 logger = logging.getLogger("backtest.simulator.execution")
@@ -419,6 +431,20 @@ def load_execution_config(
 class OrderExecutor:
     """Simulates order execution against market data.
 
+    Two usage modes
+    ---------------
+    **Tick level** — :meth:`execute` / :meth:`execute_all` attempt a fill
+    against one explicit market snapshot. This is the only fill path: every
+    fill is priced here, through the slippage and fee engines.
+
+    **Bar level** — :meth:`submit` + :meth:`step` drive the executor from a
+    bar clock (the forward / paper runner). The look-ahead rule: a signal is
+    computed from bars *through* bar ``t``, the order is submitted while bar
+    ``t`` is the latest known data, and the fill happens at bar ``t+1``'s
+    **open** — never at bar ``t``'s close. Filling at the close of the bar
+    that produced the signal is cheating; the bar-clock API makes it
+    impossible.
+
     Examples
     --------
     >>> executor = OrderExecutor()                            # doctest: +SKIP
@@ -433,14 +459,27 @@ class OrderExecutor:
         slippage: SlippageCalculator | None = None,
         fees: CommissionCalculator | None = None,
         portfolio: "Portfolio | None" = None,
+        fill_provider: "FillProvider | None" = None,
     ) -> None:
         self.config = config or ExecutionConfig()
         self.slippage = slippage or SlippageCalculator()
         self.fees = fees or CommissionCalculator()
         self.portfolio = portfolio
+        # Ticket P3.3: the fill seam. Default = simulated (paper); inject a
+        # BrokerFillProvider for live runs. The provider owns price + fees +
+        # fill construction; everything else stays here.
+        self._fill_provider = fill_provider or SimulatedFillProvider(
+            self.slippage, self.fees, self.config
+        )
         self._rng = random.Random(self.config.seed)
         self._callbacks: dict[str, list[Callable[..., None]]] = {}
         self._results: list[ExecutionResult] = []
+        # Bar-clock state (ticket P1.3). ``_pending`` is FIFO; an order in it
+        # that is NOT yet in ``_armed`` was queued on the most recent step
+        # and must wait one more bar before it may fill.
+        self._pending: list["Order"] = []
+        self._armed: set[str] = set()
+        self._queued: set[str] = set()
 
     @classmethod
     def for_realism(cls, level: str, **kwargs: Any) -> "OrderExecutor":
@@ -457,6 +496,9 @@ class OrderExecutor:
     def reset(self) -> None:
         """Clear results and re-seed, so a replay is identical."""
         self._results.clear()
+        self._pending.clear()
+        self._armed.clear()
+        self._queued.clear()
         self._rng = random.Random(self.config.seed)
 
     # -- availability ------------------------------------------------------
@@ -508,22 +550,14 @@ class OrderExecutor:
     def simulate_latency(
         self, min_ms: Any = None, max_ms: Any = None
     ) -> Decimal:
-        """Draw a fill latency in milliseconds.
+        """Draw a fill latency in milliseconds (delegates to the canonical
+        :func:`backtest.simulator.fill_providers.simulate_latency`).
 
         Reported rather than slept on: a simulator that actually waited
         500 ms per order would take hours to replay a day. The value feeds
         the Step 18 execution-quality report.
         """
-        low = to_decimal(min_ms if min_ms is not None else self.config.min_latency_ms, "min_ms")
-        high = to_decimal(max_ms if max_ms is not None else self.config.max_latency_ms, "max_ms")
-        if high < low:
-            raise ValidationError(
-                "max_ms must be >= min_ms", code="invalid_latency_range"
-            )
-        if high == low:
-            return low
-        span = high - low
-        return (low + span * Decimal(str(self._rng.random()))).quantize(Decimal("0.001"))
+        return _simulate_latency_impl(self.config, self._rng, min_ms, max_ms)
 
     def available_liquidity(self, snapshot: MarketSnapshot) -> Decimal | None:
         """How much of the bar's volume one order may take.
@@ -678,48 +712,17 @@ class OrderExecutor:
                     requested, liquidity,
                 )
 
-        # --- price ---
-        reference = order.calculate_fill_price(market_data)
-        estimate = self.slippage.calculate_slippage(
-            order, market_data, reference_price=reference, quantity=fill_qty
-        )
-        price = self._apply_price_improvement(order, estimate.executed_price)
-
-        # A limit order can never fill worse than its limit, whatever the
-        # slippage model says. Belt and braces: the calculator caps too.
-        if order.limit_price is not None and order.order_type in (
-            OrderType.LIMIT, OrderType.STOP_LIMIT
-        ):
-            price = (
-                min(price, order.limit_price)
-                if order.is_buy
-                else max(price, order.limit_price)
+        # --- price + fees + fill (ticket P3.3) ---
+        # The fill provider is the ONLY paper/live seam: simulated pricing
+        # (slippage + fees + latency) by default, or a live broker's REAL
+        # fill when a BrokerFillProvider is injected. Everything below it
+        # (order state, portfolio, results, hooks) is shared by both.
+        decision = self._fill_provider.get_fill(order, market_data, fill_qty, self._rng)
+        if decision.fill is None:
+            return self._no_fill(
+                order, "fill provider reported no trade", fill_qty, liquidity
             )
-
-        # --- fees ---
-        breakdown = self.fees.calculate(
-            quantity=fill_qty,
-            fill_price=price,
-            side=order.side,
-            segment=self.config.segment,
-        )
-
-        latency = self.simulate_latency()
-        fill = Fill(
-            symbol=order.symbol,
-            side=order.side,
-            quantity=fill_qty,
-            fill_price=price,
-            order_id=order.order_id,
-            reference_price=reference,
-            liquidity_flag=(
-                LiquidityFlag.MAKER
-                if order.order_type in (OrderType.LIMIT, OrderType.STOP_LIMIT)
-                else LiquidityFlag.TAKER
-            ),
-            strategy_name=order.strategy_name,
-            **breakdown.as_fill_kwargs(),
-        )
+        fill = decision.fill
         order.add_fill(fill)
 
         if self.portfolio is not None:
@@ -740,14 +743,15 @@ class OrderExecutor:
             filled_quantity=fill_qty,
             remaining_quantity=order.remaining_quantity,
             fill=fill,
-            latency_ms=latency,
+            latency_ms=decision.latency_ms,
             requested_quantity=requested,
             available_liquidity=liquidity,
         )
         self._record(result)
         logger.info(
             "%s %s %s @ %s (%s of %s, %.0fms)",
-            status, order.side, fill_qty, price, fill_qty, requested, float(latency),
+            status, order.side, fill_qty, fill.fill_price, fill_qty, requested,
+            float(decision.latency_ms),
         )
         self._fire(
             ExecutionEvent.FILL if complete else ExecutionEvent.PARTIAL_FILL,
@@ -785,6 +789,122 @@ class OrderExecutor:
             results.append(self.execute(order, snapshot))
         return results
 
+    # -- bar-clock API (ticket P1.3) ----------------------------------------
+
+    def submit(self, order: "Order") -> None:
+        """Queue an order for bar-clock execution via :meth:`step`.
+
+        The look-ahead rule: this order is NOT attempted on the next
+        :meth:`step` call — that step only *arms* it. It first trades at the
+        **open** of the bar after the one that produced the signal, so it
+        can never fill at that bar's close.
+        """
+        if order.is_terminal:
+            raise ValidationError(
+                f"order {order.order_id} is {order.status.value}, cannot queue it",
+                code="order_not_queuable",
+            )
+        if order.order_id in self._queued:
+            raise ValidationError(
+                f"order {order.order_id} is already queued",
+                code="order_already_queued",
+            )
+        if not order.is_working:
+            order.submit()
+        self._pending.append(order)
+        self._queued.add(order.order_id)
+
+    def step(self, completed_bars: Any) -> list[ExecutionResult]:
+        """Advance one completed bar (or one multi-symbol tick) and trade
+        what was queued before it.
+
+        Called with each NEW completed bar. Orders armed on a previous bar
+        are attempted against this bar's **open** (see :meth:`submit`);
+        orders queued since the last step only get armed and wait one more.
+
+        ``completed_bars`` is either a single bar, or a ``Mapping`` of
+        symbol → bar (one tick across a multi-symbol portfolio). Each bar
+        must expose ``open``; ``volume`` and ``timestamp``/``ts`` are used
+        when present (liquidity cap and session timing). In multi-symbol
+        mode an order whose symbol has no bar in this tick simply rests.
+
+        Returns one :class:`ExecutionResult` per order attempted. Orders
+        that did not fully fill remain queued and are re-attempted at the
+        next bar's open; terminal orders (filled, rejected, cancelled) are
+        dropped.
+        """
+        multi = isinstance(completed_bars, Mapping)
+        if multi:
+            snapshots = {
+                str(symbol).strip().upper(): self._bar_open_snapshot(bar)
+                for symbol, bar in completed_bars.items()
+            }
+            single: dict[str, Any] | None = None
+        else:
+            snapshots = None
+            single = self._bar_open_snapshot(completed_bars)
+
+        results: list[ExecutionResult] = []
+        still_pending: list["Order"] = []
+        for order in self._pending:
+            if order.order_id not in self._armed:
+                # First sighting: arm for the NEXT bar — no fill on this one.
+                self._armed.add(order.order_id)
+                if order.is_working:
+                    still_pending.append(order)
+                else:
+                    self._queued.discard(order.order_id)
+                continue
+            if not order.is_working:
+                self._armed.discard(order.order_id)
+                self._queued.discard(order.order_id)
+                continue
+            key = order.symbol.strip().upper()
+            snapshot = snapshots.get(key) if multi else single  # type: ignore[union-attr]
+            if snapshot is None:
+                # No bar for this symbol in this tick — the order rests.
+                still_pending.append(order)
+                continue
+            result = self.execute(order, snapshot)
+            results.append(result)
+            if order.is_working and order.remaining_quantity > ZERO:
+                still_pending.append(order)
+            else:
+                self._armed.discard(order.order_id)
+                self._queued.discard(order.order_id)
+        self._pending = still_pending
+        return results
+
+    @staticmethod
+    def _bar_open_snapshot(completed_bar: Any) -> dict[str, Any]:
+        """A zero-spread quote pinned to the bar's open.
+
+        A bar carries no intra-bar quotes, so bid and ask both equal the
+        open: a market order crosses into the open and slippage/fees are
+        the only price adjustment. ``close`` is deliberately never read —
+        the fill price must not know it.
+        """
+        try:
+            open_price = completed_bar.open
+        except AttributeError as exc:
+            raise ValidationError(
+                "completed_bar must expose an 'open' price", code="invalid_bar"
+            ) from exc
+        snapshot: dict[str, Any] = {
+            "bid": open_price,
+            "ask": open_price,
+            "last": open_price,
+        }
+        volume = getattr(completed_bar, "volume", None)
+        if volume is not None:
+            snapshot["volume"] = volume
+        timestamp = getattr(completed_bar, "timestamp", None)
+        if timestamp is None:
+            timestamp = getattr(completed_bar, "ts", None)
+        if timestamp is not None:
+            snapshot["timestamp"] = timestamp
+        return snapshot
+
     # -- internals ---------------------------------------------------------
 
     def _limit_fills(self, order: "Order", snapshot: MarketSnapshot) -> bool:
@@ -814,13 +934,9 @@ class OrderExecutor:
         return self._rng.random() < probability
 
     def _apply_price_improvement(self, order: "Order", price: Decimal) -> Decimal:
-        """Occasionally fill better than expected, as a real venue might."""
-        chance = float(self.config.price_improvement_probability)
-        if chance <= 0 or self._rng.random() >= chance:
-            return price
-        delta = price * self.config.price_improvement_bps / Decimal("10000")
-        improved = price - delta if order.is_buy else price + delta
-        return quantize_price(max(improved, _DUST))
+        """Occasionally fill better than expected (delegates to the
+        canonical :func:`backtest.simulator.fill_providers.apply_price_improvement`)."""
+        return _apply_price_improvement_impl(order, price, self.config, self._rng)
 
     def _reject(
         self,
@@ -896,6 +1012,11 @@ class OrderExecutor:
     def results(self) -> Sequence[ExecutionResult]:
         return tuple(self._results)
 
+    @property
+    def fill_provider(self) -> "FillProvider":
+        """The active fill provider (ticket P3.3) — simulated by default."""
+        return self._fill_provider
+
     def statistics(self) -> dict[str, Any]:
         """Execution-quality summary for the run."""
         if not self._results:
@@ -935,4 +1056,3 @@ class OrderExecutor:
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"<OrderExecutor {self.config.realism} n={len(self._results)}>"
-

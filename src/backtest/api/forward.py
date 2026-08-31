@@ -36,6 +36,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from backtest.adapters.backtest_adapter import BacktestAdapter
 from backtest.brokers.session_manager import get_session_manager
+from backtest.data.base import CANONICAL_TIMEFRAMES as SUPPORTED_TIMEFRAMES
 from backtest.engine.backtester import BacktestConfig, BacktestResult
 from backtest.engine.metrics import compute_metrics
 from backtest.logging_config import get_logger, timed
@@ -47,15 +48,6 @@ log = get_logger(__name__)
 # Extra bars before from_date for indicator warmup. 0 keeps the replay over
 # exactly the requested range (matching a standalone backtest/forward run).
 WARMUP_BARS = 0
-
-_TIMEFRAME_TO_INTERVAL = {
-    "1D": "day", "D": "day", "DAY": "day",
-    "1W": "week", "W": "week",
-    "1H": "hour", "H": "hour",
-    "4H": "4hour",
-    "15M": "15minute",
-    "5M": "5minute",
-}
 
 
 def _f(value: Any, ndigits: int = 4) -> float:
@@ -496,15 +488,17 @@ def _source() -> Any:
 
 
 def _interval(timeframe: Optional[str]) -> str:
+    """Resolve to the canonical timeframe (unknown → ``1day``); ticket P4.3."""
     if not timeframe:
-        return "day"
-    key = str(timeframe).upper()
-    if key not in _TIMEFRAME_TO_INTERVAL:
+        return "1day"
+    key = str(timeframe).strip().lower()
+    if key not in SUPPORTED_TIMEFRAMES:
         log.warning(
-            "[forward] unsupported timeframe %r — falling back to 'day' (supported: %s)",
-            timeframe, ", ".join(sorted(_TIMEFRAME_TO_INTERVAL)),
+            "[forward] unsupported timeframe %r — falling back to '1day' (supported: %s)",
+            timeframe, ", ".join(SUPPORTED_TIMEFRAMES),
         )
-    return _TIMEFRAME_TO_INTERVAL.get(key, "day")
+        return "1day"
+    return key
 
 
 def _load_candles(symbol: str, from_date: str, to_date: str, timeframe: str):

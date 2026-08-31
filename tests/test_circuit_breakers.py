@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from backtest.forward.order_ledger import SIDE_BUY
+from backtest.forward.paper_runner import SIDE_BUY
 from backtest.forward.portfolio_manager import PortfolioManager
 from backtest.forward.risk_supervisor import (
     HALT_FLATTEN,
@@ -24,7 +24,7 @@ from backtest.forward.risk_supervisor import (
     GlobalRiskConfig,
     RiskSupervisor,
 )
-from backtest.forward.runner import RunnerConfig, STATUS_PAUSED, TARGET_POOL, TARGET_SINGLE
+from backtest.forward.paper_runner import RunnerConfig, STATUS_PAUSED, TARGET_POOL, TARGET_SINGLE
 
 # Silence the engine's chatty per-bar logs for this module only — never call
 # logging.disable() at import time, as it is process-global and would leak
@@ -47,12 +47,12 @@ def _build_50_runners() -> PortfolioManager:
     for i in range(30):
         mgr.add_runner(RunnerConfig(
             name=f"S{i:02d}", strategy_name="rsi_reversion", allocated_capital=100_000,
-            target_type=TARGET_SINGLE, symbols=[f"S{i}"], timeframe="1h"))
+            target_type=TARGET_SINGLE, symbols=[f"S{i}"], timeframe="1hour"))
     for i in range(20):
         mgr.add_runner(RunnerConfig(
             name=f"P{i:02d}", strategy_name="donchian_breakout", allocated_capital=100_000,
             target_type=TARGET_POOL, symbols=[f"P{i}_{j}" for j in range(8)],
-            timeframe="1d", max_pool_positions=3))
+            timeframe="1day", max_pool_positions=3))
     return mgr
 
 
@@ -122,7 +122,7 @@ def test_flatten_mode_exits_all_positions():
         rid = mgr.add_runner(RunnerConfig(
             name="P", strategy_name="donchian_breakout", allocated_capital=1_000_000,
             target_type=TARGET_POOL, symbols=[f"X{j}" for j in range(6)],
-            timeframe="1d", max_pool_positions=4))
+            timeframe="1day", max_pool_positions=4))
         runner = mgr.get_runner(rid)
         mgr.feed.warmup()
         for sym in runner.config.symbols[:4]:
@@ -149,7 +149,7 @@ def test_pause_mode_holds_positions_but_blocks_new_entries():
         rid = mgr.add_runner(RunnerConfig(
             name="P", strategy_name="donchian_breakout", allocated_capital=1_000_000,
             target_type=TARGET_POOL, symbols=[f"X{j}" for j in range(6)],
-            timeframe="1d", max_pool_positions=4))
+            timeframe="1day", max_pool_positions=4))
         runner = mgr.get_runner(rid)
         mgr.feed.warmup()
         for sym in runner.config.symbols[:3]:
@@ -177,7 +177,7 @@ def test_no_new_entries_after_halt():
         rid = mgr.add_runner(RunnerConfig(
             name="P", strategy_name="donchian_breakout", allocated_capital=1_000_000,
             target_type=TARGET_POOL, symbols=[f"X{j}" for j in range(6)],
-            timeframe="1d", max_pool_positions=4))
+            timeframe="1day", max_pool_positions=4))
         runner = mgr.get_runner(rid)
         mgr.feed.warmup()
         for sym in runner.config.symbols[:3]:

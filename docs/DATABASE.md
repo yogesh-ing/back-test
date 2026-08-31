@@ -71,7 +71,9 @@ CREATE INDEX ix_mdc_symbol_tf_ts ON market_data_cache (symbol, timeframe, ts DES
 
 #### `portfolios` — Root Aggregate
 ```sql
--- Columns: portfolio_id (UUID), name, strategy, initial_capital, current_cash, status, created_at
+-- Columns: portfolio_id (UUID), name, initial_capital, current_cash, status,
+--          mode (paper|live), source (synthetic|replay|mstock), created_at
+-- mode/source added by 002_add_mode_source.sql (defaults: paper/synthetic)
 ```
 
 #### `positions` — Open/Closed Exposure

@@ -65,7 +65,7 @@ Example config (``config/forward_testing.yaml``):
       market: "NSE"
       dry_run: false
       backtest_mode: false
-      state_file: "state/forward_test_state.json"
+      state_file: "state/forward_state.json"
 
 Usage
 -----
@@ -96,7 +96,7 @@ from backtest.simulator.money import ZERO, money
 logger = logging.getLogger("backtest.forward.engine")
 
 DEFAULT_FORWARD_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "forward_testing.yaml"
-DEFAULT_STATE_FILE = Path("state/forward_test_state.json")
+DEFAULT_STATE_FILE = Path("state/forward_state.json")
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +177,11 @@ class SizingConfigWrapper:
 @dataclass
 class DataConfig:
     provider: str = "mock"
+    #: Run classification (ticket P1.2) — resolved by
+    #: backtest.data.source_registry.SourceRegistry.
+    mode: str = "paper"
+    source: str = "synthetic"
+    replay_speed: float = 5
     symbols: List[str] = field(default_factory=lambda: ["INFY"])
     timeframe: str = "1min"
     start_date: Optional[str] = None
@@ -184,6 +189,17 @@ class DataConfig:
 
     def __post_init__(self):
         self.provider = str(self.provider).strip().lower()
+        self.mode = str(self.mode).strip().lower()
+        self.source = str(self.source).strip().lower()
+        self.replay_speed = float(self.replay_speed)
+        if self.replay_speed <= 0:
+            raise ValidationError("replay_speed must be > 0")
+        if self.mode not in {"backtest", "paper", "live"}:
+            raise ValidationError(f"unknown data mode: {self.mode!r}")
+        if self.mode == "paper" and self.source not in {"synthetic", "mstock"}:
+            raise ValidationError(
+                f"paper mode needs source 'synthetic' or 'mstock', got {self.source!r}"
+            )
         self.symbols = [str(s).strip().upper() for s in self.symbols]
         if not self.symbols:
             raise ValidationError("at least one symbol required")

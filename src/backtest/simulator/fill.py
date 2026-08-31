@@ -176,6 +176,8 @@ class Fill:
     filled_at: datetime = field(default_factory=_utcnow)
     created_at: datetime = field(default_factory=_utcnow)
     strategy_name: str | None = None
+    broker_order_id: str | None = None
+    """Broker-issued id for live fills (ticket P3.3); None for simulated ones."""
 
     def __post_init__(self) -> None:
         # frozen=True blocks normal assignment, so normalisation goes through
@@ -575,6 +577,7 @@ class Fill:
             "filled_at": self.filled_at.isoformat(),
             "created_at": self.created_at.isoformat(),
             "strategy_name": self.strategy_name,
+            "broker_order_id": self.broker_order_id,
         }
 
     @classmethod
@@ -609,6 +612,82 @@ class Fill:
                 else _utcnow()
             ),
             strategy_name=payload.get("strategy_name"),
+            broker_order_id=payload.get("broker_order_id"),
+        )
+
+    @classmethod
+    def from_broker(
+        cls,
+        raw: Mapping[str, Any],
+        *,
+        broker_order_id: Any = None,
+        order_id: str | None = None,
+        strategy_name: str | None = None,
+        **overrides: Any,
+    ) -> "Fill":
+        """Build a fill from a RAW BROKER fill row (ticket P3.3).
+
+        ``raw`` is whatever the broker's fill endpoint returned (an mStock
+        TypeA row uses ``tradingsymbol``/``transaction_type``/``price``;
+        generic aliases — ``symbol``/``side``/``fill_price`` — are accepted
+        too). ``overrides`` (``symbol=..., side=..., quantity=...,
+        fill_price=...``) win over the parsed values, so a broker whose
+        rows omit a field can still be served explicitly.
+
+        Raises
+        ------
+        ValidationError
+            When a required field (symbol/side/quantity/fill_price) is
+            missing from both ``raw`` and ``overrides``.
+        """
+        def _pick(*keys: str) -> Any:
+            for key in keys:
+                value = raw.get(key)
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    continue
+                return value
+            return None
+
+        required = {
+            "symbol": _pick("tradingsymbol", "symbol", "trading_symbol"),
+            "side": _pick("transaction_type", "side"),
+            "quantity": _pick("quantity", "filled_quantity", "fill_quantity"),
+            "fill_price": _pick("price", "fill_price", "average_price", "avg_price"),
+        }
+        for key, value in list(required.items()):
+            if value is None and overrides.get(key) is not None:
+                required[key] = overrides.pop(key)
+        missing = [key for key, value in required.items() if value is None]
+        if missing:
+            raise ValidationError(
+                f"broker fill payload missing required field(s): {missing}",
+                code="invalid_broker_fill",
+            )
+
+        def _num(value: Any) -> Decimal:
+            if value is None:
+                return ZERO
+            if isinstance(value, bool):
+                raise ValidationError("broker fill fee is not a number", code="invalid_broker_fill")
+            return money(value, "fee")
+
+        return cls(
+            **required,
+            fill_id=str(uuid.uuid4()),
+            order_id=order_id,
+            commission=_num(overrides.pop("commission", None) or _pick("brokerage", "commission")),
+            exchange_fees=_num(
+                overrides.pop("exchange_fees", None) or _pick("exchange_fees", "exchange_fee")
+            ),
+            regulatory_fees=_num(
+                overrides.pop("regulatory_fees", None)
+                or _pick("regulatory_fees", "statutory_fees", "transaction_charges")
+            ),
+            reference_price=overrides.pop("reference_price", None),
+            liquidity_flag=overrides.pop("liquidity_flag", None),
+            strategy_name=strategy_name,
+            broker_order_id=str(broker_order_id) if broker_order_id is not None else None,
+            **overrides,
         )
 
     # -- persistence -------------------------------------------------------

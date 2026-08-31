@@ -72,6 +72,11 @@ __all__ = [
 
 logger = logging.getLogger("backtest.simulator.portfolio")
 
+#: Run classification values, mirroring the CHECK constraints on
+#: ``portfolios.mode`` / ``portfolios.source`` (migration 002).
+VALID_MODES = ("paper", "live")
+VALID_SOURCES = ("synthetic", "replay", "mstock")
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -296,6 +301,8 @@ class Portfolio:
         base_currency: str = "INR",
         limits: PortfolioLimits | None = None,
         created_at: datetime | None = None,
+        mode: str = "paper",
+        source: str = "synthetic",
     ) -> None:
         self.name = str(name).strip()
         if not self.name:
@@ -326,6 +333,22 @@ class Portfolio:
         self.base_currency = base_currency
         self.limits = limits or PortfolioLimits()
         self.created_at = created_at or _utcnow()
+        #: Run classification (migration 002): paper = simulated fills,
+        #: live = real broker orders.
+        self.mode = str(mode).strip().lower()
+        if self.mode not in VALID_MODES:
+            raise ValidationError(
+                f"unknown mode {mode!r}; expected one of {VALID_MODES}",
+                code="invalid_mode",
+            )
+        #: Where this run's bars come from: synthetic / replay (historical DB)
+        #: / mstock (live broker feed).
+        self.source = str(source).strip().lower()
+        if self.source not in VALID_SOURCES:
+            raise ValidationError(
+                f"unknown source {source!r}; expected one of {VALID_SOURCES}",
+                code="invalid_source",
+            )
 
         self.positions: dict[str, Position] = {}
         """Open positions, keyed by symbol."""
@@ -989,6 +1012,8 @@ class Portfolio:
             "current_cash": str(self.current_cash),
             "base_currency": self.base_currency,
             "status": self.status,
+            "mode": self.mode,
+            "source": self.source,
             "created_at": self.created_at.isoformat(),
             "realized_pnl": str(self.realized_pnl),
             "total_commission": str(self.total_commission),
@@ -1009,6 +1034,8 @@ class Portfolio:
             status=payload.get("status", PortfolioStatus.ACTIVE),
             base_currency=payload.get("base_currency", "INR"),
             limits=PortfolioLimits.from_dict(payload.get("limits") or {}),
+            mode=payload.get("mode", "paper"),
+            source=payload.get("source", "synthetic"),
             created_at=(
                 datetime.fromisoformat(payload["created_at"])
                 if payload.get("created_at")
@@ -1072,6 +1099,8 @@ class Portfolio:
             row.current_cash = self.current_cash
             row.base_currency = self.base_currency
             row.status = self.status
+            row.mode = self.mode
+            row.source = self.source
             row.created_at = self.created_at
             session.flush()
 
@@ -1220,6 +1249,8 @@ class Portfolio:
                 status=row.status,
                 base_currency=row.base_currency,
                 created_at=row.created_at,
+                mode=getattr(row, "mode", None) or "paper",
+                source=getattr(row, "source", None) or "synthetic",
             )
 
             open_rows = session.scalars(

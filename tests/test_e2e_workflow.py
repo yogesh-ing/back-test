@@ -21,7 +21,6 @@ from backtest.api import forward as fwd
 from backtest.brokers.base import STATUS_AUTHENTICATED, BrokerAuthBase
 from backtest.brokers.session_manager import get_session_manager, reset_default_manager
 from backtest.data.synthetic import SyntheticSource
-from backtest.runner import run_on_candles
 from backtest.web.app import create_app
 
 
@@ -94,10 +93,15 @@ def test_backtest_run_adapts_to_display_data(client):
         assert key in body
     assert len(body["equity"]["values"]) == body["metrics"]["bars"]
 
-    # the API response equals a direct adapter run with the same inputs
+    # the API response equals a direct canonical-engine run with the same
+    # inputs (P2.2: the default path is BacktestDriver, not the vectorized
+    # run_on_candles — compare against the same code the endpoint calls)
+    from backtest.api.backtest import _run_driver
+
     candles = SyntheticSource().get_candles("DEMO", "2021-01-01", "2024-01-01", "day")
-    adapted = BacktestAdapter(run_on_candles(candles, "sma_crossover",
-                              {"fast": 10, "slow": 30}, "DEMO")).to_all()
+    adapted = BacktestAdapter(_run_driver(candles, "sma_crossover",
+                                          {"fast": 10, "slow": 30}, "DEMO",
+                                          100_000)).to_all()
     assert adapted["metrics"]["total_trades"] == body["metrics"]["total_trades"]
     assert adapted["metrics"]["final_equity"] == body["metrics"]["final_equity"]
 
