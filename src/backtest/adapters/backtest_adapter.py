@@ -1,4 +1,4 @@
-"""Bridge from ``BacktestResult`` to dashboard/compare/forward payloads.
+"""Bridge from ``BacktestResult`` to dashboard, compare and forward payloads.
 
 PRD §4.5 — Task 1.4. The adapter never mutates its input and always emits
 JSON-serialisable data (native ``float``/``int``/``str``, ISO date strings) so

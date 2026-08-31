@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 import requests
 
-from backtest.data.base import normalize_candles
+from backtest.data.base import MSTOCK_INTERVAL_MAP, normalize_candles
 from backtest.live.auth import get_session_token
 
 
@@ -151,7 +151,12 @@ class MStockSource:
     def __init__(self, token: str | None = None):
         self.client = MStockClient(token)
 
-    def get_candles(self, symbol: str, start: str, end: str, interval: str = "day") -> pd.DataFrame:
-        """Fetch candles from mStock and return canonical frame."""
-        bars = self.client.get_bars(symbol, start, end, interval)
+    def get_candles(self, symbol: str, start: str, end: str, interval: str = "1day") -> pd.DataFrame:
+        """Fetch candles from mStock and return canonical frame.
+
+        ``interval`` is a canonical timeframe (ticket P4.3); it is translated
+        to the mStock wire name before the request.
+        """
+        wire = MSTOCK_INTERVAL_MAP.get(interval, interval)
+        bars = self.client.get_bars(symbol, start, end, wire)
         return _candles_to_frame(bars)

@@ -1,0 +1,10 @@
+{# Shared UI macros (ticket P4.2). #}
+
+{#- Accessible mode/source badge: the text itself carries the value, so the
+    colour is a supplement, never the sole channel. Canonical P1.1 source
+    tags are shortened for display (synthetic→SYNTH, mstock→MSTOCK,
+    replay→REPLAY); anything unknown shows uppercased as-is. Rendered
+    exactly as <span class="badge badge-paper">PAPER/SYNTH</span>. -#}
+{% set source_labels = {'synthetic': 'SYNTH', 'mstock': 'MSTOCK', 'replay': 'REPLAY'} %}
+{% macro badge(mode, source) -%}
+<span class="badge {{ 'badge-live' if mode == 'live' else 'badge-paper' }}">{{ mode | upper }}/{{ source_labels.get(source, source) | upper }}</span>{%- endmacro %}

@@ -395,6 +395,9 @@ body[data-active="portfolio"] .nav-link[data-key="portfolio"] {
 .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: .72rem; font-weight: 600; }
 .badge-single { background: rgba(59,130,246,.18); color: #93c5fd; }
 .badge-pool { background: rgba(139,92,246,.18); color: #c4b5fd; }
+/* Mode/source badges (P4.2) — the text carries the value; colour supplements. */
+.badge-paper { background: rgba(34,197,94,.16); color: #86efac; border: 1px solid rgba(34,197,94,.4); }
+.badge-live { background: rgba(239,68,68,.16); color: #fca5a5; border: 1px solid rgba(239,68,68,.45); }
 .row-actions { display: flex; gap: 4px; }
 .row-btn {
     background: var(--surface-2); border: 1px solid var(--border); color: var(--text);

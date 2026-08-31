@@ -54,7 +54,15 @@ sizing:
     kelly_fraction: 0.5
 
 data:
-  provider: "mock"   # mock, mstock, csv, synthetic
+  # Run classification (ticket P1.2) — resolved by
+  # backtest.data.source_registry.SourceRegistry:
+  #   mode:   backtest | paper | live
+  #   source: paper only -> synthetic | mstock
+  #   replay_speed: bars/second for synthetic replay
+  mode: paper
+  source: synthetic
+  replay_speed: 5
+  provider: "mock"   # legacy provider for the old engine path (retired in P1.4)
   symbols: ["INFY", "RELIANCE", "TCS"]
   timeframe: "1min"
   start_date: "2024-01-01"
@@ -66,7 +74,7 @@ system:
   market: "NSE"
   dry_run: false
   backtest_mode: false
-  state_file: "state/forward_test_state.json"
+  state_file: "state/forward_state.json"
   log_level: "INFO"
   max_errors_before_pause: 5
   heartbeat_interval_seconds: 60

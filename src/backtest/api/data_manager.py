@@ -18,10 +18,11 @@ from datetime import date
 from typing import Any
 
 import requests
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, jsonify, request
 from sqlalchemy import create_engine, text
 
-from backtest.data.db_source import DbSource
+from backtest.data.base import MSTOCK_INTERVAL_MAP
+from backtest.db.config import get_db_url
 from backtest.logging_config import get_logger
 
 data_bp = Blueprint("data_api", __name__)
@@ -49,21 +50,17 @@ _job: dict[str, Any] = {
     "cancel": False,        # flag to stop the job
 }
 
-DB_URL = os.getenv(
-    "FORWARD_TEST_DB_URL",
-    "postgresql+psycopg2://postgres:postgres@localhost:5432/forward_test",
-)
+# Single DB-URL authority (ticket P4.3): FORWARD_TEST_DB_URL env >
+# config/database.yaml profile — no private env reading or hard-coded URLs.
+DB_URL = get_db_url()
 MSTOCK_BASE_URL = os.getenv("MSTOCK_BASE_URL", "https://api.mstock.trade").rstrip("/")
 
-# mStock API interval mapping
-_MSTOCK_INTERVAL_MAP = {
-    "1min": "minute", "5min": "5minute", "15min": "15minute",
-    "30min": "30minute", "60min": "60minute", "1hour": "60minute", "day": "day",
-}
+# mStock API interval mapping — the shared canonical -> TypeA wire map
+# (ticket P4.3: one translation, one place).
+_MSTOCK_INTERVAL_MAP = MSTOCK_INTERVAL_MAP
 
 CHUNK_DAYS_MAP = {
-    "day": 800, "1min": 2, "5min": 10, "15min": 30,
-    "30min": 60, "60min": 120, "1hour": 120,
+    "1day": 800, "1min": 2, "5min": 10, "15min": 30, "1hour": 120,
 }
 
 

@@ -126,6 +126,17 @@ class PortfolioStatus(StrEnum):
     STOPPED = "stopped"
 
 
+class PortfolioMode(StrEnum):
+    PAPER = "paper"
+    LIVE = "live"
+
+
+class PortfolioSource(StrEnum):
+    SYNTHETIC = "synthetic"
+    REPLAY = "replay"
+    MSTOCK = "mstock"
+
+
 class PositionStatus(StrEnum):
     OPEN = "open"
     CLOSED = "closed"
@@ -234,6 +245,14 @@ class Portfolio(Base):
     current_cash: Mapped[Decimal] = mapped_column(Money, nullable=False)
     base_currency: Mapped[str] = mapped_column(CHAR(3), nullable=False, server_default=text("'INR'"))
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'active'"))
+    #: Run classification (migration 002): paper = simulated fills,
+    #: live = real broker orders. Pre-002 history defaults to 'paper'.
+    mode: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'paper'"))
+    #: Where this run's bars come from (migration 002): synthetic = generated,
+    #: replay = historical DB, mstock = live broker feed.
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'synthetic'")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -258,6 +277,8 @@ class Portfolio(Base):
         UniqueConstraint("name", name="uq_portfolios_name"),
         CheckConstraint(_in_check("status", PortfolioStatus), name="ck_portfolios_status"),
         CheckConstraint("initial_capital > 0", name="ck_portfolios_capital_pos"),
+        CheckConstraint(_in_check("mode", PortfolioMode), name="ck_portfolios_mode"),
+        CheckConstraint(_in_check("source", PortfolioSource), name="ck_portfolios_source"),
         Index("ix_portfolios_status", "status"),
     )
 

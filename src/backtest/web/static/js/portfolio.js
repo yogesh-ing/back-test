@@ -17,8 +17,14 @@
     audit: [],
   };
 
+
+
   // ---------------------------------------------------------------- helpers
   const $ = (id) => document.getElementById(id);
+
+  // Bucket scope (ticket P4.1): /portfolio/paper and /portfolio/live set
+  // data-mode on #portfolio-page; the combined landing leaves it empty.
+  const PAGE_MODE = $("portfolio-page") ? $("portfolio-page").dataset.mode || "" : "";
   const fmtMoney = (n, currency) => {
     const c = currency || "₹";
     const sign = n < 0 ? "-" : "";
@@ -148,6 +154,17 @@
     return html;
   }
 
+  // Mode/source badge (ticket P4.2) — mirrors templates/_macros.html::badge.
+  // The text carries the value; the colour is only a supplement.
+  const SOURCE_LABELS = { synthetic: "SYNTH", mstock: "MSTOCK", replay: "REPLAY" };
+  function badgeHtml(mode, source) {
+    const m = (mode || "paper").toUpperCase();
+    const raw = (source || "synthetic").toLowerCase();
+    const s = (SOURCE_LABELS[raw] || raw).toUpperCase();
+    const cls = mode === "live" ? "badge-live" : "badge-paper";
+    return '<span class="badge ' + cls + '">' + m + "/" + s + "</span>";
+  }
+
   function renderMatrix(p) {
     const body = $("matrix-body");
     const rows = filteredRunners(p);
@@ -164,6 +181,7 @@
           '<div class="cell-sub">' + r.strategy_name + '</div></td>' +
         '<td>' + r.target_label + '</td>' +
         '<td>' + typeBadge + '</td>' +
+        '<td>' + badgeHtml(r.mode, r.source) + '</td>' +
         '<td>' + r.timeframe + '</td>' +
         '<td class="num">' + fmtMoney(r.allocated_capital) + '</td>' +
         '<td class="num ' + pnlClass(r.open_pnl) + '">' + fmtSigned(r.open_pnl) + '</td>' +
@@ -253,6 +271,8 @@
 
   // ---------------------------------------------------------------- render
   function render(p) {
+    // SSE broadcasts the combined snapshot — drop other buckets on a scoped page.
+    if (PAGE_MODE) p.runners = (p.runners || []).filter((r) => (r.mode || "paper") === PAGE_MODE);
     state.portfolio = p;
     renderMetrics(p);
     renderBanner(p);
@@ -362,6 +382,7 @@
       body.target_type = "SINGLE_SYMBOL";
       body.symbol = $("spawn-symbol").value.trim();
     }
+    if (PAGE_MODE) body.mode = PAGE_MODE; // spawn into this page's bucket (P4.1)
 
     try {
       const data = await api("/api/portfolio/runner/create", "POST", body);
@@ -459,6 +480,7 @@
     bindEvents();
     connectStream();
     // Initial snapshot (SSE will take over)
-    api("/api/portfolio/summary").then((d) => render(d.portfolio)).catch(() => {});
+    const summaryUrl = "/api/portfolio/summary" + (PAGE_MODE ? "?mode=" + PAGE_MODE : "");
+    api(summaryUrl).then((d) => render(d.portfolio)).catch(() => {});
   });
 })();

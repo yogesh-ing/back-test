@@ -1,7 +1,23 @@
-"""Backtest endpoints (PRD Tasks 1.5 + 1.6).
+"""Backtest endpoints (PRD Tasks 1.5 + 1.6, re-routed in ticket P2.2).
 
 * ``POST /api/backtest/run``      — single strategy deep dive
-* ``POST /api/backtest/run-many`` — 2-4 slots in parallel via ThreadPoolExecutor
+* ``POST /api/backtest/run-many`` — 2-4 slots in parallel via
+  :class:`~concurrent.futures.ProcessPoolExecutor` (ticket P2.3): each slot
+  runs :func:`run_single_backtest` in its own worker process with plain-dict
+  params, so a crashed job cannot take down the web process.
+
+Two engines, one response shape (the UI is unchanged this phase):
+
+* **canonical (default)** — :class:`~backtest.engine.backtest_driver.BacktestDriver`
+  over the simulator executor: the SAME loop the forward paper run uses,
+  next-bar-open fills, Decimal-exact portfolio accounting. The portfolio's
+  per-bar equity snapshots are mapped onto a ``BacktestResult`` so the
+  ``BacktestAdapter`` payload (metrics/equity/drawdown/trades/signals) is
+  byte-for-byte the same shape as before — computed by the same
+  ``engine/metrics`` + ``engine/trades`` code as the vectorized path.
+* ``mode='quick_screen'`` — the legacy vectorized ``Backtester`` (prev-close
+  fills, fractional sizing, built-in cost model), kept ONLY as an optional
+  fast rough filter.
 
 Both log the resolved request, the bars fetched, the engine summary and any
 failure with a traceback, so a UI error toast can always be traced back to one
@@ -12,7 +28,8 @@ line in the server log (the id is quoted back in the JSON body as
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
+import traceback
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -20,8 +37,9 @@ import pandas as pd
 from flask import Blueprint, current_app, jsonify, request
 
 from backtest.adapters.backtest_adapter import BacktestAdapter
+from backtest.data.base import CANONICAL_TIMEFRAMES as SUPPORTED_TIMEFRAMES
 from backtest.engine.backtester import BacktestConfig
-from backtest.logging_config import get_logger, timed, with_request_context
+from backtest.logging_config import get_logger, timed
 from backtest.runner import build_source, run_on_candles
 from backtest.strategy.registry import get_strategy
 
@@ -34,35 +52,24 @@ log = get_logger(__name__)
 # the first bars, as they do in a standalone backtest).
 WARMUP_BARS = 0
 
-_TIMEFRAME_TO_INTERVAL = {
-    "1D": "day", "D": "day", "DAY": "day",
-    "1W": "week", "W": "week",
-    "1H": "hour", "H": "hour",
-    "4H": "4hour",
-    "15M": "15minute",
-    "5M": "5minute",
-}
-
-#: Timeframes the UI offers. Aliases in the map above are tolerated as well;
-#: anything else falls back to ``day`` with a WARNING (gap G6/G11 will harden it).
-SUPPORTED_TIMEFRAMES = ("1D", "1H", "4H", "1W", "15M", "5M")
-
 
 def _interval(timeframe: str | None) -> str:
-    """Resolve a UI timeframe to a source interval (unknown → ``day``).
+    """Resolve a UI timeframe to its canonical name (unknown → ``1day``).
 
-    Kept permissive on purpose: rejecting an unsupported timeframe is part of
-    gap G6/G11. Until then, say so loudly in the log instead of silently.
+    Case-insensitive. Kept permissive on purpose: rejecting an unsupported
+    timeframe is part of gap G6/G11. Until then, say so loudly in the log
+    instead of silently.
     """
     if not timeframe:
-        return "day"
-    key = str(timeframe).upper()
-    if key not in _TIMEFRAME_TO_INTERVAL:
+        return "1day"
+    key = str(timeframe).strip().lower()
+    if key not in SUPPORTED_TIMEFRAMES:
         log.warning(
-            "[timeframe] unsupported timeframe %r — falling back to 'day' (supported: %s)",
+            "[timeframe] unsupported timeframe %r — falling back to '1day' (supported: %s)",
             timeframe, ", ".join(SUPPORTED_TIMEFRAMES),
         )
-    return _TIMEFRAME_TO_INTERVAL.get(key, "day")
+        return "1day"
+    return key
 
 
 def _source() -> Any:
@@ -194,6 +201,81 @@ def _resolve_strategy(name: str):
 
 
 # ---------------------------------------------------------------------------
+# Engines
+# ---------------------------------------------------------------------------
+
+#: Request mode that keeps the legacy vectorized path (fast rough filter only).
+QUICK_SCREEN = "quick_screen"
+
+
+def _run_driver(candles: pd.DataFrame, strategy: str, params: dict,
+                symbol: str, capital: float) -> Any:
+    """Run the CANONICAL engine: ``BacktestDriver`` over simulator/.
+
+    Returns a :class:`BacktestResult` with the same shape the vectorized path
+    produces, so :class:`BacktestAdapter` (and therefore the UI) is unchanged:
+    the equity curve is the portfolio's per-bar equity snapshots and the
+    per-bar holding state is read from those snapshots' ``position_value``
+    (a true per-bar reading of the book — positions open/closed timestamps
+    are wall-clock, not bar time, so they must not be used for this).
+    Metrics and trades come from the same ``engine/metrics`` +
+    ``engine/trades`` code the vectorized path uses.
+
+    Imports are deferred so module import order can never tangle with
+    ``backtest.forward`` (the API and the forward package both import each
+    other's neighbourhood; at request time everything is fully loaded).
+    """
+    from backtest.engine.backtest_driver import BacktestDriver
+    from backtest.engine.backtester import BacktestResult
+    from backtest.engine.metrics import compute_metrics
+    from backtest.forward.paper_runner import _FrameSource, _all_in_size, free_executor
+    from backtest.simulator.portfolio import Portfolio
+
+    strategy_instance = get_strategy(strategy)(**params)
+    active = int((strategy_instance.generate_signals(candles).fillna(0) != 0).sum())
+    if active == 0:
+        log.warning(
+            "[run] %s produced NO signals on %s (%d bars, params=%s) — the run will be "
+            "flat: the indicator warmup likely exceeds the window, or the thresholds "
+            "never trigger on this data",
+            strategy, symbol, len(candles), params,
+        )
+    portfolio = Portfolio(name=f"backtest-{strategy}", initial_capital=capital)
+    driver = BacktestDriver(
+        source=_FrameSource(candles),
+        strategy=strategy_instance,
+        portfolio=portfolio,
+        executor=free_executor(portfolio, max_participation="1"),
+        symbols=[str(symbol).strip().upper()],
+        size_fn=_all_in_size,
+    )
+    driver.run()
+
+    points = portfolio.equity_history
+    index = [pd.Timestamp(p.ts) for p in points]
+    equity = pd.Series([float(p.total_equity) for p in points], index=index, dtype="float64")
+    holding = pd.Series(
+        [1.0 if float(p.position_value) > 0 else 0.0 for p in points],
+        index=index, dtype="float64",
+    )
+    result = BacktestResult(
+        equity=equity,
+        returns=equity.pct_change(),
+        position=holding,
+        candles=candles,
+        config=BacktestConfig(initial_capital=capital),
+        metrics={},
+    )
+    result.metrics = compute_metrics(result)
+    result.metrics["strategy"] = strategy
+    result.metrics["strategy_params"] = params
+    result.metrics["symbol"] = symbol
+    result.metrics["stop_loss"] = result.config.stop_loss
+    result.metrics["take_profit"] = result.config.take_profit
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Single backtest
 # ---------------------------------------------------------------------------
 
@@ -227,9 +309,11 @@ def run_backtest() -> tuple:
     params = data.get("params") or {}
     timeframe = data.get("timeframe", "1D")
     interval = _interval(timeframe)
+    mode = str(data.get("mode", "")).strip().lower()
     log.info(
-        "[run] strategy=%s symbol=%s timeframe=%s→%s range=%s..%s capital=%s params=%s",
-        strategy, symbol, timeframe, interval, from_date, to_date, capital, params,
+        "[run] strategy=%s symbol=%s timeframe=%s→%s range=%s..%s capital=%s mode=%s params=%s",
+        strategy, symbol, timeframe, interval, from_date, to_date, capital,
+        mode or "driver", params,
     )
     problems = _check_params(resolved, params, f"run/{strategy}")
     if problems:
@@ -251,11 +335,27 @@ def run_backtest() -> tuple:
         return jsonify({"error": f"data error: {exc}"}), 400
     log.debug("[data] %s → %d bars in %.1f ms", symbol, len(candles_full), t.elapsed_ms)
 
-    # Run strategy on full dataset (includes warmup bars)
-    config = BacktestConfig(initial_capital=capital)
     try:
-        with timed(log, f"[run] {strategy} on {symbol}", logging.DEBUG):
-            result = run_on_candles(candles_full, strategy, params, symbol, config)
+        if mode == QUICK_SCREEN:
+            # Legacy vectorized quick filter (prev-close fills, built-in costs).
+            with timed(log, f"[run] {strategy} on {symbol} (quick_screen)", logging.DEBUG):
+                result = run_on_candles(
+                    candles_full, strategy, params, symbol,
+                    BacktestConfig(initial_capital=capital),
+                )
+            # Trim results to the requested date range (strip warmup period)
+            before = len(result.equity)
+            result = _trim_to_range(result, from_date, to_date)
+            if before != len(result.equity):
+                log.debug("[trim] %d → %d bars for %s..%s",
+                          before, len(result.equity), from_date, to_date)
+            engine = "quick_screen"
+        else:
+            # Canonical: BacktestDriver over simulator/ (next-bar-open fills).
+            # It runs exactly the fetched range (WARMUP_BARS=0), so no trim.
+            with timed(log, f"[run] {strategy} on {symbol} (driver)", logging.DEBUG):
+                result = _run_driver(candles_full, strategy, params, symbol, capital)
+            engine = "backtest_driver"
     except ValueError as exc:
         log.warning("[run] %s rejected input: %s", strategy, exc)
         return jsonify({"error": str(exc)}), 400
@@ -263,15 +363,10 @@ def run_backtest() -> tuple:
         log.exception("[run] %s crashed on %s", strategy, symbol)
         return jsonify({"error": f"backtest failed: {exc}"}), 500
 
-    # Trim results to the requested date range (strip warmup period)
-    before = len(result.equity)
-    result = _trim_to_range(result, from_date, to_date)
-    if before != len(result.equity):
-        log.debug("[trim] %d → %d bars for %s..%s", before, len(result.equity), from_date, to_date)
-
     payload = BacktestAdapter(result).to_all()
     payload["config"].update(
-        {"timeframe": timeframe, "from_date": from_date, "to_date": to_date}
+        {"timeframe": timeframe, "from_date": from_date, "to_date": to_date,
+         "engine": engine}
     )
     _summarise(payload, f"run/{strategy}", params)
     return jsonify(payload), 200
@@ -313,7 +408,7 @@ def run_many() -> tuple:
         ),
     )
 
-    source = _source()
+    source_name = current_app.config.get("BACKTEST_SOURCE", "synthetic")
 
     # Calculate warmup start date
     try:
@@ -323,49 +418,122 @@ def run_many() -> tuple:
         log.warning("[run-many] unparseable shared.from_date %r — no warmup applied", from_date)
         warmup_start = from_date
 
-    def run_slot(slot: dict) -> tuple[Any, dict]:
-        sid = slot.get("id")
-        try:
-            strategy = slot.get("strategy")
-            resolution = _resolve_strategy(strategy)
-            if isinstance(resolution, str):
-                raise ValueError(resolution)
-            params = slot.get("params") or {}
-            timeframe = slot.get("timeframe", "1D")
-            interval = _interval(timeframe)
-            _check_params(resolution, params, f"slot {sid}")
-            candles_full = source.get_candles(symbol, warmup_start, to_date, interval)
-            log.debug("[slot %s] %s: %d bars @ %s", sid, strategy, len(candles_full), interval)
-            config = BacktestConfig(initial_capital=capital)
-            result = run_on_candles(candles_full, strategy, params, symbol, config)
-            result = _trim_to_range(result, from_date, to_date)
-            payload = BacktestAdapter(result).to_all()
-            payload["config"].update(
-                {
-                    "timeframe": timeframe,
-                    "from_date": from_date,
-                    "to_date": to_date,
-                }
-            )
-            _summarise(payload, f"slot {sid}/{strategy}@{timeframe}", params)
-            return sid, payload
-        except Exception as exc:  # noqa: BLE001 — one bad slot must not poison others
-            log.warning("[slot %s] failed: %s: %s", sid, exc.__class__.__name__, exc)
-            log.debug("[slot %s] traceback", sid, exc_info=True)
-            return sid, {"error": str(exc)}
+    # One PLAIN-DICT job per slot (P2.3): the work runs in a process pool,
+    # so job params must be picklable plain data — no source objects, no
+    # closures, no lambdas. Each worker process rebuilds its own source by
+    # name (sources are deterministic/plain-constructor, so this is exact).
+    jobs = [
+        {
+            "id": slot.get("id"),
+            "strategy": slot.get("strategy"),
+            "params": slot.get("params") or {},
+            "timeframe": slot.get("timeframe", "1D"),
+            "mode": str(slot.get("mode", "")).strip().lower(),
+            "symbol": symbol,
+            "from_date": from_date,
+            "to_date": to_date,
+            "warmup_start": warmup_start,
+            "capital": capital,
+            "source_name": source_name,
+        }
+        for slot in slots
+    ]
 
-    results: dict[str, Any] = {}
     max_workers = min(4, len(slots))
-    # Run each slot inside a copy of this request's context so the worker threads
-    # keep the request id on their log lines (contextvars do not cross threads).
-    run_slot_ctx = with_request_context(run_slot)
-    with timed(log, f"[run-many] {len(slots)} slots", logging.INFO) as t:
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            for sid, payload in pool.map(run_slot_ctx, slots):
-                results[str(sid)] = payload
+    with timed(log, f"[run-many] {len(slots)} slots (process pool)", logging.INFO) as t:
+        with ProcessPoolExecutor(max_workers=max_workers) as pool:
+            # chunksize=1: each slot is its own task, so one crashing job
+            # cannot swallow its neighbours' results.
+            payloads = list(pool.map(run_single_backtest, jobs, chunksize=1))
+
+    # Per-slot logging happens HERE, in the web process: worker-process log
+    # records do not surface in the web process's log capture (process
+    # boundary), so the endpoint re-emits the canonical slot lines — with
+    # the request id — and the worker's traceback rides back in the payload.
+    results: dict[str, Any] = {}
+    for job, payload in zip(jobs, payloads):
+        sid = str(job["id"])
+        results[sid] = payload
+        if isinstance(payload, dict) and "error" in payload:
+            traceback_text = payload.pop("traceback", None)
+            log.warning("[slot %s] failed: %s", sid, payload["error"])
+            if traceback_text:
+                log.debug("[slot %s] traceback:\n%s", sid, traceback_text)
+        else:
+            _summarise(
+                payload,
+                f"slot {sid}/{job.get('strategy')}@{job.get('timeframe', '1D')}",
+                job.get("params") or {},
+            )
     failed = [k for k, v in results.items() if isinstance(v, dict) and "error" in v]
     log.info("[run-many] done in %.1f ms: %d ok, %d failed%s",
              t.elapsed_ms, len(results) - len(failed), len(failed),
              f" (slots {', '.join(failed)})" if failed else "")
 
     return jsonify({"results": results}), 200
+
+
+# ---------------------------------------------------------------------------
+# Process-pool worker (ticket P2.3)
+# ---------------------------------------------------------------------------
+
+
+def run_single_backtest(params: dict) -> dict:
+    """Run ONE backtest slot — the top-level, picklable worker for the pool.
+
+    Takes plain data only (strings/numbers/dicts — no source objects, no
+    closures, no lambdas) and returns the plain-JSON slot payload, or
+    ``{"error": ...}`` — one bad job must never poison the others. The
+    worker rebuilds its source by name, so no unpicklable state crosses the
+    process boundary. (Worker log lines drop the request id: contextvars do
+    not cross processes; the endpoint's own log lines carry it.)
+    """
+    sid = params.get("id")
+    strategy = params.get("strategy")
+    symbol = str(params.get("symbol", "DEMO"))
+    from_date = str(params["from_date"])
+    to_date = str(params["to_date"])
+    capital = float(params.get("capital", 100_000))
+    try:
+        resolution = _resolve_strategy(strategy)
+        if isinstance(resolution, str):
+            raise ValueError(resolution)
+        slot_params = params.get("params") or {}
+        timeframe = params.get("timeframe", "1D")
+        interval = _interval(timeframe)
+        mode = str(params.get("mode", "")).strip().lower()
+        _check_params(resolution, slot_params, f"slot {sid}")
+
+        source = build_source(str(params.get("source_name", "synthetic")))
+        candles_full = source.get_candles(symbol, str(params["warmup_start"]), to_date, interval)
+        log.debug("[slot %s] %s: %d bars @ %s (%s)",
+                  sid, strategy, len(candles_full), interval, mode or "driver")
+
+        if mode == QUICK_SCREEN:
+            result = run_on_candles(
+                candles_full, strategy, slot_params, symbol,
+                BacktestConfig(initial_capital=capital),
+            )
+            result = _trim_to_range(result, from_date, to_date)
+            engine = "quick_screen"
+        else:
+            result = _run_driver(candles_full, strategy, slot_params, symbol, capital)
+            engine = "backtest_driver"
+
+        payload = BacktestAdapter(result).to_all()
+        payload["config"].update(
+            {
+                "timeframe": timeframe,
+                "from_date": from_date,
+                "to_date": to_date,
+                "engine": engine,
+            }
+        )
+        # NOTE: the [result]/[slot ...] INFO lines are emitted by the ENDPOINT
+        # (web process) after the pool returns — worker-process log records
+        # do not surface in the web process's log capture.
+        return payload
+    except Exception as exc:  # noqa: BLE001 — one bad job must not poison others
+        traceback_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        log.debug("[slot %s] failed: %s", sid, exc)  # child-side only
+        return {"error": f"{exc.__class__.__name__}: {exc}", "traceback": traceback_text}

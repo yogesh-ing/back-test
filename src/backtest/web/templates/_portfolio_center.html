@@ -1,0 +1,246 @@
+{% set center_mode = mode or "" %}
+<div class="portfolio-page" id="portfolio-page" data-mode="{{ center_mode }}">
+
+    <!-- Circuit breaker / alert banner -->
+    <div id="cb-banner" class="cb-banner" hidden>
+        <span class="cb-icon">🚨</span>
+        <div class="cb-body">
+            <strong>CIRCUIT BREAKER HALTED</strong>
+            <span id="cb-reason" class="cb-reason"></span>
+        </div>
+        <button id="cb-reset-btn" class="btn btn-ghost" type="button">Reset &amp; Resume</button>
+    </div>
+
+    <!-- Concentration warnings -->
+    <div id="warning-banner" class="warning-banner" hidden></div>
+
+    <!-- Header / global metrics -->
+    <div class="card pcc-header">
+        <div class="pcc-title-row">
+            <div>
+                <h1 class="pcc-title">🤖 Portfolio Command Center</h1>
+                <div class="pcc-conn">
+                    <span id="feed-dot" class="feed-dot">🟢</span>
+                    <span id="feed-label">Feed: connecting…</span>
+                </div>
+            </div>
+            <div class="pcc-actions">
+                <button id="btn-add" class="btn btn-primary" type="button">＋ Add Instance</button>
+                <button id="btn-pause-all" class="btn btn-warn" type="button">⏸ Pause All</button>
+                <button id="btn-resume-all" class="btn btn-ghost" type="button">▶ Resume All</button>
+                <button id="btn-emergency" class="btn btn-danger" type="button">🔴 Emergency Flatten</button>
+            </div>
+        </div>
+
+        <div class="metric-cards" id="metric-cards">
+            <div class="metric-card">
+                <div class="metric-label">Total Capital</div>
+                <div class="metric-value" id="m-total-capital">—</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Total Equity</div>
+                <div class="metric-value" id="m-total-equity">—</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Deployed</div>
+                <div class="metric-value" id="m-deployed">—</div>
+                <div class="metric-sub"><div class="pbar"><div id="m-deployed-bar" class="pbar-fill"></div></div></div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Daily P&amp;L</div>
+                <div class="metric-value" id="m-daily-pnl">—</div>
+                <div class="metric-sub" id="m-daily-pnl-pct"></div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Realized P&amp;L</div>
+                <div class="metric-value" id="m-realized-pnl">—</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Open Positions</div>
+                <div class="metric-value" id="m-positions">—</div>
+                <div class="metric-sub" id="m-runner-count"></div>
+            </div>
+            <div class="metric-card metric-card-wide">
+                <div class="metric-label">Daily Loss Limit</div>
+                <div class="pbar pbar-danger"><div id="m-loss-bar" class="pbar-fill pbar-fill-danger"></div></div>
+                <div class="metric-sub" id="m-loss-text">—</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Instance matrix -->
+    <div class="card pcc-matrix">
+        <div class="matrix-toolbar">
+            <h2 class="card-title">Instance Management Matrix</h2>
+            <div class="matrix-controls">
+                <input id="matrix-search" type="text" class="input"
+                       placeholder="Search strategy / symbol / name…" autocomplete="off">
+                <select id="matrix-filter" class="input input-select">
+                    <option value="all">All Statuses</option>
+                    <option value="RUNNING">🟢 Running</option>
+                    <option value="PAUSED">🟡 Paused</option>
+                    <option value="STOPPED">⚫ Stopped</option>
+                    <option value="ERROR">🔴 Error</option>
+                </select>
+                <select id="matrix-sort" class="input input-select" title="Sort by">
+                    <option value="default">Sort: Default</option>
+                    <option value="daily_pnl">Daily P&amp;L</option>
+                    <option value="open_pnl">Open P&amp;L</option>
+                    <option value="allocated">Capital Allocation</option>
+                    <option value="name">Name</option>
+                    <option value="status">Status</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="table-scroll">
+            <table class="matrix-table" id="matrix-table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Strategy Name</th>
+                        <th>Target Asset</th>
+                        <th>Type</th>
+                        <th>Mode/Source</th>
+                        <th>TF</th>
+                        <th class="num">Alloc (₹)</th>
+                        <th class="num">Open P&amp;L</th>
+                        <th class="num">Daily P&amp;L</th>
+                        <th class="num">Positions</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="matrix-body">
+                </tbody>
+            </table>
+        </div>
+        <div id="matrix-empty" class="matrix-empty" hidden>
+            <p>No strategy instances deployed yet.</p>
+            <p class="muted">Click <strong>＋ Add Instance</strong> to spawn your first runner.</p>
+        </div>
+    </div>
+
+    <!-- Consolidated views -->
+    <div class="card pcc-bottom">
+        <div class="tabs">
+            <button class="tab active" data-tab="equity" type="button">Combined Equity Curve</button>
+            <button class="tab" data-tab="positions" type="button">Aggregate Open Positions</button>
+            <button class="tab" data-tab="log" type="button">Master Audit Log</button>
+        </div>
+        <div class="tab-panel" id="tab-equity">
+            <canvas id="portfolio-equity-chart" height="90"></canvas>
+        </div>
+        <div class="tab-panel" id="tab-positions" hidden>
+            <div class="table-scroll">
+                <table class="matrix-table">
+                    <thead><tr><th>Instance</th><th>Symbol</th><th>Side</th><th class="num">Qty</th>
+                        <th class="num">Entry</th><th class="num">Current</th><th class="num">Unrealized P&amp;L</th></tr></thead>
+                    <tbody id="aggregate-positions"></tbody>
+                </table>
+            </div>
+        </div>
+        <div class="tab-panel" id="tab-log" hidden>
+            <div id="audit-log" class="audit-log"></div>
+        </div>
+    </div>
+{% if center_mode %}
+<div class="pcc-scope-banner">
+    Scoping this command center to the
+    <strong>{{ "PAPER" if center_mode == "paper" else "LIVE" }}</strong> bucket only —
+    other buckets never appear here.
+</div>
+{% endif %}
+</div>
+
+<!-- Add instance modal -->
+<div id="spawn-modal" class="modal-overlay" hidden>
+    <div class="modal">
+        <div class="modal-head">
+            <h3>Spawn Strategy Instance</h3>
+            <button class="modal-close" data-close="spawn-modal" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Instance name (optional)</label>
+                <input id="spawn-name" class="input" type="text" placeholder="e.g. RSI-BTC-4H">
+            </div>
+            <div class="form-row">
+                <label>Strategy</label>
+                <select id="spawn-strategy" class="input input-select"></select>
+            </div>
+            <div class="two-col">
+                <div class="form-row">
+                    <label>Target mode</label>
+                    <select id="spawn-target-mode" class="input input-select">
+                        <option value="single">Single Symbol</option>
+                        <option value="pool">Symbol Universe (Pool)</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>Timeframe</label>
+                    <select id="spawn-timeframe" class="input input-select">
+                        <option>1min</option><option>5min</option><option>15min</option>
+                        <option selected>1hour</option><option>4hour</option>
+                        <option>1day</option><option>1week</option>
+                    </select>
+                </div>
+            </div>
+            <div class="two-col">
+                <div class="form-row" id="spawn-symbol-row">
+                    <label>Symbol</label>
+                    <input id="spawn-symbol" class="input" type="text" placeholder="BTC/USD or RELIANCE" value="BTC/USD">
+                </div>
+                <div class="form-row" id="spawn-universe-row" hidden>
+                    <label>Universe / Pool</label>
+                    <select id="spawn-universe" class="input input-select"></select>
+                </div>
+                <div class="form-row" id="spawn-maxpos-row" hidden>
+                    <label>Max pool positions</label>
+                    <input id="spawn-maxpos" class="input" type="number" value="5" min="1" max="20">
+                </div>
+                <div class="form-row">
+                    <label>Allocated capital (₹)</label>
+                    <input id="spawn-capital" class="input" type="number" value="1000000" min="1000">
+                </div>
+            </div>
+            <div id="spawn-params" class="spawn-params"></div>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-ghost" data-close="spawn-modal" type="button">Cancel</button>
+            <button id="spawn-submit" class="btn btn-primary" type="button">Deploy Instance</button>
+        </div>
+    </div>
+</div>
+
+<!-- Emergency confirm modal -->
+<div id="emergency-modal" class="modal-overlay" hidden>
+    <div class="modal modal-sm">
+        <div class="modal-head"><h3>🔴 Emergency Flatten All</h3>
+            <button class="modal-close" data-close="emergency-modal" type="button">✕</button></div>
+        <div class="modal-body">
+            <p>This will <strong>cancel new entries and market-exit every open position
+            across all runners</strong>, then halt the portfolio.</p>
+            <p class="muted">Use only for risk emergencies. This cannot be undone.</p>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-ghost" data-close="emergency-modal" type="button">Cancel</button>
+            <button id="emergency-confirm" class="btn btn-danger" type="button">Flatten Everything</button>
+        </div>
+    </div>
+</div>
+
+<!-- Deep-dive slide-over drawer -->
+<div id="drawer-overlay" class="drawer-overlay" hidden></div>
+<aside id="deep-dive" class="deep-dive" hidden>
+    <div class="drawer-head">
+        <div>
+            <h3 id="dd-title">Instance Detail</h3>
+            <div id="dd-subtitle" class="muted"></div>
+        </div>
+        <button class="modal-close" id="dd-close" type="button">✕</button>
+    </div>
+    <div class="drawer-body" id="dd-body">
+        <div class="loader-spinner" id="dd-loader">Loading…</div>
+    </div>
+</aside>
