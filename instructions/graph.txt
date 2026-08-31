@@ -1,130 +1,283 @@
+# Version: 2.0 | Date: 2026-08-31 | Commit: b68e328
+# Regenerated from AST analysis of src/backtest/*.py
+# Previous: 1.0 (aa2b583, 2026-08-30)
+
 === edges (backtest-internal only) ===
-backtest.__main__
-    -> backtest.__main__
 backtest.adapters
     -> backtest.adapters.backtest_adapter
 backtest.adapters.backtest_adapter
-    -> backtest.engine.backtester, backtest.engine.trades, backtest.logging_config
-backtest.alerts
-    -> backtest.alerts.manager
-backtest.analysis
-    -> backtest.analysis.comparison
-backtest.analysis.comparison
-    -> backtest.db.models
+    -> backtest.engine.backtester
+    -> backtest.engine.trades
+    -> backtest.logging_config
 backtest.api
-    -> backtest.api.backtest, backtest.api.broker_auth, backtest.api.data_manager, backtest.api.forward, backtest.api.portfolio, backtest.api.strategies, backtest.api.symbols
+    -> backtest.api.backtest
+    -> backtest.api.broker_auth
+    -> backtest.api.data_manager
+    -> backtest.api.forward
+    -> backtest.api.portfolio
+    -> backtest.api.strategies
+    -> backtest.api.symbols
 backtest.api.backtest
-    -> backtest.adapters.backtest_adapter, backtest.engine.backtester, backtest.engine.metrics, backtest.logging_config, backtest.runner, backtest.strategy.registry
+    -> backtest.adapters.backtest_adapter
+    -> backtest.data.base
+    -> backtest.engine.backtest_driver
+    -> backtest.engine.backtester
+    -> backtest.engine.metrics
+    -> backtest.forward.paper_runner
+    -> backtest.logging_config
+    -> backtest.runner
+    -> backtest.simulator.portfolio
+    -> backtest.strategy.registry
 backtest.api.broker_auth
-    -> backtest.brokers.session_manager, backtest.logging_config
+    -> backtest.brokers.session_manager
+    -> backtest.logging_config
 backtest.api.data_manager
-    -> backtest.data.db_source, backtest.logging_config
+    -> backtest.data.base
+    -> backtest.db.config
+    -> backtest.logging_config
 backtest.api.forward
-    -> backtest.adapters.backtest_adapter, backtest.brokers.session_manager, backtest.engine.backtester, backtest.engine.metrics, backtest.logging_config, backtest.runner
+    -> backtest.adapters.backtest_adapter
+    -> backtest.brokers.session_manager
+    -> backtest.data.base
+    -> backtest.engine.backtester
+    -> backtest.engine.metrics
+    -> backtest.logging_config
+    -> backtest.runner
 backtest.api.portfolio
-    -> backtest.data.universe, backtest.forward.portfolio_manager, backtest.forward.risk_supervisor, backtest.forward.runner, backtest.logging_config
+    -> backtest.data.universe
+    -> backtest.forward.paper_runner
+    -> backtest.forward.portfolio_manager
+    -> backtest.logging_config
 backtest.api.strategies
-    -> backtest.logging_config, backtest.strategy.registry
+    -> backtest.logging_config
+    -> backtest.strategy.registry
 backtest.api.symbols
-    -> backtest.data.db_source, backtest.logging_config
+    -> backtest.data.db_source
+    -> backtest.logging_config
 backtest.brokers
-    -> backtest.brokers.base, backtest.brokers.mstock, backtest.brokers.session_manager
+    -> backtest.brokers.base
+    -> backtest.brokers.mstock
+    -> backtest.brokers.session_manager
 backtest.brokers.mstock
     -> backtest.brokers.base
 backtest.brokers.session_manager
-    -> backtest.brokers.base, backtest.brokers.mstock
+    -> backtest.brokers.base
+    -> backtest.brokers.mstock
 backtest.cli
-    -> backtest.engine.backtester, backtest.engine.plotting, backtest.forward.paper, backtest.live.preflight, backtest.logging_config, backtest.runner, backtest.strategy.registry
-backtest.config_manager
-    -> backtest.config_manager.manager
-backtest.dashboard
-    -> backtest.dashboard.app, backtest.dashboard.data_provider
-backtest.dashboard.app
-    -> backtest.dashboard.app, backtest.forward.engine, backtest.simulator.enums, backtest.simulator.order, backtest.simulator.portfolio
-backtest.dashboard.data_provider
-    -> backtest.simulator.money
-backtest.data
-    -> backtest.data.base, backtest.data.universe
+    -> backtest.engine.backtester
+    -> backtest.engine.plotting
+    -> backtest.forward.paper_runner
+    -> backtest.live.preflight
+    -> backtest.logging_config
+    -> backtest.runner
+    -> backtest.strategy.registry
 backtest.data.csv_source
-    -> backtest.data.csv_source, backtest.logging_config
+    -> backtest.logging_config
 backtest.data.db_source
-    -> backtest.data.base, backtest.logging_config
+    -> backtest.data.base
+    -> backtest.db.config
+    -> backtest.logging_config
+backtest.data.mstock_live_feed
+    -> backtest.data.base
+    -> backtest.live.auth
+backtest.data.source_registry
+    -> backtest.data.base
+    -> backtest.data.db_source
+    -> backtest.data.mstock_live_feed
+    -> backtest.data.synthetic
+    -> backtest.db.config
 backtest.data.synthetic
-    -> backtest.data.synthetic, backtest.logging_config
+    -> backtest.logging_config
 backtest.db
-    -> backtest.db.config, backtest.db.manager, backtest.db.models
+    -> backtest.db.config
+    -> backtest.db.manager
+    -> backtest.db.models
 backtest.db.manager
     -> backtest.db.config
+backtest.engine.backtest_driver
+    -> backtest.data.db_source
+    -> backtest.data.mstock_live_feed
+    -> backtest.data.synthetic
+    -> backtest.simulator.engine_loop
 backtest.engine.backtester
-    -> backtest.engine.metrics, backtest.logging_config
+    -> backtest.engine.metrics
+    -> backtest.logging_config
 backtest.engine.metrics
     -> backtest.engine.trades
 backtest.forward
-    -> backtest.alerts.manager, backtest.dashboard.app, backtest.dashboard.data_provider, backtest.forward.broker, backtest.forward.engine, backtest.forward.order_ledger, backtest.forward.paper, backtest.forward.portfolio, backtest.forward.portfolio_manager, backtest.forward.risk_supervisor, backtest.forward.runner, backtest.forward.strategy_adapter, backtest.simulator.performance, backtest.simulator.risk_manager, backtest.simulator.stop_manager, backtest.simulator.trade_analyzer
+    -> backtest.simulator.performance
+    -> backtest.simulator.risk_manager
+    -> backtest.simulator.stop_manager
+    -> backtest.simulator.trade_analyzer
 backtest.forward.engine
-    -> backtest.db.manager, backtest.db.models, backtest.forward.strategy_adapter, backtest.live.data_validator, backtest.live.market_data_handler, backtest.live.time_manager, backtest.logging_config, backtest.simulator.errors, backtest.simulator.execution, backtest.simulator.fees, backtest.simulator.money, backtest.simulator.performance, backtest.simulator.portfolio, backtest.simulator.position_sizing, backtest.simulator.risk_manager, backtest.simulator.slippage, backtest.simulator.stop_manager, backtest.simulator.trade_analyzer, backtest.strategy.registry
-backtest.forward.live_engine
-    -> backtest.api.backtest, backtest.data.base, backtest.live.auth, backtest.runner, backtest.strategy.registry
-backtest.forward.paper
-    -> backtest.engine.backtester, backtest.forward.broker, backtest.forward.portfolio, backtest.strategy.registry
+    -> backtest.db.manager
+    -> backtest.db.models
+    -> backtest.forward.strategy_adapter
+    -> backtest.live.data_validator
+    -> backtest.live.market_data_handler
+    -> backtest.live.time_manager
+    -> backtest.logging_config
+    -> backtest.simulator.errors
+    -> backtest.simulator.execution
+    -> backtest.simulator.fees
+    -> backtest.simulator.money
+    -> backtest.simulator.performance
+    -> backtest.simulator.portfolio
+    -> backtest.simulator.position_sizing
+    -> backtest.simulator.risk_manager
+    -> backtest.simulator.slippage
+    -> backtest.simulator.stop_manager
+    -> backtest.simulator.trade_analyzer
+    -> backtest.strategy.registry
+backtest.forward.paper_runner
+    -> backtest.data.base
+    -> backtest.data.db_source
+    -> backtest.data.mstock_live_feed
+    -> backtest.data.synthetic
+    -> backtest.data.universe
+    -> backtest.simulator.engine_loop
+    -> backtest.simulator.enums
+    -> backtest.simulator.execution
+    -> backtest.simulator.fees
+    -> backtest.simulator.order
+    -> backtest.simulator.portfolio
+    -> backtest.simulator.slippage
+    -> backtest.strategy.base
+    -> backtest.strategy.registry
 backtest.forward.portfolio_manager
-    -> backtest.forward.feed, backtest.forward.order_ledger, backtest.forward.risk_supervisor, backtest.forward.runner
+    -> backtest.forward.feed
+    -> backtest.forward.paper_runner
+    -> backtest.forward.risk_supervisor
 backtest.forward.risk_supervisor
     -> backtest.data.universe
-backtest.forward.runner
-    -> backtest.data.universe, backtest.forward.order_ledger, backtest.strategy.registry
 backtest.forward.strategy_adapter
-    -> backtest.db.models, backtest.simulator.enums, backtest.simulator.errors, backtest.simulator.money, backtest.simulator.order, backtest.simulator.position_sizing, backtest.strategy.base
-backtest.live
-    -> backtest.live.auth, backtest.live.data_validator, backtest.live.market_data_handler, backtest.live.mstock, backtest.live.preflight, backtest.live.time_manager
+    -> backtest.db.models
+    -> backtest.simulator.enums
+    -> backtest.simulator.errors
+    -> backtest.simulator.money
+    -> backtest.simulator.order
+    -> backtest.simulator.position_sizing
+    -> backtest.strategy.base
 backtest.live.market_data_handler
-    -> backtest.db.models, backtest.live.data_validator, backtest.live.mstock, backtest.live.time_manager
+    -> backtest.db.models
+    -> backtest.live.data_validator
+    -> backtest.live.mstock
+    -> backtest.live.time_manager
 backtest.live.mstock
-    -> backtest.data.base, backtest.live.auth
-backtest.marketdata
-    -> backtest.marketdata.bars, backtest.marketdata.errors, backtest.marketdata.feed, backtest.marketdata.handler, backtest.marketdata.quality, backtest.marketdata.ticks, backtest.marketdata.timesync
-backtest.marketdata.bars
-    -> backtest.marketdata.ticks
-backtest.marketdata.feed
-    -> backtest.live.mstock, backtest.marketdata.errors
-backtest.marketdata.handler
-    -> backtest.db.manager, backtest.db.models, backtest.marketdata.bars, backtest.marketdata.errors, backtest.marketdata.feed, backtest.marketdata.quality, backtest.marketdata.ticks
-backtest.marketdata.quality
-    -> backtest.marketdata.bars, backtest.marketdata.errors, backtest.marketdata.ticks, backtest.simulator.money
-backtest.marketdata.ticks
-    -> backtest.marketdata.errors, backtest.simulator.money
-backtest.marketdata.timesync
-    -> backtest.marketdata.bars, backtest.marketdata.errors
+    -> backtest.data.base
+    -> backtest.live.auth
 backtest.runner
-    -> backtest.data.csv_source, backtest.data.db_source, backtest.data.synthetic, backtest.engine.backtester, backtest.live.mstock, backtest.logging_config, backtest.strategy.registry
+    -> backtest.data.csv_source
+    -> backtest.data.db_source
+    -> backtest.data.synthetic
+    -> backtest.engine.backtester
+    -> backtest.live.mstock
+    -> backtest.logging_config
+    -> backtest.strategy.registry
 backtest.simulator
-    -> backtest.simulator.commission, backtest.simulator.enums, backtest.simulator.errors, backtest.simulator.execution, backtest.simulator.fees, backtest.simulator.fill, backtest.simulator.lots, backtest.simulator.money, backtest.simulator.order, backtest.simulator.performance, backtest.simulator.portfolio, backtest.simulator.position, backtest.simulator.position_sizing, backtest.simulator.risk_manager, backtest.simulator.slippage, backtest.simulator.stop_manager, backtest.simulator.trade_analyzer
+    -> backtest.simulator.commission
+    -> backtest.simulator.enums
+    -> backtest.simulator.errors
+    -> backtest.simulator.execution
+    -> backtest.simulator.fees
+    -> backtest.simulator.fill
+    -> backtest.simulator.lots
+    -> backtest.simulator.money
+    -> backtest.simulator.order
+    -> backtest.simulator.performance
+    -> backtest.simulator.portfolio
+    -> backtest.simulator.position
+    -> backtest.simulator.position_sizing
+    -> backtest.simulator.risk_manager
+    -> backtest.simulator.slippage
+    -> backtest.simulator.stop_manager
+    -> backtest.simulator.trade_analyzer
 backtest.simulator.commission
-    -> backtest.simulator.enums, backtest.simulator.errors, backtest.simulator.money
+    -> backtest.simulator.enums
+    -> backtest.simulator.errors
+    -> backtest.simulator.money
+backtest.simulator.engine_loop
+    -> backtest.simulator.enums
+    -> backtest.simulator.errors
+    -> backtest.simulator.execution
+    -> backtest.simulator.order
+    -> backtest.simulator.portfolio
 backtest.simulator.execution
-    -> backtest.simulator.enums, backtest.simulator.errors, backtest.simulator.fees, backtest.simulator.fill, backtest.simulator.money, backtest.simulator.order, backtest.simulator.portfolio, backtest.simulator.slippage
+    -> backtest.simulator.enums
+    -> backtest.simulator.errors
+    -> backtest.simulator.fees
+    -> backtest.simulator.fill
+    -> backtest.simulator.fill_providers
+    -> backtest.simulator.money
+    -> backtest.simulator.order
+    -> backtest.simulator.portfolio
+    -> backtest.simulator.slippage
 backtest.simulator.fees
-    -> backtest.simulator.commission, backtest.simulator.enums, backtest.simulator.errors, backtest.simulator.money, backtest.simulator.order
+    -> backtest.simulator.commission
+    -> backtest.simulator.enums
+    -> backtest.simulator.errors
+    -> backtest.simulator.money
+    -> backtest.simulator.order
 backtest.simulator.fill
-    -> backtest.db.manager, backtest.db.models, backtest.simulator.commission, backtest.simulator.enums, backtest.simulator.errors, backtest.simulator.money, backtest.simulator.order, backtest.simulator.position
+    -> backtest.db.manager
+    -> backtest.db.models
+    -> backtest.simulator.commission
+    -> backtest.simulator.enums
+    -> backtest.simulator.errors
+    -> backtest.simulator.money
+    -> backtest.simulator.order
+    -> backtest.simulator.position
+backtest.simulator.fill_providers
+    -> backtest.simulator.enums
+    -> backtest.simulator.errors
+    -> backtest.simulator.execution
+    -> backtest.simulator.fees
+    -> backtest.simulator.fill
+    -> backtest.simulator.money
+    -> backtest.simulator.order
+    -> backtest.simulator.slippage
 backtest.simulator.lots
-    -> backtest.simulator.errors, backtest.simulator.money
+    -> backtest.simulator.errors
+    -> backtest.simulator.money
 backtest.simulator.order
-    -> backtest.db.manager, backtest.db.models, backtest.simulator.enums, backtest.simulator.errors, backtest.simulator.money
+    -> backtest.db.manager
+    -> backtest.db.models
+    -> backtest.simulator.enums
+    -> backtest.simulator.errors
+    -> backtest.simulator.money
 backtest.simulator.performance
-    -> backtest.db.models, backtest.simulator.errors, backtest.simulator.money
+    -> backtest.db.models
+    -> backtest.simulator.errors
+    -> backtest.simulator.money
 backtest.simulator.portfolio
-    -> backtest.db.manager, backtest.db.models, backtest.simulator.errors, backtest.simulator.fill, backtest.simulator.money, backtest.simulator.position
+    -> backtest.db.manager
+    -> backtest.db.models
+    -> backtest.simulator.errors
+    -> backtest.simulator.fill
+    -> backtest.simulator.money
+    -> backtest.simulator.position
 backtest.simulator.position
-    -> backtest.db.manager, backtest.db.models, backtest.simulator.errors, backtest.simulator.lots, backtest.simulator.money
+    -> backtest.db.manager
+    -> backtest.db.models
+    -> backtest.simulator.errors
+    -> backtest.simulator.lots
+    -> backtest.simulator.money
 backtest.simulator.position_sizing
-    -> backtest.simulator.errors, backtest.simulator.money
+    -> backtest.simulator.errors
+    -> backtest.simulator.money
 backtest.simulator.risk_manager
-    -> backtest.simulator.errors, backtest.simulator.money
+    -> backtest.simulator.errors
+    -> backtest.simulator.money
 backtest.simulator.slippage
-    -> backtest.simulator.enums, backtest.simulator.errors, backtest.simulator.money, backtest.simulator.order
+    -> backtest.simulator.enums
+    -> backtest.simulator.errors
+    -> backtest.simulator.money
+    -> backtest.simulator.order
 backtest.simulator.stop_manager
-    -> backtest.simulator.enums, backtest.simulator.errors, backtest.simulator.money, backtest.simulator.order
+    -> backtest.simulator.enums
+    -> backtest.simulator.errors
+    -> backtest.simulator.money
+    -> backtest.simulator.order
 backtest.simulator.trade_analyzer
     -> backtest.simulator.money
 backtest.strategies.buy_and_hold
@@ -135,37 +288,45 @@ backtest.strategies.rsi_reversion
     -> backtest.strategy.base
 backtest.strategies.sma_crossover
     -> backtest.strategy.base
-backtest.strategy
-    -> backtest.strategy.adapter, backtest.strategy.base, backtest.strategy.registry
 backtest.strategy.adapter
-    -> backtest.forward.strategy_adapter, backtest.simulator.position_sizing
-backtest.strategy.base
-    -> backtest.strategy.base
+    -> backtest.forward.strategy_adapter
+    -> backtest.simulator.position_sizing
 backtest.strategy.registry
-    -> backtest.logging_config, backtest.strategies, backtest.strategy.registry
+    -> backtest.logging_config
+    -> backtest.strategies
 backtest.web
     -> backtest.web.app
 backtest.web.app
-    -> backtest.api, backtest.api.backtest, backtest.api.symbols, backtest.brokers.session_manager, backtest.data.db_source, backtest.logging_config
+    -> backtest.api
+    -> backtest.api.backtest
+    -> backtest.api.portfolio
+    -> backtest.api.symbols
+    -> backtest.brokers.session_manager
+    -> backtest.data.db_source
+    -> backtest.logging_config
+
 === orphan modules (no in-package importer) ===
-backtest
+backtest.__main__
 backtest.adapters
-backtest.alerts
-backtest.analysis
 backtest.brokers
 backtest.cli
-backtest.config_manager
-backtest.dashboard
 backtest.data
+backtest.data.source_registry
 backtest.db
 backtest.forward
-backtest.forward.live_engine
+backtest.forward.engine
 backtest.live
-backtest.marketdata
 backtest.simulator
 backtest.strategies.buy_and_hold
 backtest.strategies.donchian_breakout
 backtest.strategies.rsi_reversion
 backtest.strategies.sma_crossover
 backtest.strategy
+backtest.strategy.adapter
 backtest.web
+
+# Changelog
+# | Version | Date       | Commit  | Changes |
+# |---------|------------|---------|---------|
+# | 1.0     | 2026-08-30 | aa2b583 | Initial graph: 77 modules, 12 orphans |
+# | 2.0     | 2026-08-31 | b68e328 | Deleted 6 orphan packages; added source_registry, mstock_live_feed, backtest_driver, paper_runner, engine_loop, fill_providers; 83 modules, 18 orphans |

@@ -1,10 +1,10 @@
 # Architecture Blueprint — `back-test`
 
-> Read-only audit blueprint. **No code was changed.**
-> Generated: 2026-08-30 · branch `arena/01a0520c-back-test` · based on commit `aa2b583`.
+> Read-only audit blueprint. Updated to reflect current repo state.
+> **Version: 2.0** · Date: 2026-08-31 · Commit: `b68e328`
+> Previous: 1.0 (`aa2b583`, 2026-08-30)
 > Dependency edges in §2 were generated automatically with Python's `ast` module —
 > the raw output is saved next to this file as **`graph.txt`** (regenerate:
-> `python3 /tmp/depmap.py` style script; see §2.10).
 
 ---
 
