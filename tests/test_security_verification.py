@@ -331,31 +331,46 @@ class TestErrorHandlingSecurity:
 
 
 class TestForwardTestSecurity:
-    """Test forward test security gates."""
-    
-    def test_forward_start_requires_authentication(self, client):
-        """Verify forward start requires authentication."""
-        response = client.post('/api/forward/start', json={
+    """Test forward test security gates (ticket #10: auth gates LIVE, not paper)."""
+
+    def test_forward_paper_needs_no_auth_but_live_does(self, client):
+        """Paper replays start without a broker session; live is refused 403."""
+        # Paper (the default) needs no broker session — the T10 split.
+        paper = client.post('/api/forward/start', json={
             'strategy': 'sma_crossover',
             'symbol': 'DEMO',
             'timeframe': '1D',
             'from_date': '2024-01-01',
             'to_date': '2024-12-31',
-            'capital': 10000
+            'capital': 10000,
         })
-        
-        assert response.status_code == 403
-        response_json = response.get_json()
-        assert response_json['error'] == 'broker_not_authenticated'
-    
+        assert paper.status_code == 200
+        assert paper.get_json()['mode'] == 'paper'
+
+        # Live refuses an unauthenticated request BEFORE the not-wired refusal.
+        live = client.post('/api/forward/start', json={
+            'strategy': 'sma_crossover',
+            'symbol': 'DEMO',
+            'mode': 'live',
+            'source': 'mstock',
+            'timeframe': '1D',
+            'from_date': '2024-01-01',
+            'to_date': '2024-12-31',
+            'capital': 10000,
+        })
+        assert live.status_code == 403
+        assert live.get_json()['error'] == 'broker_not_authenticated'
+
     def test_forward_start_blocked_with_expired_session(self, client, broker):
-        """Verify forward start is blocked with expired session."""
+        """Verify LIVE forward start is blocked with expired session."""
         broker.authenticate({"username": "test", "password": "test"})
         broker.logout()  # Simulate expiry
         
         response = client.post('/api/forward/start', json={
             'strategy': 'sma_crossover',
             'symbol': 'DEMO',
+            'mode': 'live',
+            'source': 'mstock',
             'timeframe': '1D',
             'from_date': '2024-01-01',
             'to_date': '2024-12-31',
@@ -363,6 +378,7 @@ class TestForwardTestSecurity:
         })
         
         assert response.status_code == 403
+        assert response.get_json()['error'] == 'broker_not_authenticated'
     
     def test_forward_start_allowed_when_authenticated(self, client, broker):
         """Verify forward start is allowed when authenticated."""

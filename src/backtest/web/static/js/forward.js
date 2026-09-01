@@ -1,9 +1,16 @@
 /**
- * Forward Test page controller — live paper trading.
+ * Forward Test page controller — paper forward replay.
  *
- * Start → launches LiveForwardEngine (background thread).
- * Status polled every 2 seconds. Equity chart updates in real-time.
- * Trade feed shows executed paper trades with PnL.
+ * Start → POST /api/forward/start; the server owns the replay
+ * (ForwardSession + run_quick_screen, simulated fills) and a polling snapshot
+ * is rendered every 2 s. This page NEVER paper-fills a live-labelled run:
+ * mode=live is refused by the server (live_execution_not_wired) so a user
+ * cannot silently start something the backend classifies live.
+ *
+ * Taxonomy (ticket #10): run mode (paper|live) and data source
+ * (synthetic|replay|mstock) are first-class, selected from the canonical
+ * vocabulary the server injects into the template — this file only reads
+ * the controls; it re-declares no backend constants.
  */
 const $ = (id) => document.getElementById(id);
 const POLL_MS = 2000;
@@ -28,12 +35,42 @@ function rememberedSession() {
 
 // ---- Auth gate -----------------------------------------------------------
 let brokerAuthenticated = false;
+let currentBuckets = null;   // {mode, source} of the running session
+
+function runSelection() {
+    return {
+        mode: $("runMode")?.value || "paper",
+        source: $("dataSource")?.value || "synthetic",
+    };
+}
+
+/** Risk implication surfaced per selection (ticket #9-aware, display copy). */
+function updateTaxonomyHint() {
+    const hint = $("taxonomyHint");
+    if (!hint) return;
+    const { mode, source } = runSelection();
+    if (mode === "live") {
+        hint.textContent = "⚠ LIVE = real fills, tight caps (10% per name, 10k max, 5 positions); " +
+            "refuses synthetic/replay data, requires mStock + auth. This web replay executes " +
+            "simulated fills only — the server refuses live rather than paper-filling it. " +
+            "Real-fill live runs use the engine path.";
+        hint.className = "warn-text";
+    } else if (source === "mstock") {
+        hint.textContent = "Paper + mstock = LIVE DATA, PAPER RISK (simulated fills on broker bars).";
+        hint.className = "muted";
+    } else {
+        hint.textContent = "Paper = free-play risk caps; data source only affects data trust (paper accepts all).";
+        hint.className = "muted";
+    }
+}
 
 function updateStartButtonForAuth() {
     const btn = $("startBtn");
     if (!btn) return;
-    const mode = $("dataMode")?.value;
-    if (mode === "synthetic" || brokerAuthenticated) {
+    const { mode } = runSelection();
+    // Paper replays need no broker session; live does (and is then refused by
+    // the server as not-wired — the hint explains that before the click).
+    if (mode === "paper" || brokerAuthenticated) {
         btn.disabled = false;
         btn.textContent = "▶ Start";
         btn.title = "";
@@ -54,12 +91,13 @@ function onBrokerStatusUpdate(event) {
 }
 
 function handleStartClick(e) {
-    const mode = dataMode();
-    // Synthetic mode doesn't need broker auth
-    if (mode === "synthetic") {
+    const { mode } = runSelection();
+    // Paper replay needs no broker auth.
+    if (mode === "paper") {
         return startBot();
     }
-    // Live mode needs broker auth
+    // Live needs broker auth — the server then refuses live_execution_not_wired
+    // (this page cannot real-fill); the refusal toast explains, never silent.
     if (!brokerAuthenticated) {
         e.preventDefault();
         e.stopPropagation();
@@ -216,7 +254,7 @@ function val(id, fallback = "") {
 }
 
 function forwardConfig() {
-    const mode = dataMode();
+    const { mode, source } = runSelection();
     const symbol = (val("symbol") || "").toUpperCase();
     const cfg = {
         strategy: val("strategy"),
@@ -224,6 +262,7 @@ function forwardConfig() {
         timeframe: val("timeframe", "1D"),
         capital: Number(val("capital")) || 100000,
         mode: mode,
+        source: source,
         from_date: val("fromDate") || "2024-01-01",
         to_date: val("toDate") || new Date().toISOString().slice(0, 10),
         params: collectParamsFrom($("params-container")),
@@ -249,8 +288,12 @@ async function startBot() {
             body: JSON.stringify(forwardConfig()),
         });
         rememberSession(result.state_id);
+        currentBuckets = { mode: result.mode || runSelection().mode,
+                           source: result.source || runSelection().source };
+        const bucket = `${(currentBuckets.mode || "").toUpperCase()}/` +
+                       `${(currentBuckets.source || "").toUpperCase()}`;
         showToast(`Forward test started: ${result.symbol} · ${result.total} bars @ ` +
-                  `${result.bars_per_second} bars/s`, "success");
+                  `${result.bars_per_second} bars/s · ${bucket}`, "success");
         // A window the server had to invent is not a window we chose — say so
         // loudly instead of showing a replay that looks like the user's range.
         if (result.defaults_applied && result.defaults_applied.length && result.config) {
@@ -277,6 +320,8 @@ async function stopBot() {
     } catch { /* ignore */ }
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     rememberSession(null);
+    currentBuckets = null;
+    showResumeBanner(null);
     await poll();
     setStatus("stopped");
     showToast("Forward test stopped", "warning");
@@ -318,18 +363,57 @@ function on(id, event, handler) {
     if (el) el.addEventListener(event, handler);
 }
 
-// Data-source mode ("synthetic" | "live"); defaults to live when the control
-// is absent so the auth gate still applies in a minimal/partial DOM.
-function dataMode() {
-    return $("dataMode")?.value || "live";
+// ---- Resume affordance (ticket #10, T7-aware) ----------------------------
+// Web forward sessions are in-memory (survive a page refresh, not a process
+// restart); engine state-file resume is the CLI `papertrade --state-file`
+// path. The banner makes the re-attach a visible choice: Resume vs fresh.
+function showResumeBanner(stateId) {
+    const banner = $("resumeBanner");
+    const idEl = $("resumedSessionId");
+    if (!banner) return;
+    if (!stateId) {
+        banner.hidden = true;
+        if (idEl) idEl.textContent = "—";
+        return;
+    }
+    if (idEl) idEl.textContent = stateId.slice(0, 8);
+    banner.hidden = false;
+}
+
+async function resumeRunningSession() {
+    if (!currentStateId) return;
+    $("livePanel").hidden = false;
+    try {
+        const data = await fetchJSON(
+            `/api/forward/status?state_id=${encodeURIComponent(currentStateId)}`);
+        renderLive(data);
+        if (data.status === "running" && !pollTimer) {
+            pollTimer = setInterval(poll, POLL_MS);
+        }
+    } catch (err) {
+        showToast(err.message || "Resume failed", "error");
+        rememberSession(null);
+        showResumeBanner(null);
+    }
+}
+
+function startFresh() {
+    rememberSession(null);
+    currentStateId = null;
+    currentBuckets = null;
+    showResumeBanner(null);
 }
 
 async function init() {
     on("startBtn", "click", handleStartClick);
     on("stopBtn", "click", stopBot);
-    on("dataMode", "change", updateStartButtonForAuth);
+    on("runMode", "change", () => { updateStartButtonForAuth(); updateTaxonomyHint(); });
+    on("dataSource", "change", updateTaxonomyHint);
+    on("resumeBtn", "click", resumeRunningSession);
+    on("freshStartBtn", "click", startFresh);
     document.addEventListener("broker:status", onBrokerStatusUpdate);
     updateStartButtonForAuth();
+    updateTaxonomyHint();
 
     // Load strategies
     let strategies = [];
@@ -393,12 +477,18 @@ async function init() {
         const status = await fetchJSON(`/api/forward/status${qs}`);
         if (status.status === "running") {
             if (status.state_id) rememberSession(status.state_id);
+            currentBuckets = {
+                mode: (status.config && status.config.mode) || runSelection().mode,
+                source: (status.config && status.config.source) || runSelection().source,
+            };
             $("livePanel").hidden = false;
             setStatus("running");
             renderLive(status);
+            showResumeBanner(status.state_id);   // visible resume affordance
             if (!pollTimer) pollTimer = setInterval(poll, POLL_MS);
         } else if (stored) {
             rememberSession(null);
+            showResumeBanner(null);
         }
     } catch { /* ignore */ }
 

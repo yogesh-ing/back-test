@@ -1,5 +1,10 @@
 # Full Release Guide — Forward Testing Simulator v1.0 (Windows + PostgreSQL + Real Broker API)
 
+> ⚠️ **HISTORICAL (archived).** References modules deleted in the P1.4/P4.3
+> refactor — `dashboard/`, `alerts/`, `analysis/`, `config_manager/`,
+> `marketdata/`, `forward/{paper,broker,portfolio,runner,order_ledger,live_engine}.py`.
+> Kept for history only; do not use as current documentation.
+>
 > **Date:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Tests:** 1175 passing, 4 skipped (need broker creds)
 > **Tech Stack:** Python Backend, Windows Direct PostgreSQL, .env for DB + Broker API, Real mStock Credentials, Telegram Preferred
 

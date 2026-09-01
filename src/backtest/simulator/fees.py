@@ -79,6 +79,7 @@ __all__ = [
     "IndiaEquityFees",
     "USEquityFees",
     "BrokerProfile",
+    "PAPER_FREE_PROFILE",
     "CommissionCalculator",
     "CurrencyConverter",
     "BROKER_PRESETS",
@@ -600,6 +601,18 @@ def _india_discount(name: str, flat: Decimal = Decimal("20")) -> BrokerProfile:
         currency="INR",
         default_segment=TradeSegment.EQUITY_DELIVERY,
     )
+
+
+#: Deterministic zero-cost profile for simulated runs (command-center paper
+#: buckets, walk-forward buckets, canonical backtests). V1 paper trading had
+#: no costs — the simulator reproduces that exactly: no commission, no
+#: statutory fees, and (via :func:`backtest.simulator.execution.free_executor`)
+#: no slippage, price improvement or market-hours gate.
+PAPER_FREE_PROFILE = BrokerProfile(
+    name="paper_free",
+    commission_model=ZeroCommission(),
+    fee_schedule=NoStatutoryFees(),
+)
 
 
 #: Ready-made broker cost models. Rates are indicative — verify before use.

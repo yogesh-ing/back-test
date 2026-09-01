@@ -360,7 +360,8 @@ def test_integration_with_adapter():
     )
 
     bar = {"symbol": "INFY", "timestamp": "2024-01-01T09:15:00+05:30", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000}
-    adapter.on_bar_close(bar)
+    sigs = adapter.on_bar_close(bar)
+    adapter.create_orders(sigs, market_data=bar)
 
     assert len(adapter.order_history) == 1
     # risk 1% of 100k =1000, stop 2% at 100 => loss per share 2, qty 500

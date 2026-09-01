@@ -1,3 +1,20 @@
+"""Legacy vectorized runner (quick-screen engine) and shared source factory.
+
+LAYERING (ticket #6): this module is NOT the canonical backtest entry. The
+single canonical entry is ``backtest.engine.backtest_runner.run_backtest``
+(the fill-exact :class:`~backtest.engine.backtest_driver.BacktestDriver`);
+what remains here is the legacy vectorized
+:class:`~backtest.engine.backtester.Backtester` path (the optional
+``mode='quick_screen'`` filter and the CLI's historical ``run``/``compare``
+commands, whose numbers are the documented pre-P2.2 shape) plus the shared
+``build_source`` factory and ``RunSpec``.
+
+* :func:`run_on_source` — fetch candles + ``run_on_candles`` (legacy path).
+* :func:`run_on_candles` — the vectorized engine wrapper itself (also used
+  by :func:`backtest.engine.backtest_runner.run_quick_screen`).
+* :func:`compare_strategies` — CLI comparison over one candle fetch.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
@@ -89,7 +106,8 @@ def run_on_candles(candles: pd.DataFrame, strategy_name: str, strategy_params: d
     return result
 
 
-def run_backtest(source, spec: RunSpec, config: BacktestConfig | None = None):
+def run_on_source(source, spec: RunSpec, config: BacktestConfig | None = None):
+    """Legacy vectorized run over a source (CLI path; NOT the canonical engine)."""
     candles = source.get_candles(spec.symbol, spec.start, spec.end, spec.interval)
     return run_on_candles(candles, spec.strategy, spec.strategy_params, spec.symbol, config)
 

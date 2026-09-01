@@ -358,7 +358,7 @@
   }
 
   async function submitSpawn() {
-    const mode = $("spawn-target-mode").value;
+    const targetType = $("spawn-target-type").value;
     const params = {};
     document.querySelectorAll(".spawn-param").forEach((el) => {
       let v = el.value;
@@ -373,8 +373,14 @@
       timeframe: $("spawn-timeframe").value,
       allocated_capital: parseFloat($("spawn-capital").value) || 100000,
       params,
+      // Ticket #10 — the bucket (mode/source) is ALWAYS sent so the runner is
+      // labelled from the user's selection; scoped pages default the controls
+      // to the page's bucket, but the landing page sends the explicit choice
+      // too (never an implicit backend default the user didn't see).
+      mode: $("spawn-mode") ? $("spawn-mode").value : (PAGE_MODE || "paper"),
+      source: $("spawn-source") ? $("spawn-source").value : "synthetic",
     };
-    if (mode === "pool") {
+    if (targetType === "pool") {
       body.target_type = "SYMBOL_UNIVERSE";
       body.universe_id = $("spawn-universe").value;
       body.max_pool_positions = parseInt($("spawn-maxpos").value, 10) || 5;
@@ -382,7 +388,6 @@
       body.target_type = "SINGLE_SYMBOL";
       body.symbol = $("spawn-symbol").value.trim();
     }
-    if (PAGE_MODE) body.mode = PAGE_MODE; // spawn into this page's bucket (P4.1)
 
     try {
       const data = await api("/api/portfolio/runner/create", "POST", body);
@@ -443,7 +448,7 @@
     document.querySelectorAll("[data-close]").forEach((b) =>
       b.addEventListener("click", () => { $(b.dataset.close).hidden = true; }));
 
-    $("spawn-target-mode").addEventListener("change", (e) => {
+    $("spawn-target-type").addEventListener("change", (e) => {
       const pool = e.target.value === "pool";
       $("spawn-symbol-row").hidden = pool;
       $("spawn-universe-row").hidden = !pool;

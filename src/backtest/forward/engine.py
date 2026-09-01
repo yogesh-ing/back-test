@@ -86,10 +86,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 import pandas as pd
 
+from backtest.simulator.engine_loop import Bar, to_python_scalar
 from backtest.simulator.errors import ValidationError
 from backtest.simulator.money import ZERO, money
 
@@ -97,6 +98,30 @@ logger = logging.getLogger("backtest.forward.engine")
 
 DEFAULT_FORWARD_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "forward_testing.yaml"
 DEFAULT_STATE_FILE = Path("state/forward_state.json")
+
+#: State-file format version (tickets F-04 + #7).
+#:
+#: * **v1** — the implicit pre-F-04 format: no ``state_version`` field, no
+#:   ``mode`` / ``source`` / ``engine_id``. Legacy files still load (warned),
+#:   and are migrated to v2 semantics on the next save, with mode/source
+#:   derived from the engine's actual config (never hardcoded).
+#: * **v2** — adds ``state_version``, ``engine_id`` (the portfolio id),
+#:   ``mode`` (paper|live) and ``source`` (synthetic|replay|mstock) mirroring
+#:   the ``portfolios`` columns added by migration 002 (DB-T1).
+#: * **v3** — current: adds **full resume fidelity**. ``executor`` captures
+#:   the executor's in-flight bar-clock queue (pending orders + which of them
+#:   are already armed) and ``engine_runtime`` captures ``loop_count``, the
+#:   last processed bar timestamp per symbol, and per-symbol processed-bar
+#:   counts — so a restored engine continues the SAME loop a never-stopped
+#:   engine would have (pending fills keep their exact bar timing; a backtest
+#:   replay resumes at the next unprocessed bar instead of re-running).
+#:
+#: v1/v2 files still load (warned): portfolio + adapter state are restored,
+#:  but the executor queue and engine runtime are rebuilt empty (v2) — a
+#: resume from an old file is progress-safe but may miss an in-flight order
+#: that was armed at teardown. That is the documented cost of NOT bumping
+#: before T7; new saves are v3.
+STATE_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +166,11 @@ class RiskConfig:
     max_drawdown_pct: Decimal = Decimal("0.10")
     daily_loss_limit_pct: Decimal = Decimal("0.02")
     max_leverage: Decimal = Decimal("1")
+    #: Ticket #9 — per-bucket overrides keyed on the run classification
+    #: (paper|live). Canonical defaults live in
+    #: ``backtest.simulator.bucket_risk.BUCKET_RISK_LIMITS``; this config only
+    #: OVERRIDES a bucket's limit (e.g. ``{"live": {"max_position_pct": 0.05}}``).
+    buckets: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self):
         from backtest.simulator.money import to_decimal
@@ -150,6 +180,10 @@ class RiskConfig:
         self.max_drawdown_pct = to_decimal(self.max_drawdown_pct, "max_drawdown_pct")
         self.daily_loss_limit_pct = to_decimal(self.daily_loss_limit_pct, "daily_loss_limit_pct")
         self.max_leverage = to_decimal(self.max_leverage, "max_leverage")
+        self.buckets = {
+            str(bucket).strip().lower(): dict(values or {})
+            for bucket, values in (self.buckets or {}).items()
+        }
 
 
 @dataclass
@@ -268,6 +302,15 @@ class ForwardTestingConfig:
                 "max_positions": self.risk.max_positions,
                 "max_drawdown_pct": str(self.risk.max_drawdown_pct),
                 "daily_loss_limit_pct": str(self.risk.daily_loss_limit_pct),
+                "buckets": {
+                    bucket: {
+                        field: (str(value) if isinstance(value, Decimal) else
+                                sorted(value) if isinstance(value, (set, frozenset)) else
+                                value)
+                        for field, value in values.items()
+                    }
+                    for bucket, values in self.risk.buckets.items()
+                },
             },
             "execution": {
                 "realism": self.execution.realism,
@@ -514,6 +557,96 @@ class MockPerformanceCalculator:
 
 
 # ---------------------------------------------------------------------------
+# State classification helpers (ticket F-04)
+# ---------------------------------------------------------------------------
+
+
+def _ts_key(ts: Any) -> str:
+    """Canonical JSON-safe key for a bar timestamp (ticket #7).
+
+    Both the live dedupe (:meth:`ForwardTestingEngine._new_bars`) and the
+    persisted ``engine_runtime.last_bar_ts`` use this encoding, so a restored
+    engine compares the same shape an in-memory engine does.
+    """
+    if ts is None:
+        return ""
+    try:
+        return pd.Timestamp(ts).isoformat()
+    except Exception:  # noqa: BLE001 - non-date stamps survive as strings
+        return str(ts)
+
+
+def _ts_from_key(key: Any) -> Any:
+    """Inverse of :func:`_ts_key` for restoring a saved timestamp."""
+    if key in (None, ""):
+        return None
+    try:
+        return pd.Timestamp(key)
+    except Exception:  # noqa: BLE001
+        return key
+
+
+def _normalize_mode(mode: Any, default: Any = None) -> str:
+    """Coerce + validate a state ``mode`` against ``db.models.PortfolioMode``.
+
+    Uses the ORM enum (the same vocabulary as the ``portfolios.mode`` CHECK)
+    rather than re-declaring ``'paper'``/``'live'`` here.
+    """
+    from backtest.db.models import PortfolioMode
+
+    fallback = default or PortfolioMode.PAPER.value
+    if mode is None:
+        return fallback
+    mode = str(mode).strip().lower()
+    valid = {m.value for m in PortfolioMode}
+    if mode not in valid:
+        logger.warning(
+            "state mode %r is not one of %s; falling back to %r",
+            mode, sorted(valid), fallback,
+        )
+        return fallback
+    return mode
+
+
+def _normalize_source(source: Any, default: Any = None) -> str:
+    """Coerce + validate a state ``source`` against the canonical SOURCE_TAGS.
+
+    The single set of tag strings lives in ``backtest.data.source_tags`` — the
+    state module never re-declares ``synthetic``/``replay``/``mstock``.
+    """
+    from backtest.data.source_tags import DEFAULT_SOURCE_TAG, SOURCE_TAG_VALUES
+
+    fallback = default or DEFAULT_SOURCE_TAG
+    if source is None:
+        return fallback
+    source = str(source).strip().lower()
+    if source not in SOURCE_TAG_VALUES:
+        logger.warning(
+            "state source %r is not one of %s; falling back to %r",
+            source, sorted(SOURCE_TAG_VALUES), fallback,
+        )
+        return fallback
+    return source
+
+
+def _classify(engine: Any) -> tuple[str, str]:
+    """(mode, source) for an engine — from its ACTUAL config, duck-typed.
+
+    ``config.data.mode`` is ``backtest|paper|live``; the state/portfolio
+    vocabulary is ``paper|live`` (migration 002), and a backtest replay runs
+    simulated fills, so it classifies as the ``paper`` bucket (ticket P1.1).
+    Missing values fall back through the canonical normalize helpers (the
+    ORM's ``PortfolioMode`` / ``SOURCE_TAGS`` default) — never hardcoded here.
+    """
+    data = getattr(getattr(engine, "config", None), "data", None)
+    mode = getattr(data, "mode", None)
+    source = getattr(data, "source", None)
+    if str(mode).strip().lower() == "backtest":
+        mode = "paper"
+    return _normalize_mode(mode), _normalize_source(source)
+
+
+# ---------------------------------------------------------------------------
 # State Manager
 # ---------------------------------------------------------------------------
 
@@ -526,11 +659,43 @@ class StateManager:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
 
     def save_state(self, engine: "ForwardTestingEngine") -> str:
-        """Save full engine state to JSON."""
+        """Save full engine state to JSON (format v3, tickets F-04 + #7).
+
+        The payload mirrors the ``portfolios`` classification added by
+        migration 002: ``mode`` (paper|live) + ``source``
+        (synthetic|replay|mstock) are derived from the engine's ACTUAL config
+        (via :func:`_classify`) — never hardcoded, and the ``source`` strings
+        come from the canonical :data:`backtest.data.source_tags.SOURCE_TAGS`.
+
+        v3 adds the **resume fidelity** fields: ``executor`` (in-flight
+        pending/armed orders) and ``engine_runtime`` (loop count, last bar
+        timestamp per symbol, per-symbol processed-bar counts) — see
+        :data:`STATE_VERSION`.
+        """
         try:
+            mode, source = _classify(engine)
+            executor_state = {}
+            if hasattr(engine, "executor") and hasattr(engine.executor, "get_state"):
+                try:
+                    executor_state = engine.executor.get_state()
+                except Exception as exc:
+                    logger.warning("executor state capture failed: %s", exc)
             payload = {
+                "state_version": STATE_VERSION,
+                "engine_id": getattr(getattr(engine, "portfolio", None), "portfolio_id", None),
+                "mode": mode,
+                "source": source,
                 "portfolio": engine.portfolio.to_dict() if hasattr(engine.portfolio, "to_dict") else {},
                 "adapter": engine.adapter.get_state() if hasattr(engine.adapter, "get_state") else {},
+                "executor": executor_state,
+                "engine_runtime": {
+                    "loop_count": getattr(engine, "_loop_count", 0),
+                    "last_bar_ts": {
+                        str(sym): _ts_key(ts)
+                        for sym, ts in getattr(engine, "_last_bar_ts", {}).items()
+                    },
+                    "processed_bars": dict(getattr(engine, "_processed_bars", {})),
+                },
                 "performance": engine.performance.equity_curve if hasattr(engine.performance, "equity_curve") else [],
                 "config": engine.config.to_dict(),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -540,24 +705,87 @@ class StateManager:
             tmp = self.state_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload, indent=2))
             tmp.replace(self.state_file)
-            logger.info("State saved to %s (loop %s)", self.state_file, engine._loop_count)
+            logger.info(
+                "State saved to %s (v%s %s/%s, loop %s)",
+                self.state_file, STATE_VERSION, mode, source, engine._loop_count,
+            )
             return str(self.state_file)
         except Exception as exc:
             logger.exception("Failed to save state: %s", exc)
             raise
 
-    def load_state(self, path: str | Path | None = None) -> Optional[Dict[str, Any]]:
+    def load_state(
+        self,
+        path: str | Path | None = None,
+        engine: "ForwardTestingEngine | None" = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Load a state file (ticket F-04).
+
+        ``engine`` is optional: it supplies the ACTUAL run config so legacy
+        files can be filled with the right mode/source instead of a hardcoded
+        default. When omitted (e.g. a standalone ``StateManager``), the
+        helper's own safe defaults apply.
+
+        Accepts:
+
+        * **v1 / legacy** — missing ``state_version`` (the pre-F-04 format).
+          It is accepted as-is (no hard failure) and normalized to v2 in place:
+          ``mode``/``source`` are derived from the ACTUAL engine config at the
+          moment of load (never hardcoded; a warn + fallback if the file holds
+          an invalid value), then the migrated file is rewritten on the next
+          :meth:`save_state`. No separate on-disk migration on load — loading
+          must stay read-only, so the file keeps surviving restarts.
+        * **v2** — current; invalid ``mode``/``source`` values are warned and
+          replaced with the engine-derived value but the file is touched only
+          on the next save.
+
+        ``state_version`` values above the current format are refused (the
+        file was written by a newer product; a warn + ``None``).
+        """
         file_path = Path(path) if path else self.state_file
         if not file_path.exists():
             logger.info("No state file at %s", file_path)
             return None
         try:
             data = json.loads(file_path.read_text())
-            logger.info("State loaded from %s (loop %s)", file_path, data.get("loop_count", "?"))
-            return data
         except Exception as exc:
             logger.warning("Failed to load state from %s: %s", file_path, exc)
             return None
+
+        if not isinstance(data, dict):
+            logger.warning("State file %s is not a JSON object; ignoring", file_path)
+            return None
+
+        version = data.get("state_version", 1)
+        try:
+            version = int(version)
+        except (TypeError, ValueError):
+            logger.warning("State file %s has non-integer state_version %r; treating as v1", file_path, version)
+            version = 1
+
+        if version > STATE_VERSION:
+            logger.warning(
+                "State file %s is format v%s but this build supports <= v%s; refusing to load",
+                file_path, version, STATE_VERSION,
+            )
+            return None
+
+        if version < STATE_VERSION:
+            logger.warning(
+                "State file %s is legacy format v%s; migrating to v%s semantics in memory "
+                "(kept read-only on disk; rewritten on next save)",
+                file_path, version, STATE_VERSION,
+            )
+
+        # Normalize the F-04 classification in memory (never mutates this
+        # object's expectation of the file — the rewrite happens on save).
+        mode, source = _classify(engine)
+        data["mode"] = _normalize_mode(data.get("mode"), default=mode)
+        data["source"] = _normalize_source(data.get("source"), default=source)
+        data["state_version"] = STATE_VERSION
+
+        logger.info("State loaded from %s (v%s, loop %s)", file_path, data["state_version"], data.get("loop_count", "?"))
+        return data
 
     def should_save(self, last_save: datetime, interval_minutes: float) -> bool:
         if interval_minutes <= 0:
@@ -597,6 +825,7 @@ class ForwardTestingEngine:
         data_source: Any = None,
         portfolio: Any = None,
         strategy: Any = None,
+        broker: Any = None,
     ):
         # Load config
         if config_file:
@@ -619,6 +848,12 @@ class ForwardTestingEngine:
         self.data_source = data_source
         self._provided_portfolio = portfolio
         self._provided_strategy = strategy
+        #: Duck-typed live broker (ticket #8) — drives ``BrokerFillProvider``
+        #: for ``config.data.mode == 'live'``. Injected fake brokers keep the
+        #: live path deterministic; when None, a live run defaults to the
+        #: repo's :class:`MStockBroker` (construction is safe — no auth,
+        #: ``place_order`` fails cleanly without a session).
+        self._broker = broker
 
         # Runtime state
         self.portfolio: Any = None
@@ -634,6 +869,10 @@ class ForwardTestingEngine:
         self.performance: Any = None
         self.trade_analyzer: Any = None
         self.state_manager: StateManager = StateManager(self.config.system.state_file)
+        #: Resolved bucket classification + limits (ticket #9) — set by
+        #: ``initialize_system`` from ``_classify``, the single keying point.
+        self._bucket_key: Optional[str] = None
+        self._bucket_limits: Any = None
 
         self._running = False
         self._paused = False
@@ -641,6 +880,14 @@ class ForwardTestingEngine:
         self._error_count = 0
         self._last_save = datetime.now(timezone.utc)
         self._last_heartbeat = datetime.now(timezone.utc)
+        #: Last processed bar timestamp per symbol — a poll can return the
+        #: same completed bar repeatedly; the executor bar clock must only
+        #: advance on NEW bars (ticket F-01).
+        self._last_bar_ts: Dict[str, Any] = {}
+        #: Bars already replayed per symbol in backtest mode (ticket #7):
+        #: a restored engine resumes at the next unprocessed bar instead of
+        #: re-running the full history (which would double-fill positions).
+        self._processed_bars: Dict[str, int] = {}
 
         # Lifecycle hooks
         self._hooks: Dict[str, List[Callable]] = {
@@ -712,6 +959,138 @@ class ForwardTestingEngine:
             # Signal handlers may not work in all environments (e.g. tests)
             pass
 
+    # -- canonical fill path (ticket F-01) --------------------------------
+
+    @staticmethod
+    def _bar_ts(bar: Mapping[str, Any]) -> Any:
+        return bar.get("timestamp") or bar.get("ts") or bar.get("time") or bar.get("datetime")
+
+    def _new_bars(self, market_data: Mapping[str, Any]) -> Dict[str, Any]:
+        """Keep only bars newer than the last processed one, per symbol.
+
+        A live poll can return the same completed bar repeatedly. The
+        executor's bar clock (``step``) must advance only on NEW bars —
+        stepping the same bar twice would let an armed order fill at the
+        SIGNAL bar's open, which is exactly the leak F-01 removes.
+        Bars without a timestamp are treated as new each poll (no dedupe
+        information available).
+        """
+        new_bars: Dict[str, Any] = {}
+        for sym, bar in market_data.items():
+            sym = str(sym).strip().upper()
+            if not isinstance(bar, Mapping):
+                continue
+            ts = self._bar_ts(bar)
+            key = _ts_key(ts)
+            # Canonical key (ticket #7): a restored engine's saved timestamp
+            # compares equal to the live one regardless of the in-memory type
+            # (datetime vs pd.Timestamp vs string).
+            if ts is None or self._last_bar_ts.get(sym) != key:
+                new_bars[sym] = bar
+                if ts is not None:
+                    self._last_bar_ts[sym] = key
+        return new_bars
+
+    @staticmethod
+    def _to_executor_bar(symbol: str, bar: Mapping[str, Any]) -> Bar:
+        """The minimal bar view the executor needs — ``open`` is the anchor.
+
+        ``close`` is deliberately not used by the executor's fill logic; the
+        bar's timestamp is passed through for session checks.
+        """
+        close = bar.get("close")
+        if close is None:
+            close = bar.get("last") or bar.get("price")
+        open_price = bar.get("open")
+        if open_price is None:
+            open_price = close
+        return Bar(
+            open=to_python_scalar(open_price),
+            close=to_python_scalar(close),
+            volume=to_python_scalar(bar.get("volume")),
+            timestamp=to_python_scalar(ForwardTestingEngine._bar_ts(bar)),
+        )
+
+    def _submit_orders(
+        self, signals: Iterable[Any], market_data: Mapping[str, Any]
+    ) -> List[Any]:
+        """Signal → Order → ``executor.submit`` (arms for the NEXT bar).
+
+        Same sequence the canonical ``run_engine_loop`` uses: while bar ``t``
+        is the latest known data, the order is submitted; the executor arms
+        it on the next ``step`` and only fills at the bar AFTER that, at its
+        open.
+        """
+        created: List[Any] = []
+        if self.executor is None:
+            logger.warning("no executor; %d signal(s) created without fill path", len(signals) if signals else 0)
+            return created
+        for order in self.adapter.create_orders(signals, market_data=market_data):
+            # Ticket #9 — risk teeth for the LIVE bucket: every real-fill
+            # order passes the bucket pre-trade check before it reaches the
+            # executor. Paper stays free play (its bucket caps are permissive
+            # anyway, and sizing already ran through the same bucket caps).
+            if self._bucket_key == "live" and self.risk_manager is not None:
+                if not self._bucket_risk_allows(order, market_data):
+                    continue
+            self.executor.submit(order)
+            created.append(order)
+        return created
+
+    def _bucket_risk_allows(
+        self, order: Any, market_data: Optional[Mapping[str, Any]] = None
+    ) -> bool:
+        """Run the bucket risk manager's check for one live order.
+
+        Duck-typed: the real ``RiskManager`` returns a ``RiskCheckResult``
+        (``allowed``), the mock fallback returns a ``(bool, reason)`` tuple.
+        """
+        price = self._order_price(order, market_data)
+        try:
+            result = self.risk_manager.validate_order(order, current_price=price)
+        except TypeError:  # mock fallback takes only the order
+            result = self.risk_manager.validate_order(order)
+        if hasattr(result, "allowed"):
+            allowed = bool(result.allowed)
+            reason = getattr(result, "reason", "")
+        elif isinstance(result, tuple) and result:
+            allowed = bool(result[0])
+            reason = result[1] if len(result) > 1 else ""
+        else:
+            allowed = bool(result)
+            reason = ""
+        if not allowed:
+            logger.warning(
+                "Risk rejected live order %s %s x%s: %s",
+                getattr(order, "symbol", "?"), getattr(order, "side", "?"),
+                getattr(order, "quantity", "?"), reason,
+            )
+        return allowed
+
+    def _order_price(self, order: Any, market_data: Optional[Mapping[str, Any]] = None) -> Any:
+        """Best price for the bucket risk check: market data > limit > last bar."""
+        symbol = str(getattr(order, "symbol", "") or "").strip().upper()
+        if symbol and isinstance(market_data, Mapping):
+            md = market_data.get(symbol)
+            if isinstance(md, Mapping):
+                for key in ("close", "last", "price", "ask", "bid"):
+                    if md.get(key):
+                        return md[key]
+            for key in ("close", "last", "price"):
+                if market_data.get(key):
+                    return market_data[key]
+        limit = getattr(order, "limit_price", None)
+        if limit:
+            return limit
+        if symbol:
+            try:
+                candles = self.adapter._bars.get(symbol)
+                if candles is not None and not candles.empty:
+                    return float(candles["close"].iloc[-1])
+            except Exception:
+                pass
+        return 100  # same fallback the strategy adapter uses
+
     def initialize_system(self):
         """Initialize all components, restore state if available."""
         logger.info("Initializing system...")
@@ -732,13 +1111,44 @@ class ForwardTestingEngine:
                 logger.warning("DB connection failed, running without DB: %s", exc)
                 self.db_manager = None
 
+        # Ticket #9 — risk limits resolve from the SAME classification that
+        # labels the run (mode/source), at the same point ``_classify``
+        # resolves them. No hardcoded global knob: the canonical bucket map
+        # (backtest.simulator.bucket_risk) owns the defaults and this config
+        # (risk.buckets) only overrides them.
+        run_mode, run_source = _classify(self)
+        try:
+            from backtest.simulator.bucket_risk import resolve_bucket_risk
+
+            self._bucket_key, self._bucket_limits = resolve_bucket_risk(
+                run_mode, run_source, overrides=self.config.risk.buckets,
+            )
+        except Exception as exc:
+            # A live/synthetic run etc. must be refused BEFORE any trading —
+            # the source gate is part of the risk limits, not a soft warning.
+            logger.error("Bucket risk resolution refused the run: %s", exc)
+            raise
+
         # Portfolio
         if self._provided_portfolio is not None:
             self.portfolio = self._provided_portfolio
         else:
             # Try to restore from state file
-            state = self.state_manager.load_state()
-            if state and "portfolio" in state and state["portfolio"]:
+            state = self.state_manager.load_state(engine=self)
+            if state is None:
+                pass
+            elif "portfolio" not in state or not state["portfolio"]:
+                logger.warning("State file exists but has no usable portfolio; creating fresh")
+            else:
+                # New-format classification (mode/source on the state file) is
+                # advisory here — the engine's live config always wins, and the
+                # portfolio row already carries the authoritative classification.
+                if state.get("mode") not in (None, run_mode) or state.get("source") not in (None, run_source):
+                    logger.warning(
+                        "State classification (%s/%s) != engine classification (%s/%s); "
+                        "engine config wins, state will be rewritten on next save",
+                        state.get("mode"), state.get("source"), run_mode, run_source,
+                    )
                 try:
                     from backtest.simulator.portfolio import Portfolio
 
@@ -750,18 +1160,100 @@ class ForwardTestingEngine:
             if self.portfolio is None:
                 # Try to load from DB if name exists?
                 # For now, create new
-                from backtest.simulator.portfolio import Portfolio, PortfolioLimits
+                from backtest.simulator.portfolio import Portfolio
 
-                limits = PortfolioLimits(
+                # Ticket #9 — the bucket (not a global default) sizes the
+                # fresh portfolio's per-trade limits.
+                limits = self._bucket_limits.to_portfolio_limits(
                     allow_short=self.config.portfolio.allow_short,
-                    max_open_positions=self.config.portfolio.max_open_positions or self.config.risk.max_positions,
                 )
+                # Ticket #8 — a FRESH run classifies itself from the real
+                # config (live/mstock) instead of the constructor defaults
+                # (paper/synthetic); the DB row then matches state + config.
                 self.portfolio = Portfolio(
                     name=self.config.portfolio.name,
                     initial_capital=self.config.portfolio.initial_capital,
                     limits=limits,
+                    mode=run_mode,
+                    source=run_source,
                 )
-                logger.info("New portfolio created: %s %s", self.portfolio.name, self.portfolio.initial_capital)
+                logger.info(
+                    "New portfolio created: %s %s (%s/%s)",
+                    self.portfolio.name, self.portfolio.initial_capital,
+                    self.portfolio.mode, self.portfolio.source,
+                )
+
+        # Ticket #8 — no silent classification downgrade. The engine's
+        # config is authoritative for the CURRENT run; the guard only ever
+        # upgrades paper→live when the run is live (a live run must never
+        # resurrect as paper) and never claims live for a paper run.
+        guard_fired = False
+        if run_mode == "live" and getattr(self.portfolio, "mode", "paper") != "live":
+            logger.warning(
+                "Portfolio %s is classified %s/%s but the engine config is LIVE — "
+                "upgrading to live/%s so state/DB can never show a live run "
+                "reclassified as paper",
+                self.portfolio.name, getattr(self.portfolio, "mode", "?"),
+                getattr(self.portfolio, "source", "?"), run_source,
+            )
+            self.portfolio.mode = "live"
+            self.portfolio.source = run_source
+            guard_fired = True
+        elif run_mode == "paper" and getattr(self.portfolio, "mode", "paper") == "live":
+            logger.warning(
+                "Portfolio %s was restored classified live/%s but the engine config is "
+                "PAPER — engine config wins, reclassifying to paper/%s (a paper run "
+                "must never claim live). This usually means the state file belongs "
+                "to a different run; the accounting restores unchanged.",
+                self.portfolio.name, getattr(self.portfolio, "source", "?"), run_source,
+            )
+            self.portfolio.mode = "paper"
+            self.portfolio.source = run_source
+            guard_fired = True
+
+        # Ticket #9 — the bucket that trades is the bucket that was
+        # risk-limited: ALWAYS re-key the portfolio's per-trade limits from
+        # the resolved bucket (fresh, restored or provided). Explicit config
+        # values that used to cap positions stay effective as a fallback when
+        # the bucket leaves a limit open.
+        allow_short = bool(
+            getattr(getattr(self.portfolio, "limits", None), "allow_short", None)
+            if getattr(self.portfolio, "limits", None) is not None
+            else self.config.portfolio.allow_short
+        )
+        # Bucket caps, then the explicit config-level position cap as a
+        # fallback (preserves the pre-T9 config behavior when the bucket
+        # leaves the limit open).
+        self.portfolio.limits = self._bucket_limits.to_portfolio_limits(
+            allow_short=allow_short,
+        )
+        if self.portfolio.limits.max_open_positions is None:
+            self.portfolio.limits.max_open_positions = (
+                self.config.portfolio.max_open_positions or self.config.risk.max_positions
+            )
+        logger.info(
+            "Bucket risk %s/%s: %s",
+            self._bucket_key, run_source,
+            ", ".join(
+                f"{k}={v}" for k, v in self._bucket_limits.to_dict().items()
+                if k != "allowed_sources"
+            ),
+        )
+
+        # Risk teeth on the T8 guard: if the classification had to be
+        # CHANGED (mis-classified restore), the OPEN book must satisfy the
+        # target bucket's caps — otherwise refuse the run instead of
+        # silently trading at the wrong size.
+        if guard_fired:
+            violation = self._bucket_limits.check_exposure(self.portfolio)
+            if violation:
+                raise ValidationError(
+                    f"RISK REFUSAL — mis-classified {run_mode} run: {violation}. "
+                    "The open book violates the bucket risk caps; refusing to run "
+                    "at the wrong size instead of silently trading under mismatched "
+                    "limits. Close/reclassify the portfolio or override the bucket "
+                    "limits explicitly (risk.buckets)."
+                )
 
         # Strategy
         if self._provided_strategy is not None:
@@ -788,6 +1280,9 @@ class ForwardTestingEngine:
             sizing_dict.update(self.config.sizing.params)
 
             # If sizing params contain risk_per_trade etc, pass through
+            # Ticket #9 — the bucket's exposure/size caps become the sizer's
+            # hard constraints, so the size that reaches the executor is
+            # already bucket-limited (paper: permissive; live: tight).
             cfg = SizingConfig(
                 method=sizing_dict.get("method", "fixed_quantity"),
                 fixed_quantity=sizing_dict.get("fixed_quantity", 100),
@@ -801,9 +1296,13 @@ class ForwardTestingEngine:
                 avg_win=sizing_dict.get("avg_win"),
                 avg_loss=sizing_dict.get("avg_loss"),
                 kelly_fraction=sizing_dict.get("kelly_fraction", 0.5),
+                constraints=self._bucket_limits.to_sizing_constraints(),
             )
             self.sizer = PositionSizer(cfg)
-            logger.info("Position sizer initialized: %s", cfg.method)
+            logger.info(
+                "Position sizer initialized: %s (bucket %s caps)",
+                cfg.method, self._bucket_key,
+            )
         except Exception as exc:
             logger.warning("Failed to init sizer, using fixed 100: %s", exc)
             from backtest.simulator.position_sizing import PositionSizer, SizingConfig
@@ -828,20 +1327,42 @@ class ForwardTestingEngine:
             slippage = SlippageCalculator()
             fees = CommissionCalculator()
 
-            self.executor = OrderExecutor(config=exec_cfg, slippage=slippage, fees=fees, portfolio=self.portfolio)
-            logger.info("Order executor initialized: %s", exec_cfg.realism)
+            # Ticket #8 — the live fill seam: in live mode the executor sends
+            # orders to a REAL broker (BrokerFillProvider) instead of
+            # simulating fills, so a live run can never silently paper-trade.
+            # Everything above the fill (portfolio/positions/risk/metrics)
+            # stays the shared path; only the provider differs.
+            run_mode, _ = _classify(self)
+            if run_mode == "live":
+                from backtest.simulator.fill_providers import BrokerFillProvider
+
+                fill_provider = BrokerFillProvider(broker=self._resolve_live_broker())
+                self.executor = OrderExecutor(
+                    config=exec_cfg, slippage=slippage, fees=fees,
+                    portfolio=self.portfolio, fill_provider=fill_provider,
+                )
+                logger.info(
+                    "Order executor initialized: %s — LIVE (broker %s)",
+                    exec_cfg.realism, type(fill_provider.broker).__name__,
+                )
+            else:
+                self.executor = OrderExecutor(
+                    config=exec_cfg, slippage=slippage, fees=fees, portfolio=self.portfolio,
+                )
+                logger.info("Order executor initialized: %s", exec_cfg.realism)
         except Exception as exc:
             logger.warning("Failed to init executor: %s", exc)
             self.executor = None
 
-        # Strategy adapter
+        # Strategy adapter — signal source only (ticket F-01). It produces
+        # signals + Order objects; the engine owns the executor's bar clock
+        # (submit → step) so fills land at the NEXT bar's open.
         try:
             from backtest.forward.strategy_adapter import StrategyAdapter
 
             self.adapter = StrategyAdapter(
                 strategy=self.strategy,
                 portfolio=self.portfolio,
-                executor=self.executor,
                 symbols=self.config.data.symbols,
                 dry_run=self.config.system.dry_run,
                 position_sizer=self.sizer,
@@ -849,7 +1370,7 @@ class ForwardTestingEngine:
                 allow_short=self.config.portfolio.allow_short,
             )
             # Restore adapter state if available
-            state = self.state_manager.load_state()
+            state = self.state_manager.load_state(engine=self)
             if state and "adapter" in state and state["adapter"]:
                 try:
                     self.adapter.load_state(state["adapter"])
@@ -900,16 +1421,15 @@ class ForwardTestingEngine:
         try:
             from backtest.simulator.risk_manager import RiskManager as RealRiskManager, RiskConfig as RealRiskConfig
 
-            real_risk_cfg = RealRiskConfig(
-                max_position_value=self.config.risk.max_position_size,
-                max_position_pct=None,
-                max_open_positions=self.config.risk.max_positions,
+            # Ticket #9 — the pre-trade risk config is built from the bucket
+            # caps (keyed on the classification), with drawdown/daily-loss
+            # staying config-level (already explicit on the engine).
+            real_risk_cfg = self._bucket_limits.to_risk_config(
                 max_drawdown_pct=self.config.risk.max_drawdown_pct,
                 daily_loss_limit_pct=self.config.risk.daily_loss_limit_pct,
-                max_leverage=self.config.risk.max_leverage,
             )
             self.risk_manager = RealRiskManager(portfolio=self.portfolio, config=real_risk_cfg)
-            logger.info("Using real RiskManager (Step 15)")
+            logger.info("Using real RiskManager (Step 15, bucket %s)", self._bucket_key)
         except Exception as exc:
             logger.warning("Failed to init real RiskManager, using mock: %s", exc)
             self.risk_manager = MockRiskManager(portfolio=self.portfolio, risk_config=self.config.risk)
@@ -947,7 +1467,62 @@ class ForwardTestingEngine:
         self._loop_count = 0
         self._error_count = 0
 
+        # Restore the engine runtime + in-flight execution queue (ticket #7).
+        # Fresh v3 files resume EXACTLY where a never-stopped engine would
+        # be: loop counter, per-symbol processed bar counts, last bar
+        # timestamps, and the executor's pending/armed orders. v1/v2 files
+        # have none of these — they load (warned) and resume with an empty
+        # queue, which is documented in STATE_VERSION.
+        try:
+            state = self.state_manager.load_state(engine=self)
+        except Exception as exc:
+            logger.warning("State read skipped: %s", exc)
+            state = None
+        if state:
+            runtime = state.get("engine_runtime") or {}
+            self._loop_count = int(runtime.get("loop_count", 0) or 0)
+            self._error_count = 0
+            self._last_bar_ts = {
+                str(sym): _ts_from_key(ts) for sym, ts in (runtime.get("last_bar_ts") or {}).items()
+            }
+            self._processed_bars = {
+                str(sym): int(count)
+                for sym, count in (runtime.get("processed_bars") or {}).items()
+            }
+            if state.get("executor") and self.executor is not None:
+                try:
+                    # Share the portfolio's order objects so fills update the
+                    # same graph (sync_orders sees the executor's transitions).
+                    self.executor.restore_state(state["executor"], orders=self.portfolio.pending_orders)
+                    logger.info(
+                        "Executor restored: %d in-flight order(s), %d armed",
+                        len(self.portfolio.pending_orders),
+                        len(state["executor"].get("armed", [])),
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to restore executor state: %s", exc)
+            if self._loop_count:
+                logger.info(
+                    "Resumed runtime: loop_count=%s processed=%s",
+                    self._loop_count, self._processed_bars,
+                )
+
         logger.info("System initialized: portfolio=%s strategy=%s symbols=%s", self.portfolio.name, self.strategy.name, self.config.data.symbols)
+
+    def _resolve_live_broker(self) -> Any:
+        """The broker for live orders (ticket #8).
+
+        Returns the injected ``broker`` when given (tests pass a
+        deterministic fake); otherwise the repo's live broker
+        (:class:`MStockBroker`) — constructed without auth; every live call
+        is guarded by its session requirement, so an unauthenticated broker
+        fails cleanly instead of half-sending.
+        """
+        if self._broker is not None:
+            return self._broker
+        from backtest.brokers.mstock import MStockBroker
+
+        return MStockBroker()
 
     # -- control -----------------------------------------------------------
 
@@ -1039,37 +1614,38 @@ class ForwardTestingEngine:
                     time.sleep(self.config.system.loop_interval_seconds)
                     continue
 
-                # Update portfolio positions with current prices
-                if market_data:
-                    prices = {}
-                    for sym, bar in market_data.items():
-                        if isinstance(bar, dict):
-                            price = bar.get("close") or bar.get("last") or bar.get("price")
-                            if price is not None:
-                                prices[sym] = price
-                    if prices:
-                        self.portfolio.update_prices(prices)
-
                 # Check and update stops
                 self.stop_manager.check_stops(market_data)
 
-                # Generate strategy signals
-                signals = []
-                if isinstance(market_data, dict):
-                    for sym, bar in market_data.items():
-                        if isinstance(bar, dict):
-                            # Ensure bar has symbol
-                            if "symbol" not in bar:
-                                bar["symbol"] = sym
-                            sigs = self.adapter.on_bar_close(bar)
-                            signals.extend(sigs)
-                else:
-                    signals = self.adapter.generate_signals()
+                # Canonical bar-clock sequence (ticket F-01) — the same
+                # submit → step(next-open) path PaperRunner uses:
+                #   bar t: signal → Order → executor.submit (arms)
+                #   bar t+1: executor.step fills at t+1's OPEN
+                # Only NEW bars advance the clock (a poll may repeat the
+                # latest completed bar).
+                new_bars = self._new_bars(market_data if isinstance(market_data, dict) else {})
+                if new_bars:
+                    for sym, bar in new_bars.items():
+                        if "symbol" not in bar:
+                            bar["symbol"] = sym
+                        sigs = self.adapter.on_bar_close(bar)
+                        if sigs:
+                            self._submit_orders(sigs, bar)
 
-                # Apply position sizing is already done inside adapter.execute_signals via sizer
-                # Risk check is also inside adapter, but we double-check with risk_manager
-                # For this loop, adapter already created orders, so we get them
-                # In a more explicit flow, we would do sizing and risk separately
+                    # Fill orders armed on earlier bars at each new bar's open.
+                    self.executor.step(
+                        {sym: self._to_executor_bar(sym, bar) for sym, bar in new_bars.items()}
+                    )
+                    self.portfolio.sync_orders()
+
+                    # Mark to market at the close of the bars just processed.
+                    prices: Dict[str, Any] = {}
+                    for sym, bar in new_bars.items():
+                        price = bar.get("close") or bar.get("last") or bar.get("price")
+                        if price is not None:
+                            prices[sym] = price
+                    if prices:
+                        self.portfolio.update_prices(prices)
 
                 # Update performance metrics
                 self.performance.update_metrics(self.portfolio)
@@ -1129,9 +1705,19 @@ class ForwardTestingEngine:
                 timeframe = self.config.data.timeframe or "day"
 
                 candles = self.data_source.get_candles(symbol, start, end, timeframe)
-                logger.info("Replaying %s bars for %s", len(candles), symbol)
+                # Resume (ticket #7): skip bars already processed in a prior
+                # run. Without the offset a restored engine re-replays the
+                # whole history — signals would re-fire against a portfolio
+                # that already holds the positions (double exposure).
+                offset = int(self._processed_bars.get(symbol, 0) or 0)
+                remaining = candles.iloc[offset:]
+                logger.info(
+                    "Replaying %s bars for %s (%s already processed%s)",
+                    len(remaining), symbol, offset,
+                    ", resuming" if offset else "",
+                )
 
-                for idx, row in candles.iterrows():
+                for pos, (idx, row) in enumerate(remaining.iterrows()):
                     if not self._running:
                         break
                     if self._paused:
@@ -1156,12 +1742,21 @@ class ForwardTestingEngine:
                     if not self.validator.validate(bar):
                         continue
 
+                    # Canonical bar-clock sequence (ticket F-01): signal on
+                    # this bar → Order → executor.submit (arms); orders armed
+                    # on EARLIER bars fill at THIS bar's open; then mark to
+                    # market at this bar's close. Same as PaperRunner.
+                    sigs = self.adapter.on_bar_close(bar)
+                    if sigs:
+                        self._submit_orders(sigs, bar)
+                    self.executor.step({symbol: self._to_executor_bar(symbol, bar)})
+                    self.portfolio.sync_orders()
                     self.portfolio.update_prices({symbol: bar["close"]})
                     self.stop_manager.check_stops({symbol: bar})
-                    self.adapter.on_bar_close(bar)
                     self.performance.update_metrics(self.portfolio)
 
                     self._loop_count += 1
+                    self._processed_bars[symbol] = offset + pos + 1
 
                     # Save state periodically
                     if self.state_manager.should_save(self._last_save, self.config.system.save_state_interval_minutes):

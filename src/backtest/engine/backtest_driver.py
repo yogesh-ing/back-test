@@ -9,9 +9,9 @@ rather than an approximation: one loop, two entry points. The vectorized
 :class:`~backtest.engine.backtester.Backtester` stays as-is (the quick
 screen path); the driver is the fill-exact path.
 
-Layering note: the ``source_tag`` defaults are a local mirror of
-``backtest.forward.paper_runner.SOURCE_TAGS`` (this module must not import
-from ``backtest.forward``); unify when the tag map moves to ``data/``.
+Layering note (ticket F-14): the ``source`` tag map lives in
+``backtest.data.source_tags`` (canonical, shared with ``PaperRunner``) —
+this module must not import from ``backtest.forward``.
 """
 
 from __future__ import annotations
@@ -19,21 +19,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Optional
 
-from backtest.data.db_source import DbSource
-from backtest.data.mstock_live_feed import MStockLiveFeed
-from backtest.data.synthetic import SyntheticSource
+from backtest.data.source_tags import source_tag_for
 from backtest.simulator.engine_loop import OrderQueue, run_engine_loop
 
 logger = logging.getLogger("backtest.engine.backtest_driver")
 
 __all__ = ["BacktestDriver"]
-
-# Local mirror of paper_runner.SOURCE_TAGS (see module docstring).
-_SOURCE_TAGS: dict[type, str] = {
-    SyntheticSource: "synthetic",
-    DbSource: "replay",
-    MStockLiveFeed: "mstock",
-}
 
 
 class BacktestDriver:
@@ -79,7 +70,7 @@ class BacktestDriver:
         # paper = simulated fills, live = real broker orders); the bars'
         # origin (replay vs synthetic vs mstock) comes from the source class.
         self.portfolio.mode = "paper"
-        self.portfolio.source = source_tag or _SOURCE_TAGS.get(type(source), "synthetic")
+        self.portfolio.source = source_tag or source_tag_for(source)
 
     def run(self) -> dict[str, Any]:
         """Run the shared engine loop and return the portfolio summary."""

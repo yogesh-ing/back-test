@@ -171,8 +171,8 @@
             </div>
             <div class="two-col">
                 <div class="form-row">
-                    <label>Target mode</label>
-                    <select id="spawn-target-mode" class="input input-select">
+                    <label>Target type</label>
+                    <select id="spawn-target-type" class="input input-select">
                         <option value="single">Single Symbol</option>
                         <option value="pool">Symbol Universe (Pool)</option>
                     </select>
@@ -186,6 +186,33 @@
                     </select>
                 </div>
             </div>
+            <div class="two-col">
+                <div class="form-row">
+                    <label>Bucket mode</label>
+                    <select id="spawn-mode" class="input input-select">
+                        {% for m in bucket_modes %}
+                        <option value="{{ m }}"
+                            {% if (mode or '') == m %}selected{% endif %}
+                            {% if not mode and m == 'paper' %}selected{% endif %}>
+                            {{ m | upper }}{% if m == 'live' %} (tight T9 caps){% else %} (free play){% endif %}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>Data source</label>
+                    <select id="spawn-source" class="input input-select">
+                        {% for s in source_tags %}
+                        <option value="{{ s }}"
+                            {% if s == 'synthetic' %}selected{% endif %}>{{ s | upper }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <small id="spawn-risk-hint" class="muted">
+                Paper = free-play caps; live = tight caps (10% per name, 10k value, 5 positions)
+                and only mstock data is accepted for real fills. Source is data trust.
+            </small>
             <div class="two-col">
                 <div class="form-row" id="spawn-symbol-row">
                     <label>Symbol</label>

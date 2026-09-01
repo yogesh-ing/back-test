@@ -202,7 +202,12 @@ class TestExpiryWarnings:
         assert response.status_code == 200
     
     def test_expired_blocks_forward_start(self, client, broker):
-        """Test that expired state blocks forward test."""
+        """Test that expired state blocks LIVE forward start (ticket #10).
+
+        The auth gate now applies to ``mode=live`` only — paper replays need
+        no broker session, so expiry must never silently block the free-play
+        path the UI defaults to.
+        """
         broker.authenticate({"username": "test", "password": "test"})
         broker.set_expiry_minutes(0)  # Expired
         
@@ -210,10 +215,12 @@ class TestExpiryWarnings:
         status = client.get('/api/broker/status').get_json()
         assert status['status'] == 'expired'
         
-        # Forward start should be blocked
+        # LIVE forward start should be blocked
         response = client.post('/api/forward/start', json={
             'strategy': 'sma_crossover',
             'symbol': 'DEMO',
+            'mode': 'live',
+            'source': 'mstock',
             'timeframe': '1D',
             'from_date': '2024-01-01',
             'to_date': '2024-12-31',
@@ -221,6 +228,21 @@ class TestExpiryWarnings:
         })
         assert response.status_code == 403
         assert response.get_json()['error'] == 'broker_not_authenticated'
+
+        # …but a paper replay still starts (T10: blocked things must be visible;
+        # the free-play default is not auth-gated).
+        paper = client.post('/api/forward/start', json={
+            'strategy': 'sma_crossover',
+            'symbol': 'DEMO',
+            'mode': 'paper',
+            'source': 'synthetic',
+            'timeframe': '1D',
+            'from_date': '2024-01-01',
+            'to_date': '2024-12-31',
+            'capital': 10000
+        })
+        assert paper.status_code == 200
+        assert paper.get_json()['mode'] == 'paper'
 
 
 class TestReauthenticationAfterExpiry:

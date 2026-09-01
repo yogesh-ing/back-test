@@ -109,7 +109,26 @@ Default: 0.03% commission + 0.05% slippage = 0.08% total cost per trade.
 
 ## Running a Backtest
 
-### Via Python API
+The **canonical entry** is `backtest.engine.backtest_runner.run_backtest` —
+the fill-exact `BacktestDriver` over the simulator (same loop as the forward
+paper run, next-bar-open fills). The vectorized `run_on_candles` path below
+is the legacy quick-screen engine (prev-close fills, built-in costs), still
+used by the CLI `run`/`compare` commands and API `mode='quick_screen'`.
+
+### Via Python API — canonical (fill-exact)
+```python
+from backtest.data.synthetic import SyntheticSource
+from backtest.engine.backtest_runner import run_backtest
+
+candles = SyntheticSource().get_candles("DEMO", "2024-01-01", "2024-12-31", "day")
+result = run_backtest(candles, "sma_crossover", {"fast": 20, "slow": 50}, "DEMO", 100_000)
+
+print(f"Sharpe: {result.metrics['sharpe']:.2f}")
+print(f"Return: {result.metrics['total_return']*100:.1f}%")
+print(f"Max DD: {result.metrics['max_drawdown']*100:.1f}%")
+```
+
+### Via Python API — legacy vectorized (quick screen)
 ```python
 from backtest.runner import build_source, run_on_candles
 from backtest.engine.backtester import BacktestConfig
@@ -118,10 +137,6 @@ source = build_source("synthetic")
 candles = source.get_candles("DEMO", "2024-01-01", "2024-12-31", "day")
 config = BacktestConfig(initial_capital=100_000, stop_loss=0.05)
 result = run_on_candles(candles, "sma_crossover", {"fast": 20, "slow": 50}, "DEMO", config)
-
-print(f"Sharpe: {result.metrics['sharpe']:.2f}")
-print(f"Return: {result.metrics['total_return']*100:.1f}%")
-print(f"Max DD: {result.metrics['max_drawdown']*100:.1f}%")
 ```
 
 ### Via CLI

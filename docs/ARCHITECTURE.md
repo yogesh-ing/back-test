@@ -21,8 +21,8 @@
        │
        ├── SyntheticSource (fake random walk)
        ├── CsvSource (local CSV files)
-       ├── MStockSource (live API, needs TOTP)
-       └── DbSource (PostgreSQL, **NOT YET WIRED**)
+       ├── MStockSource / MStockLiveFeed (live API, needs TOTP)
+       └── DbSource (PostgreSQL market_data_cache)
 ```
 
 ## Directory Structure
@@ -34,7 +34,10 @@ src/backtest/
 │   ├── base.py              # DataSource Protocol + normalize_candles()
 │   ├── synthetic.py         # SyntheticSource - random walk candles
 │   ├── csv_source.py        # CsvSource - reads local CSV files
-│   └── (mstock.py is in live/)
+│   ├── db_source.py         # DbSource - market_data_cache + resample
+│   ├── mstock_live_feed.py  # MStockLiveFeed - real-time mStock bars
+│   ├── source_registry.py   # (mode, source) -> DataSource factory (P1.2)
+│   └── universe.py          # Symbol universes + correlation groups
 │
 ├── strategy/                # STRATEGY SYSTEM
 │   ├── base.py              # Strategy ABC - inherit from this
@@ -48,13 +51,16 @@ src/backtest/
 │   └── donchian_breakout.py # Channel breakout
 │
 ├── engine/                  # BACKTEST ENGINE
-│   ├── backtester.py        # Backtester class - simulates trades
+│   ├── backtester.py        # Backtester class - vectorized quick-screen (legacy)
+│   ├── backtest_driver.py   # BacktestDriver - canonical loop (P2.1)
+│   ├── backtest_runner.py   # CANONICAL run_backtest() entry (ticket #6)
 │   ├── metrics.py           # compute_metrics() - Sharpe, drawdown, etc.
 │   └── plotting.py          # matplotlib chart generation
 │
-├── runner.py                # ORCHESTRATOR
+├── runner.py                # LEGACY VECTORIZED RUNNER + shared factories
 │   ├── build_source()       # Maps "synthetic" -> SyntheticSource()
-│   ├── run_on_candles()     # Strategy -> Engine -> Result
+│   ├── run_on_candles()     # Strategy -> Engine -> Result (quick screen)
+│   ├── run_on_source()      # fetch + run_on_candles (CLI legacy path)
 │   └── RunSpec              # Dataclass for CLI runs
 │
 ├── adapters/                # API RESPONSE ADAPTERS
@@ -77,16 +83,21 @@ src/backtest/
 │   └── config.py            # FORWARD_TEST_DB_URL config
 │
 ├── forward/                 # FORWARD TESTING (paper trading)
-│   ├── engine.py            # ForwardTestEngine - bar-by-bar replay
-│   ├── paper.py             # CLI paper-trade commands
-│   ├── portfolio.py         # StrategyAccount - tracks positions
-│   └── strategy_adapter.py  # Wraps Strategy for forward test loop
+│   ├── engine.py            # ForwardTestingEngine - live loop + backtest replay
+│   ├── paper_runner.py      # PaperRunner (canonical loop), CLI walk-forward/live
+│   │                        #   paper trade, StrategyRunner/OrderLedger/PaperBroker
+│   ├── portfolio_manager.py # PortfolioManager (multi-strategy command center)
+│   ├── risk_supervisor.py   # Global daily-loss / drawdown circuit breakers
+│   ├── feed.py              # SyntheticFeed - 1s random-walk bars
+│   └── strategy_adapter.py  # Strategy → Signal → Order (NO fills, F-01)
 │
 ├── simulator/               # TRADE SIMULATION PRIMITIVES
+│   ├── engine_loop.py       # canonical bar-clock loop (submit → fill at next open)
 │   ├── position.py          # Position tracking
 │   ├── order.py             # Order lifecycle
 │   ├── fill.py              # Fill execution
-│   ├── execution.py         # Order routing
+│   ├── execution.py         # OrderExecutor - submit()/step() bar clock + execute()
+│   ├── fill_providers.py    # simulated vs broker fill seam (P3.3)
 │   ├── commission.py        # Fee calculation
 │   ├── slippage.py          # Slippage model
 │   ├── position_sizing.py   # Kelly, fixed-fraction, etc.
@@ -129,14 +140,13 @@ Opens browser to `http://localhost:5000` with 4 tabs: Dashboard, Backtest, Compa
 PYTHONPATH=src python -m backtest run --strategy sma_crossover --symbol DEMO --from 2024-01-01 --to 2024-12-31 --source synthetic
 ```
 
-### 3. Python API
+### 3. Python API — canonical backtest entry (`engine/backtest_runner`)
 ```python
-from backtest.runner import build_source, run_on_candles
-from backtest.engine.backtester import BacktestConfig
+from backtest.data.synthetic import SyntheticSource
+from backtest.engine.backtest_runner import run_backtest
 
-source = build_source("synthetic")
-candles = source.get_candles("DEMO", "2024-01-01", "2024-12-31", "day")
-result = run_on_candles(candles, "sma_crossover", {"fast": 20, "slow": 50}, "DEMO", BacktestConfig())
+candles = SyntheticSource().get_candles("DEMO", "2024-01-01", "2024-12-31", "day")
+result = run_backtest(candles, "sma_crossover", {"fast": 20, "slow": 50}, "DEMO", 100_000)
 print(result.metrics["sharpe"], result.metrics["total_return"])
 ```
 

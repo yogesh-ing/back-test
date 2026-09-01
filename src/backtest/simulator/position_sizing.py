@@ -60,6 +60,7 @@ __all__ = [
     "VolatilitySizer",
     "ATRBasedSizer",
     "KellySizer",
+    "all_in_size",
     "load_position_sizing_config",
     "DEFAULT_SIZING_CONFIG_PATH",
 ]
@@ -1195,6 +1196,21 @@ def _resolve_equity(portfolio: Any) -> Decimal:
     except Exception:
         pass
     return money(100000)
+
+
+def all_in_size(symbol: str, price: float, portfolio: Any) -> int:
+    """Size an entry with the whole bucket (walk-forward convention).
+
+    A 2% safety haircut keeps the next-bar-open fill funded: sizing uses
+    this bar's price but the order trades at the NEXT bar's open, and an
+    upward gap must not push the notional past the available cash.
+    Canonical home (ticket #6); ``backtest.forward.paper_runner`` re-exports
+    the historical private name.
+    """
+    if price <= 0:
+        return 0
+    equity = float(portfolio.calculate_total_equity())
+    return int(equity * 0.98 / price)
 
 
 # ---------------------------------------------------------------------------

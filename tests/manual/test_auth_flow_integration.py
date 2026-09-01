@@ -98,10 +98,12 @@ class TestFullAuthenticationFlow:
         assert 'token' not in data
         assert 'session_token' not in data
         
-        # Verify forward start is blocked
+        # Verify LIVE forward start is blocked (paper needs no session — T10)
         response = client.post('/api/forward/start', json={
             'strategy': 'sma_crossover',
             'symbol': 'DEMO',
+            'mode': 'live',
+            'source': 'mstock',
             'timeframe': '1D',
             'from_date': '2024-01-01',
             'to_date': '2024-12-31',
@@ -190,10 +192,12 @@ class TestFullAuthenticationFlow:
         status_data = status_resp.get_json()
         assert status_data['status'] == 'unauthenticated'
         
-        # Verify forward start is blocked again
+        # Verify LIVE forward start is blocked again (T10: paper is not)
         forward_resp = client.post('/api/forward/start', json={
             'strategy': 'sma_crossover',
             'symbol': 'DEMO',
+            'mode': 'live',
+            'source': 'mstock',
             'timeframe': '1D',
             'from_date': '2024-01-01',
             'to_date': '2024-12-31',
@@ -288,6 +292,8 @@ class TestFullAuthenticationFlow:
         forward = client.post('/api/forward/start', json={
             'strategy': 'sma_crossover',
             'symbol': 'DEMO',
+            'mode': 'live',
+            'source': 'mstock',
             'timeframe': '1D',
             'from_date': '2024-01-01',
             'to_date': '2024-12-31',

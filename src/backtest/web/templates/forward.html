@@ -3,9 +3,19 @@
 
 {% block content %}
 <h1 class="page-title">Forward Test</h1>
-<p class="muted small page-sub">Live paper trading. Start a strategy, watch it trade in real-time.</p>
+<p class="muted small page-sub">Paper forward replay — simulated fills over historical/synthetic bars, watched in real-time (ticket #8: real-fill runs use the engine path; this page never paper-fills a live label).</p>
 
 <div id="prefillBanner" class="banner" hidden>Pre-filled from a backtest / compare result</div>
+
+<!-- T7-aware resume affordance: this page's run state is the in-memory web
+     session (sessionStorage key below); engine state-file resume is the CLI
+     `papertrade --mode live --state-file <path>` path. -->
+<div id="resumeBanner" class="banner" hidden>
+    <span>Re-attached to running session <strong id="resumedSessionId">—</strong>
+        (this browser's in-memory replay).</span>
+    <button id="resumeBtn" class="btn btn-sm" type="button">▶ Resume</button>
+    <button id="freshStartBtn" class="btn btn-ghost btn-sm" type="button">✕ Start fresh</button>
+</div>
 
 <!-- ================= LIVE STATUS BANNER ================= -->
 <div id="liveStatusBanner" class="card" style="display:none; margin-bottom:16px;">
@@ -36,13 +46,27 @@
             <datalist id="symbolList"></datalist>
         </div>
         <div class="form-row"><label>Timeframe</label><select id="timeframe" class="input">
-            <option value="1min">1min (Live)</option>
+            <option value="1min">1min</option>
             <option value="day">Day</option>
         </select></div>
-        <div class="form-row"><label>Mode</label><select id="dataMode" class="input">
-            <option value="synthetic">Synthetic (no broker needed)</option>
-            <option value="live">Live (requires mStock auth)</option>
+        <div class="form-row"><label>Run mode</label><select id="runMode" class="input">
+            {% for m in bucket_modes %}
+            <option value="{{ m }}"
+                {% if m == 'paper' %}selected{% endif %}>
+                {%- if m == 'paper' -%}Paper — simulated fills (free-play caps)
+                {%- else -%}Live — real fills (tight caps; engine path only)
+                {%- endif -%}
+            </option>
+            {% endfor %}
         </select></div>
+        <div class="form-row"><label>Data source</label><select id="dataSource" class="input">
+            {% for s in source_tags %}
+            <option value="{{ s }}" {% if s == 'synthetic' %}selected{% endif %}>{{ s | upper }}</option>
+            {% endfor %}
+        </select></div>
+        <div class="form-row" style="grid-column: 1 / -1;">
+            <small id="taxonomyHint" class="muted">Paper = free-play risk caps; data source only affects data trust (paper accepts all).</small>
+        </div>
         <div class="form-row"><label>Capital ({{ currency_symbol }})</label><input type="number" id="capital" class="input" value="100000" min="1000"></div>
         <div class="form-row"><label>Replay speed</label><select id="replaySpeed" class="input"
                 title="Bars revealed per second by the server clock — it keeps running even if you close this tab">

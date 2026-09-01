@@ -13,6 +13,8 @@ from decimal import Decimal
 from datetime import datetime, timezone
 
 from backtest.strategy.base import Strategy
+from backtest.simulator import CommissionCalculator, ExecutionConfig, SlippageCalculator
+from backtest.simulator.engine_loop import Bar
 from backtest.simulator.portfolio import Portfolio
 from backtest.simulator.execution import OrderExecutor
 from backtest.forward.strategy_adapter import (
@@ -199,17 +201,12 @@ def test_on_bar_close_and_signal_generation():
     assert sigs[0].action == "BUY"
     assert sigs[0].symbol == "INFY"
 
-    # third bar: already long, should HOLD
+    # third bar: target unchanged (1 -> 1), so the SIGNAL TRANSITION says HOLD
+    # (ticket F-01: decisions are transition-based, not position-based —
+    # the fill happens one bar later, so the portfolio is not yet long).
     sigs = adapter.on_bar_close(bars[2])
-    # portfolio has no position yet because no executor, so current target is 0
-    # But adapter's _current_target_position checks portfolio.get_position
-    # Since no fill, it will still be 0, so it will try to BUY again but
-    # can_open_position will deny duplicate? Let's check
-    # Actually portfolio has no position, so it will generate BUY again
-    # But after first order, portfolio has pending order but no position
-    # So second signal will be BUY again
-    # That's okay for this test - we just check signals are generated
-    assert len(sigs) >= 1
+    assert len(sigs) == 1
+    assert sigs[0].action == "HOLD"
 
 
 def test_no_lookahead_bias():
@@ -248,19 +245,23 @@ def test_dry_run_mode():
     assert len(adapter.order_history) == 0  # no orders in dry_run
 
 
-def test_execute_signals_creates_orders():
+def test_create_orders_from_signals():
+    """Signal → Order only; the adapter never fills (ticket F-01)."""
     strat = DummyLongStrategy(threshold=100)
     portfolio = Portfolio(name="exec_test", initial_capital=100000)
     adapter = StrategyAdapter(strategy=strat, portfolio=portfolio, symbols=["INFY"], min_bars=1)
 
     bar = make_bar("INFY", "2024-01-01T09:15:00+05:30", 101)
     sigs = adapter.on_bar_close(bar)
+    orders = adapter.create_orders(sigs, market_data=bar)
 
-    # should have created 1 order
+    assert len(orders) == 1
     assert len(adapter.order_history) == 1
     order = adapter.order_history[0]
     assert order.symbol == "INFY"
     assert str(order.side) == "buy"
+    # No fill happened: the portfolio is still flat.
+    assert portfolio.get_position("INFY") is None
 
 
 def test_portfolio_validation():
@@ -277,6 +278,7 @@ def test_portfolio_validation():
 
     bar = make_bar("INFY", "2024-01-01T09:15:00+05:30", 101)
     sigs = adapter.on_bar_close(bar)
+    adapter.create_orders(sigs, market_data=bar)
 
     # order should be rejected due to insufficient funds, so no order history
     assert len(adapter.order_history) == 0
@@ -344,22 +346,36 @@ def test_state_persistence():
     assert adapter2.symbols == ["INFY"]
 
 
-def test_integration_with_executor():
+def test_orders_fill_at_next_open_not_signal_bar():
+    """F-01: the adapter produces orders; the executor bar clock fills at
+    the NEXT bar's open — never the signal bar's close."""
     strat = DummyLongStrategy(threshold=100)
     portfolio = Portfolio(name="integ_test", initial_capital=100000)
-    executor = OrderExecutor()
-    adapter = StrategyAdapter(
-        strategy=strat, portfolio=portfolio, executor=executor, symbols=["INFY"], min_bars=1
+    executor = OrderExecutor(
+        config=ExecutionConfig(seed=7, price_improvement_probability=Decimal("0")),
+        slippage=SlippageCalculator.disabled(),
+        fees=CommissionCalculator(),
+        portfolio=portfolio,
     )
+    adapter = StrategyAdapter(strategy=strat, portfolio=portfolio, symbols=["INFY"], min_bars=1)
 
-    bar = make_bar("INFY", "2024-01-01T09:15:00+05:30", 101)
-    adapter.on_bar_close(bar)
+    # Signal bar t: close 101 > threshold → BUY. Order must NOT fill here.
+    bar_t = make_bar("INFY", "2024-01-01T09:15:00+05:30", close=101, open_=100)
+    sigs = adapter.on_bar_close(bar_t)
+    orders = adapter.create_orders(sigs, market_data=bar_t)
+    assert len(orders) == 1
+    for order in orders:
+        executor.submit(order)
 
-    # with executor, order should be filled and position opened
-    assert len(adapter.order_history) == 1
-    # portfolio should have position because executor's portfolio is None, so adapter applies fill itself
-    # In our implementation, when executor is provided but its portfolio is None, adapter's on_order_filled
-    # will apply fill to portfolio. Let's check
+    # Feeding bar t again only ARMS the order — no fill, no look-ahead.
+    assert executor.step(Bar(open=Decimal("100"), close=Decimal("101"), volume=Decimal("1000"))) == []
+
+    # Next bar t+1: fill at its OPEN (103), never bar t's close (101).
+    results = executor.step(Bar(open=Decimal("103"), close=Decimal("110"), volume=Decimal("1000")))
+    assert len(results) == 1
+    assert results[0].fill is not None
+    assert results[0].fill.fill_price == Decimal("103")
+    assert results[0].fill.fill_price != Decimal("101")
     assert portfolio.get_position("INFY") is not None
 
 
@@ -398,14 +414,15 @@ def test_db_logging():
     )
 
     bar = make_bar("INFY", "2024-01-01T09:15:00+05:30", 101)
-    adapter.on_bar_close(bar)
+    sigs = adapter.on_bar_close(bar)
+    adapter.create_orders(sigs, market_data=bar)
 
     with db.session() as session:
         from backtest.db.models import StrategySignal as Row
 
         rows = session.query(Row).all()
-        # should have at least 2 rows: generated + executed
-        assert len(rows) >= 1
+        # at least 2 rows: generated (executed=False) + mapped-to-order (executed=True)
+        assert len(rows) >= 2
         # check no lookahead
         for r in rows:
             if r.bar_ts and r.generated_at:
@@ -448,3 +465,132 @@ def test_existing_strategies_via_registry():
             adapter.on_bar_close(bar)
         # should not crash
         assert len(adapter.signal_history) >= 1
+
+
+# ---------------------------------------------------------------------------
+# F-17 — transition-based decisions produce the SAME trade selection as the
+# old position-based logic (given fills succeed), except persistent signals
+# no longer re-fire. The reference below is the OLD logic's decision +
+# same-bar-fill state machine, re-implemented from the pre-F-01 code.
+# ---------------------------------------------------------------------------
+
+
+def _clip_target(target: int, allow_short: bool) -> int:
+    """Adapter clips the strategy's target before deciding (long-only ⇒ ≥ 0)."""
+    if not allow_short and target < 0:
+        return 0
+    return target
+
+
+def _old_decide(position: int, target: int) -> str:
+    """The pre-F-01 position-based ``_decide_action`` body."""
+    if position == target:
+        return "HOLD"
+    if position == 0 and target > 0:
+        return "BUY"  # entry long
+    if position == 0 and target < 0:
+        return "SELL"  # entry short
+    if position > 0 and target == 0:
+        return "SELL"  # exit long
+    if position < 0 and target == 0:
+        return "BUY"  # exit short
+    if position > 0 and target < 0:
+        return "SELL"  # flip: close long only
+    if position < 0 and target > 0:
+        return "BUY"  # flip: close short only
+    return "HOLD"
+
+
+def _old_actions(targets: list[int], allow_short: bool) -> list[str]:
+    """Action sequence of the OLD logic with successful same-bar fills."""
+    actions: list[str] = []
+    position = 0
+    for raw in targets:
+        target = _clip_target(raw, allow_short)
+        action = _old_decide(position, target)
+        actions.append(action)
+        # same-bar fill state machine (fill succeeds):
+        if action == "BUY":
+            position = 1 if position == 0 else (0 if position < 0 else position)
+        elif action == "SELL":
+            position = -1 if position == 0 else (0 if position > 0 else position)
+    return actions
+
+
+class TargetReturningStrategy(Strategy):
+    """Returns a fixed target for every bar fed so far — the adapter takes
+    ``series.iloc[-1]``, so this drives the per-bar target sequence."""
+
+    name = ""
+    params = {}
+
+    def __init__(self, target: int, **kwargs):
+        super().__init__(**kwargs)
+        self.name = "target_ret"
+        self._target = target
+
+    def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
+        return pd.Series(self._target, index=candles.index)
+
+
+@pytest.mark.parametrize(
+    "targets,allow_short",
+    [
+        ([0, 1, 1, 1, 0], False),
+        ([0, 1, 1, 1, 0], True),
+        ([0, 1, 0, 1, 0], False),          # 1-bar spikes
+        ([0, 1, 1, 0, 1, 1, 0], False),    # re-entry
+        ([0, -1, -1, 0], True),            # persistent short
+        ([0, -1, 0, -1, 0], True),         # short spikes
+        ([0, 1, -1, -1, 0], True),         # flip long→short
+        ([0, -1, 1, 1, 0], True),          # flip short→long
+        ([0, 1, -1, 0, 1], True),          # flip then flat
+        ([0, 1, -1, 1, -1, 0], True),      # flip back and forth
+    ],
+)
+def test_transition_decisions_match_old_position_based(targets, allow_short):
+    """F-17: for the same data (fills succeed), the new transition-based
+    decisions are IDENTICAL to the old position-based trade selection."""
+    old = _old_actions(targets, allow_short)
+    assert old[0] == "HOLD"  # first bar is always flat->... , targets[0]=0
+
+    portfolio = Portfolio(name=f"f17_{allow_short}", initial_capital=100000)
+    adapter = StrategyAdapter(
+        strategy=TargetReturningStrategy(target=0),
+        portfolio=portfolio,
+        symbols=["INFY"],
+        min_bars=1,
+        allow_short=allow_short,
+    )
+
+    received: list[str] = []
+    # one strategy per target would not work — the adapter reuses one strategy
+    # for the whole run, so drive it with a per-bar strategy dict instead.
+    for i, raw in enumerate(targets):
+        adapter._strategies["INFY"] = TargetReturningStrategy(target=raw)
+        bar = make_bar("INFY", f"2024-01-0{i+1}T09:15:00+05:30", 100 + i)
+        sigs = adapter.on_bar_close(bar)
+        assert len(sigs) == 1, f"expected exactly one signal on bar {i}"
+        received.append(sigs[0].action)
+
+    assert received == old
+
+
+def test_persistent_signal_fires_once_not_every_bar():
+    """F-17 documented divergence: a persistent target fires once (BUY on the
+    0→1 transition) and then HOLDs. The OLD position-based logic re-fired BUY
+    on every bar while no fill landed (dry-run, rejected order, no executor);
+    the canonical engine only ever retries ORDERS the executor still holds."""
+    portfolio = Portfolio(name="f17_refire", initial_capital=100000)
+    adapter = StrategyAdapter(
+        strategy=TargetReturningStrategy(target=1),
+        portfolio=portfolio,
+        symbols=["INFY"],
+        min_bars=1,
+    )
+
+    for i in range(3):
+        bar = make_bar("INFY", f"2024-01-0{i+1}T09:15:00+05:30", 101)
+        sigs = adapter.on_bar_close(bar)
+        assert len(sigs) == 1
+        assert sigs[0].action == ("BUY" if i == 0 else "HOLD")

@@ -233,7 +233,14 @@ class BrokerFillProvider(FillProvider):
         quantity: Any,
         rng: random.Random,
     ) -> FillDecision:
-        broker_order_id = self.broker.place_order(order)
+        # Place ONCE per order. ``order.broker_order_id`` is stamped at
+        # place time and survives state-file round-trips (T7), so a retry
+        # (order still working after an unfilled poll) and a RESUMED order
+        # poll the SAME broker order instead of double-placing at the venue.
+        broker_order_id = order.broker_order_id
+        if broker_order_id is None:
+            broker_order_id = self.broker.place_order(order)
+            order.broker_order_id = str(broker_order_id)
         raw = self.broker.poll_fill(broker_order_id)
         if raw is None:
             return FillDecision(fill=None)

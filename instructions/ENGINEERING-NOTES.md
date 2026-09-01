@@ -85,13 +85,14 @@ Start here. Symptom → most likely cause → where to look.
 
 | Symptom | Likely cause | Check |
 |---|---|---|
-| `HOLD` signals flooding DB | Logging HOLD twice (generate + execute) | `execute_signals` now skips HOLD logging; HOLD already logged in `generate_signals` |
+| `HOLD` signals flooding DB | Logging HOLD twice (generate + create) | `create_orders` skips HOLD logging; HOLD already logged in `generate_signals` |
 | `FOREIGN KEY constraint failed` on `strategy_signals.portfolio_id` | Portfolio row not yet persisted | Adapter auto-creates minimal portfolio row in `_save_signal_to_db` if missing |
 | `FOREIGN KEY constraint failed` on `strategy_signals.order_id` | Order row not yet persisted | Adapter drops FK (saves without order_id) when order not in DB |
 | Signal generated but no order created | Portfolio validation failed (insufficient funds, duplicate position, short disabled) | Check `skip_reason` in DB or logs; `portfolio.can_open_position` |
 | Short signal ignored | `allow_short=False` by default | Set `allow_short=True` for short strategies |
 | Lookahead bias suspicion | `bar_ts` >= `generated_at` | Adapter sets `bar_ts` from completed bar index, `generated_at` = now; assert `bar_ts < generated_at` |
-| Position not opened after signal | No executor, or executor without portfolio sync | Without executor, order stays pending; with executor, fill applied via `on_order_filled` |
+| Signal fired but no fill at the signal bar | Expected (F-01) | Adapter never fills: engine does `executor.submit(order)` on bar `t` → `executor.step(bar t+1)` fills at `t+1`'s OPEN |
+| Same BUY/SELL re-fires every bar | Not expected with the adapter | Decisions are transition-based (`_last_target`); persistent signals fire once per `0→1`/`1→0` (F-17) |
 
 ### Environment
 
@@ -519,11 +520,14 @@ Bridges ``strategy/base.py`` (existing) into ``simulator.Portfolio`` and
   ``bar_ts`` is the timestamp of the completed bar, ``generated_at`` is now,
   so ``bar_ts < generated_at`` always holds — the query Step 22 uses for bias
   detection.
-* **Signal → Order:** ``Signal`` is a typed dataclass mirroring the plan's dict
-  shape (symbol, action BUY/SELL/HOLD, quantity, order_type, limit_price,
-  reason, indicators). ``execute_signals`` validates via
-  ``Portfolio.can_open_position``, sizes via ``PositionSizer``, and optionally
-  executes via ``OrderExecutor``.
+* **Signal → Order (F-01):** ``Signal`` is a typed dataclass mirroring the plan's
+  dict shape (symbol, action BUY/SELL/HOLD, quantity, order_type, limit_price,
+  reason, indicators). ``create_orders`` validates via
+  ``Portfolio.can_open_position``, sizes via ``PositionSizer``, and returns
+  ``Order`` objects — the adapter NEVER fills. The engine drives the executor's
+  bar clock (``submit`` on the signal bar, ``step`` on the next bar), so a fill
+  lands at the **next bar's open**. Transition-based decisions (``_last_target``,
+  flip-aware bookkeeping) replace the old position-based ones (F-17).
 * **Multi-symbol:** per-symbol DataFrames in ``_bars``; supports dict of
   strategies (one per symbol) or single strategy reused.
 * **Dry-run:** when ``dry_run=True`` signals are generated and logged but no

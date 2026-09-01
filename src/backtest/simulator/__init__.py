@@ -154,6 +154,13 @@ from backtest.simulator.position_sizing import (
     VolatilitySizer,
     load_position_sizing_config,
 )
+from backtest.simulator.bucket_risk import (
+    BUCKET_RISK_LIMITS,
+    BucketRiskLimits,
+    LIVE_BUCKET,
+    PAPER_BUCKET,
+    resolve_bucket_risk,
+)
 from backtest.simulator.risk_manager import (
     DEFAULT_RISK_CONFIG_PATH,
     RiskCheckResult,
@@ -300,6 +307,12 @@ __all__ = [
     "RiskCheckResult",
     "load_risk_config",
     "DEFAULT_RISK_CONFIG_PATH",
+    # Per-bucket risk limits (ticket #9)
+    "PAPER_BUCKET",
+    "LIVE_BUCKET",
+    "BucketRiskLimits",
+    "BUCKET_RISK_LIMITS",
+    "resolve_bucket_risk",
     # Stop manager (Step 16)
     "StopManager",
     "StopConfig",

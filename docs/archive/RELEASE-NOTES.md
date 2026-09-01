@@ -1,5 +1,10 @@
 # Release Notes — Forward Testing Simulator v1.0 (All 24 Steps Complete)
 
+> ⚠️ **HISTORICAL (archived).** References modules deleted in the P1.4/P4.3
+> refactor — `dashboard/`, `alerts/`, `analysis/`, `config_manager/`,
+> `marketdata/`, `forward/{paper,broker,portfolio,runner,order_ledger,live_engine}.py`.
+> Kept for history only; do not use as current documentation.
+>
 > **Date:** 2026-08-23 · **Branch:** `arena/01a02caa-back-test` · **Tests:** 1175 passing, 4 skipped (need broker creds)
 
 ---

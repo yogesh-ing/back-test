@@ -247,11 +247,15 @@ class Portfolio(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'active'"))
     #: Run classification (migration 002): paper = simulated fills,
     #: live = real broker orders. Pre-002 history defaults to 'paper'.
-    mode: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'paper'"))
+    #: Python-level ``default`` covers ORM-only inserts; ``server_default``
+    #: applies at the DB level for any non-ORM writer. Both match migration 002.
+    mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="paper", server_default=text("'paper'")
+    )
     #: Where this run's bars come from (migration 002): synthetic = generated,
     #: replay = historical DB, mstock = live broker feed.
     source: Mapped[str] = mapped_column(
-        String(16), nullable=False, server_default=text("'synthetic'")
+        String(16), nullable=False, default="synthetic", server_default=text("'synthetic'")
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
