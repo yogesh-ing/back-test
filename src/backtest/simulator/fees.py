@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -717,7 +717,7 @@ def load_broker_profile(path: str | Path | None = None, broker: str | None = Non
 
     payload = dict(brokers[chosen] or {})
     payload.setdefault("name", chosen)
-    known = set(BrokerProfile.__dataclass_fields__)
+    known = {f.name for f in fields(BrokerProfile)}
     unknown = set(payload) - known
     if unknown:
         raise ValidationError(

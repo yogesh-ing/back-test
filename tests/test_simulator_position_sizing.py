@@ -392,6 +392,16 @@ def test_risk_params_override():
     # risk 2% =2000, loss 2 => 1000
     assert qty == Decimal("1000")
 
+    # same override via a risk_params dict — exercises the dict-merge path
+    # (fields(RiskParams) walk in PositionSizer.calculate_position_size)
+    qty_dict = sizer.calculate_position_size(
+        symbol="INFY",
+        current_price=100,
+        portfolio=portfolio,
+        risk_params={"max_risk_per_trade": 0.02},
+    )
+    assert qty_dict == Decimal("1000")
+
 
 def test_kelly_with_signal():
     cfg = SizingConfig(method="kelly", win_rate=0.6, avg_win=200, avg_loss=100, kelly_fraction=0.5)

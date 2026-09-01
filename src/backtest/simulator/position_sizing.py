@@ -37,7 +37,7 @@ All monetary values are :class:`Decimal` to match the rest of ``simulator/``.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -366,12 +366,14 @@ class SizingConfig:
         if not isinstance(self.constraints, SizingConstraints):
             # allow dict
             if isinstance(self.constraints, dict):
+                # pylint: disable-next=not-a-mapping  # narrowed to dict by the isinstance above
                 self.constraints = SizingConstraints(**self.constraints)
             else:
                 raise ValidationError("constraints must be SizingConstraints or dict")
 
         if not isinstance(self.risk_params, RiskParams):
             if isinstance(self.risk_params, dict):
+                # pylint: disable-next=not-a-mapping  # narrowed to dict by the isinstance above
                 self.risk_params = RiskParams(**self.risk_params)
             else:
                 raise ValidationError("risk_params must be RiskParams or dict")
@@ -873,7 +875,7 @@ class PositionSizer:
                 # Actually to_dict returns str or None
                 # Let's build RiskParams directly from merged dict filtering
                 merged = {}
-                for k in RiskParams.__dataclass_fields__:
+                for k in (f.name for f in fields(RiskParams)):
                     if k in risk_params and risk_params[k] is not None:
                         merged[k] = risk_params[k]
                     else:
@@ -1365,7 +1367,7 @@ def load_position_sizing_config(
     risk_params_data = merged.pop("risk_params", None)
 
     # known fields
-    known = set(SizingConfig.__dataclass_fields__.keys())
+    known = {f.name for f in fields(SizingConfig)}
     # allow constraints and risk_params as nested, already popped
     unknown = set(merged) - known
     if unknown:

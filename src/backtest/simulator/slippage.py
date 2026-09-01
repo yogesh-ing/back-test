@@ -46,7 +46,7 @@ from __future__ import annotations
 import logging
 import statistics as _stats
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from datetime import time as dtime
 from decimal import Decimal
@@ -761,7 +761,7 @@ def load_slippage_config(
     if "session_close" in merged:
         merged["session_close"] = _parse_time(merged["session_close"], "session_close")
 
-    known = {f for f in SlippageConfig.__dataclass_fields__}
+    known = {f.name for f in fields(SlippageConfig)}
     unknown = set(merged) - known
     if unknown:
         raise ValidationError(

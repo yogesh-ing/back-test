@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -215,7 +215,7 @@ def load_risk_config(path: str | Path | None = None, profile: str | None = None)
         if "allowed_symbols" in merged and isinstance(merged["allowed_symbols"], list):
             merged["allowed_symbols"] = set(merged["allowed_symbols"])
 
-        known = set(RiskConfig.__dataclass_fields__.keys())
+        known = {f.name for f in fields(RiskConfig)}
         filtered = {k: v for k, v in merged.items() if k in known}
 
         return RiskConfig(**filtered)

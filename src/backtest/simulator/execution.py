@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import logging
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from datetime import time as dtime
 from decimal import Decimal
@@ -445,7 +445,7 @@ def load_execution_config(
     if "halted_symbols" in merged and merged["halted_symbols"]:
         merged["halted_symbols"] = frozenset(merged["halted_symbols"])
 
-    known = set(ExecutionConfig.__dataclass_fields__)
+    known = {f.name for f in fields(ExecutionConfig)}
     unknown = set(merged) - known
     if unknown:
         raise ValidationError(
