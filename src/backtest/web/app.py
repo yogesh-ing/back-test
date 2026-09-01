@@ -193,9 +193,13 @@ def _portfolio_buckets() -> dict[str, dict[str, Any]]:
 
     Each bucket lists its own instances only, so the landing shows a
     combined summary without one bucket leaking into the other (P4.1).
+
+    Ticket #10: the bucket keys come from the canonical ``BUCKET_RISK_LIMITS``
+    map (the same source the templates render their mode selects from) — the
+    vocabulary is never re-declared here.
     """
     buckets: dict[str, dict[str, Any]] = {}
-    for mode in ("paper", "live"):
+    for mode in BUCKET_RISK_LIMITS:
         rows = list_instances(mode)
         buckets[mode] = {
             "count": len(rows),

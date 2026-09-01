@@ -17,9 +17,13 @@
     chart: null,
   };
 
+  // Money (components/currency.js, loaded first in base.html) is the single
+  // money formatter: symbol/locale come from the <body data-currency-*>
+  // attributes, never hard-coded (ticket #10 — the app's currency config is
+  // the source of truth; the drawer used to print ₹ for every currency).
   function fmtSigned(n) {
     const v = Math.round(n || 0);
-    return (v >= 0 ? "+₹" : "-₹") + Math.abs(v).toLocaleString("en-IN");
+    return Money.signed(v, 0);
   }
   const pnlClass = (n) => (n > 0 ? "pnl-pos" : n < 0 ? "pnl-neg" : "pnl-flat");
   const $ = (id) => document.getElementById(id);
@@ -105,8 +109,8 @@
       ["Target type", r.target_type],
       ["Symbols", r.symbol_count + (r.target_type === "SYMBOL_UNIVERSE" ? " (pool)" : "")],
       ["Max pool positions", r.max_pool_positions],
-      ["Allocated capital", "₹" + (r.allocated_capital || 0).toLocaleString("en-IN")],
-      ["Cash", "₹" + (r.cash || 0).toLocaleString("en-IN")],
+      ["Allocated capital", Money.format(r.allocated_capital || 0, 0)],
+      ["Cash", Money.format(r.cash || 0, 0)],
       ["Win rate", ((r.win_rate || 0) * 100).toFixed(1) + "%"],
       ["Max drawdown", ((r.max_drawdown_pct || 0) * 100).toFixed(2) + "%"],
       ["Bars processed", r.bars_processed],

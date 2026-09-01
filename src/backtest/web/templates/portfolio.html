@@ -19,15 +19,15 @@
         </div>
     </div>
     <div class="bucket-cards">
-        {% for mode in ["paper", "live"] %}
+        {% for mode in bucket_modes %}
         {% set b = buckets[mode] %}
         <a class="card bucket-card" href="/portfolio/{{ mode }}">
-            <div class="bucket-name">{{ "📄 PAPER" if mode == "paper" else "🔴 LIVE" }}</div>
+            <div class="bucket-name">{{ "📄 " if mode == "paper" else "🔴 " }}{{ mode | upper }}</div>
             <div class="bucket-row"><span>Instances</span><strong>{{ b.count }}</strong></div>
-            <div class="bucket-row"><span>Allocated</span><strong>₹{{ "{:,.0f}".format(b.allocated) }}</strong></div>
-            <div class="bucket-row"><span>Equity</span><strong>₹{{ "{:,.0f}".format(b.equity) }}</strong></div>
-            <div class="bucket-row"><span>Daily P&amp;L</span><strong>₹{{ "{:,.0f}".format(b.daily_pnl) }}</strong></div>
-            <div class="bucket-row"><span>Realized P&amp;L</span><strong>₹{{ "{:,.0f}".format(b.realized_pnl) }}</strong></div>
+            <div class="bucket-row"><span>Allocated</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.allocated) }}</strong></div>
+            <div class="bucket-row"><span>Equity</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.equity) }}</strong></div>
+            <div class="bucket-row"><span>Daily P&amp;L</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.daily_pnl) }}</strong></div>
+            <div class="bucket-row"><span>Realized P&amp;L</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.realized_pnl) }}</strong></div>
             <div class="bucket-go">View {{ mode }} portfolio →</div>
         </a>
         {% endfor %}

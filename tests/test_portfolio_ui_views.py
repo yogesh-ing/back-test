@@ -8,9 +8,12 @@ Acceptance:
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from backtest.forward.paper_runner import RunnerConfig
+from backtest.simulator.bucket_risk import BUCKET_RISK_LIMITS
 
 
 def _config(name: str, **overrides) -> RunnerConfig:
@@ -193,3 +196,60 @@ def test_mode_source_badges_on_bucket_pages(client):
     # the combined command-center matrix carries the Mode/Source column too
     landing = client.get("/portfolio").get_data(as_text=True)
     assert "<th>Mode/Source</th>" in landing
+
+
+# ---------------------------------------------------------------------------
+# Ticket #10 — landing page follows the CANONICAL taxonomy; money labels come
+# from the app's currency config (never a hard-coded symbol)
+# ---------------------------------------------------------------------------
+
+
+def test_landing_page_bucket_cards_driven_by_canonical_map(client):
+    """The /portfolio bucket cards iterate the backend-owned bucket vocabulary.
+
+    The template must not re-declare the mode list (T3 pattern): it renders
+    one card per key of ``BUCKET_RISK_LIMITS`` (injected as ``bucket_modes``),
+    so a future bucket appears/disappears in exactly one place — the map.
+    """
+    html = client.get("/portfolio").get_data(as_text=True)
+    rendered = set(re.findall(r'href="/portfolio/([a-z]+)"', html))
+    assert rendered == set(BUCKET_RISK_LIMITS)
+    for mode in BUCKET_RISK_LIMITS:
+        assert f"/portfolio/{mode}" in html
+
+
+def _usd_client():
+    """A second app configured with a NON-default currency (USD)."""
+    from backtest.forward.portfolio_manager import reset_portfolio_manager
+    from backtest.forward.risk_supervisor import GlobalRiskConfig
+    from backtest.web.app import create_app
+
+    reset_portfolio_manager(
+        risk_config=GlobalRiskConfig(daily_loss_limit=100_000, max_drawdown_pct=0.50),
+        tick_seconds=1.0,
+        warmup_bars=15,
+        auto_start_feed=False,
+    )
+    app = create_app(source="synthetic", currency="USD")
+    return app
+
+
+def test_portfolio_and_forward_pages_render_configured_currency_symbol():
+    """The server-rendered money labels follow the app's currency config.
+
+    Runs the app with ``currency="USD"`` and asserts the portfolio/forward
+    pages print ``$`` (the configured symbol) and contain no hard-coded ``₹``
+    anywhere in the HTML — the mirror of the audit finding that Backtest/
+    Compare once printed a hard-coded ``$`` on an INR deployment.
+    """
+    app = _usd_client()
+    try:
+        with app.test_client() as c:
+            for path in ("/portfolio", "/portfolio/paper", "/portfolio/live", "/forward"):
+                html = c.get(path).get_data(as_text=True)
+                assert "$" in html, f"{path}: configured currency symbol missing"
+                assert "₹" not in html, f"{path}: hard-coded INR symbol leaked"
+    finally:
+        from backtest.forward.portfolio_manager import get_portfolio_manager
+
+        get_portfolio_manager().shutdown()
