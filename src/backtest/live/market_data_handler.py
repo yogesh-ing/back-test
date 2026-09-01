@@ -55,7 +55,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set
 from zoneinfo import ZoneInfo
@@ -166,7 +166,10 @@ class MockBrokerFeed(BrokerFeed):
 
 
 class MStockBrokerFeed(BrokerFeed):
-    """Concrete feed wrapping existing MStockSource (Step 10 requirement: wire to live/mstock.py)."""
+    """Concrete feed wrapping existing MStockSource.
+
+    Step 10 requirement: wire to live/mstock.py.
+    """
 
     def __init__(self, mstock_source: Any = None):
         self._connected = False
@@ -992,4 +995,8 @@ class MarketDataHandler:
         }
 
     def __repr__(self):
-        return f"<MarketDataHandler provider={self.provider} symbols={self.symbols} connected={self.is_connected()} ticks={self._stats['ticks_received']} bars={self._stats['bars_built']}>"
+        return (
+            f"<MarketDataHandler provider={self.provider} symbols={self.symbols} "
+            f"connected={self.is_connected()} ticks={self._stats['ticks_received']} "
+            f"bars={self._stats['bars_built']}>"
+        )

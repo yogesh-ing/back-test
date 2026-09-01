@@ -7,7 +7,10 @@ class RsiReversion(Strategy):
     """RSI mean-reversion: go long when RSI is oversold, exit on recovery."""
 
     name = "rsi_reversion"
-    description = "RSI mean-reversion — enter long when RSI dips below the oversold level, exit when it recovers past the exit level."
+    description = (
+        "RSI mean-reversion — enter long when RSI dips below the oversold level, "
+        "exit when it recovers past the exit level."
+    )
     version = "1.0"
     author = "Trading Bot"
     params = {

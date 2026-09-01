@@ -18,7 +18,9 @@ from backtest.strategy.registry import get_strategy, list_strategies
 def _print_metrics(result):
     m = result.metrics
     print(
-        f"strategy={m.get('strategy', 'unknown')} symbol={m.get('symbol', 'NA')} final_equity={m.get('final_equity', 0):.2f} total_return={m.get('total_return', 0):.4f} sharpe={m.get('sharpe', 0):.4f}"
+        f"strategy={m.get('strategy', 'unknown')} symbol={m.get('symbol', 'NA')} "
+        f"final_equity={m.get('final_equity', 0):.2f} "
+        f"total_return={m.get('total_return', 0):.4f} sharpe={m.get('sharpe', 0):.4f}"
     )
     if m.get("stop_loss") is not None or m.get("take_profit") is not None:
         print(f"Risk: stop_loss={m.get('stop_loss')} take_profit={m.get('take_profit')}")
@@ -61,10 +63,16 @@ def run_command(args):
     result = run_on_source(source, spec, cfg)
     _print_metrics(result)
     if (args.plot or not args.no_chart) and not args.json:
-        default_path = f"charts/{args.strategy}_{args.symbol}_{args.interval}_{int(datetime.now().timestamp())}.png"
+        default_path = (
+            f"charts/{args.strategy}_{args.symbol}_{args.interval}_"
+            f"{int(datetime.now().timestamp())}.png"
+        )
         out = args.plot if isinstance(args.plot, str) else default_path
         if args.chart_dir:
-            out = f"{args.chart_dir}/{args.strategy}_{args.symbol}_{args.interval}_{int(datetime.now().timestamp())}.png"
+            out = (
+                f"{args.chart_dir}/{args.strategy}_{args.symbol}_{args.interval}_"
+                f"{int(datetime.now().timestamp())}.png"
+            )
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         plot_result(result, path=out)
         print(f"chart={out}")
@@ -102,14 +110,18 @@ def compare_command(args):
     rows.sort(key=lambda item: item[sort_by], reverse=reverse)
     for row in rows:
         print(
-            f"{row['name']} sharpe={row['sharpe']:.4f} total_return={row['total_return']:.4f} final_equity={row['final_equity']:.2f}"
+            f"{row['name']} sharpe={row['sharpe']:.4f} "
+            f"total_return={row['total_return']:.4f} final_equity={row['final_equity']:.2f}"
         )
     if args.json:
         print(json.dumps(rows, indent=2, default=str))
     if not args.no_chart:
         out = (
             args.chart_dir
-            and f"{args.chart_dir}/compare_{args.symbol}_{args.interval}_{int(datetime.now().timestamp())}.png"
+            and (
+                f"{args.chart_dir}/compare_{args.symbol}_{args.interval}_"
+                f"{int(datetime.now().timestamp())}.png"
+            )
             or f"charts/compare_{args.symbol}_{args.interval}_{int(datetime.now().timestamp())}.png"
         )
         Path(out).parent.mkdir(parents=True, exist_ok=True)
@@ -171,7 +183,9 @@ def papertrade_command(args):
             pnl_pct = (final - args.capital) / args.capital * 100
             print(f"strategy={name} final_equity={final:.2f} return={pnl_pct:.2f}%")
         print(
-            f"state_file={state_file} processed_bars={result['state'].get('processed_bars', 0)} resume_count={result['state'].get('resume_count', 0)}"
+            f"state_file={state_file} "
+            f"processed_bars={result['state'].get('processed_bars', 0)} "
+            f"resume_count={result['state'].get('resume_count', 0)}"
         )
     else:
         raise ValueError(f"Unknown mode: {args.mode}")

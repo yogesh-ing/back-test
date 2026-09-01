@@ -43,7 +43,6 @@ import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
 
@@ -55,7 +54,7 @@ from backtest.data.source_tags import SOURCE_TAG_VALUES, SOURCE_TAGS, source_tag
 from backtest.data.universe import get_universe_symbols
 from backtest.simulator.engine_loop import OrderQueue, run_engine_loop
 from backtest.simulator.enums import OrderSide, OrderType, TimeInForce
-from backtest.simulator.execution import free_executor
+from backtest.simulator.execution import OrderExecutor, free_executor
 from backtest.simulator.order import Order as SimOrder
 from backtest.simulator.portfolio import Portfolio, PortfolioLimits
 from backtest.simulator.position_sizing import all_in_size

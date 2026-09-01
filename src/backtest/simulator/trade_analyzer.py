@@ -36,17 +36,16 @@ from __future__ import annotations
 import csv
 import json
 import logging
-from collections import Counter, defaultdict
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 
-from backtest.simulator.money import ZERO, money, to_decimal
+from backtest.simulator.money import ZERO, to_decimal
 
 logger = logging.getLogger("backtest.simulator.trade_analyzer")
 
@@ -311,7 +310,8 @@ class TradeAnalyzer:
                     trade_bars = hist.loc[mask]
 
                     if not trade_bars.empty:
-                        # For long: MAE is max adverse (lowest low vs entry), MFE is highest high vs entry
+                        # For long: MAE is max adverse (lowest low vs entry),
+                        # MFE is highest high vs entry
                         # For short: inverse
                         direction = str(data.get("direction", "long")).lower()
                         is_long = direction == "long"
@@ -394,7 +394,8 @@ class TradeAnalyzer:
                             mid = float(row["close"])
 
                         if mid and mid != 0:
-                            # Execution quality bps: (fill - mid)/mid *10000, positive = adverse for buy
+                            # Execution quality bps: (fill - mid)/mid *10000,
+                            # positive = adverse for buy
                             fill = float(entry_price)
                             eq_bps = (fill - mid) / mid * 10000
                             exec_quality_bps = to_decimal(eq_bps, "exec_quality_bps")
@@ -846,4 +847,8 @@ class TradeAnalyzer:
         }
 
     def __repr__(self):
-        return f"<TradeAnalyzer portfolio={getattr(self.portfolio, 'name', '?') if self.portfolio else 'None'} trades={len(self.get_trades())}>"
+        return (
+            f"<TradeAnalyzer "
+            f"portfolio={getattr(self.portfolio, 'name', '?') if self.portfolio else 'None'} "
+            f"trades={len(self.get_trades())}>"
+        )

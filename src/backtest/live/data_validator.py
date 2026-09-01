@@ -37,10 +37,9 @@ import logging
 import math
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional
 
 import pandas as pd
 
@@ -262,7 +261,8 @@ class DataValidator:
                     if price < self.config.min_price or price > self.config.max_price:
                         return self._fail(
                             "price_out_of_range",
-                            f"{key} {price} out of range [{self.config.min_price}, {self.config.max_price}]",
+                            f"{key} {price} out of range "
+                            f"[{self.config.min_price}, {self.config.max_price}]",
                             {"symbol": symbol},
                         )
                 except (ValueError, TypeError):
@@ -294,12 +294,12 @@ class DataValidator:
                 try:
                     b = float(bid)
                     a = float(ask)
-                    l = float(last)
+                    last_px = float(last)
                     tolerance = (a - b) * self.config.bid_ask_tolerance_pct if a > b else 0
-                    if not (b - tolerance <= l <= a + tolerance):
+                    if not (b - tolerance <= last_px <= a + tolerance):
                         return self._fail(
                             "last_outside_spread",
-                            f"last {l} outside bid/ask [{b}, {a}] with tolerance {tolerance}",
+                            f"last {last_px} outside bid/ask [{b}, {a}] with tolerance {tolerance}",
                             {"symbol": symbol},
                         )
                 except (ValueError, TypeError):
@@ -496,21 +496,21 @@ class DataValidator:
         try:
             o = float(open)
             h = float(high)
-            l = float(low)
+            lo = float(low)
             c = float(close)
 
-            if h < o or h < c or h < l:
+            if h < o or h < c or h < lo:
                 return self._fail(
                     "ohlc_high_low",
-                    f"high {h} must be >= open {o}, low {l}, close {c}",
-                    {"open": o, "high": h, "low": l, "close": c},
+                    f"high {h} must be >= open {o}, low {lo}, close {c}",
+                    {"open": o, "high": h, "low": lo, "close": c},
                 )
 
-            if l > o or l > c or l > h:
+            if lo > o or lo > c or lo > h:
                 return self._fail(
                     "ohlc_low_high",
-                    f"low {l} must be <= open {o}, high {h}, close {c}",
-                    {"open": o, "high": h, "low": l, "close": c},
+                    f"low {lo} must be <= open {o}, high {h}, close {c}",
+                    {"open": o, "high": h, "low": lo, "close": c},
                 )
 
             return ValidationResult(valid=True)
@@ -558,7 +558,8 @@ class DataValidator:
         if z_score > threshold:
             return self._fail(
                 "price_spike",
-                f"price spike detected for {symbol}: {p} vs mean {mean:.2f} std {std:.2f} z={z_score:.2f} > {threshold}",
+                f"price spike detected for {symbol}: {p} vs mean {mean:.2f} "
+                f"std {std:.2f} z={z_score:.2f} > {threshold}",
                 {
                     "symbol": symbol,
                     "price": p,
@@ -840,4 +841,7 @@ class DataValidator:
         logger.info("Validator reset")
 
     def __repr__(self):
-        return f"<DataValidator strictness={self.config.strictness} checks={self._total_checks} failed={self._failed_checks}>"
+        return (
+            f"<DataValidator strictness={self.config.strictness} "
+            f"checks={self._total_checks} failed={self._failed_checks}>"
+        )

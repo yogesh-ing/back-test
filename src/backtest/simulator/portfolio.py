@@ -37,7 +37,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping
+from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
 from backtest.simulator.errors import (
     DuplicatePositionError,
@@ -1099,8 +1099,6 @@ class Portfolio:
             Also persist every tracked order and the fills attached to them.
             Set ``False`` to write only cash and positions.
         """
-        from sqlalchemy import select
-
         from backtest.db.models import Fill as FillRow
         from backtest.db.models import Order as OrderRow
         from backtest.db.models import Portfolio as PortfolioRow

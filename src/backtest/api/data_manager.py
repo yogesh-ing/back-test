@@ -111,7 +111,10 @@ def fetch_start() -> tuple:
         return (
             jsonify(
                 {
-                    "error": f"Unsupported timeframe: {timeframe}. Use: {list(_MSTOCK_INTERVAL_MAP.keys())}"
+                    "error": (
+                        f"Unsupported timeframe: {timeframe}. "
+                        f"Use: {list(_MSTOCK_INTERVAL_MAP.keys())}"
+                    )
                 }
             ),
             400,
@@ -439,7 +442,8 @@ def _persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timefram
         INSERT INTO market_data_cache
             (symbol, exchange, timeframe, ts, open, high, low, close, volume, source, ingested_at)
         VALUES
-            (:symbol, :exchange, :timeframe, :ts, :open, :high, :low, :close, :volume, :source, now())
+            (:symbol, :exchange, :timeframe, :ts, :open, :high, :low, :close, :volume,"""
+        """ :source, now())
         ON CONFLICT (symbol, exchange, timeframe, ts) DO UPDATE
             SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
                 close = EXCLUDED.close, volume = EXCLUDED.volume, ingested_at = now()

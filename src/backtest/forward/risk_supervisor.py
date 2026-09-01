@@ -120,7 +120,7 @@ class RiskSupervisor:
         """Flag correlation groups with >= threshold concurrent LONG positions."""
         group_longs: Dict[str, set] = {}
         for runner in runners:
-            state = runner.get_state()
+            _ = runner.get_state()  # unused; call kept unchanged (F841, ticket #11)
             for pos in runner.positions.values():
                 if pos["side"] != "LONG":
                     continue

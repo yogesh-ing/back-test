@@ -7,9 +7,12 @@ real-time equity curve tracking.
 Features
 --------
 * Return metrics: total return, daily/cumulative, annualized, CAGR, MoM, best/worst day/week/month
-* Risk metrics: volatility, annualized vol, max drawdown $/%, drawdown duration, current drawdown, VaR 95%/99%
+* Risk metrics: volatility, annualized vol, max drawdown $/%, drawdown duration,
+  current drawdown, VaR 95%/99%
 * Risk-adjusted: Sharpe, Sortino, Calmar, Information Ratio, Treynor
-* Trade stats: total, winning/losing, win rate, avg win/loss, largest win/loss, profit factor, avg holding period, expectancy, consecutive wins/losses, avg trade size, commission/slippage totals
+* Trade stats: total, winning/losing, win rate, avg win/loss, largest win/loss,
+  profit factor, avg holding period, expectancy, consecutive wins/losses,
+  avg trade size, commission/slippage totals
 * Real-time: update_equity_curve() on each tick/bar, calculate_all_metrics() on trade close
 * Persistence: save to PERFORMANCE_METRICS table via DatabaseManager
 * Benchmark comparison vs S&P 500 or custom benchmark
@@ -34,12 +37,11 @@ from __future__ import annotations
 
 import logging
 import math
-from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
 import pandas as pd
@@ -539,7 +541,8 @@ class PerformanceCalculator:
             # Also try to get trades from portfolio if it has trades list
             trades = []
             if closed_positions:
-                # Each closed position is a round-trip? For simplicity, treat each closed position as a trade
+                # Each closed position is a round-trip? For simplicity, treat
+                # each closed position as a trade
                 # Real implementation would use TRADES table
                 for pos in closed_positions:
                     # pos has realized_pnl
@@ -691,7 +694,8 @@ class PerformanceCalculator:
         }
 
         logger.info(
-            "Performance calculated: total_return=%.2f%% win_rate=%.1f%% sharpe=%.2f max_dd=%.2f%% trades=%s",
+            "Performance calculated: total_return=%.2f%% win_rate=%.1f%% "
+            "sharpe=%.2f max_dd=%.2f%% trades=%s",
             all_metrics.get("total_return_pct", 0) * 100,
             all_metrics.get("win_rate", 0) * 100,
             all_metrics.get("sharpe_ratio", 0),
@@ -810,4 +814,7 @@ class PerformanceCalculator:
         return self.calculate_all_metrics()
 
     def __repr__(self):
-        return f"<PerformanceCalculator portfolio={getattr(self.portfolio, 'name', '?')} risk_free={self.config.risk_free_rate}>"
+        return (
+            f"<PerformanceCalculator portfolio={getattr(self.portfolio, 'name', '?')} "
+            f"risk_free={self.config.risk_free_rate}>"
+        )

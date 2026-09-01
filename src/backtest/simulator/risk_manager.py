@@ -8,7 +8,8 @@ Risk hierarchy
 Order -> Position -> Portfolio
 
 * Order-level: sufficient cash, size limits, restricted symbols, % of daily volume
-* Position-level: max position size per symbol, max % per symbol, max open positions, sector concentration
+* Position-level: max position size per symbol, max % per symbol, max open positions,
+  sector concentration
 * Portfolio-level: max drawdown, daily/weekly/monthly loss limits, max leverage, max total exposure
 
 Circuit breakers
@@ -33,17 +34,17 @@ True
 from __future__ import annotations
 
 import logging
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set
 
 from backtest.simulator.errors import ValidationError
 from backtest.simulator.money import ZERO, money
 from backtest.simulator.money import price as to_price
-from backtest.simulator.money import quantize_money, to_decimal
+from backtest.simulator.money import to_decimal
 
 logger = logging.getLogger("backtest.simulator.risk_manager")
 
@@ -294,7 +295,8 @@ class RiskManager:
         self._override_until: Optional[datetime] = None
 
         logger.info(
-            "RiskManager initialized: max_pos_pct=%s max_drawdown=%s daily_loss=%s max_positions=%s",
+            "RiskManager initialized: max_pos_pct=%s max_drawdown=%s "
+            "daily_loss=%s max_positions=%s",
             self.config.max_position_pct,
             self.config.max_drawdown_pct,
             self.config.daily_loss_limit_pct,
@@ -475,7 +477,8 @@ class RiskManager:
                             return RiskCheckResult(
                                 False,
                                 "exceeds_daily_volume",
-                                f"Order qty {qty} is {pct:.1%} of daily volume {avg_vol_dec} > limit {self.config.max_order_pct_of_daily_volume:.1%}",
+                                f"Order qty {qty} is {pct:.1%} of daily volume {avg_vol_dec} "
+                                f"> limit {self.config.max_order_pct_of_daily_volume:.1%}",
                                 {
                                     "symbol": symbol,
                                     "pct": str(pct),
@@ -520,7 +523,8 @@ class RiskManager:
                         return RiskCheckResult(
                             False,
                             "max_position_pct",
-                            f"Position would be {pct:.2%} of equity > limit {self.config.max_position_pct:.2%} for {symbol}",
+                            f"Position would be {pct:.2%} of equity "
+                            f"> limit {self.config.max_position_pct:.2%} for {symbol}",
                             {
                                 "symbol": symbol,
                                 "pct": str(pct),
@@ -538,7 +542,8 @@ class RiskManager:
                         return RiskCheckResult(
                             False,
                             "max_open_positions",
-                            f"Already have {len(self.portfolio.positions)} positions, max {self.config.max_open_positions}",
+                            f"Already have {len(self.portfolio.positions)} positions, "
+                            f"max {self.config.max_open_positions}",
                             {
                                 "open": len(self.portfolio.positions),
                                 "max": self.config.max_open_positions,
@@ -569,7 +574,8 @@ class RiskManager:
                         return RiskCheckResult(
                             False,
                             "sector_exposure",
-                            f"Sector {sector} exposure {projected} > limit {max_sector_value} ({sector_limit:.1%})",
+                            f"Sector {sector} exposure {projected} "
+                            f"> limit {max_sector_value} ({sector_limit:.1%})",
                             {
                                 "sector": sector,
                                 "exposure": str(projected),
@@ -744,7 +750,8 @@ class RiskManager:
                     return RiskCheckResult(
                         False,
                         "max_gross_exposure",
-                        f"Gross exposure {new_gross} > max {max_gross} ({self.config.max_gross_exposure_pct:.1%})",
+                        f"Gross exposure {new_gross} > max {max_gross} "
+                        f"({self.config.max_gross_exposure_pct:.1%})",
                         {"gross": str(new_gross), "max": str(max_gross)},
                     )
             except Exception as exc:
@@ -828,7 +835,8 @@ class RiskManager:
                 result = RiskCheckResult(
                     False,
                     "consecutive_losses",
-                    f"Consecutive losses {self._consecutive_losses} >= limit {self.config.max_consecutive_losses}",
+                    f"Consecutive losses {self._consecutive_losses} "
+                    f">= limit {self.config.max_consecutive_losses}",
                     {
                         "consecutive_losses": self._consecutive_losses,
                         "limit": self.config.max_consecutive_losses,
@@ -965,7 +973,8 @@ class RiskManager:
                 logger.info("Risk rejected signal %s: not allowed", symbol)
                 continue
 
-            # For signals, we don't have quantity yet (sizer will decide), so check portfolio-level only
+            # For signals, we don't have quantity yet (sizer will decide),
+            # so check portfolio-level only
             dd_result = self.check_drawdown_limits()
             if not dd_result.allowed:
                 logger.info("Risk rejected signal %s: %s", symbol, dd_result.reason)
@@ -1011,4 +1020,8 @@ class RiskManager:
         }
 
     def __repr__(self):
-        return f"<RiskManager halted={self.is_halted()} drawdown_limit={self.config.max_drawdown_pct} daily_loss={self.config.daily_loss_limit_pct}>"
+        return (
+            f"<RiskManager halted={self.is_halted()} "
+            f"drawdown_limit={self.config.max_drawdown_pct} "
+            f"daily_loss={self.config.daily_loss_limit_pct}>"
+        )

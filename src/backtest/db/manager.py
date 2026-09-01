@@ -61,7 +61,7 @@ from contextlib import contextmanager
 from typing import Any, Iterator, Mapping, Sequence
 
 from sqlalchemy import Connection, create_engine, event, text
-from sqlalchemy.engine import Engine, Result
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import (
     DBAPIError,
     DisconnectionError,

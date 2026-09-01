@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from backtest.engine.metrics import compute_metrics
@@ -108,9 +107,9 @@ class Backtester:
     def _run_with_risk(
         self, candles: pd.DataFrame, target: pd.Series
     ) -> tuple[pd.Series, pd.Series, pd.Series]:
-        close = candles["close"]
-        high = candles["high"]
-        low = candles["low"]
+        # Values unused below (rows are read in the loop); keep the lookups so a
+        # malformed frame still fails fast on missing columns (F841, ticket #11).
+        _ = (candles["close"], candles["high"], candles["low"])
 
         # Lag target signals to implement no-lookahead rule (Invariant 1)
         lagged_target = target.shift(1).fillna(0).clip(-1, 1)

@@ -18,7 +18,9 @@ Quick start
 >>> from backtest.simulator.portfolio import Portfolio
 >>> from backtest.simulator.position_sizing import PositionSizer, SizingConfig
 >>> portfolio = Portfolio(name="test", initial_capital=100000)
->>> sizer = PositionSizer.from_config(SizingConfig(method="risk_based", risk_per_trade=0.01, stop_loss_pct=0.02))
+>>> sizer = PositionSizer.from_config(
+...     SizingConfig(method="risk_based", risk_per_trade=0.01, stop_loss_pct=0.02)
+... )
 >>> qty = sizer.calculate_position_size(symbol="INFY", current_price=1500, portfolio=portfolio)
 
 Constraints are applied after the raw calculation:
@@ -35,7 +37,6 @@ All monetary values are :class:`Decimal` to match the rest of ``simulator/``.
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -44,7 +45,7 @@ from typing import Any, Dict, Mapping, Optional
 from backtest.simulator.errors import ValidationError
 from backtest.simulator.money import ONE, ZERO, money
 from backtest.simulator.money import price as to_price
-from backtest.simulator.money import quantize_money, quantize_price, to_decimal
+from backtest.simulator.money import quantize_money, to_decimal
 
 logger = logging.getLogger("backtest.simulator.position_sizing")
 
@@ -861,7 +862,6 @@ class PositionSizer:
         price = _resolve_price(current_price, signal, portfolio)
 
         # Merge risk_params overrides
-        effective_config = self.config
         if risk_params is not None:
             if isinstance(risk_params, RiskParams):
                 rp = risk_params
@@ -869,7 +869,8 @@ class PositionSizer:
                 # build from dict, merging with existing
                 rp_dict = self.config.risk_params.to_dict()
                 rp_dict.update({k: v for k, v in risk_params.items() if v is not None})
-                # remove None string values that to_dict produced as None? Actually to_dict returns str or None
+                # remove None string values that to_dict produced as None?
+                # Actually to_dict returns str or None
                 # Let's build RiskParams directly from merged dict filtering
                 merged = {}
                 for k in RiskParams.__dataclass_fields__:
@@ -890,7 +891,8 @@ class PositionSizer:
             else:
                 rp = self.config.risk_params
 
-            # If risk_params overrides contain sizing-relevant fields, rebuild inner sizer temporarily?
+            # If risk_params overrides contain sizing-relevant fields,
+            # rebuild inner sizer temporarily?
             # For simplicity, pass them as kwargs to inner calculate
             kwargs.update(
                 {

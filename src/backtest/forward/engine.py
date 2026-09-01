@@ -81,7 +81,6 @@ import json
 import logging
 import signal
 import time
-import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -140,8 +139,6 @@ class PortfolioConfig:
     max_open_positions: Optional[int] = None
 
     def __post_init__(self):
-        from backtest.simulator.money import to_decimal
-
         self.initial_capital = money(self.initial_capital)
         if self.initial_capital <= ZERO:
             raise ValidationError("initial_capital must be positive")
@@ -1485,7 +1482,6 @@ class ForwardTestingEngine:
 
         # Risk manager – try real implementation
         try:
-            from backtest.simulator.risk_manager import RiskConfig as RealRiskConfig
             from backtest.simulator.risk_manager import RiskManager as RealRiskManager
 
             # Ticket #9 — the pre-trade risk config is built from the bucket
@@ -1876,7 +1872,7 @@ class ForwardTestingEngine:
                 if hasattr(self.portfolio, "get_current_exposure")
                 else {}
             )
-            metrics = self.performance.get_metrics()
+            _ = self.performance.get_metrics()  # unused; call kept unchanged (F841, ticket #11)
 
             logger.info(
                 "Heartbeat loop=%s equity=%s cash=%s positions=%s exposure=%s errors=%s",
@@ -1905,7 +1901,10 @@ class ForwardTestingEngine:
         }
 
     def __repr__(self):
-        return f"<ForwardTestingEngine portfolio={getattr(self.portfolio, 'name', '?')} running={self._running} loops={self._loop_count}>"
+        return (
+            f"<ForwardTestingEngine portfolio={getattr(self.portfolio, 'name', '?')} "
+            f"running={self._running} loops={self._loop_count}>"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -34,14 +34,14 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set
 
 from backtest.simulator.enums import OrderSide, OrderType
 from backtest.simulator.errors import ValidationError
-from backtest.simulator.money import ONE, ZERO, money
+from backtest.simulator.money import ONE, ZERO
 from backtest.simulator.money import price as to_price
 from backtest.simulator.money import quantize_price, to_decimal
 
@@ -415,7 +415,8 @@ class StopManager:
         position:
             Position object with symbol, quantity, average_entry_price, position_id
         stop_type:
-            One of StopType: fixed_price, percentage, atr_based, trailing_fixed, trailing_percentage, time_based
+            One of StopType: fixed_price, percentage, atr_based, trailing_fixed,
+            trailing_percentage, time_based
         params:
             Dict with keys: price, pct, atr, atr_multiplier, trailing_amount, trailing_pct, bars
 
@@ -948,7 +949,8 @@ class StopManager:
                             "Time-based stop triggered for %s after %s bars", symbol, stop.bars_held
                         )
 
-                # For long positions (side SELL): stop triggers when price <= stop price (for SL) or >= for TP?
+                # For long positions (side SELL): stop triggers when
+                # price <= stop price (for SL) or >= for TP?
                 # Let's define:
                 # Long SL: triggers when low <= stop price (price falls to stop)
                 # Long TP: triggers when high >= target price (price rises to target)
@@ -999,7 +1001,11 @@ class StopManager:
                         current_price=curr_price_dec,
                         action="SELL" if stop.side == OrderSide.SELL else "BUY",
                         quantity=qty,
-                        reason=f"{'Take profit' if stop.is_take_profit else 'Stop loss'} {stop.stop_type} hit for {symbol} at {trigger_price} (current {curr_price_dec})",
+                        reason=(
+                            f"{'Take profit' if stop.is_take_profit else 'Stop loss'} "
+                            f"{stop.stop_type} hit for {symbol} at {trigger_price} "
+                            f"(current {curr_price_dec})"
+                        ),
                         oco_group=stop.oco_group,
                         scale_out_pct=stop.scale_out_pct,
                     )
@@ -1164,4 +1170,7 @@ class StopManager:
 
     def __repr__(self):
         active = len(self.get_active_stops())
-        return f"<StopManager active={active} total_added={self._stats['stops_added']} triggered={self._stats['stops_triggered']}>"
+        return (
+            f"<StopManager active={active} total_added={self._stats['stops_added']} "
+            f"triggered={self._stats['stops_triggered']}>"
+        )

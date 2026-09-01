@@ -65,7 +65,8 @@ NYSE_CLOSE = dtime(16, 0)
 # Holiday calendars (minimal, expandable)
 # ---------------------------------------------------------------------------
 
-# NSE holidays 2024-2025 (partial list, for testing – full calendar would use pandas_market_calendars)
+# NSE holidays 2024-2025 (partial list, for testing – a full calendar
+# would use pandas_market_calendars)
 NSE_HOLIDAYS_2024 = [
     date(2024, 1, 26),  # Republic Day
     date(2024, 3, 8),  # Mahashivratri
@@ -183,7 +184,8 @@ class TimeManager:
     holidays:
         List of holiday dates (datetime.date). If None, uses built-in list for market.
     mock_time:
-        Optional fixed time for testing (controllable clock). If set, get_current_time() returns this.
+        Optional fixed time for testing (controllable clock).
+        If set, get_current_time() returns this.
     ntp_sync:
         Whether to sync with NTP (placeholder, logs warning if enabled but not implemented)
 

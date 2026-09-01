@@ -46,10 +46,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, runtime_checkable
 
 from backtest.simulator.enums import (
-    TERMINAL_STATUSES,
     VALID_TRANSITIONS,
     OrderSide,
     OrderStatus,
@@ -57,7 +56,7 @@ from backtest.simulator.enums import (
     TimeInForce,
 )
 from backtest.simulator.errors import ValidationError
-from backtest.simulator.money import ZERO, is_zero, money
+from backtest.simulator.money import ZERO, money
 from backtest.simulator.money import price as to_price
 from backtest.simulator.money import quantize_money, quantize_price
 

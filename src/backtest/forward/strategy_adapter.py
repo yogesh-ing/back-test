@@ -69,7 +69,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Union
 
 import pandas as pd
 
@@ -352,7 +352,7 @@ try:
     PositionSizer = FullPositionSizer  # type: ignore
 
 except Exception:  # pragma: no cover - fallback if simulator not yet loaded
-    from typing import Protocol
+    from typing import Protocol  # noqa: F811  # fallback Protocol when simulator absent
 
     class PositionSizer(Protocol):  # type: ignore[no-redef]
         """Protocol for position sizing engines (Step 14 will expand this)."""
@@ -1138,7 +1138,8 @@ class StrategyAdapter:
                             continue
                     else:
                         # closing short or adding? For now, if pos is short, allow close
-                        # if pos is long, we would be adding - treat as HOLD unless sizing says increase
+                        # if pos is long, we would be adding - treat as HOLD unless
+                        # sizing says increase
                         if pos.quantity > ZERO:
                             # already long, skip if target already met
                             # (we already decided action, but double-check)
@@ -1172,7 +1173,8 @@ class StrategyAdapter:
                         # closing long or opening short after close handled earlier
                         # ensure quantity does not exceed position when closing
                         if pos.quantity > ZERO:
-                            # closing long, quantity should not exceed position unless we allow partial
+                            # closing long, quantity should not exceed position
+                            # unless we allow partial
                             # we will cap to position quantity for exit
                             if signal.signal_type == SignalType.EXIT:
                                 quantity = min(quantity, abs(pos.quantity))
@@ -1336,7 +1338,8 @@ class StrategyAdapter:
                             "auto-created portfolio row %s for signal logging", portfolio_id
                         )
                     except Exception as exc:
-                        # if creation fails (e.g. name collision), try to fetch by name or clear portfolio_id
+                        # if creation fails (e.g. name collision), try to fetch
+                        # by name or clear portfolio_id
                         logger.debug("auto-create portfolio failed: %s, will try without FK", exc)
                         # try to find existing by name
                         try:
@@ -1487,4 +1490,8 @@ class StrategyAdapter:
         logger.info("adapter reset")
 
     def __repr__(self) -> str:
-        return f"<StrategyAdapter strategy={getattr(self.strategy, 'name', '?')} symbols={self.symbols} signals={len(self.signal_history)} orders={len(self.order_history)} dry_run={self.dry_run}>"
+        return (
+            f"<StrategyAdapter strategy={getattr(self.strategy, 'name', '?')} "
+            f"symbols={self.symbols} signals={len(self.signal_history)} "
+            f"orders={len(self.order_history)} dry_run={self.dry_run}>"
+        )

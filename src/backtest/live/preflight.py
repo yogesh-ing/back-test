@@ -86,6 +86,7 @@ def print_preflight() -> int:
         return 0
     else:
         print(
-            "Some checks failed. Fix network or auth env vars, or run the live login flow with a TOTP/OTP prompt."
+            "Some checks failed. Fix network or auth env vars, "
+            "or run the live login flow with a TOTP/OTP prompt."
         )
         return 1

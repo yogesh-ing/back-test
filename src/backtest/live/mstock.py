@@ -51,7 +51,8 @@ class MStockClient:
                 break
         if symbol_key is None or token_key is None:
             raise ValueError(
-                f"scriptmaster response missing symbol/token columns: {list(lower_frame.columns)[:10]}"
+                "scriptmaster response missing symbol/token columns: "
+                f"{list(lower_frame.columns)[:10]}"
             )
 
         matches = lower_frame[lower_frame[symbol_key].astype(str).str.lower() == symbol.lower()]
@@ -81,7 +82,10 @@ class MStockClient:
         """Fetch OHLCV bars from mStock using the TypeA historical route."""
         segment = "NSE"
         security_token = self._resolve_security_token(symbol, segment)
-        endpoint = f"{self.base_url}/openapi/typea/instruments/historical/{segment}/{security_token}/{interval}"
+        endpoint = (
+            f"{self.base_url}/openapi/typea/instruments/historical/"
+            f"{segment}/{security_token}/{interval}"
+        )
         params = {"from": start, "to": end}
         resp = requests.get(endpoint, headers=self.headers, params=params, timeout=30)
         resp.raise_for_status()

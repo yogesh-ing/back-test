@@ -1,0 +1,8 @@
+# Single authority for flake8 — auto-discovered by tox AND pre-commit.
+# Keep in sync with nothing: this file IS the config (ticket #11, F-10).
+[flake8]
+max-line-length = 100
+exclude = __pycache__
+# E203 (whitespace before ':') conflicts with black's slice style — the
+# black docs list it as a known safe disable when flake8 runs alongside.
+extend-ignore = E203
