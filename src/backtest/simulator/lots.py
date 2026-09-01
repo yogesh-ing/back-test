@@ -37,13 +37,9 @@ from decimal import Decimal
 from typing import Any, Iterable, Iterator, Sequence
 
 from backtest.simulator.errors import ValidationError
-from backtest.simulator.money import (
-    ZERO,
-    is_zero,
-    price as to_price,
-    quantize_price,
-    to_decimal,
-)
+from backtest.simulator.money import ZERO, is_zero
+from backtest.simulator.money import price as to_price
+from backtest.simulator.money import quantize_price, to_decimal
 
 __all__ = ["CostBasisMethod", "Lot", "LotConsumption", "LotBook"]
 
@@ -98,9 +94,7 @@ class Lot:
         self.quantity = to_price(self.quantity, "lot quantity")
         self.price = to_price(self.price, "lot price")
         if self.quantity <= ZERO:
-            raise ValidationError(
-                "lot quantity must be positive", code="invalid_lot_quantity"
-            )
+            raise ValidationError("lot quantity must be positive", code="invalid_lot_quantity")
         if self.price <= ZERO:
             raise ValidationError("lot price must be positive", code="invalid_lot_price")
 
@@ -355,9 +349,7 @@ class LotBook:
         """
         amount = to_decimal(per_share, "dividend")
         if amount < ZERO:
-            raise ValidationError(
-                "dividend must not be negative", code="invalid_dividend"
-            )
+            raise ValidationError("dividend must not be negative", code="invalid_dividend")
         for lot in self._lots:
             lot.price = max(quantize_price(lot.price - amount), _DUST)
 
@@ -375,4 +367,3 @@ class LotBook:
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"<LotBook {self.method} lots={len(self._lots)} qty={self.total_quantity}>"
-

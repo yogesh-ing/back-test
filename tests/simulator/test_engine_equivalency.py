@@ -85,8 +85,9 @@ def _funded_all_in(symbol: str, price: float, portfolio: Portfolio) -> int:
 
 
 def _forward_pnl(bars: pd.DataFrame, strategy) -> float:
-    portfolio = Portfolio(name="equivalency", initial_capital=INITIAL_CAPITAL,
-                          mode="paper", source="replay")
+    portfolio = Portfolio(
+        name="equivalency", initial_capital=INITIAL_CAPITAL, mode="paper", source="replay"
+    )
     runner = PaperRunner(
         portfolio=portfolio,
         source=_FrameSource(bars),
@@ -102,8 +103,9 @@ def _forward_pnl(bars: pd.DataFrame, strategy) -> float:
 
 
 def _driver_pnl(bars: pd.DataFrame, strategy) -> float:
-    portfolio = Portfolio(name="equivalency-driver", initial_capital=INITIAL_CAPITAL,
-                          mode="paper", source="replay")
+    portfolio = Portfolio(
+        name="equivalency-driver", initial_capital=INITIAL_CAPITAL, mode="paper", source="replay"
+    )
     driver = BacktestDriver(
         source=_FrameSource(bars),
         strategy=strategy,

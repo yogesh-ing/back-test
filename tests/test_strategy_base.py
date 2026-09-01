@@ -29,11 +29,20 @@ def _make_valid(name="contract_valid"):
     _S.description = "d"
     _S.version = "1.0"
     _S.author = "tester"
-    _S.params = {"period": {"default": 14, "min": 5, "max": 50, "type": "int",
-                            "label": "Period", "tooltip": "lookback"}}
+    _S.params = {
+        "period": {
+            "default": 14,
+            "min": 5,
+            "max": 50,
+            "type": "int",
+            "label": "Period",
+            "tooltip": "lookback",
+        }
+    }
 
     def generate_signals(self, candles):
         import pandas as pd
+
         return pd.Series(1, index=candles.index, dtype=int)
 
     _S.generate_signals = generate_signals
@@ -53,8 +62,7 @@ def test_missing_name_fails():
     class NoName(Strategy):
         params = {"p": 1}
 
-        def generate_signals(self, candles):
-            ...
+        def generate_signals(self, candles): ...
 
     with pytest.raises(StrategyContractError, match="name"):
         NoName.validate()
@@ -65,8 +73,7 @@ def test_params_not_a_dict_fails():
         name = "bad_params"
         params = "not a dict"
 
-        def generate_signals(self, candles):
-            ...
+        def generate_signals(self, candles): ...
 
     with pytest.raises(StrategyContractError, match="params"):
         BadParams.validate()
@@ -77,8 +84,7 @@ def test_schema_missing_default_fails():
         name = "no_default"
         params = {"p": {"min": 1, "max": 10, "type": "int"}}
 
-        def generate_signals(self, candles):
-            ...
+        def generate_signals(self, candles): ...
 
     with pytest.raises(StrategyContractError, match="default"):
         NoDefault.validate()
@@ -89,8 +95,7 @@ def test_schema_bad_type_fails():
         name = "bad_type"
         params = {"p": {"default": 1, "type": "percentage"}}
 
-        def generate_signals(self, candles):
-            ...
+        def generate_signals(self, candles): ...
 
     with pytest.raises(StrategyContractError, match="invalid type"):
         BadType.validate()
@@ -101,8 +106,7 @@ def test_schema_default_out_of_range_fails():
         name = "out_of_range"
         params = {"p": {"default": 100, "min": 1, "max": 10, "type": "int"}}
 
-        def generate_signals(self, candles):
-            ...
+        def generate_signals(self, candles): ...
 
     with pytest.raises(StrategyContractError, match="> max"):
         OutOfRange.validate()
@@ -125,12 +129,17 @@ def test_flat_form_yields_full_schema():
         name = "flat"
         params = {"period": 14, "vol": 1.5, "on": True, "label": "x"}
 
-        def generate_signals(self, candles):
-            ...
+        def generate_signals(self, candles): ...
 
     schema = Flat.param_schema()
-    assert schema["period"] == {"default": 14, "type": "int", "min": None, "max": None,
-                                "label": "Period", "tooltip": ""}
+    assert schema["period"] == {
+        "default": 14,
+        "type": "int",
+        "min": None,
+        "max": None,
+        "label": "Period",
+        "tooltip": "",
+    }
     assert schema["vol"]["type"] == "float"
     assert schema["on"]["type"] == "bool"
     assert Flat.default_params() == {"period": 14, "vol": 1.5, "on": True, "label": "x"}
@@ -170,8 +179,7 @@ def test_get_all_skips_invalid_strategies(caplog):
         name = "catalogue_invalid"
         params = {"p": {"min": 5, "max": 1, "type": "int", "default": 3}}  # min>max
 
-        def generate_signals(self, candles):
-            ...
+        def generate_signals(self, candles): ...
 
     names = {c["name"] for c in registry.get_all()}
     assert "catalogue_invalid" not in names
@@ -208,13 +216,15 @@ def test_migrated_strategies_have_full_metadata():
         assert entry["author"], f"{name} missing author"
         # every declared param is a full schema
         for pname, spec in entry["params"].items():
-            assert {"default", "min", "max", "type", "label", "tooltip"} <= set(spec), (
-                f"{name}.{pname} schema incomplete")
+            assert {"default", "min", "max", "type", "label", "tooltip"} <= set(
+                spec
+            ), f"{name}.{pname} schema incomplete"
             assert spec["label"], f"{name}.{pname} missing label"
 
 
 def test_migrated_strategies_validate_and_run():
     import pandas as pd
+
     from backtest.data.synthetic import SyntheticSource
     from backtest.runner import run_on_candles
 

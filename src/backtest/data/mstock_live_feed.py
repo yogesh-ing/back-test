@@ -137,9 +137,7 @@ def _fetch_bars(
     url = f"{base_url}/openapi/typea/instruments/historical/{segment}/{security_token}/{interval}"
     params = {"from": start, "to": end}
     try:
-        resp = requests.get(
-            url, headers=_typea_headers(api_key, token), params=params, timeout=15
-        )
+        resp = requests.get(url, headers=_typea_headers(api_key, token), params=params, timeout=15)
         resp.raise_for_status()
         rows = _extract_candles(resp.json())
     except Exception as exc:  # noqa: BLE001 — feed hiccups are logged, not fatal
@@ -164,9 +162,7 @@ def _resolve_security_token(base_url: str, api_key: str, token: str, symbol: str
         raise ValueError("scriptmaster is empty")
 
     lower = frame.rename(columns=lambda c: str(c).strip().lower())
-    symbol_key = next(
-        (c for c in ("tradingsymbol", "symbol", "name") if c in lower.columns), None
-    )
+    symbol_key = next((c for c in ("tradingsymbol", "symbol", "name") if c in lower.columns), None)
     token_key = next(
         (c for c in ("instrument_token", "token", "securitytoken") if c in lower.columns), None
     )
@@ -253,8 +249,14 @@ class MStockLiveFeed:
         today = date.today().strftime("%Y-%m-%d")
         start = (date.today() - timedelta(days=3)).strftime("%Y-%m-%d")
         bars = _fetch_bars(
-            self._base_url(), token, api_key,
-            self._security_token_for(symbol), start, today, self.segment, "minute",
+            self._base_url(),
+            token,
+            api_key,
+            self._security_token_for(symbol),
+            start,
+            today,
+            self.segment,
+            "minute",
         )
         return bars[-1] if bars else None
 

@@ -231,9 +231,7 @@ def _install_handlers(
                 handler.close()
 
     # Console handler (stderr, so it never pollutes piped stdout).
-    console = next(
-        (h for h in logger.handlers if getattr(h, _SENTINEL, None) == "console"), None
-    )
+    console = next((h for h in logger.handlers if getattr(h, _SENTINEL, None) == "console"), None)
     if console is None:
         console = logging.StreamHandler(sys.stderr)
         console.addFilter(req_filter)
@@ -242,9 +240,7 @@ def _install_handlers(
         logger.addHandler(console)
 
     # Optional file handler — created once, reused on reconfigure.
-    file_handler = next(
-        (h for h in logger.handlers if getattr(h, _SENTINEL, None) == "file"), None
-    )
+    file_handler = next((h for h in logger.handlers if getattr(h, _SENTINEL, None) == "file"), None)
     if log_file:
         if file_handler is None or getattr(file_handler, "baseFilename", "") != os.path.abspath(
             os.path.expanduser(log_file)
@@ -347,7 +343,7 @@ def _logger_name_for_main() -> Optional[str]:
     index = path.rfind(marker)
     if index < 0:
         return None
-    dotted = path[index + 1:].replace(os.sep, ".")
+    dotted = path[index + 1 :].replace(os.sep, ".")
     if dotted.endswith(".py"):
         dotted = dotted[:-3]
     return dotted
@@ -400,8 +396,9 @@ class Timer:
     def __exit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001 - stdlib signature
         self.elapsed_ms = round((time.perf_counter() - self._start) * 1000, 1)
         if exc is not None:
-            self.log.error("%s failed after %.1f ms: %s", self.label, self.elapsed_ms, exc,
-                           exc_info=exc)
+            self.log.error(
+                "%s failed after %.1f ms: %s", self.label, self.elapsed_ms, exc, exc_info=exc
+            )
         else:
             self.log.log(self.level, "%s done in %.1f ms", self.label, self.elapsed_ms)
         return False

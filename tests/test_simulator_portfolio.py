@@ -494,7 +494,8 @@ class TestCanOpenPosition:
 
     def test_max_open_positions(self):
         p = Portfolio(
-            name="x", initial_capital=100_000,
+            name="x",
+            initial_capital=100_000,
             limits=PortfolioLimits(max_open_positions=2),
         )
         p.open_position("A", 1, 100)
@@ -504,7 +505,8 @@ class TestCanOpenPosition:
 
     def test_max_position_value(self):
         p = Portfolio(
-            name="x", initial_capital=100_000,
+            name="x",
+            initial_capital=100_000,
             limits=PortfolioLimits(max_position_value=D("5000")),
         )
         assert p.can_open_position("A", 40, 100)
@@ -512,15 +514,17 @@ class TestCanOpenPosition:
 
     def test_max_position_pct(self):
         p = Portfolio(
-            name="x", initial_capital=100_000,
+            name="x",
+            initial_capital=100_000,
             limits=PortfolioLimits(max_position_pct=D("0.10")),
         )
-        assert p.can_open_position("A", 100, 100)          # 10% exactly
+        assert p.can_open_position("A", 100, 100)  # 10% exactly
         assert p.can_open_position("A", 101, 100).code == "max_position_pct"
 
     def test_max_gross_exposure(self):
         p = Portfolio(
-            name="x", initial_capital=10_000,
+            name="x",
+            initial_capital=10_000,
             limits=PortfolioLimits(max_gross_exposure_pct=D("0.5")),
         )
         p.open_position("A", 40, 100)  # 4000 = 40%
@@ -528,7 +532,8 @@ class TestCanOpenPosition:
 
     def test_min_trade_value(self):
         p = Portfolio(
-            name="x", initial_capital=100_000,
+            name="x",
+            initial_capital=100_000,
             limits=PortfolioLimits(min_trade_value=D("1000")),
         )
         assert p.can_open_position("A", 1, 100).code == "below_min_trade_value"
@@ -538,12 +543,15 @@ class TestCanOpenPosition:
         portfolio.pause()
         assert portfolio.can_open_position("A", 1, 100).code == "portfolio_not_active"
 
-    @pytest.mark.parametrize("qty, price, code", [
-        (0, 100, "zero_quantity"),
-        (10, 0, "invalid_price"),
-        (10, -5, "invalid_price"),
-        ("abc", 100, "invalid_input"),
-    ])
+    @pytest.mark.parametrize(
+        "qty, price, code",
+        [
+            (0, 100, "zero_quantity"),
+            (10, 0, "invalid_price"),
+            (10, -5, "invalid_price"),
+            ("abc", 100, "invalid_input"),
+        ],
+    )
     def test_invalid_inputs(self, portfolio, qty, price, code):
         assert portfolio.can_open_position("A", qty, price).code == code
 
@@ -564,7 +572,8 @@ class TestCanOpenPosition:
 
     def test_limit_exceeded_is_the_fallback(self):
         p = Portfolio(
-            name="x", initial_capital=100_000,
+            name="x",
+            initial_capital=100_000,
             limits=PortfolioLimits(max_open_positions=1),
         )
         p.open_position("A", 1, 100)
@@ -583,21 +592,26 @@ class TestCanOpenPosition:
 
 
 class TestPortfolioLimitsValidation:
-    @pytest.mark.parametrize("kwargs", [
-        dict(max_position_value=0),
-        dict(max_position_pct=-1),
-        dict(max_leverage=D("0.5")),
-        dict(max_open_positions=0),
-        dict(min_trade_value=0),
-    ])
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            dict(max_position_value=0),
+            dict(max_position_pct=-1),
+            dict(max_leverage=D("0.5")),
+            dict(max_open_positions=0),
+            dict(min_trade_value=0),
+        ],
+    )
     def test_invalid_limits_rejected(self, kwargs):
         with pytest.raises(ValidationError):
             PortfolioLimits(**kwargs)
 
     def test_round_trip(self):
         limits = PortfolioLimits(
-            allow_short=True, max_open_positions=5,
-            max_position_pct=D("0.2"), max_leverage=D("2"),
+            allow_short=True,
+            max_open_positions=5,
+            max_position_pct=D("0.2"),
+            max_leverage=D("2"),
         )
         restored = PortfolioLimits.from_dict(limits.to_dict())
         assert restored.allow_short is True
@@ -710,9 +724,9 @@ class TestEquityHistory:
     def test_peak_and_drawdown(self, portfolio):
         portfolio.open_position("A", 100, 100)
         portfolio.update_position("A", 120)
-        portfolio.record_equity()                      # equity 102,000
+        portfolio.record_equity()  # equity 102,000
         assert portfolio.peak_equity() == D("102000.0000")
-        portfolio.update_position("A", 110)            # equity 101,000
+        portfolio.update_position("A", 110)  # equity 101,000
         assert portfolio.current_drawdown() == D("0.009804")
 
     def test_no_drawdown_at_peak(self, portfolio):
@@ -757,7 +771,8 @@ class TestPortfolioSerialisation:
 
     def test_limits_survive_round_trip(self):
         p = Portfolio(
-            name="x", initial_capital=1000,
+            name="x",
+            initial_capital=1000,
             limits=PortfolioLimits(allow_short=True, max_open_positions=3),
         )
         restored = Portfolio.from_dict(p.to_dict())
@@ -830,9 +845,7 @@ class TestPersistence:
         portfolio.open_position("INFY", 5, 1610)
         portfolio.save_to_db(db)
         assert db.fetch_scalar("SELECT count(*) FROM positions") == 2
-        assert db.fetch_scalar(
-            "SELECT count(*) FROM positions WHERE status='open'"
-        ) == 1
+        assert db.fetch_scalar("SELECT count(*) FROM positions WHERE status='open'") == 1
 
     def test_close_and_reopen_across_two_saves(self, db, portfolio):
         """Regression: caught against real PostgreSQL, missed by an earlier test.
@@ -843,16 +856,17 @@ class TestPersistence:
         uq_positions_one_open_per_symbol.
         """
         portfolio.open_position("INFY", 10, 1500)
-        portfolio.save_to_db(db)                 # old row persisted as OPEN
+        portfolio.save_to_db(db)  # old row persisted as OPEN
 
         portfolio.close_position("INFY", 1560)
         portfolio.open_position("INFY", 4, 1565)
-        portfolio.save_to_db(db)                 # must not violate the index
+        portfolio.save_to_db(db)  # must not violate the index
 
         assert db.fetch_scalar("SELECT count(*) FROM positions WHERE symbol='INFY'") == 2
-        assert db.fetch_scalar(
-            "SELECT count(*) FROM positions WHERE symbol='INFY' AND status='open'"
-        ) == 1
+        assert (
+            db.fetch_scalar("SELECT count(*) FROM positions WHERE symbol='INFY' AND status='open'")
+            == 1
+        )
         reloaded = Portfolio.load_from_db(db, portfolio.portfolio_id)
         assert reloaded.get_position("INFY").quantity == D("4.00000000")
 
@@ -864,9 +878,10 @@ class TestPersistence:
             portfolio.close_position("INFY", 101 + i)
             portfolio.save_to_db(db)
         assert db.fetch_scalar("SELECT count(*) FROM positions WHERE symbol='INFY'") == 5
-        assert db.fetch_scalar(
-            "SELECT count(*) FROM positions WHERE symbol='INFY' AND status='open'"
-        ) == 0
+        assert (
+            db.fetch_scalar("SELECT count(*) FROM positions WHERE symbol='INFY' AND status='open'")
+            == 0
+        )
 
     def test_load_unknown_id_raises(self, db):
         with pytest.raises(PositionNotFoundError, match="no portfolio"):
@@ -911,8 +926,14 @@ def test_summary_contains_expected_keys(portfolio):
     portfolio.open_position("A", 10, 100)
     summary = portfolio.summary()
     for key in (
-        "name", "status", "cash", "equity", "realized_pnl",
-        "unrealized_pnl", "open_positions", "drawdown",
+        "name",
+        "status",
+        "cash",
+        "equity",
+        "realized_pnl",
+        "unrealized_pnl",
+        "open_positions",
+        "drawdown",
     ):
         assert key in summary
 

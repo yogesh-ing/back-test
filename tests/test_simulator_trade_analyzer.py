@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from datetime import datetime, timezone, timedelta
 
 import pandas as pd
 import pytest
 
-from backtest.simulator.portfolio import Portfolio, EquityPoint
-from backtest.simulator.trade_analyzer import TradeAnalyzer, AnalyzedTrade
+from backtest.simulator.portfolio import EquityPoint, Portfolio
+from backtest.simulator.trade_analyzer import AnalyzedTrade, TradeAnalyzer
 
 
 def make_portfolio_with_trades():
@@ -101,19 +101,27 @@ def test_analyzed_trade_categorization():
 
 def test_holding_categories():
     # Scalp <60
-    t1 = AnalyzedTrade(trade_id="1", symbol="INFY", holding_period_minutes=30, net_pnl=Decimal("100"))
+    t1 = AnalyzedTrade(
+        trade_id="1", symbol="INFY", holding_period_minutes=30, net_pnl=Decimal("100")
+    )
     assert t1.holding_category == "scalp"
 
     # Day <6 hours
-    t2 = AnalyzedTrade(trade_id="2", symbol="INFY", holding_period_minutes=120, net_pnl=Decimal("100"))
+    t2 = AnalyzedTrade(
+        trade_id="2", symbol="INFY", holding_period_minutes=120, net_pnl=Decimal("100")
+    )
     assert t2.holding_category == "day"
 
     # Swing <5 days
-    t3 = AnalyzedTrade(trade_id="3", symbol="INFY", holding_period_minutes=60 * 24 * 2, net_pnl=Decimal("100"))
+    t3 = AnalyzedTrade(
+        trade_id="3", symbol="INFY", holding_period_minutes=60 * 24 * 2, net_pnl=Decimal("100")
+    )
     assert t3.holding_category == "swing"
 
     # Position >=5 days
-    t4 = AnalyzedTrade(trade_id="4", symbol="INFY", holding_period_minutes=60 * 24 * 6, net_pnl=Decimal("100"))
+    t4 = AnalyzedTrade(
+        trade_id="4", symbol="INFY", holding_period_minutes=60 * 24 * 6, net_pnl=Decimal("100")
+    )
     assert t4.holding_category == "position"
 
 
@@ -354,7 +362,13 @@ def test_mae_mfe_calculation():
     highs = [101, 100, 99, 96, 97, 98, 99, 100, 101, 103, 106, 111]
 
     df = pd.DataFrame(
-        {"open": [100] * 12, "high": highs, "low": lows, "close": [100 + i for i in range(12)], "volume": [1000] * 12},
+        {
+            "open": [100] * 12,
+            "high": highs,
+            "low": lows,
+            "close": [100 + i for i in range(12)],
+            "volume": [1000] * 12,
+        },
         index=pd.DatetimeIndex(dates),
     )
 

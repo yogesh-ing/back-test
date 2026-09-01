@@ -13,15 +13,14 @@ import pytest
 
 from backtest.data.source_tags import SOURCE_TAG_VALUES
 from backtest.simulator.bucket_risk import (
-    BUCKET_RISK_LIMITS,
     BUCKET_RISK_FIELDS,
-    BucketRiskLimits,
+    BUCKET_RISK_LIMITS,
     LIVE_BUCKET,
     PAPER_BUCKET,
+    BucketRiskLimits,
     resolve_bucket_risk,
 )
 from backtest.simulator.errors import ValidationError
-
 
 # ---------------------------------------------------------------------------
 # Canonical defaults
@@ -91,7 +90,9 @@ def test_unknown_mode_bucket_or_field_raises():
 
 def test_explicit_bucket_override_wins_and_merges():
     _, limits = resolve_bucket_risk(
-        "live", "mstock", overrides={"live": {"max_position_pct": Decimal("0.05")}},
+        "live",
+        "mstock",
+        overrides={"live": {"max_position_pct": Decimal("0.05")}},
     )
     assert limits.max_position_pct == Decimal("0.05")
     # Non-overridden fields keep the canonical defaults.
@@ -100,14 +101,17 @@ def test_explicit_bucket_override_wins_and_merges():
 
     # Explicit None disables a bucket cap (the sanctioned way to opt out).
     _, limits = resolve_bucket_risk(
-        "live", "mstock", overrides={"live": {"max_position_value": None}},
+        "live",
+        "mstock",
+        overrides={"live": {"max_position_value": None}},
     )
     assert limits.max_position_value is None
     assert limits.max_position_pct == Decimal("0.10")
 
     # A paper bucket can be tightened explicitly too.
     _, limits = resolve_bucket_risk(
-        "paper", "synthetic",
+        "paper",
+        "synthetic",
         overrides={"paper": {"max_position_pct": Decimal("0.10")}},
     )
     assert limits.max_position_pct == Decimal("0.10")
@@ -150,7 +154,8 @@ def test_adapters_map_bucket_to_sizing_portfolio_and_risk_config():
     assert portfolio_limits.min_trade_value == Decimal("1000.0000")
 
     risk_cfg = limits.to_risk_config(
-        max_drawdown_pct=Decimal("0.05"), daily_loss_limit_pct=Decimal("0.01"),
+        max_drawdown_pct=Decimal("0.05"),
+        daily_loss_limit_pct=Decimal("0.01"),
     )
     assert risk_cfg.max_position_value == Decimal("10000.0000")
     assert risk_cfg.max_position_pct == Decimal("0.10")
@@ -171,9 +176,7 @@ class _StubPosition:
         self.symbol = symbol
         self.quantity = Decimal(str(quantity))
         self.average_entry_price = Decimal(str(average_entry_price))
-        self.current_price = (
-            Decimal(str(current_price)) if current_price is not None else None
-        )
+        self.current_price = Decimal(str(current_price)) if current_price is not None else None
 
 
 class _StubBook:
@@ -223,8 +226,6 @@ def test_exposure_check_violates_real_bucket_but_not_paper():
 
     # max_open_positions check.
     def too_many():
-        return _StubBook(
-            {f"S{i}": _StubPosition(f"S{i}", 10, 100) for i in range(6)}
-        )
+        return _StubBook({f"S{i}": _StubPosition(f"S{i}", 10, 100) for i in range(6)})
 
     assert "6 open positions > bucket max 5" in (real.check_exposure(too_many()) or "")

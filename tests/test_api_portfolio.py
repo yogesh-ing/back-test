@@ -15,18 +15,21 @@ from backtest.forward.risk_supervisor import GlobalRiskConfig
 
 @pytest.fixture
 def client():
-    from backtest.web.app import create_app
     from backtest.forward.portfolio_manager import reset_portfolio_manager
+    from backtest.web.app import create_app
 
     reset_portfolio_manager(
         risk_config=GlobalRiskConfig(daily_loss_limit=100_000, max_drawdown_pct=0.50),
-        tick_seconds=1.0, warmup_bars=15, auto_start_feed=False,
+        tick_seconds=1.0,
+        warmup_bars=15,
+        auto_start_feed=False,
     )
     app = create_app(source="synthetic")
     app.config["PORTFOLIO_SSE_INTERVAL"] = 0.05
     with app.test_client() as c:
         yield c
     from backtest.forward.portfolio_manager import get_portfolio_manager
+
     get_portfolio_manager().shutdown()
 
 
@@ -57,13 +60,16 @@ def test_universes_listed(client):
 
 
 def test_create_single_runner(client):
-    r = client.post("/api/portfolio/runner/create", json={
-        "strategy": "rsi_reversion",
-        "target_type": "SINGLE_SYMBOL",
-        "symbol": "BTC/USD",
-        "timeframe": "1hour",
-        "allocated_capital": 1_000_000,
-    })
+    r = client.post(
+        "/api/portfolio/runner/create",
+        json={
+            "strategy": "rsi_reversion",
+            "target_type": "SINGLE_SYMBOL",
+            "symbol": "BTC/USD",
+            "timeframe": "1hour",
+            "allocated_capital": 1_000_000,
+        },
+    )
     assert r.status_code == 201
     runner = r.get_json()["runner"]
     assert runner["status"] == "RUNNING"
@@ -72,14 +78,17 @@ def test_create_single_runner(client):
 
 
 def test_create_pool_runner_via_universe(client):
-    r = client.post("/api/portfolio/runner/create", json={
-        "name": "Swing",
-        "strategy": "donchian_breakout",
-        "target_type": "SYMBOL_UNIVERSE",
-        "universe_id": "NIFTY_50",
-        "allocated_capital": 2_500_000,
-        "max_pool_positions": 5,
-    })
+    r = client.post(
+        "/api/portfolio/runner/create",
+        json={
+            "name": "Swing",
+            "strategy": "donchian_breakout",
+            "target_type": "SYMBOL_UNIVERSE",
+            "universe_id": "NIFTY_50",
+            "allocated_capital": 2_500_000,
+            "max_pool_positions": 5,
+        },
+    )
     assert r.status_code == 201
     runner = r.get_json()["runner"]
     assert runner["target_type"] == "SYMBOL_UNIVERSE"
@@ -87,11 +96,14 @@ def test_create_pool_runner_via_universe(client):
 
 
 def test_create_pool_runner_accepts_universe_as_target(client):
-    r = client.post("/api/portfolio/runner/create", json={
-        "strategy": "rsi_reversion",
-        "target": "TOP_10_CRYPTO",
-        "allocated_capital": 500_000,
-    })
+    r = client.post(
+        "/api/portfolio/runner/create",
+        json={
+            "strategy": "rsi_reversion",
+            "target": "TOP_10_CRYPTO",
+            "allocated_capital": 500_000,
+        },
+    )
     assert r.status_code == 201
     assert r.get_json()["runner"]["symbol_count"] == 10
 
@@ -102,20 +114,27 @@ def test_create_missing_strategy_400(client):
 
 
 def test_create_unknown_universe_400(client):
-    r = client.post("/api/portfolio/runner/create", json={
-        "strategy": "rsi_reversion",
-        "target_type": "SYMBOL_UNIVERSE",
-        "universe_id": "MARS_INDEX",
-        "allocated_capital": 100_000,
-    })
+    r = client.post(
+        "/api/portfolio/runner/create",
+        json={
+            "strategy": "rsi_reversion",
+            "target_type": "SYMBOL_UNIVERSE",
+            "universe_id": "MARS_INDEX",
+            "allocated_capital": 100_000,
+        },
+    )
     assert r.status_code == 400
 
 
 def test_create_bad_capital_400(client):
-    r = client.post("/api/portfolio/runner/create", json={
-        "strategy": "rsi_reversion", "symbol": "BTC/USD",
-        "allocated_capital": -100,
-    })
+    r = client.post(
+        "/api/portfolio/runner/create",
+        json={
+            "strategy": "rsi_reversion",
+            "symbol": "BTC/USD",
+            "allocated_capital": -100,
+        },
+    )
     assert r.status_code == 400
 
 
@@ -156,8 +175,15 @@ def test_deep_dive_returns_detail(client):
     r = client.post(f"/api/portfolio/runner/{rid}/control", json={"action": "deep_dive"})
     assert r.status_code == 200
     detail = r.get_json()["runner"]
-    for key in ("positions", "trades", "signals", "equity_curve", "params",
-                "universe_symbols", "cash"):
+    for key in (
+        "positions",
+        "trades",
+        "signals",
+        "equity_curve",
+        "params",
+        "universe_symbols",
+        "cash",
+    ):
         assert key in detail
 
 
@@ -183,6 +209,7 @@ def test_emergency_stop_flattens_and_halts(client):
     # open a position directly through the manager, with a mark price set so
     # flatten can sell at last-known price.
     from backtest.forward.portfolio_manager import get_portfolio_manager
+
     mgr = get_portfolio_manager()
     runner = mgr.get_runner(rid)
     runner.last_price["BTC/USD"] = 100.0
@@ -202,17 +229,22 @@ def test_emergency_stop_flattens_and_halts(client):
 
 def test_test_breach_endpoint_trips_breaker(client):
     from backtest.forward.portfolio_manager import get_portfolio_manager, reset_portfolio_manager
+
     reset_portfolio_manager(
         risk_config=GlobalRiskConfig(daily_loss_limit=10_000, max_drawdown_pct=0.05),
-        warmup_bars=12, auto_start_feed=False,
+        warmup_bars=12,
+        auto_start_feed=False,
     )
-    rid = client.post("/api/portfolio/runner/create", json={
-        "strategy": "donchian_breakout",
-        "target_type": "SYMBOL_UNIVERSE",
-        "symbols": ["A", "B", "C", "D"],
-        "allocated_capital": 1_000_000,
-        "max_pool_positions": 3,
-    }).get_json()["instance_id"]
+    rid = client.post(
+        "/api/portfolio/runner/create",
+        json={
+            "strategy": "donchian_breakout",
+            "target_type": "SYMBOL_UNIVERSE",
+            "symbols": ["A", "B", "C", "D"],
+            "allocated_capital": 1_000_000,
+            "max_pool_positions": 3,
+        },
+    ).get_json()["instance_id"]
     mgr = get_portfolio_manager()
     mgr.feed.warmup()
     for _ in range(5):

@@ -29,13 +29,15 @@ def _config(name: str, **overrides) -> RunnerConfig:
 
 @pytest.fixture
 def client():
-    from backtest.web.app import create_app
     from backtest.forward.portfolio_manager import get_portfolio_manager, reset_portfolio_manager
     from backtest.forward.risk_supervisor import GlobalRiskConfig
+    from backtest.web.app import create_app
 
     reset_portfolio_manager(
         risk_config=GlobalRiskConfig(daily_loss_limit=100_000, max_drawdown_pct=0.50),
-        tick_seconds=1.0, warmup_bars=15, auto_start_feed=False,
+        tick_seconds=1.0,
+        warmup_bars=15,
+        auto_start_feed=False,
     )
     app = create_app(source="synthetic")
     with app.test_client() as c:
@@ -96,8 +98,9 @@ def test_summary_scoped_to_bucket():
 
     mgr = PortfolioManager(auto_start_feed=False)
     mgr.add_runner(_config("PAPER-ONE"), start=False)
-    mgr.add_runner(_config("LIVE-ONE", mode="live", source="mstock",
-                           allocated_capital=250_000), start=False)
+    mgr.add_runner(
+        _config("LIVE-ONE", mode="live", source="mstock", allocated_capital=250_000), start=False
+    )
 
     combined = mgr.get_portfolio_summary()
     assert combined["runner_count"] == 2
@@ -167,10 +170,15 @@ def test_spawn_accepts_mode_and_source(client):
     row = client.get("/api/portfolio/summary?mode=live").get_json()["portfolio"]["runners"][0]
     assert row["mode"] == "live" and row["source"] == "mstock"
     # invalid mode → 400 (RunnerConfig validation)
-    r = client.post("/api/portfolio/runner/create", json={
-        "strategy": "rsi_reversion", "symbol": "BTC/USD",
-        "allocated_capital": 100_000, "mode": "bogus",
-    })
+    r = client.post(
+        "/api/portfolio/runner/create",
+        json={
+            "strategy": "rsi_reversion",
+            "symbol": "BTC/USD",
+            "allocated_capital": 100_000,
+            "mode": "bogus",
+        },
+    )
     assert r.status_code == 400
 
 

@@ -102,7 +102,7 @@ class TestPerShareCommission:
 class TestPercentageCommission:
     def test_basic_rate(self):
         model = PercentageCommission(rate=D("0.0003"), maximum=None)
-        assert model.calculate(100, 500) == D("15.0000")   # 0.03% of 50,000
+        assert model.calculate(100, 500) == D("15.0000")  # 0.03% of 50,000
 
     def test_cap_models_the_indian_discount_broker(self):
         """'0.03% or Rs 20, whichever is lower'."""
@@ -128,13 +128,13 @@ class TestTieredCommission:
 
     def test_selects_the_right_tier(self, model):
         assert model.rate_for(50_000) == D("0.0005")
-        assert model.rate_for(100_000) == D("0.0003")   # boundary is inclusive
+        assert model.rate_for(100_000) == D("0.0003")  # boundary is inclusive
         assert model.rate_for(500_000) == D("0.0003")
         assert model.rate_for(5_000_000) == D("0.0001")
 
     def test_whole_trade_charged_at_the_selected_rate(self, model):
         """Selected-rate, not marginal — the retail convention."""
-        assert model.calculate(3000, 500) == D("150.0000")   # 1.5M x 0.0001
+        assert model.calculate(3000, 500) == D("150.0000")  # 1.5M x 0.0001
 
     def test_tiers_are_sorted_automatically(self):
         model = TieredCommission([(1_000_000, D("0.0001")), (0, D("0.0005"))])
@@ -209,19 +209,22 @@ class TestFillConstruction:
     def test_symbol_normalised(self):
         assert mkfill(symbol=" infy ").symbol == "INFY"
 
-    @pytest.mark.parametrize("kwargs, match", [
-        (dict(quantity=0), "must be positive"),
-        (dict(quantity=-5), "side"),
-        (dict(fill_price=0), "must be positive"),
-        (dict(fill_price=-1), "must be positive"),
-        (dict(commission=-1), "must not be negative"),
-        (dict(exchange_fees=-1), "must not be negative"),
-        (dict(regulatory_fees=-1), "must not be negative"),
-        (dict(reference_price=0), "must be positive"),
-        (dict(symbol="  "), "symbol"),
-        (dict(side="sideways"), "invalid"),
-        (dict(liquidity_flag="ghost"), "liquidity_flag"),
-    ])
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            (dict(quantity=0), "must be positive"),
+            (dict(quantity=-5), "side"),
+            (dict(fill_price=0), "must be positive"),
+            (dict(fill_price=-1), "must be positive"),
+            (dict(commission=-1), "must not be negative"),
+            (dict(exchange_fees=-1), "must not be negative"),
+            (dict(regulatory_fees=-1), "must not be negative"),
+            (dict(reference_price=0), "must be positive"),
+            (dict(symbol="  "), "symbol"),
+            (dict(side="sideways"), "invalid"),
+            (dict(liquidity_flag="ghost"), "liquidity_flag"),
+        ],
+    )
     def test_invalid_inputs(self, kwargs, match):
         with pytest.raises(ValidationError, match=match):
             mkfill(**kwargs)
@@ -299,9 +302,9 @@ class TestSlippage:
         """It is already inside fill_price; counting it as cash double-counts."""
         f = mkfill(side="buy", fill_price=101, reference_price=100, commission=5)
         assert f.total_fees == D("5.0000")
-        assert f.calculate_total_cost() == D("1015.0000")     # 10x101 + 5
-        assert f.slippage_amount == D("10.0000")              # tracked separately
-        assert f.total_cost_of_trading == D("15.0000")        # attribution only
+        assert f.calculate_total_cost() == D("1015.0000")  # 10x101 + 5
+        assert f.slippage_amount == D("10.0000")  # tracked separately
+        assert f.total_cost_of_trading == D("15.0000")  # attribution only
 
 
 # ===========================================================================
@@ -394,28 +397,35 @@ class TestPositionImpact:
 
 class TestFromOrder:
     def test_prices_commission_and_advances_the_order(self):
-        o = Order.market("INFY", "buy", 10); o.submit()
-        f = Fill.from_order(o, fill_price=1500,
-                            commission_model=PercentageCommission(rate=D("0.0003"), maximum=None))
+        o = Order.market("INFY", "buy", 10)
+        o.submit()
+        f = Fill.from_order(
+            o,
+            fill_price=1500,
+            commission_model=PercentageCommission(rate=D("0.0003"), maximum=None),
+        )
         assert f.commission == D("4.5000")
         assert o.status is OrderStatus.FILLED
         assert f.order_id == o.order_id
 
     def test_partial_fill(self):
-        o = Order.market("INFY", "buy", 10); o.submit()
+        o = Order.market("INFY", "buy", 10)
+        o.submit()
         Fill.from_order(o, quantity=4, fill_price=1500)
         assert o.status is OrderStatus.PARTIAL
         assert o.remaining_quantity == D("6.00000000")
 
     def test_defaults_to_remaining_quantity(self):
-        o = Order.market("INFY", "buy", 10); o.submit()
+        o = Order.market("INFY", "buy", 10)
+        o.submit()
         o.add_fill(quantity=3, fill_price=1500)
         f = Fill.from_order(o, fill_price=1500)
         assert f.quantity == D("7.00000000")
         assert o.status is OrderStatus.FILLED
 
     def test_overfill_refused_before_anything_changes(self):
-        o = Order.market("INFY", "buy", 10); o.submit()
+        o = Order.market("INFY", "buy", 10)
+        o.submit()
         with pytest.raises(ValidationError, match="exceed"):
             Fill.from_order(o, quantity=11, fill_price=1500)
         assert o.filled_quantity == D("0E-8")
@@ -426,30 +436,37 @@ class TestFromOrder:
             Fill.from_order(Order.market("INFY", "buy", 10), fill_price=1500)
 
     def test_terminal_order_refused(self):
-        o = Order.market("INFY", "buy", 10); o.submit(); o.cancel("x")
+        o = Order.market("INFY", "buy", 10)
+        o.submit()
+        o.cancel("x")
         with pytest.raises(ValidationError, match="not working"):
             Fill.from_order(o, fill_price=1500)
 
     def test_apply_to_order_can_be_disabled(self):
-        o = Order.market("INFY", "buy", 10); o.submit()
+        o = Order.market("INFY", "buy", 10)
+        o.submit()
         Fill.from_order(o, fill_price=1500, apply_to_order=False)
         assert o.status is OrderStatus.PENDING
 
     def test_limit_price_used_when_no_price_given(self):
-        o = Order.limit("INFY", "buy", 10, 1500); o.submit()
+        o = Order.limit("INFY", "buy", 10, 1500)
+        o.submit()
         assert Fill.from_order(o).fill_price == D("1500.00000000")
 
     def test_missing_price_reported(self):
-        o = Order.market("INFY", "buy", 10); o.submit()
+        o = Order.market("INFY", "buy", 10)
+        o.submit()
         with pytest.raises(ValidationError, match="fill_price is required"):
             Fill.from_order(o)
 
     def test_strategy_name_is_carried_over(self):
-        o = Order.market("INFY", "buy", 10, strategy_name="sma"); o.submit()
+        o = Order.market("INFY", "buy", 10, strategy_name="sma")
+        o.submit()
         assert Fill.from_order(o, fill_price=1500).strategy_name == "sma"
 
     def test_several_partials_accumulate_on_the_order(self):
-        o = Order.market("INFY", "buy", 10); o.submit()
+        o = Order.market("INFY", "buy", 10)
+        o.submit()
         for _ in range(5):
             Fill.from_order(o, quantity=2, fill_price=1500)
         assert o.status is OrderStatus.FILLED
@@ -492,7 +509,7 @@ class TestPortfolioApplyFill:
         assert pos.quantity == D("20.00000000")
         assert pos.average_entry_price == D("110.00000000")
         p.apply_fill(mkfill(side="sell", quantity=5, fill_price=130))
-        assert p.realized_pnl == D("100.0000")     # 5 x (130-110)
+        assert p.realized_pnl == D("100.0000")  # 5 x (130-110)
 
     def test_closing_retires_the_position(self):
         p = Portfolio(name="p", initial_capital=100_000)
@@ -503,7 +520,8 @@ class TestPortfolioApplyFill:
 
     def test_short_entry_credits_cash(self):
         p = Portfolio(
-            name="p", initial_capital=100_000,
+            name="p",
+            initial_capital=100_000,
             limits=PortfolioLimits(allow_short=True, max_gross_exposure_pct=D("2")),
         )
         p.apply_fill(mkfill(side="sell", quantity=10, fill_price=100, commission=5))
@@ -538,17 +556,24 @@ class TestPortfolioApplyFill:
 
     def test_fees_counted_exactly_once(self):
         p = Portfolio(name="p", initial_capital=100_000)
-        p.apply_fill(mkfill(side="buy", quantity=10, fill_price=100,
-                            commission=3, exchange_fees=1, regulatory_fees=1))
+        p.apply_fill(
+            mkfill(
+                side="buy",
+                quantity=10,
+                fill_price=100,
+                commission=3,
+                exchange_fees=1,
+                regulatory_fees=1,
+            )
+        )
         assert p.total_commission == D("5.0000")
-        assert p.current_cash == D("98995.0000")   # 100000 - 1000 - 5
+        assert p.current_cash == D("98995.0000")  # 100000 - 1000 - 5
 
     def test_end_to_end_order_fill_portfolio(self):
         p = Portfolio(name="p", initial_capital=100_000)
         o = p.add_order(Order.market("INFY", "buy", 10, portfolio_id=p.portfolio_id))
         o.submit()
-        f = Fill.from_order(o, fill_price=1500,
-                            commission_model=FlatCommission(per_trade=20))
+        f = Fill.from_order(o, fill_price=1500, commission_model=FlatCommission(per_trade=20))
         p.apply_fill(f)
         p.sync_orders()
         assert o.status is OrderStatus.FILLED
@@ -559,10 +584,12 @@ class TestPortfolioApplyFill:
     def test_many_round_trips_reconcile_exactly(self):
         p = Portfolio(name="p", initial_capital=100_000)
         for _ in range(100):
-            p.apply_fill(mkfill(side="buy", quantity=3, fill_price=D("100.1"),
-                                commission=D("0.33")))
-            p.apply_fill(mkfill(side="sell", quantity=3, fill_price=D("100.2"),
-                                commission=D("0.33")))
+            p.apply_fill(
+                mkfill(side="buy", quantity=3, fill_price=D("100.1"), commission=D("0.33"))
+            )
+            p.apply_fill(
+                mkfill(side="sell", quantity=3, fill_price=D("100.2"), commission=D("0.33"))
+            )
         assert p.realized_pnl == D("30.0000")
         assert p.total_commission == D("66.0000")
         assert p.calculate_total_equity() == D("99964.0000")
@@ -575,9 +602,17 @@ class TestPortfolioApplyFill:
 
 class TestSerialisation:
     def test_round_trip(self):
-        f = mkfill(side="sell", fill_price=101, reference_price=100,
-                   commission=5, exchange_fees=1, regulatory_fees=2,
-                   liquidity_flag="maker", order_id="o1", position_id="p1")
+        f = mkfill(
+            side="sell",
+            fill_price=101,
+            reference_price=100,
+            commission=5,
+            exchange_fees=1,
+            regulatory_fees=2,
+            liquidity_flag="maker",
+            order_id="o1",
+            position_id="p1",
+        )
         restored = Fill.from_dict(f.to_dict())
         assert restored.fill_id == f.fill_id
         assert restored.side is f.side
@@ -620,11 +655,16 @@ class TestPersistence:
             mkfill().save_to_db(db)
 
     def test_save_and_read_back(self, db):
-        p = Portfolio(name="p", initial_capital=100_000); p.save_to_db(db)
+        p = Portfolio(name="p", initial_capital=100_000)
+        p.save_to_db(db)
         o = self._order(db, p)
-        f = Fill.from_order(o, fill_price=1501, reference_price=1500,
-                            commission_model=FlatCommission(per_trade=20),
-                            liquidity_flag="taker")
+        f = Fill.from_order(
+            o,
+            fill_price=1501,
+            reference_price=1500,
+            commission_model=FlatCommission(per_trade=20),
+            liquidity_flag="taker",
+        )
         f.save_to_db(db)
 
         row = db.fetch_one("SELECT * FROM fills")
@@ -635,7 +675,8 @@ class TestPersistence:
 
     def test_resaving_is_a_safe_noop(self, db):
         """Fills are append-only; a retry must not duplicate or mutate."""
-        p = Portfolio(name="p", initial_capital=100_000); p.save_to_db(db)
+        p = Portfolio(name="p", initial_capital=100_000)
+        p.save_to_db(db)
         o = self._order(db, p)
         f = Fill.from_order(o, fill_price=1500)
         f.save_to_db(db)
@@ -643,7 +684,8 @@ class TestPersistence:
         assert db.fetch_scalar("SELECT count(*) FROM fills") == 1
 
     def test_several_partial_fills_persist(self, db):
-        p = Portfolio(name="p", initial_capital=100_000); p.save_to_db(db)
+        p = Portfolio(name="p", initial_capital=100_000)
+        p.save_to_db(db)
         o = self._order(db, p)
         for _ in range(5):
             Fill.from_order(o, quantity=2, fill_price=1500).save_to_db(db)
@@ -652,7 +694,8 @@ class TestPersistence:
 
     def test_position_link_persists(self, db):
         p = Portfolio(name="p", initial_capital=100_000)
-        o = Order.market("INFY", "buy", 10, portfolio_id=p.portfolio_id); o.submit()
+        o = Order.market("INFY", "buy", 10, portfolio_id=p.portfolio_id)
+        o.submit()
         f = Fill.from_order(o, fill_price=1500)
         p.apply_fill(f)
         p.save_to_db(db)
@@ -742,7 +785,7 @@ class TestGraphPersistence:
         o.submit()
         o.save_to_db(db)
         f = Fill.from_order(o, fill_price=1500)
-        p.apply_fill(f)          # links position_id, but the row is unsaved
+        p.apply_fill(f)  # links position_id, but the row is unsaved
 
         with pytest.raises(ValidationError, match="dependency order"):
             f.save_to_db(db)
@@ -753,6 +796,6 @@ class TestGraphPersistence:
         o.submit()
         f = Fill.from_order(o, fill_price=1500)
         p.apply_fill(f)
-        p.save_to_db(db, include_orders=False)   # positions first
-        o.save_to_db(db)                          # then the order
-        assert f.save_to_db(db) == f.fill_id      # now the fill fits
+        p.save_to_db(db, include_orders=False)  # positions first
+        o.save_to_db(db)  # then the order
+        assert f.save_to_db(db) == f.fill_id  # now the fill fits

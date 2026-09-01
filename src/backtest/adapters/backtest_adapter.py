@@ -213,12 +213,18 @@ class BacktestAdapter:
             if abs(summed - total_pnl) > max(1.0, 0.005 * abs(self._capital)):
                 log.warning(
                     "[adapter] trades don't reconcile for %s/%s: Σpnl=%.2f vs total_pnl=%.2f",
-                    m.get("strategy"), m.get("symbol"), summed, total_pnl,
+                    m.get("strategy"),
+                    m.get("symbol"),
+                    summed,
+                    total_pnl,
                 )
         log.debug(
             "[adapter] %s/%s → %d trades (%d closed, %d open), win_rate=%.2f%% over closed",
-            m.get("strategy"), m.get("symbol"), m.get("num_trades"),
-            m.get("closed_trades", 0), m.get("open_trades", 0),
+            m.get("strategy"),
+            m.get("symbol"),
+            m.get("num_trades"),
+            m.get("closed_trades", 0),
+            m.get("open_trades", 0),
             100.0 * float(m.get("win_rate", 0.0)),
         )
         return {

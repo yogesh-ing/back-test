@@ -34,14 +34,16 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
-from backtest.simulator.errors import ValidationError
-from backtest.simulator.money import ZERO, ONE, money, price as to_price, to_decimal, quantize_price
 from backtest.simulator.enums import OrderSide, OrderType
+from backtest.simulator.errors import ValidationError
+from backtest.simulator.money import ONE, ZERO, money
+from backtest.simulator.money import price as to_price
+from backtest.simulator.money import quantize_price, to_decimal
 
 logger = logging.getLogger("backtest.simulator.stop_manager")
 
@@ -146,7 +148,12 @@ class StopConfig:
     oco_group: Optional[str] = None  # OCO group id
 
     def __post_init__(self):
-        self.stop_type = StopType.validate(self.stop_type) if self.stop_type in StopType.ALL or self.stop_type.lower() in [t.lower() for t in StopType.ALL] else TakeProfitType.validate(self.stop_type)
+        self.stop_type = (
+            StopType.validate(self.stop_type)
+            if self.stop_type in StopType.ALL
+            or self.stop_type.lower() in [t.lower() for t in StopType.ALL]
+            else TakeProfitType.validate(self.stop_type)
+        )
 
         # Normalize via try for both enums
         try:
@@ -165,13 +172,24 @@ class StopConfig:
                     raise ValidationError(f"{name} must be positive")
                 setattr(self, name, dec)
 
-        for name in ("pct", "trailing_pct", "risk_reward_ratio", "breakeven_trigger_pct", "scale_out_pct"):
+        for name in (
+            "pct",
+            "trailing_pct",
+            "risk_reward_ratio",
+            "breakeven_trigger_pct",
+            "scale_out_pct",
+        ):
             v = getattr(self, name)
             if v is not None:
                 dec = to_decimal(v, name)
                 if dec <= ZERO or dec > Decimal("10"):
                     # Allow >1 for risk_reward, but pct should be <=1
-                    if name in ("pct", "trailing_pct", "breakeven_trigger_pct", "scale_out_pct") and dec > Decimal("1"):
+                    if name in (
+                        "pct",
+                        "trailing_pct",
+                        "breakeven_trigger_pct",
+                        "scale_out_pct",
+                    ) and dec > Decimal("1"):
                         raise ValidationError(f"{name} must be between 0 and 1")
                 setattr(self, name, dec)
 
@@ -372,13 +390,24 @@ class StopManager:
         # OCO groups
         self._oco_groups: Dict[str, Set[str]] = defaultdict(set)
 
-        self._stats = {"stops_added": 0, "stops_triggered": 0, "stops_cancelled": 0, "trailing_updates": 0}
+        self._stats = {
+            "stops_added": 0,
+            "stops_triggered": 0,
+            "stops_cancelled": 0,
+            "trailing_updates": 0,
+        }
 
-        logger.info("StopManager initialized: portfolio=%s backtest_mode=%s", getattr(portfolio, "name", "?"), backtest_mode)
+        logger.info(
+            "StopManager initialized: portfolio=%s backtest_mode=%s",
+            getattr(portfolio, "name", "?"),
+            backtest_mode,
+        )
 
     # -- add stops ---------------------------------------------------------
 
-    def add_stop_loss(self, position: Any, stop_type: str = "percentage", params: Optional[Dict[str, Any]] = None) -> Stop:
+    def add_stop_loss(
+        self, position: Any, stop_type: str = "percentage", params: Optional[Dict[str, Any]] = None
+    ) -> Stop:
         """Add stop loss to a position.
 
         Parameters
@@ -396,11 +425,18 @@ class StopManager:
         """
         return self._add_stop(position, stop_type, params, is_take_profit=False)
 
-    def add_take_profit(self, position: Any, target_type: str = "percentage", params: Optional[Dict[str, Any]] = None) -> Stop:
+    def add_take_profit(
+        self,
+        position: Any,
+        target_type: str = "percentage",
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Stop:
         """Add take profit to a position."""
         return self._add_stop(position, target_type, params, is_take_profit=True)
 
-    def _add_stop(self, position: Any, stop_type: str, params: Optional[Dict[str, Any]], is_take_profit: bool) -> Stop:
+    def _add_stop(
+        self, position: Any, stop_type: str, params: Optional[Dict[str, Any]], is_take_profit: bool
+    ) -> Stop:
         import uuid
 
         params = params or {}
@@ -409,9 +445,15 @@ class StopManager:
             raise ValidationError("symbol required for stop")
         symbol = str(symbol).strip().upper()
 
-        position_id = getattr(position, "position_id", None) or params.get("position_id") or str(uuid.uuid4())
+        position_id = (
+            getattr(position, "position_id", None) or params.get("position_id") or str(uuid.uuid4())
+        )
         quantity = getattr(position, "quantity", None)
-        entry_price = getattr(position, "average_entry_price", None) or getattr(position, "entry_price", None) or params.get("entry_price")
+        entry_price = (
+            getattr(position, "average_entry_price", None)
+            or getattr(position, "entry_price", None)
+            or params.get("entry_price")
+        )
 
         if entry_price is None:
             raise ValidationError("entry_price required to calculate stop")
@@ -443,7 +485,11 @@ class StopManager:
             current_price=params.get("current_price"),
         )
 
-        is_trailing = validated_type in (StopType.TRAILING_FIXED, StopType.TRAILING_PERCENTAGE, TakeProfitType.TRAILING)
+        is_trailing = validated_type in (
+            StopType.TRAILING_FIXED,
+            StopType.TRAILING_PERCENTAGE,
+            TakeProfitType.TRAILING,
+        )
 
         # Quantity: for scale-out, use fraction
         scale_out_pct = params.get("scale_out_pct")
@@ -479,7 +525,11 @@ class StopManager:
             params=dict(params),
             oco_group=params.get("oco_group"),
             move_to_breakeven=bool(params.get("move_to_breakeven", False)),
-            breakeven_trigger_pct=to_decimal(params["breakeven_trigger_pct"], "breakeven_trigger_pct") if params.get("breakeven_trigger_pct") else None,
+            breakeven_trigger_pct=(
+                to_decimal(params["breakeven_trigger_pct"], "breakeven_trigger_pct")
+                if params.get("breakeven_trigger_pct")
+                else None
+            ),
             scale_out_pct=scale_out_pct,
             entry_price=entry_price_dec,
         )
@@ -567,9 +617,17 @@ class StopManager:
             trailing_dec = to_price(trailing_amount, "trailing_amount")
             # Initial stop price
             if is_long:
-                return quantize_price(entry_price - trailing_dec) if not is_take_profit else quantize_price(entry_price + trailing_dec)
+                return (
+                    quantize_price(entry_price - trailing_dec)
+                    if not is_take_profit
+                    else quantize_price(entry_price + trailing_dec)
+                )
             else:
-                return quantize_price(entry_price + trailing_dec) if not is_take_profit else quantize_price(entry_price - trailing_dec)
+                return (
+                    quantize_price(entry_price + trailing_dec)
+                    if not is_take_profit
+                    else quantize_price(entry_price - trailing_dec)
+                )
 
         elif stop_type == StopType.TRAILING_PERCENTAGE:
             trailing_pct = params.get("trailing_pct") or params.get("pct")
@@ -618,11 +676,16 @@ class StopManager:
 
         elif stop_type == TakeProfitType.TRAILING:
             # Similar to trailing stop but for take profit
-            trailing_amount = params.get("trailing_amount") or params.get("amount") or params.get("pct")
+            trailing_amount = (
+                params.get("trailing_amount") or params.get("amount") or params.get("pct")
+            )
             if trailing_amount is None:
                 raise ValidationError("trailing take profit requires trailing_amount or pct")
             # If pct, treat as percentage
-            if isinstance(trailing_amount, (float, int, str)) and str(trailing_amount).replace('.', '').replace('-', '').isdigit():
+            if (
+                isinstance(trailing_amount, (float, int, str))
+                and str(trailing_amount).replace(".", "").replace("-", "").isdigit()
+            ):
                 # Could be pct or amount – try to infer
                 try:
                     val = to_decimal(trailing_amount, "trailing_amount")
@@ -701,14 +764,24 @@ class StopManager:
                                     stop.price = new_stop_price
                                     updated.append(stop)
                                     self._stats["trailing_updates"] += 1
-                                    logger.info("Trailing stop updated for %s: new stop %s (extreme %s)", symbol, new_stop_price, stop.extreme_price)
+                                    logger.info(
+                                        "Trailing stop updated for %s: new stop %s (extreme %s)",
+                                        symbol,
+                                        new_stop_price,
+                                        stop.extreme_price,
+                                    )
                             else:  # short
                                 new_stop_price = quantize_price(stop.extreme_price + trailing_dec)
                                 if stop.price is None or new_stop_price < stop.price:
                                     stop.price = new_stop_price
                                     updated.append(stop)
                                     self._stats["trailing_updates"] += 1
-                                    logger.info("Trailing stop updated for %s: new stop %s (extreme %s)", symbol, new_stop_price, stop.extreme_price)
+                                    logger.info(
+                                        "Trailing stop updated for %s: new stop %s (extreme %s)",
+                                        symbol,
+                                        new_stop_price,
+                                        stop.extreme_price,
+                                    )
 
                     elif stop.stop_type == StopType.TRAILING_PERCENTAGE:
                         trailing_pct = params.get("trailing_pct") or params.get("pct")
@@ -717,19 +790,33 @@ class StopManager:
                         else:
                             trailing_pct_dec = to_decimal(trailing_pct, "trailing_pct")
                             if stop.side == OrderSide.SELL:  # long
-                                new_stop_price = quantize_price(stop.extreme_price * (ONE - trailing_pct_dec))
+                                new_stop_price = quantize_price(
+                                    stop.extreme_price * (ONE - trailing_pct_dec)
+                                )
                                 if stop.price is None or new_stop_price > stop.price:
                                     stop.price = new_stop_price
                                     updated.append(stop)
                                     self._stats["trailing_updates"] += 1
-                                    logger.info("Trailing pct stop updated for %s: %s (extreme %s)", symbol, new_stop_price, stop.extreme_price)
+                                    logger.info(
+                                        "Trailing pct stop updated for %s: %s (extreme %s)",
+                                        symbol,
+                                        new_stop_price,
+                                        stop.extreme_price,
+                                    )
                             else:
-                                new_stop_price = quantize_price(stop.extreme_price * (ONE + trailing_pct_dec))
+                                new_stop_price = quantize_price(
+                                    stop.extreme_price * (ONE + trailing_pct_dec)
+                                )
                                 if stop.price is None or new_stop_price < stop.price:
                                     stop.price = new_stop_price
                                     updated.append(stop)
                                     self._stats["trailing_updates"] += 1
-                                    logger.info("Trailing pct stop updated for %s: %s (extreme %s)", symbol, new_stop_price, stop.extreme_price)
+                                    logger.info(
+                                        "Trailing pct stop updated for %s: %s (extreme %s)",
+                                        symbol,
+                                        new_stop_price,
+                                        stop.extreme_price,
+                                    )
 
                 # Check breakeven move for any stop with move_to_breakeven
                 if stop.move_to_breakeven and stop.entry_price and stop.breakeven_trigger_pct:
@@ -743,7 +830,13 @@ class StopManager:
                                     # Avoid duplicate in updated list
                                     if stop not in updated:
                                         updated.append(stop)
-                                    logger.info("Stop moved to breakeven for %s: %s -> %s (trigger %s)", symbol, old_price, stop.entry_price, trigger_price)
+                                    logger.info(
+                                        "Stop moved to breakeven for %s: %s -> %s (trigger %s)",
+                                        symbol,
+                                        old_price,
+                                        stop.entry_price,
+                                        trigger_price,
+                                    )
                         else:  # short
                             trigger_price = stop.entry_price * (ONE - stop.breakeven_trigger_pct)
                             if current_price <= trigger_price:
@@ -752,7 +845,12 @@ class StopManager:
                                     stop.price = stop.entry_price
                                     if stop not in updated:
                                         updated.append(stop)
-                                    logger.info("Stop moved to breakeven for %s: %s -> %s", symbol, old_price, stop.entry_price)
+                                    logger.info(
+                                        "Stop moved to breakeven for %s: %s -> %s",
+                                        symbol,
+                                        old_price,
+                                        stop.entry_price,
+                                    )
                     except Exception as exc:
                         logger.debug("Breakeven check failed for %s: %s", symbol, exc)
 
@@ -846,7 +944,9 @@ class StopManager:
                     if isinstance(bars_needed, int) and stop.bars_held >= bars_needed:
                         triggered = True
                         trigger_price = curr_price_dec
-                        logger.info("Time-based stop triggered for %s after %s bars", symbol, stop.bars_held)
+                        logger.info(
+                            "Time-based stop triggered for %s after %s bars", symbol, stop.bars_held
+                        )
 
                 # For long positions (side SELL): stop triggers when price <= stop price (for SL) or >= for TP?
                 # Let's define:
@@ -909,7 +1009,15 @@ class StopManager:
                     stop.triggered_at = datetime.now(timezone.utc)
                     self._stats["stops_triggered"] += 1
 
-                    logger.info("Stop triggered: %s %s %s @ %s (current %s) qty=%s", symbol, "TP" if stop.is_take_profit else "SL", stop.stop_type, trigger_price, curr_price_dec, qty)
+                    logger.info(
+                        "Stop triggered: %s %s %s @ %s (current %s) qty=%s",
+                        symbol,
+                        "TP" if stop.is_take_profit else "SL",
+                        stop.stop_type,
+                        trigger_price,
+                        curr_price_dec,
+                        qty,
+                    )
 
                     # Handle OCO: cancel other stops in same group
                     if stop.oco_group:
@@ -917,7 +1025,12 @@ class StopManager:
 
                     # In backtest mode, just log
                     if self.backtest_mode:
-                        logger.info("Backtest mode: would have exited %s %s @ %s", symbol, qty, trigger_price)
+                        logger.info(
+                            "Backtest mode: would have exited %s %s @ %s",
+                            symbol,
+                            qty,
+                            trigger_price,
+                        )
 
         return hits
 
@@ -934,7 +1047,13 @@ class StopManager:
                     if stop.stop_id == stop_id and stop.is_active:
                         stop.is_active = False
                         self._stats["stops_cancelled"] += 1
-                        logger.info("OCO cancelled stop %s for %s (group %s triggered by %s)", stop_id, symbol, oco_group, triggered_stop_id)
+                        logger.info(
+                            "OCO cancelled stop %s for %s (group %s triggered by %s)",
+                            stop_id,
+                            symbol,
+                            oco_group,
+                            triggered_stop_id,
+                        )
 
         # Clear group
         self._oco_groups.pop(oco_group, None)
@@ -953,7 +1072,9 @@ class StopManager:
         for stop in stops:
             symbol = stop.symbol
             if symbol in self._stops_by_symbol:
-                self._stops_by_symbol[symbol] = [s for s in self._stops_by_symbol[symbol] if s.stop_id != stop.stop_id]
+                self._stops_by_symbol[symbol] = [
+                    s for s in self._stops_by_symbol[symbol] if s.stop_id != stop.stop_id
+                ]
 
             if stop.oco_group and stop.oco_group in self._oco_groups:
                 self._oco_groups[stop.oco_group].discard(stop.stop_id)
@@ -973,7 +1094,9 @@ class StopManager:
                     self._stops[position_id] = [s for s in stops if s.stop_id != stop_id]
                     # Also from symbol index
                     if stop.symbol in self._stops_by_symbol:
-                        self._stops_by_symbol[stop.symbol] = [s for s in self._stops_by_symbol[stop.symbol] if s.stop_id != stop_id]
+                        self._stops_by_symbol[stop.symbol] = [
+                            s for s in self._stops_by_symbol[stop.symbol] if s.stop_id != stop_id
+                        ]
                     if stop.oco_group:
                         self._oco_groups.get(stop.oco_group, set()).discard(stop_id)
                     self._stats["stops_cancelled"] += 1
@@ -1006,7 +1129,13 @@ class StopManager:
                 order.submit()
                 self.portfolio.add_order(order)
                 orders.append(order)
-                logger.info("Created exit order for stop hit %s: %s %s %s", hit.stop_id, hit.action, hit.quantity, hit.symbol)
+                logger.info(
+                    "Created exit order for stop hit %s: %s %s %s",
+                    hit.stop_id,
+                    hit.action,
+                    hit.quantity,
+                    hit.symbol,
+                )
             except Exception as exc:
                 logger.exception("Failed to create order for hit %s: %s", hit.stop_id, exc)
 

@@ -162,11 +162,7 @@ def run_engine_loop(
 
     def submit_buy(symbol: str, bar: Bar, ts: Any) -> None:
         """Size and submit an entry order for this bar's signal."""
-        qty = (
-            size_fn(symbol, float(bar.open), portfolio)
-            if size_fn is not None
-            else quantity
-        )
+        qty = size_fn(symbol, float(bar.open), portfolio) if size_fn is not None else quantity
         submit_order(symbol, "buy", qty, ts)
 
     # -- bars & signals ------------------------------------------------------
@@ -177,7 +173,8 @@ def run_engine_loop(
         candles = source.get_candles(symbol, start, end, interval)
         if candles is None or candles.empty:
             raise ValidationError(
-                f"source returned no bars for {symbol}", code="no_bars",
+                f"source returned no bars for {symbol}",
+                code="no_bars",
                 symbol=symbol,
             )
         frames[symbol] = candles
@@ -200,8 +197,10 @@ def run_engine_loop(
             else:
                 volume = to_python_scalar(volume)
             bars_this_tick[symbol] = Bar(
-                open=to_python_scalar(row["open"]), close=to_python_scalar(row["close"]),
-                volume=volume, timestamp=ts,
+                open=to_python_scalar(row["open"]),
+                close=to_python_scalar(row["close"]),
+                volume=volume,
+                timestamp=ts,
             )
             closes[symbol] = to_python_scalar(row["close"])
 
@@ -214,11 +213,13 @@ def run_engine_loop(
                 continue
             position = portfolio.get_position(symbol)
             pending_buys = [
-                o for o in portfolio.pending_orders
+                o
+                for o in portfolio.pending_orders
                 if o.symbol == symbol and o.side is OrderSide.BUY
             ]
             pending_sells = [
-                o for o in portfolio.pending_orders
+                o
+                for o in portfolio.pending_orders
                 if o.symbol == symbol and o.side is OrderSide.SELL
             ]
             if sig == 1 and prev == 0:
@@ -244,8 +245,10 @@ def run_engine_loop(
                     # right behind it — the pair brackets one bar, the
                     # same exposure the lagged backtest model has.
                     submit_order(
-                        symbol, "sell",
-                        sum(float(o.quantity) for o in pending_buys), ts,
+                        symbol,
+                        "sell",
+                        sum(float(o.quantity) for o in pending_buys),
+                        ts,
                     )
 
         # 2) fills at THIS bar's open, for orders armed earlier.
@@ -268,7 +271,9 @@ def run_engine_loop(
 
     logger.info(
         "%s finished: %d bars, %d orders, %d closed positions, equity=%s",
-        log_label, len(timestamps), len(order_queue),
+        log_label,
+        len(timestamps),
+        len(order_queue),
         len(portfolio.closed_positions),
         portfolio.calculate_total_equity(),
     )

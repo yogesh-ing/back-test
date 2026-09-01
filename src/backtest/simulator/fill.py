@@ -49,13 +49,9 @@ from typing import TYPE_CHECKING, Any, Mapping
 from backtest.simulator.commission import CommissionModel, resolve_commission_model
 from backtest.simulator.enums import OrderSide
 from backtest.simulator.errors import ValidationError
-from backtest.simulator.money import (
-    ZERO,
-    money,
-    price as to_price,
-    quantize_money,
-    quantize_price,
-)
+from backtest.simulator.money import ZERO, money
+from backtest.simulator.money import price as to_price
+from backtest.simulator.money import quantize_money, quantize_price
 
 if TYPE_CHECKING:  # pragma: no cover
     from backtest.db.manager import DatabaseManager
@@ -210,13 +206,12 @@ class Fill:
             )
         if self.fill_price <= ZERO:
             raise ValidationError(
-                "fill_price must be positive", code="invalid_price",
+                "fill_price must be positive",
+                code="invalid_price",
                 price=str(self.fill_price),
             )
         if self.reference_price is not None and self.reference_price <= ZERO:
-            raise ValidationError(
-                "reference_price must be positive when set", code="invalid_price"
-            )
+            raise ValidationError("reference_price must be positive when set", code="invalid_price")
         for name in ("commission", "exchange_fees", "regulatory_fees"):
             if getattr(self, name) < ZERO:
                 raise ValidationError(
@@ -253,9 +248,7 @@ class Fill:
 
         Excludes slippage, which is already inside ``fill_price``.
         """
-        return quantize_money(
-            self.commission + self.exchange_fees + self.regulatory_fees
-        )
+        return quantize_money(self.commission + self.exchange_fees + self.regulatory_fees)
 
     @property
     def slippage_per_share(self) -> Decimal:
@@ -266,18 +259,14 @@ class Fill:
         """
         if self.reference_price is None:
             return ZERO
-        return quantize_price(
-            (self.fill_price - self.reference_price) * self.side.sign
-        )
+        return quantize_price((self.fill_price - self.reference_price) * self.side.sign)
 
     @property
     def slippage_bps(self) -> Decimal:
         """Signed slippage in basis points of the reference price."""
         if self.reference_price is None or self.reference_price == ZERO:
             return ZERO
-        return (self.slippage_per_share / self.reference_price * _BPS).quantize(
-            Decimal("0.000001")
-        )
+        return (self.slippage_per_share / self.reference_price * _BPS).quantize(Decimal("0.000001"))
 
     @property
     def slippage_amount(self) -> Decimal:
@@ -354,9 +343,7 @@ class Fill:
                 action=PositionAction.INCREASE,
                 quantity=self.quantity,
                 cash_delta=self.calculate_cash_delta(),
-                resulting_quantity=quantize_price(
-                    position.quantity + self.signed_quantity
-                ),
+                resulting_quantity=quantize_price(position.quantity + self.signed_quantity),
             )
 
         open_qty = abs(position.quantity)
@@ -365,9 +352,7 @@ class Fill:
                 action=PositionAction.REVERSE,
                 quantity=self.quantity,
                 cash_delta=self.calculate_cash_delta(),
-                resulting_quantity=quantize_price(
-                    position.quantity + self.signed_quantity
-                ),
+                resulting_quantity=quantize_price(position.quantity + self.signed_quantity),
             )
 
         closing = min(self.quantity, open_qty)
@@ -383,9 +368,9 @@ class Fill:
             cash_delta=self.calculate_cash_delta(),
             realized_pnl=quantize_money(realized),
             fully_closed=fully,
-            resulting_quantity=ZERO
-            if fully
-            else quantize_price(position.quantity + self.signed_quantity),
+            resulting_quantity=(
+                ZERO if fully else quantize_price(position.quantity + self.signed_quantity)
+            ),
         )
 
     def apply_to_position(self, position: "Position") -> PositionImpact:
@@ -492,15 +477,9 @@ class Fill:
                 status=str(getattr(order, "status", "?")),
             )
 
-        qty = (
-            to_price(quantity, "quantity")
-            if quantity is not None
-            else order.remaining_quantity
-        )
+        qty = to_price(quantity, "quantity") if quantity is not None else order.remaining_quantity
         if qty <= ZERO:
-            raise ValidationError(
-                "fill quantity must be positive", code="invalid_quantity"
-            )
+            raise ValidationError("fill quantity must be positive", code="invalid_quantity")
         if qty > order.remaining_quantity + _DUST:
             raise ValidationError(
                 "fill would exceed the order's remaining quantity",
@@ -640,6 +619,7 @@ class Fill:
             When a required field (symbol/side/quantity/fill_price) is
             missing from both ``raw`` and ``overrides``.
         """
+
         def _pick(*keys: str) -> Any:
             for key in keys:
                 value = raw.get(key)

@@ -157,8 +157,7 @@ class SyntheticFeed:
             n = self.warmup()
             logger.info("Feed warmup: %d bars across %d symbols", n, len(self._symbols))
         self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, daemon=True,
-                                        name="portfolio-feed")
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="portfolio-feed")
         self._thread.start()
 
     def stop(self) -> None:
@@ -168,8 +167,11 @@ class SyntheticFeed:
         self._thread = None
 
     def _loop(self) -> None:
-        logger.info("Synthetic feed started: %d symbols @ %.1fs ticks",
-                    len(self._symbols), self.tick_seconds)
+        logger.info(
+            "Synthetic feed started: %d symbols @ %.1fs ticks",
+            len(self._symbols),
+            self.tick_seconds,
+        )
         while not self._stop.is_set():
             self.emit_one()
             self._stop.wait(self.tick_seconds)

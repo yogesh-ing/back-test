@@ -40,7 +40,7 @@ from backtest.simulator import (
 )
 
 D = Decimal
-LAKH = dict(quantity=100, fill_price=1000)      # ₹1,00,000 notional
+LAKH = dict(quantity=100, fill_price=1000)  # ₹1,00,000 notional
 
 
 # ===========================================================================
@@ -69,17 +69,17 @@ class TestIndiaDeliveryBuy:
         return calc.calculate(**LAKH, side="buy", segment=TradeSegment.EQUITY_DELIVERY)
 
     def test_stt_both_sides_on_delivery(self, fees):
-        assert fees.get("stt") == D("100.00")           # 0.1% of 1,00,000
+        assert fees.get("stt") == D("100.00")  # 0.1% of 1,00,000
 
     def test_exchange_transaction_charge(self, fees):
         assert fees.get("exchange_transaction") == D("2.97")
 
     def test_sebi_and_ipft(self, fees):
-        assert fees.get("sebi_turnover") == D("0.10")   # ₹10 per crore
+        assert fees.get("sebi_turnover") == D("0.10")  # ₹10 per crore
         assert fees.get("ipft") == D("0.10")
 
     def test_stamp_duty_charged_on_buy(self, fees):
-        assert fees.get("stamp_duty") == D("15.00")     # 0.015%
+        assert fees.get("stamp_duty") == D("15.00")  # 0.015%
 
     def test_gst_excludes_stt_and_stamp_duty(self, fees):
         """GST applies to brokerage + exchange + SEBI + IPFT only."""
@@ -144,7 +144,7 @@ class TestDeliveryVsIntraday:
 
     def test_intraday_stamp_duty_is_lower(self):
         buy, _ = self._round_trip("india_zero", TradeSegment.EQUITY_INTRADAY)
-        assert buy.get("stamp_duty") == D("3.00")      # 0.003%
+        assert buy.get("stamp_duty") == D("3.00")  # 0.003%
 
     def test_no_dp_charge_on_intraday(self):
         _, sell = self._round_trip("india_zero", TradeSegment.EQUITY_INTRADAY)
@@ -167,7 +167,7 @@ class TestFuturesAndOptions:
         buy = calc.calculate(**LAKH, side="buy", segment=TradeSegment.FUTURES)
         sell = calc.calculate(**LAKH, side="sell", segment=TradeSegment.FUTURES)
         assert buy.get("stt") == D("0")
-        assert sell.get("stt") == D("20.00")      # 0.02%
+        assert sell.get("stt") == D("20.00")  # 0.02%
 
     def test_options_have_the_highest_exchange_charge(self):
         calc = CommissionCalculator.for_broker("india_zero")
@@ -215,11 +215,11 @@ class TestUSEquityFees:
 
     def test_sec_fee_on_a_sell(self, calc):
         fees = calc.calculate(quantity=100, fill_price=50, side="sell")
-        assert fees.get("sec_fee") == D("0.14")      # 0.0000278 x 5000
+        assert fees.get("sec_fee") == D("0.14")  # 0.0000278 x 5000
 
     def test_finra_taf_per_share(self, calc):
         fees = calc.calculate(quantity=100, fill_price=50, side="sell")
-        assert fees.get("finra_taf") == D("0.02")    # 0.000166 x 100
+        assert fees.get("finra_taf") == D("0.02")  # 0.000166 x 100
 
     def test_finra_taf_is_capped(self):
         calc = CommissionCalculator.for_broker("robinhood")
@@ -283,7 +283,9 @@ class TestBrokerPresets:
         assert fees.effective_bps(100_000) > D("11")
 
     def test_zero_preset_really_is_free(self):
-        assert CommissionCalculator.for_broker("zero").calculate(**LAKH, side="buy").total == D("0.00")
+        assert CommissionCalculator.for_broker("zero").calculate(**LAKH, side="buy").total == D(
+            "0.00"
+        )
 
     def test_delivery_override_only_affects_delivery(self):
         calc = CommissionCalculator.for_broker("zerodha")
@@ -300,7 +302,7 @@ class TestPaymentForOrderFlow:
     def test_hidden_cost_is_exposed(self):
         """'Free' is funded by worse fills; the model says how much."""
         model = PaymentForOrderFlowCommission(implied_slippage_bps=D("2.5"))
-        assert model.hidden_cost(100, 50) == D("1.2500")   # 2.5bps of $5,000
+        assert model.hidden_cost(100, 50) == D("1.2500")  # 2.5bps of $5,000
 
     def test_robinhood_uses_it(self):
         assert CommissionCalculator.for_broker("robinhood").broker.commission_model.name == "pfof"
@@ -321,7 +323,7 @@ class TestCalculatorAPI:
         order.submit()
         order.add_fill(quantity=100, fill_price=1000)
         fees = CommissionCalculator.for_broker("zerodha").calculate(order)
-        assert fees.brokerage == D("0.00")     # delivery default
+        assert fees.brokerage == D("0.00")  # delivery default
         assert fees.total == D("118.74")
 
     def test_missing_context_rejected(self):
@@ -337,7 +339,9 @@ class TestCalculatorAPI:
     def test_calculate_commission_helper(self):
         calc = CommissionCalculator.for_broker("zerodha")
         assert calc.calculate_commission(
-            quantity=100, fill_price=1000, side="buy",
+            quantity=100,
+            fill_price=1000,
+            side="buy",
             segment=TradeSegment.EQUITY_INTRADAY,
         ) == D("20.00")
 
@@ -352,10 +356,12 @@ class TestCalculatorAPI:
     def test_calculate_exchange_fees_helper(self):
         calc = CommissionCalculator.for_broker("india_zero")
         value = calc.calculate_exchange_fees(
-            quantity=100, trade_value=100_000, side="buy",
+            quantity=100,
+            trade_value=100_000,
+            side="buy",
             segment=TradeSegment.EQUITY_DELIVERY,
         )
-        assert value == D("3.07")       # exchange txn + ipft
+        assert value == D("3.07")  # exchange txn + ipft
 
     def test_switch_broker_keeps_history(self):
         calc = CommissionCalculator.for_broker("zerodha")
@@ -418,8 +424,8 @@ class TestMonthlyVolumeTracking:
         high.record_volume(20_000_000, when)
         later = high.calculate(**LAKH, side="buy", when=when).brokerage
 
-        assert first == D("100.00")     # 0.1%
-        assert later == D("10.00")      # 0.01% — cheaper tier
+        assert first == D("100.00")  # 0.1%
+        assert later == D("10.00")  # 0.01% — cheaper tier
         assert later < first
 
     def test_reset_clears_volume_and_history(self):
@@ -461,8 +467,9 @@ class TestFeeBreakdown:
         fees = CommissionCalculator.for_broker("zerodha").calculate(
             **LAKH, side="buy", segment=TradeSegment.EQUITY_INTRADAY
         )
-        fill = Fill(symbol="INFY", side="buy", quantity=100, fill_price=1000,
-                    **fees.as_fill_kwargs())
+        fill = Fill(
+            symbol="INFY", side="buy", quantity=100, fill_price=1000, **fees.as_fill_kwargs()
+        )
         assert fill.total_fees == fees.total
 
     def test_effective_bps(self, fees):
@@ -519,7 +526,7 @@ class TestCurrencyConverter:
         calc = CommissionCalculator.for_broker("ibkr", converter=fx, report_currency="INR")
         fees = calc.calculate(quantity=100, fill_price=50, side="buy")
         assert fees.currency == "INR"
-        assert fees.brokerage == D("83.0000")     # $1 minimum x 83
+        assert fees.brokerage == D("83.0000")  # $1 minimum x 83
 
     def test_no_conversion_when_currencies_match(self):
         calc = CommissionCalculator.for_broker("ibkr")
@@ -535,11 +542,21 @@ class TestConfiguration:
     def test_ships_a_loadable_file(self):
         assert load_broker_profile().name == "zerodha"
 
-    @pytest.mark.parametrize("broker", [
-        "zerodha", "mstock", "india_full_service", "india_zero",
-        "india_tiered", "ibkr", "td_ameritrade", "robinhood",
-        "generic_discount", "zero",
-    ])
+    @pytest.mark.parametrize(
+        "broker",
+        [
+            "zerodha",
+            "mstock",
+            "india_full_service",
+            "india_zero",
+            "india_tiered",
+            "ibkr",
+            "td_ameritrade",
+            "robinhood",
+            "generic_discount",
+            "zero",
+        ],
+    )
     def test_every_configured_broker_loads_and_prices(self, broker):
         calc = CommissionCalculator.from_config(broker=broker)
         assert calc.calculate(quantity=100, fill_price=1000, side="buy").total >= D("0")
@@ -638,7 +655,9 @@ class TestStatistics:
         calc.calculate(**LAKH, side="buy", segment=TradeSegment.EQUITY_INTRADAY)
         stats = calc.statistics()
         assert stats["brokerage"] == D("20.00")
-        assert stats["brokerage"] + stats["exchange_fees"] + stats["regulatory_fees"] == stats["total"]
+        assert (
+            stats["brokerage"] + stats["exchange_fees"] + stats["regulatory_fees"] == stats["total"]
+        )
 
     def test_recording_can_be_disabled(self):
         calc = CommissionCalculator.for_broker("zerodha", record=False)

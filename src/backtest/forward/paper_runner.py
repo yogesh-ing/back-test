@@ -45,23 +45,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import (
-    Any,
-    Callable,
-    Deque,
-    Dict,
-    List,
-    Optional,
-)
+from typing import Any, Callable, Deque, Dict, List, Optional
 
 import pandas as pd
 
 from backtest.data.base import CANONICAL_TIMEFRAMES, DataSource
 from backtest.data.frame_source import FrameSource
-from backtest.data.source_tags import SOURCE_TAGS, SOURCE_TAG_VALUES, source_tag_for
+from backtest.data.source_tags import SOURCE_TAG_VALUES, SOURCE_TAGS, source_tag_for
 from backtest.data.universe import get_universe_symbols
-from backtest.simulator.enums import OrderSide, OrderType, TimeInForce
 from backtest.simulator.engine_loop import OrderQueue, run_engine_loop
+from backtest.simulator.enums import OrderSide, OrderType, TimeInForce
 from backtest.simulator.execution import free_executor
 from backtest.simulator.order import Order as SimOrder
 from backtest.simulator.portfolio import Portfolio, PortfolioLimits
@@ -402,14 +395,10 @@ class PaperBroker:
         sim_order.validate()
         sim_order.submit()
 
-        result = runner.executor.execute(
-            sim_order, {"bid": price, "ask": price, "last": price}
-        )
+        result = runner.executor.execute(sim_order, {"bid": price, "ask": price, "last": price})
         fill = result.fill
         if fill is None:
-            raise RuntimeError(
-                f"paper fill did not execute: {result.status} — {result.reason}"
-            )
+            raise RuntimeError(f"paper fill did not execute: {result.status} — {result.reason}")
         runner.portfolio.add_order(sim_order)
 
         return self.ledger.apply_fill(
@@ -433,11 +422,11 @@ STATUS_PAUSED = "PAUSED"
 STATUS_STOPPED = "STOPPED"
 STATUS_ERROR = "ERROR"
 
-MAX_BARS_PER_SYMBOL = 500          # Task 5: light rolling buffers
+MAX_BARS_PER_SYMBOL = 500  # Task 5: light rolling buffers
 MAX_SIGNAL_LOG = 200
 MAX_TRADE_LOG = 200
 MAX_EQUITY_POINTS = 500
-MIN_WARMUP_BARS = 12              # strategies need history to compute
+MIN_WARMUP_BARS = 12  # strategies need history to compute
 
 
 @dataclass
@@ -453,7 +442,7 @@ class RunnerConfig:
     timeframe: str = "1hour"
     strategy_params: Dict[str, Any] = field(default_factory=dict)
     max_pool_positions: int = 5
-    position_pct: Optional[float] = None      # fraction of bucket per entry
+    position_pct: Optional[float] = None  # fraction of bucket per entry
     instance_id: Optional[str] = None
     # Instance-level circuit breakers (fraction of allocation)
     max_drawdown_pct: float = 0.25
@@ -612,7 +601,8 @@ class StrategyRunner:
                     "qty": abs(float(pos.quantity)),
                     "entry_price": float(pos.average_entry_price),
                     "exit_price": float(
-                        pos.current_price if pos.current_price is not None
+                        pos.current_price
+                        if pos.current_price is not None
                         else pos.average_entry_price
                     ),
                     "entry_ts": pos.opened_at.isoformat() if pos.opened_at else None,
@@ -647,9 +637,13 @@ class StrategyRunner:
                 return
             self.status = STATUS_RUNNING
             self.error = None
-            logger.info("Runner %s (%s) started: %s on %s",
-                        self.instance_id[:8], self.config.name,
-                        self.config.strategy_name, self.target_label)
+            logger.info(
+                "Runner %s (%s) started: %s on %s",
+                self.instance_id[:8],
+                self.config.name,
+                self.config.strategy_name,
+                self.target_label,
+            )
 
     def pause(self) -> None:
         with self._lock:
@@ -731,8 +725,7 @@ class StrategyRunner:
                 # (once per tick instead of once per symbol event — O(n) vs O(n^2)).
 
             except Exception as exc:  # noqa: BLE001 — one bad bar must not kill the runner
-                logger.exception("Runner %s bar error on %s: %s",
-                                 self.instance_id[:8], symbol, exc)
+                logger.exception("Runner %s bar error on %s: %s", self.instance_id[:8], symbol, exc)
                 self.error = str(exc)
 
     def apply_markdown(self, symbol: str, price: float, ts: Optional[str] = None) -> None:
@@ -777,8 +770,7 @@ class StrategyRunner:
                 self._process_pool(tick_ts)
                 self._check_instance_risk()
             except Exception as exc:  # noqa: BLE001
-                logger.exception("Runner %s pool scan failed: %s",
-                                 self.instance_id[:8], exc)
+                logger.exception("Runner %s pool scan failed: %s", self.instance_id[:8], exc)
                 self.error = str(exc)
 
     # -- single symbol ----------------------------------------------------
@@ -793,7 +785,7 @@ class StrategyRunner:
 
     def _process_pool(self, tick_ts: str) -> None:
         """Evaluate every basket symbol; rank candidates; enter top-K."""
-        scores: List[tuple] = []   # (score, symbol, signal)
+        scores: List[tuple] = []  # (score, symbol, signal)
         for symbol in self.config.symbols:
             if len(self._bars[symbol]) < MIN_WARMUP_BARS:
                 continue
@@ -821,8 +813,7 @@ class StrategyRunner:
 
         open_slots = self.config.max_pool_positions - len(self.positions)
         for score, symbol, signal in scores[: max(0, open_slots)]:
-            self._act_on_signal(symbol, signal, self.last_price.get(symbol),
-                                tick_ts, score=score)
+            self._act_on_signal(symbol, signal, self.last_price.get(symbol), tick_ts, score=score)
 
     # -- signal / action --------------------------------------------------
 
@@ -843,8 +834,9 @@ class StrategyRunner:
             data["low"][i] = bar["low"]
             data["close"][i] = bar["close"]
             data["volume"][i] = bar["volume"]
-        return pd.DataFrame(data, columns=["open", "high", "low", "close", "volume"],
-                            dtype="float64")
+        return pd.DataFrame(
+            data, columns=["open", "high", "low", "close", "volume"], dtype="float64"
+        )
 
     def _signal_for(self, symbol: str) -> Optional[int]:
         """Run the strategy over the symbol's rolling buffer; return {-1,0,1}."""
@@ -853,10 +845,12 @@ class StrategyRunner:
             series = self.strategy.generate_signals(df)
             return int(series.iloc[-1])
         except Exception as exc:  # noqa: BLE001
-            logger.debug("Strategy %s signal failed for %s: %s",
-                         self.config.strategy_name, symbol, exc)
-            self._log_signal(symbol, "ERROR", None, self.last_price.get(symbol),
-                             f"signal error: {exc}")
+            logger.debug(
+                "Strategy %s signal failed for %s: %s", self.config.strategy_name, symbol, exc
+            )
+            self._log_signal(
+                symbol, "ERROR", None, self.last_price.get(symbol), f"signal error: {exc}"
+            )
             return None
 
     def _entry_score(self, symbol: str) -> float:
@@ -879,12 +873,16 @@ class StrategyRunner:
 
         if signal == 1 and not held:
             if self.status != STATUS_RUNNING:
-                self._log_signal(symbol, "BLOCKED", 1, price,
-                                 f"entry blocked while {self.status}")
+                self._log_signal(symbol, "BLOCKED", 1, price, f"entry blocked while {self.status}")
                 return
             if len(self.positions) >= self.config.max_pool_positions:
-                self._log_signal(symbol, "BLOCKED", 1, price,
-                                 f"max positions ({self.config.max_pool_positions}) reached")
+                self._log_signal(
+                    symbol,
+                    "BLOCKED",
+                    1,
+                    price,
+                    f"max positions ({self.config.max_pool_positions}) reached",
+                )
                 return
             self._emit_entry(symbol, price, ts, side=SIDE_BUY, score=score)
         elif signal == 0 and held:
@@ -912,18 +910,29 @@ class StrategyRunner:
             qty = float(int(qty))
         return round(qty, 6)
 
-    def _emit_entry(self, symbol: str, price: float, ts: str,
-                    side: str = SIDE_BUY, score: Optional[float] = None) -> None:
+    def _emit_entry(
+        self,
+        symbol: str,
+        price: float,
+        ts: str,
+        side: str = SIDE_BUY,
+        score: Optional[float] = None,
+    ) -> None:
         qty = self._position_size(price)
         if qty <= 0:
-            self._log_signal(symbol, "NO_FILL", 1, price,
-                             f"insufficient capital (cash={self.cash:.2f})")
+            self._log_signal(
+                symbol, "NO_FILL", 1, price, f"insufficient capital (cash={self.cash:.2f})"
+            )
             return
         try:
             fill = self.broker.submit_market(
-                self.instance_id, symbol, side, qty, price, ts=ts,
-                tag={"runner": self.config.name, "kind": "entry",
-                     "score": score},
+                self.instance_id,
+                symbol,
+                side,
+                qty,
+                price,
+                ts=ts,
+                tag={"runner": self.config.name, "kind": "entry", "score": score},
             )
         except Exception as exc:  # noqa: BLE001
             self.error = str(exc)
@@ -931,25 +940,31 @@ class StrategyRunner:
             return
         score_part = f" | pool rank score {score:+.4f}" if score is not None else ""
         reason = f"BUY signal{score_part}"
-        self._log_signal(symbol, "ENTRY", 1, fill.price,
-                         f"{reason} → {side} {qty:g} @ {fill.price:.2f}")
+        self._log_signal(
+            symbol, "ENTRY", 1, fill.price, f"{reason} → {side} {qty:g} @ {fill.price:.2f}"
+        )
 
-    def _emit_close(self, symbol: str, price: float, reason: str,
-                    ts: Optional[str] = None) -> None:
+    def _emit_close(self, symbol: str, price: float, reason: str, ts: Optional[str] = None) -> None:
         pos = self.positions.get(symbol)
         if pos is None:
             return
         try:
             fill = self.broker.submit_market(
-                self.instance_id, symbol, SIDE_SELL, pos["qty"], price, ts=ts,
+                self.instance_id,
+                symbol,
+                SIDE_SELL,
+                pos["qty"],
+                price,
+                ts=ts,
                 tag={"runner": self.config.name, "kind": "exit", "reason": reason},
             )
         except Exception as exc:  # noqa: BLE001
             self.error = str(exc)
             logger.exception("Exit order failed for %s: %s", symbol, exc)
             return
-        self._log_signal(symbol, "EXIT", 0, fill.price,
-                         f"{reason} → SELL {pos['qty']:g} @ {fill.price:.2f}")
+        self._log_signal(
+            symbol, "EXIT", 0, fill.price, f"{reason} → SELL {pos['qty']:g} @ {fill.price:.2f}"
+        )
 
     # ------------------------------------------------------------------ #
     # Fill routing — ledger calls back here (zero cross-contamination).
@@ -960,12 +975,18 @@ class StrategyRunner:
     def on_fill(self, fill: FillEvent) -> None:
         if fill.instance_id != self.instance_id:
             # Ledger must never route here; guard anyway.
-            logger.error("Fill routed to wrong runner: %s != %s",
-                         fill.instance_id, self.instance_id)
+            logger.error(
+                "Fill routed to wrong runner: %s != %s", fill.instance_id, self.instance_id
+            )
             return
-        logger.debug("fill routed to runner %s: %s %s %g @ %s",
-                     self.instance_id[:8], fill.side, fill.symbol,
-                     fill.quantity, fill.price)
+        logger.debug(
+            "fill routed to runner %s: %s %s %g @ %s",
+            self.instance_id[:8],
+            fill.side,
+            fill.symbol,
+            fill.quantity,
+            fill.price,
+        )
 
     # ------------------------------------------------------------------ #
     # Accounting / metrics
@@ -981,9 +1002,7 @@ class StrategyRunner:
         return float(self.portfolio.calculate_total_equity())
 
     def deployed_capital(self) -> float:
-        return sum(
-            p["qty"] * p["entry_price"] for p in self.positions.values()
-        )
+        return sum(p["qty"] * p["entry_price"] for p in self.positions.values())
 
     def daily_pnl(self) -> float:
         return self.equity() - self._day_start_equity
@@ -1001,10 +1020,12 @@ class StrategyRunner:
             if dd > self.max_drawdown_pct:
                 self.max_drawdown_pct = dd
         if record and len(self.equity_curve) < MAX_EQUITY_POINTS:
-            self.equity_curve.append({
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "equity": round(equity, 2),
-            })
+            self.equity_curve.append(
+                {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "equity": round(equity, 2),
+                }
+            )
 
     def _roll_trading_day(self, ts: str) -> None:
         # Daily PnL is session-anchored: the baseline is fixed at the first
@@ -1028,13 +1049,17 @@ class StrategyRunner:
         alloc = self.config.allocated_capital
         breach = None
         if self.max_drawdown_pct >= self.config.max_drawdown_pct:
-            breach = (f"instance max drawdown {self.max_drawdown_pct:.1%} >= "
-                      f"{self.config.max_drawdown_pct:.1%}")
+            breach = (
+                f"instance max drawdown {self.max_drawdown_pct:.1%} >= "
+                f"{self.config.max_drawdown_pct:.1%}"
+            )
         elif (alloc - equity) >= alloc * self.config.daily_loss_limit_pct and self.daily_pnl() < 0:
             loss_pct = (self._day_start_equity - equity) / alloc
             if loss_pct >= self.config.daily_loss_limit_pct:
-                breach = (f"instance daily loss {loss_pct:.1%} >= "
-                          f"{self.config.daily_loss_limit_pct:.1%}")
+                breach = (
+                    f"instance daily loss {loss_pct:.1%} >= "
+                    f"{self.config.daily_loss_limit_pct:.1%}"
+                )
         if breach:
             self._log_signal("-", "RISK_HALT", None, None, breach)
             if self.status == STATUS_RUNNING:
@@ -1045,8 +1070,9 @@ class StrategyRunner:
     # Logging / state snapshots
     # ------------------------------------------------------------------ #
 
-    def _log_signal(self, symbol: str, kind: str, signal: Optional[int],
-                    price: Optional[float], reason: str) -> None:
+    def _log_signal(
+        self, symbol: str, kind: str, signal: Optional[int], price: Optional[float], reason: str
+    ) -> None:
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol,
@@ -1056,8 +1082,15 @@ class StrategyRunner:
             "reason": reason,
         }
         self.signal_log.append(entry)
-        logger.info("Runner %s | %s %s sig=%s @ %s — %s",
-                    self.config.name, symbol, kind, signal, price, reason)
+        logger.info(
+            "Runner %s | %s %s sig=%s @ %s — %s",
+            self.config.name,
+            symbol,
+            kind,
+            signal,
+            price,
+            reason,
+        )
 
     @property
     def target_label(self) -> str:
@@ -1109,8 +1142,9 @@ class StrategyRunner:
                     "entry_price": round(p["entry_price"], 4),
                     "current_price": round(self.last_price.get(sym, p["entry_price"]), 4),
                     "unrealized_pnl": round(
-                        (self.last_price.get(sym, p["entry_price"])
-                         - p["entry_price"]) * p["qty"], 2),
+                        (self.last_price.get(sym, p["entry_price"]) - p["entry_price"]) * p["qty"],
+                        2,
+                    ),
                     "entry_ts": p["entry_ts"],
                 }
                 for sym, p in self.positions.items()
@@ -1128,8 +1162,10 @@ class StrategyRunner:
             }
 
     def __repr__(self) -> str:
-        return (f"<StrategyRunner {self.config.name!r} {self.config.strategy_name} "
-                f"{self.target_label} status={self.status}>")
+        return (
+            f"<StrategyRunner {self.config.name!r} {self.config.strategy_name} "
+            f"{self.target_label} status={self.status}>"
+        )
 
 
 # =====================================================================
@@ -1181,8 +1217,10 @@ class StrategyPortfolio:
             else:
                 account.unrealized_pnl = 0.0
             value = (
-                account.cash + account.position * price
-                + account.realized_pnl + account.unrealized_pnl
+                account.cash
+                + account.position * price
+                + account.realized_pnl
+                + account.unrealized_pnl
             )
             account.equity_history.append(value)
 
@@ -1193,8 +1231,10 @@ class StrategyPortfolio:
             if account.position and account.entry_price is not None:
                 price = account.entry_price
             total += (
-                account.cash + account.position * price
-                + account.realized_pnl + account.unrealized_pnl
+                account.cash
+                + account.position * price
+                + account.realized_pnl
+                + account.unrealized_pnl
             )
         return total
 
@@ -1309,9 +1349,7 @@ def run_walkforward(
         account.cash = float(portfolio.current_cash)
         account.position = float(sum(abs(p.quantity) for p in portfolio.positions.values()))
         open_pos = list(portfolio.positions.values())
-        account.entry_price = (
-            float(open_pos[0].average_entry_price) if open_pos else None
-        )
+        account.entry_price = float(open_pos[0].average_entry_price) if open_pos else None
         account.realized_pnl = float(portfolio.realized_pnl)
         account.equity_history = history
 
@@ -1326,12 +1364,12 @@ def _load_live_state(path: str) -> tuple[StrategyPortfolio, dict[str, Any]]:
     file_path = Path(path)
     if not file_path.exists():
         return StrategyPortfolio(), {
-            "resume_count": 0, "processed_bars": 0, "poll_interval_s": 0,
+            "resume_count": 0,
+            "processed_bars": 0,
+            "poll_interval_s": 0,
         }
     payload = json.loads(file_path.read_text())
-    portfolio = StrategyPortfolio.load_from_snapshot(
-        payload.get("portfolio", payload)
-    )
+    portfolio = StrategyPortfolio.load_from_snapshot(payload.get("portfolio", payload))
     state = payload.get("state", {})
     return portfolio, {
         "resume_count": int(state.get("resume_count", 0)),
@@ -1343,9 +1381,7 @@ def _load_live_state(path: str) -> tuple[StrategyPortfolio, dict[str, Any]]:
 def _save_live_state(portfolio: StrategyPortfolio, path: str, state: dict[str, Any]) -> str:
     file_path = Path(path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    file_path.write_text(json.dumps(
-        {"portfolio": portfolio.snapshot(), "state": state}, indent=2
-    ))
+    file_path.write_text(json.dumps({"portfolio": portfolio.snapshot(), "state": state}, indent=2))
     return str(file_path)
 
 
@@ -1398,8 +1434,7 @@ def run_live_papertrade(
             return {
                 "portfolio": portfolio_view,
                 "equity": {
-                    name: list(portfolio_view.accounts[name].equity_history)
-                    for name in strategies
+                    name: list(portfolio_view.accounts[name].equity_history) for name in strategies
                 },
                 "total_equity": sum(
                     portfolio_view.accounts[name].equity_history[-1]
@@ -1453,9 +1488,7 @@ def run_live_papertrade(
         account.realized_pnl = float(portfolio.realized_pnl)
         open_pos = list(portfolio.positions.values())
         account.position = float(sum(abs(p.quantity) for p in open_pos))
-        account.entry_price = (
-            float(open_pos[0].average_entry_price) if open_pos else None
-        )
+        account.entry_price = float(open_pos[0].average_entry_price) if open_pos else None
         new_history = [float(p.total_equity) for p in portfolio.equity_history]
         account.equity_history = equity.get(name, []) + new_history
         equity[name] = account.equity_history

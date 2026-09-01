@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, date, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from backtest.live.time_manager import TimeManager, NSE_TIMEZONE
+from backtest.live.time_manager import NSE_TIMEZONE, TimeManager
 
 
 def test_time_manager_init():
@@ -133,7 +133,7 @@ def test_trading_days_between():
 
     # Mon to Fri with 1 holiday
     start = date(2024, 1, 1)  # Monday
-    end = date(2024, 1, 5)    # Friday
+    end = date(2024, 1, 5)  # Friday
     days = tm.get_trading_days_between(start, end)
     # Should exclude weekend (none in this range) and 1 holiday
     assert len(days) == 4

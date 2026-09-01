@@ -4,25 +4,25 @@ from __future__ import annotations
 
 import json
 import tempfile
-from pathlib import Path
 from decimal import Decimal
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from backtest.data.source_tags import SOURCE_TAG_VALUES
 from backtest.forward.engine import (
-    DataConfig,
-    ForwardTestingEngine,
-    ForwardTestingConfig,
-    PortfolioConfig,
-    StrategyConfig,
-    RiskConfig,
     STATE_VERSION,
+    DataConfig,
+    ForwardTestingConfig,
+    ForwardTestingEngine,
+    PortfolioConfig,
+    RiskConfig,
     StateManager,
+    StrategyConfig,
     load_forward_config,
 )
-from backtest.data.source_tags import SOURCE_TAG_VALUES
 from backtest.simulator import CommissionCalculator, ExecutionConfig, OrderSide, SlippageCalculator
 from backtest.simulator.execution import OrderExecutor
 from backtest.simulator.portfolio import Portfolio
@@ -167,7 +167,7 @@ def test_state_manager_save_load():
         assert loaded["loop_count"] == 5
 
         # should_save
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
 
         assert manager.should_save(datetime.now(timezone.utc) - timedelta(minutes=10), 5) is True
         assert manager.should_save(datetime.now(timezone.utc), 5) is False
@@ -281,7 +281,9 @@ def test_state_file_invalid_classification_falls_back_to_engine():
     with tempfile.TemporaryDirectory() as tmpdir:
         state_file = Path(tmpdir) / "state.json"
         state_file.write_text(
-            json.dumps({"state_version": 2, "mode": "sideways", "source": "quantum", "portfolio": {}})
+            json.dumps(
+                {"state_version": 2, "mode": "sideways", "source": "quantum", "portfolio": {}}
+            )
         )
         manager = StateManager(state_file)
         engine = _state_engine_mock(mode="paper", source="synthetic")
@@ -304,7 +306,11 @@ def test_engine_initialization():
                 "portfolio": {"initial_capital": 100000, "name": "InitTest"},
                 "strategy": {"name": "sma_crossover", "parameters": {"fast": 2, "slow": 3}},
                 "data": {"symbols": ["INFY"], "provider": "mock"},
-                "system": {"loop_interval_seconds": 0, "save_state_interval_minutes": 0, "state_file": str(state_file)},
+                "system": {
+                    "loop_interval_seconds": 0,
+                    "save_state_interval_minutes": 0,
+                    "state_file": str(state_file),
+                },
             }
         )
         engine.initialize_system()
@@ -400,7 +406,11 @@ def test_engine_bar_processing():
         engine = ForwardTestingEngine(
             config_dict={
                 "data": {"symbols": ["INFY"]},
-                "system": {"state_file": str(state_file), "loop_interval_seconds": 0, "save_state_interval_minutes": 0},
+                "system": {
+                    "state_file": str(state_file),
+                    "loop_interval_seconds": 0,
+                    "save_state_interval_minutes": 0,
+                },
             },
             portfolio=portfolio,
             strategy=strategy,
@@ -409,7 +419,15 @@ def test_engine_bar_processing():
         # Lower min_bars for testing
         engine.adapter.min_bars = 1
 
-        bar = {"symbol": "INFY", "timestamp": "2024-01-01T09:15:00+05:30", "open": 99, "high": 102, "low": 98, "close": 101, "volume": 1000}
+        bar = {
+            "symbol": "INFY",
+            "timestamp": "2024-01-01T09:15:00+05:30",
+            "open": 99,
+            "high": 102,
+            "low": 98,
+            "close": 101,
+            "volume": 1000,
+        }
 
         # Inject and process
         engine.data_handler.inject_bar(bar)
@@ -436,8 +454,19 @@ def test_engine_backtest_mode():
             config_dict={
                 "portfolio": {"name": "BacktestTest"},
                 "strategy": {"name": "dummy_test"},
-                "data": {"symbols": ["INFY"], "provider": "mock", "start_date": "2024-01-01", "end_date": "2024-01-10", "timeframe": "1day"},
-                "system": {"state_file": str(state_file), "loop_interval_seconds": 0, "backtest_mode": True, "save_state_interval_minutes": 0},
+                "data": {
+                    "symbols": ["INFY"],
+                    "provider": "mock",
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-01-10",
+                    "timeframe": "1day",
+                },
+                "system": {
+                    "state_file": str(state_file),
+                    "loop_interval_seconds": 0,
+                    "backtest_mode": True,
+                    "save_state_interval_minutes": 0,
+                },
             },
             portfolio=portfolio,
             strategy=strategy,
@@ -473,7 +502,11 @@ def test_engine_dry_run():
                 "portfolio": {"name": "DryRunTest"},
                 "strategy": {"name": "dummy_test"},
                 "data": {"symbols": ["INFY"]},
-                "system": {"state_file": str(state_file), "loop_interval_seconds": 0, "dry_run": True},
+                "system": {
+                    "state_file": str(state_file),
+                    "loop_interval_seconds": 0,
+                    "dry_run": True,
+                },
             },
             portfolio=portfolio,
             strategy=strategy,
@@ -481,7 +514,15 @@ def test_engine_dry_run():
         engine.initialize_system()
         engine.adapter.min_bars = 1
 
-        bar = {"symbol": "INFY", "timestamp": "2024-01-01T09:15:00+05:30", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000}
+        bar = {
+            "symbol": "INFY",
+            "timestamp": "2024-01-01T09:15:00+05:30",
+            "open": 100,
+            "high": 101,
+            "low": 99,
+            "close": 100,
+            "volume": 1000,
+        }
         engine.adapter.on_bar_close(bar)
 
         # dry_run: signals but no orders
@@ -526,7 +567,11 @@ def test_engine_with_all_real_strategies():
                 config_dict={
                     "portfolio": {"name": f"RealStrat_{strat_name}"},
                     "data": {"symbols": ["INFY"]},
-                    "system": {"state_file": str(state_file), "loop_interval_seconds": 0, "dry_run": True},
+                    "system": {
+                        "state_file": str(state_file),
+                        "loop_interval_seconds": 0,
+                        "dry_run": True,
+                    },
                 },
                 portfolio=portfolio,
                 strategy=strat,
@@ -536,7 +581,15 @@ def test_engine_with_all_real_strategies():
 
             # Feed a few bars
             for i in range(5):
-                bar = {"symbol": "INFY", "timestamp": f"2024-01-0{i+1}T09:15:00+05:30", "open": 100 + i, "high": 101 + i, "low": 99 + i, "close": 100 + i, "volume": 1000}
+                bar = {
+                    "symbol": "INFY",
+                    "timestamp": f"2024-01-0{i+1}T09:15:00+05:30",
+                    "open": 100 + i,
+                    "high": 101 + i,
+                    "low": 99 + i,
+                    "close": 100 + i,
+                    "volume": 1000,
+                }
                 engine.adapter.on_bar_close(bar)
 
             assert len(engine.adapter.signal_history) >= 1
@@ -552,12 +605,12 @@ def test_forward_engine_fills_at_next_open_not_signal_bar():
     ``t+1``'s OPEN — never bar ``t``'s close (the F-01 look-ahead leak)."""
     #        date         open   close
     rows = [
-        ("2024-01-01", 100.0, 100.0),   # t0: below 150, flat
-        ("2024-01-02", 105.0, 200.0),   # t1: close 200 > 150 → BUY signal HERE
-        ("2024-01-03", 210.0, 300.0),   # t2: fill MUST be 210 (open), not 200
-        ("2024-01-04", 305.0, 400.0),   # t3: still long
-        ("2024-01-05", 405.0, 90.0),    # t4: close 90 < 150 → SELL signal HERE
-        ("2024-01-06", 95.0, 100.0),    # t5: close fill MUST be 95 (open), not 90
+        ("2024-01-01", 100.0, 100.0),  # t0: below 150, flat
+        ("2024-01-02", 105.0, 200.0),  # t1: close 200 > 150 → BUY signal HERE
+        ("2024-01-03", 210.0, 300.0),  # t2: fill MUST be 210 (open), not 200
+        ("2024-01-04", 305.0, 400.0),  # t3: still long
+        ("2024-01-05", 405.0, 90.0),  # t4: close 90 < 150 → SELL signal HERE
+        ("2024-01-06", 95.0, 100.0),  # t5: close fill MUST be 95 (open), not 90
     ]
 
     with tempfile.TemporaryDirectory() as tmpdir:

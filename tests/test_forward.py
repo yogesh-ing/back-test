@@ -36,7 +36,11 @@ def test_walkforward_matches_direct_paper_runner():
     """
     source = SyntheticSource()
     walk = run_walkforward(
-        source, ["sma_crossover"], "DEMO", WINDOW[0], WINDOW[1],
+        source,
+        ["sma_crossover"],
+        "DEMO",
+        WINDOW[0],
+        WINDOW[1],
         {"sma_crossover": 100_000.0},
     )
 
@@ -98,7 +102,11 @@ def test_strategy_capital_isolation():
     assert set(walk["portfolio"].accounts) == {"sma_crossover", "rsi_reversion"}
     assert walk["portfolio"].accounts["sma_crossover"].cash >= 0
     assert walk["portfolio"].accounts["rsi_reversion"].cash >= 0
-    assert walk["portfolio"].accounts["sma_crossover"].cash + walk["portfolio"].accounts["rsi_reversion"].cash >= 0
+    assert (
+        walk["portfolio"].accounts["sma_crossover"].cash
+        + walk["portfolio"].accounts["rsi_reversion"].cash
+        >= 0
+    )
 
 
 def test_portfolio_snapshot_roundtrip(tmp_path):

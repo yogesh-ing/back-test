@@ -91,11 +91,12 @@ def _resolve_currency(value: "str | None") -> dict[str, str]:
     preset = CURRENCY_PRESETS.get(raw.upper())
     if preset:
         return {"code": raw.upper(), **preset}
-    if len(raw) <= 3 and not raw.isalpha():      # a symbol: "Rp", "R$", "$"
+    if len(raw) <= 3 and not raw.isalpha():  # a symbol: "Rp", "R$", "$"
         return {"code": "CUSTOM", "symbol": raw, "locale": "en-US"}
     logger.warning(
         "unknown currency %r — falling back to INR (known: %s)",
-        raw, ", ".join(sorted(CURRENCY_PRESETS)),
+        raw,
+        ", ".join(sorted(CURRENCY_PRESETS)),
     )
     return {"code": "INR", **CURRENCY_PRESETS["INR"]}
 
@@ -117,11 +118,19 @@ def _register_request_logging(app: Flask) -> None:
         if request.path.startswith("/api/"):
             quiet = request.path in QUIET_PATHS
             query = f"?{request.query_string.decode()}" if request.query_string else ""
-            logger.log(logging.DEBUG if quiet else logging.INFO, "→ %s %s%s",
-                       request.method, request.path, query)
+            logger.log(
+                logging.DEBUG if quiet else logging.INFO,
+                "→ %s %s%s",
+                request.method,
+                request.path,
+                query,
+            )
             if not quiet:
-                logger.debug("→ client=%s agent=%s", request.remote_addr,
-                             (request.headers.get("User-Agent") or "-")[:60])
+                logger.debug(
+                    "→ client=%s agent=%s",
+                    request.remote_addr,
+                    (request.headers.get("User-Agent") or "-")[:60],
+                )
 
     @app.after_request
     def _close(response):  # noqa: ANN001 - Flask passes the Response
@@ -134,13 +143,24 @@ def _register_request_logging(app: Flask) -> None:
                 level = logging.DEBUG
             else:
                 level = logging.INFO
-            suffix = f" [req={current_request_id()}]" if (
-                response.status_code >= 400 and current_request_id()) else ""
-            logger.log(level, "← %s %s %s in %.1f ms%s", request.method, request.path,
-                       response.status_code, ms, suffix)
+            suffix = (
+                f" [req={current_request_id()}]"
+                if (response.status_code >= 400 and current_request_id())
+                else ""
+            )
+            logger.log(
+                level,
+                "← %s %s %s in %.1f ms%s",
+                request.method,
+                request.path,
+                response.status_code,
+                ms,
+                suffix,
+            )
         else:
-            logger.debug("← %s %s %s in %.1f ms", request.method, request.path,
-                         response.status_code, ms)
+            logger.debug(
+                "← %s %s %s in %.1f ms", request.method, request.path, response.status_code, ms
+            )
         if response.status_code >= 400 and request.path.startswith("/api/"):
             try:
                 payload = response.get_json(silent=True)
@@ -156,8 +176,14 @@ def _register_request_logging(app: Flask) -> None:
         if exc is not None:
             # The id is inside the message as well as the prefix, so it survives
             # any formatter (journald, pytest's capture, a custom handler).
-            logger.error("request blew up: %s %s [req=%s] — %s", request.method, request.path,
-                         current_request_id() or "-", exc, exc_info=exc)
+            logger.error(
+                "request blew up: %s %s [req=%s] — %s",
+                request.method,
+                request.path,
+                current_request_id() or "-",
+                exc,
+                exc_info=exc,
+            )
         reset_request_id(getattr(g, "_log_token", None))
 
 
@@ -173,8 +199,12 @@ def _register_error_handlers(app: Flask) -> None:
     def _unhandled(exc: Exception) -> Any:
         if isinstance(exc, HTTPException):
             return exc
-        logger.exception("unhandled error on %s %s [req=%s]", request.method, request.path,
-                         current_request_id() or "-")
+        logger.exception(
+            "unhandled error on %s %s [req=%s]",
+            request.method,
+            request.path,
+            current_request_id() or "-",
+        )
         if request.path.startswith("/api/"):
             return (
                 jsonify(
@@ -256,8 +286,9 @@ def create_app(
     try:
         app.config["FORWARD_REPLAY_BARS_PER_SECOND"] = max(0.0, float(speed))
     except (TypeError, ValueError):
-        logger.warning("FORWARD_REPLAY_SPEED=%r is not a number — using %s bars/s",
-                       speed, DEFAULT_REPLAY_SPEED)
+        logger.warning(
+            "FORWARD_REPLAY_SPEED=%r is not a number — using %s bars/s", speed, DEFAULT_REPLAY_SPEED
+        )
         app.config["FORWARD_REPLAY_BARS_PER_SECOND"] = DEFAULT_REPLAY_SPEED
     app.config.update(overrides)
 
@@ -294,6 +325,7 @@ def create_app(
     if source == "db":
         try:
             from backtest.data.db_source import DbSource
+
             _src = DbSource()
             syms = _src.list_symbols()
             logger.info("[DB] %d symbols available in market_data_cache", len(syms))
@@ -326,11 +358,19 @@ def create_app(
     # ------------------------------------------------------------------
     @app.get("/")
     def index() -> Any:
-        return render_template("backtest.html", active="backtest", source=app.config.get("BACKTEST_SOURCE", "synthetic"))
+        return render_template(
+            "backtest.html",
+            active="backtest",
+            source=app.config.get("BACKTEST_SOURCE", "synthetic"),
+        )
 
     @app.get("/backtest")
     def backtest_page() -> Any:
-        return render_template("backtest.html", active="backtest", source=app.config.get("BACKTEST_SOURCE", "synthetic"))
+        return render_template(
+            "backtest.html",
+            active="backtest",
+            source=app.config.get("BACKTEST_SOURCE", "synthetic"),
+        )
 
     @app.get("/dashboard")
     def dashboard_page() -> Any:
@@ -347,9 +387,7 @@ def create_app(
     @app.get("/portfolio")
     def portfolio_page() -> Any:
         """Landing: combined summary of the paper + live buckets (P4.1)."""
-        return render_template(
-            "portfolio.html", active="portfolio", buckets=_portfolio_buckets()
-        )
+        return render_template("portfolio.html", active="portfolio", buckets=_portfolio_buckets())
 
     @app.get("/portfolio/paper")
     def portfolio_paper_page() -> Any:
@@ -378,25 +416,30 @@ def create_app(
     @app.get("/api/config")
     def config_view() -> tuple:
         """What the UI needs to know about this deployment (no secrets)."""
-        return jsonify({
-            "source": app.config["BACKTEST_SOURCE"],
-            "currency": {
-                "code": app.config["CURRENCY"],
-                "symbol": app.config["CURRENCY_SYMBOL"],
-                "locale": app.config["CURRENCY_LOCALE"],
-            },
-            "forward_replay_bars_per_second": app.config["FORWARD_REPLAY_BARS_PER_SECOND"],
-            "strategies_supported_timeframes": list(_SUPPORTED_TIMEFRAMES),
-            # Ticket #10 — the single vocabulary the UI must render its
-            # mode/source choices from (backend-owned, never re-declared).
-            "taxonomy": {
-                "modes": sorted(BUCKET_RISK_LIMITS),
-                "sources": sorted(SOURCE_TAG_VALUES),
-            },
-            "log_level": logging.getLevelName(
-                logging.getLogger("backtest").getEffectiveLevel()
+        return (
+            jsonify(
+                {
+                    "source": app.config["BACKTEST_SOURCE"],
+                    "currency": {
+                        "code": app.config["CURRENCY"],
+                        "symbol": app.config["CURRENCY_SYMBOL"],
+                        "locale": app.config["CURRENCY_LOCALE"],
+                    },
+                    "forward_replay_bars_per_second": app.config["FORWARD_REPLAY_BARS_PER_SECOND"],
+                    "strategies_supported_timeframes": list(_SUPPORTED_TIMEFRAMES),
+                    # Ticket #10 — the single vocabulary the UI must render its
+                    # mode/source choices from (backend-owned, never re-declared).
+                    "taxonomy": {
+                        "modes": sorted(BUCKET_RISK_LIMITS),
+                        "sources": sorted(SOURCE_TAG_VALUES),
+                    },
+                    "log_level": logging.getLevelName(
+                        logging.getLogger("backtest").getEffectiveLevel()
+                    ),
+                }
             ),
-        }), 200
+            200,
+        )
 
     @app.get("/health")
     def health() -> tuple:
@@ -416,12 +459,22 @@ def run_app(
     replay_speed: "float | None" = None,
 ) -> None:
     """Boot the app and serve it. Unset options fall back to their env vars."""
-    app = create_app(source=source, log_level=log_level, log_file=log_file,
-                     currency=currency, replay_speed=replay_speed, debug=debug)
+    app = create_app(
+        source=source,
+        log_level=log_level,
+        log_file=log_file,
+        currency=currency,
+        replay_speed=replay_speed,
+        debug=debug,
+    )
     routes = sorted(str(r) for r in app.url_map.iter_rules())
-    logger.info("serving %d routes on http://%s:%s — %d api endpoints",
-                len(routes), host, port,
-                sum(1 for r in routes if r.startswith("/api/")))
+    logger.info(
+        "serving %d routes on http://%s:%s — %d api endpoints",
+        len(routes),
+        host,
+        port,
+        sum(1 for r in routes if r.startswith("/api/")),
+    )
     if debug:
         logger.warning("Flask debug mode is ON — reloader disabled, do not use in production")
     logger.debug("routes: %s", ", ".join(routes))
@@ -434,7 +487,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Unified Trading Bot Platform")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
-    parser.add_argument("--source", default="synthetic", choices=["synthetic", "csv", "mstock", "db"], help="Data source: synthetic | csv | mstock | db")
+    parser.add_argument(
+        "--source",
+        default="synthetic",
+        choices=["synthetic", "csv", "mstock", "db"],
+        help="Data source: synthetic | csv | mstock | db",
+    )
     parser.add_argument("--debug", action="store_true")
     parser.add_argument(
         "--log-level",
@@ -445,14 +503,14 @@ def main() -> None:
         "--currency",
         default=os.getenv("BACKTEST_CURRENCY", "INR"),
         help="Money display for every page: INR (default, ₹) | USD | EUR | GBP | "
-             "JPY | AUD | SGD, or a bare symbol (env: BACKTEST_CURRENCY)",
+        "JPY | AUD | SGD, or a bare symbol (env: BACKTEST_CURRENCY)",
     )
     parser.add_argument(
         "--replay-speed",
         type=float,
         default=float(os.getenv("FORWARD_REPLAY_SPEED", "1.0")),
         help="Bars per second a forward-test replay advances at; 0 = manual "
-             "(env: FORWARD_REPLAY_SPEED)",
+        "(env: FORWARD_REPLAY_SPEED)",
     )
     parser.add_argument(
         "--log-file",

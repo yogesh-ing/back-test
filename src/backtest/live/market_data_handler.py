@@ -56,11 +56,11 @@ import time
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-from zoneinfo import ZoneInfo
 
 from backtest.live.data_validator import DataValidator
 from backtest.live.time_manager import TimeManager
@@ -105,28 +105,22 @@ class BrokerFeed(ABC):
     """Abstract base for broker-specific feeds."""
 
     @abstractmethod
-    def connect(self) -> None:
-        ...
+    def connect(self) -> None: ...
 
     @abstractmethod
-    def disconnect(self) -> None:
-        ...
+    def disconnect(self) -> None: ...
 
     @abstractmethod
-    def subscribe(self, symbols: List[str]) -> None:
-        ...
+    def subscribe(self, symbols: List[str]) -> None: ...
 
     @abstractmethod
-    def unsubscribe(self, symbols: List[str]) -> None:
-        ...
+    def unsubscribe(self, symbols: List[str]) -> None: ...
 
     @abstractmethod
-    def get_latest_tick(self, symbol: str) -> Optional[Dict[str, Any]]:
-        ...
+    def get_latest_tick(self, symbol: str) -> Optional[Dict[str, Any]]: ...
 
     @abstractmethod
-    def is_connected(self) -> bool:
-        ...
+    def is_connected(self) -> bool: ...
 
 
 class MockBrokerFeed(BrokerFeed):
@@ -214,7 +208,9 @@ class MStockBrokerFeed(BrokerFeed):
     def is_connected(self) -> bool:
         return self._connected
 
-    def fetch_historical(self, symbol: str, start: str, end: str, interval: str = "day") -> pd.DataFrame:
+    def fetch_historical(
+        self, symbol: str, start: str, end: str, interval: str = "day"
+    ) -> pd.DataFrame:
         if self.source is None:
             raise ValueError("MStock source not available")
         return self.source.get_candles(symbol, start, end, interval)
@@ -464,7 +460,9 @@ class MarketDataHandler:
 
         # Per-symbol buffers
         self._tick_buffers: Dict[str, deque] = defaultdict(lambda: deque(maxlen=self.buffer_size))
-        self._bar_buffers: Dict[str, Dict[str, deque]] = defaultdict(lambda: defaultdict(lambda: deque(maxlen=self.buffer_size)))
+        self._bar_buffers: Dict[str, Dict[str, deque]] = defaultdict(
+            lambda: defaultdict(lambda: deque(maxlen=self.buffer_size))
+        )
         self._bar_builders: Dict[str, Dict[str, BarBuilder]] = defaultdict(dict)
         self._latest_quotes: Dict[str, Dict[str, Any]] = {}
         self._latest_bars: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
@@ -477,9 +475,19 @@ class MarketDataHandler:
         self._reconnect_count = 0
 
         # Stats
-        self._stats = {"ticks_received": 0, "bars_built": 0, "validation_failures": 0, "reconnects": 0}
+        self._stats = {
+            "ticks_received": 0,
+            "bars_built": 0,
+            "validation_failures": 0,
+            "reconnects": 0,
+        }
 
-        logger.info("MarketDataHandler initialized: provider=%s symbols=%s timeframes=%s", self.provider, self.symbols, self.timeframes)
+        logger.info(
+            "MarketDataHandler initialized: provider=%s symbols=%s timeframes=%s",
+            self.provider,
+            self.symbols,
+            self.timeframes,
+        )
 
     # -- connection ---------------------------------------------------------
 
@@ -528,14 +536,21 @@ class MarketDataHandler:
     def _attempt_reconnect(self) -> bool:
         """Attempt reconnection with backoff."""
         if self._reconnect_count >= self.max_reconnect_attempts:
-            logger.error("Max reconnect attempts (%s) reached, giving up", self.max_reconnect_attempts)
+            logger.error(
+                "Max reconnect attempts (%s) reached, giving up", self.max_reconnect_attempts
+            )
             return False
 
         self._reconnect_count += 1
         self._stats["reconnects"] += 1
 
-        backoff = min(2 ** self._reconnect_count, 30)
-        logger.warning("Reconnecting in %ss (attempt %s/%s)", backoff, self._reconnect_count, self.max_reconnect_attempts)
+        backoff = min(2**self._reconnect_count, 30)
+        logger.warning(
+            "Reconnecting in %ss (attempt %s/%s)",
+            backoff,
+            self._reconnect_count,
+            self.max_reconnect_attempts,
+        )
         time.sleep(backoff)
 
         try:
@@ -566,7 +581,9 @@ class MarketDataHandler:
         for symbol in symbols:
             for tf in self.timeframes:
                 if tf not in self._bar_builders[symbol]:
-                    self._bar_builders[symbol][tf] = BarBuilder(symbol=symbol, timeframe=tf, timezone=self.time_manager.timezone)
+                    self._bar_builders[symbol][tf] = BarBuilder(
+                        symbol=symbol, timeframe=tf, timezone=self.time_manager.timezone
+                    )
 
     def unsubscribe_symbols(self, symbol_list: List[str]) -> None:
         symbols = [_normalize_symbol(s) for s in symbol_list]
@@ -636,7 +653,11 @@ class MarketDataHandler:
             return None
 
         try:
-            symbol = broker_data.get("symbol") or broker_data.get("tradingsymbol") or broker_data.get("Symbol")
+            symbol = (
+                broker_data.get("symbol")
+                or broker_data.get("tradingsymbol")
+                or broker_data.get("Symbol")
+            )
             if not symbol:
                 return None
             symbol = _normalize_symbol(symbol)
@@ -680,7 +701,9 @@ class MarketDataHandler:
             elif ask is None:
                 ask = last
 
-            volume = broker_data.get("volume") or broker_data.get("v") or broker_data.get("vol") or 0
+            volume = (
+                broker_data.get("volume") or broker_data.get("v") or broker_data.get("vol") or 0
+            )
             try:
                 volume = int(float(volume))
             except (ValueError, TypeError):
@@ -778,7 +801,9 @@ class MarketDataHandler:
         for tf in self.timeframes:
             builder = self._bar_builders.get(symbol, {}).get(tf)
             if builder is None:
-                builder = BarBuilder(symbol=symbol, timeframe=tf, timezone=self.time_manager.timezone)
+                builder = BarBuilder(
+                    symbol=symbol, timeframe=tf, timezone=self.time_manager.timezone
+                )
                 self._bar_builders[symbol][tf] = builder
 
             completed_bar = builder.add_tick(normalized)
@@ -838,7 +863,9 @@ class MarketDataHandler:
         # Publish
         self._publish_bar(bar)
 
-        logger.debug("New bar: %s %s close=%s vol=%s", symbol, timeframe, bar.get("close"), bar.get("volume"))
+        logger.debug(
+            "New bar: %s %s close=%s vol=%s", symbol, timeframe, bar.get("close"), bar.get("volume")
+        )
 
     # -- observer pattern ---------------------------------------------------
 
@@ -913,7 +940,9 @@ class MarketDataHandler:
         buf = self._tick_buffers.get(symbol, deque())
         return list(buf)[-count:]
 
-    def get_recent_bars(self, symbol: str, timeframe: str = "1min", count: int = 100) -> List[Dict[str, Any]]:
+    def get_recent_bars(
+        self, symbol: str, timeframe: str = "1min", count: int = 100
+    ) -> List[Dict[str, Any]]:
         symbol = _normalize_symbol(symbol)
         buf = self._bar_buffers.get(symbol, {}).get(timeframe, deque())
         return list(buf)[-count:]
@@ -957,7 +986,9 @@ class MarketDataHandler:
             "connected": self.is_connected(),
             "subscribed_symbols": list(self.symbols),
             "buffer_sizes": {sym: len(buf) for sym, buf in self._tick_buffers.items()},
-            "validator_stats": self.validator.get_stats() if hasattr(self.validator, "get_stats") else {},
+            "validator_stats": (
+                self.validator.get_stats() if hasattr(self.validator, "get_stats") else {}
+            ),
         }
 
     def __repr__(self):

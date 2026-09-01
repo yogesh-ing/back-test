@@ -62,9 +62,12 @@ def login() -> tuple:
     password = password if isinstance(password, str) and password else None
     if username is None or password is None:
         # Only which *fields* were missing — never the values.
-        logger.warning("login rejected: missing %s",
-                       " and ".join(n for n, v in (("username", username), ("password", password))
-                                    if v is None))
+        logger.warning(
+            "login rejected: missing %s",
+            " and ".join(
+                n for n, v in (("username", username), ("password", password)) if v is None
+            ),
+        )
         return (
             jsonify(
                 {
@@ -81,8 +84,7 @@ def login() -> tuple:
         # logged anywhere past this line.
         result = get_session_manager().login(username, password)
         outcome = "accepted" if result.get("success") else "rejected"
-        reason = result.get("message") or (
-            "TOTP required" if result.get("requires_totp") else "ok")
+        reason = result.get("message") or ("TOTP required" if result.get("requires_totp") else "ok")
         logger.info("login %s for user=%s → %s", outcome, _mask(username), reason)
     except Exception:  # noqa: BLE001 — generic message to browser, detail to log
         logger.exception("broker login endpoint failed")
@@ -108,8 +110,12 @@ def verify_totp() -> tuple:
         result = get_session_manager().verify_totp(code)
         verified = bool(result.get("success"))
         detail = "" if verified or not result.get("message") else f" ({result['message']})"
-        logger.info("TOTP %s — session %s%s", "verified" if verified else "rejected",
-                    result.get("expires_at") or "-", detail)
+        logger.info(
+            "TOTP %s — session %s%s",
+            "verified" if verified else "rejected",
+            result.get("expires_at") or "-",
+            detail,
+        )
     except Exception:  # noqa: BLE001
         logger.exception("broker TOTP verification endpoint failed")
         return (

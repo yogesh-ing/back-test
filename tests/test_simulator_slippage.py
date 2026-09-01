@@ -34,8 +34,7 @@ from backtest.simulator import (
 D = Decimal
 IST = ZoneInfo("Asia/Kolkata")
 
-QUOTE = {"bid": 1499.5, "ask": 1500.5, "last": 1500,
-         "avg_volume": 1_000_000, "atr": 22.5}
+QUOTE = {"bid": 1499.5, "ask": 1500.5, "last": 1500, "avg_volume": 1_000_000, "atr": 22.5}
 
 
 def buy(qty=1000, symbol="INFY") -> Order:
@@ -73,9 +72,7 @@ class TestMarketSnapshot:
 
     def test_avg_volume_aliases(self):
         for key in ("avg_volume", "average_volume", "adv"):
-            assert MarketSnapshot.from_market_data(
-                {"last": 100, key: 5000}
-            ).avg_volume == D("5000")
+            assert MarketSnapshot.from_market_data({"last": 100, key: 5000}).avg_volume == D("5000")
 
     def test_bid_only_falls_back(self):
         assert MarketSnapshot.from_market_data({"bid": 99}).last == D("99.00000000")
@@ -93,9 +90,7 @@ class TestMarketSnapshot:
             MarketSnapshot.from_market_data(None)
 
     def test_iso_timestamp_parsed(self):
-        s = MarketSnapshot.from_market_data(
-            {"last": 100, "timestamp": "2026-01-05T09:20:00+05:30"}
-        )
+        s = MarketSnapshot.from_market_data({"last": 100, "timestamp": "2026-01-05T09:20:00+05:30"})
         assert s.timestamp.hour == 9
 
 
@@ -135,7 +130,7 @@ class TestSpreadSlippage:
         """Crossing from mid costs half the quoted spread."""
         calc = SlippageCalculator(model=SpreadSlippage())
         est = calc.calculate_slippage(buy(), QUOTE, reference_price=1500)
-        assert est.bps == D("3.333334")     # half of 6.666667
+        assert est.bps == D("3.333334")  # half of 6.666667
 
     def test_full_spread(self):
         calc = SlippageCalculator(model=SpreadSlippage(spread_fraction=D("1")))
@@ -165,12 +160,12 @@ class TestVolumeImpactSlippage:
 
     def test_square_root_law(self, model):
         """Quadrupling participation should double impact, not quadruple it."""
-        one = model.impact_bps(10_000, 1_000_000)     # 1%
-        four = model.impact_bps(40_000, 1_000_000)    # 4%
+        one = model.impact_bps(10_000, 1_000_000)  # 1%
+        four = model.impact_bps(40_000, 1_000_000)  # 4%
         assert float(four) == pytest.approx(float(one) * 2, rel=1e-6)
 
     def test_known_values(self, model):
-        assert model.impact_bps(10_000, 1_000_000) == D("10.000000")   # 1%
+        assert model.impact_bps(10_000, 1_000_000) == D("10.000000")  # 1%
         assert model.impact_bps(250_000, 1_000_000) == D("50.000000")  # 25%
         assert model.impact_bps(1_000_000, 1_000_000) == D("100.000000")
 
@@ -211,7 +206,7 @@ class TestVolatilitySlippage:
         model = VolatilitySlippage(atr_fraction=D("0.1"), size_scaling=True)
         base = model.volatility_bps(15, 1500)
         scaled = model.volatility_bps(15, 1500, quantity=1_000_000, avg_volume=1_000_000)
-        assert scaled == base * 2      # (1 + sqrt(1.0))
+        assert scaled == base * 2  # (1 + sqrt(1.0))
 
     def test_size_scaling_can_be_disabled(self):
         model = VolatilitySlippage(atr_fraction=D("0.1"), size_scaling=False)
@@ -226,15 +221,12 @@ class TestHybridSlippage:
     def test_components_add_up(self):
         calc = SlippageCalculator(model=HybridSlippage())
         est = calc.calculate_slippage(buy(10_000), QUOTE)
-        parts = {k: v for k, v in est.components.items()
-                 if k in ("spread", "impact", "volatility")}
+        parts = {k: v for k, v in est.components.items() if k in ("spread", "impact", "volatility")}
         assert set(parts) == {"spread", "impact", "volatility"}
         assert float(sum(parts.values())) == pytest.approx(float(est.bps), rel=1e-6)
 
     def test_floor_prevents_free_execution(self):
-        model = HybridSlippage(
-            spread=SpreadSlippage(fallback_bps=D("0")), floor_bps=D("3")
-        )
+        model = HybridSlippage(spread=SpreadSlippage(fallback_bps=D("0")), floor_bps=D("3"))
         calc = SlippageCalculator(model=model)
         assert calc.calculate_slippage(buy(), {"last": 1500}).bps == D("3.000000")
 
@@ -302,10 +294,15 @@ class TestDirection:
         for side in ("buy", "sell"):
             order = buy() if side == "buy" else sell()
             est = calc.calculate_slippage(order, QUOTE, reference_price=1000)
-            fill = Fill(symbol="INFY", side=side, quantity=est.quantity,
-                        fill_price=est.executed_price, reference_price=est.reference_price)
+            fill = Fill(
+                symbol="INFY",
+                side=side,
+                quantity=est.quantity,
+                fill_price=est.executed_price,
+                reference_price=est.reference_price,
+            )
             assert float(fill.slippage_bps) == pytest.approx(float(est.bps), rel=1e-6)
-            assert fill.slippage_bps > 0        # adverse for both sides
+            assert fill.slippage_bps > 0  # adverse for both sides
 
 
 # ===========================================================================
@@ -367,16 +364,19 @@ class TestTimeOfDay:
     def calc(self):
         return SlippageCalculator(SlippageConfig(model=FixedBpsSlippage(bps_value=10)))
 
-    @pytest.mark.parametrize("hh, mm, expected", [
-        (9, 15, "2.0"),    # open
-        (9, 44, "2.0"),    # still inside the open window
-        (9, 46, "1"),      # midday
-        (12, 0, "1"),
-        (15, 1, "1.5"),    # close window
-        (15, 30, "1.5"),
-        (18, 0, "2.0"),    # after hours: illiquid by definition
-        (6, 0, "2.0"),     # pre-open
-    ])
+    @pytest.mark.parametrize(
+        "hh, mm, expected",
+        [
+            (9, 15, "2.0"),  # open
+            (9, 44, "2.0"),  # still inside the open window
+            (9, 46, "1"),  # midday
+            (12, 0, "1"),
+            (15, 1, "1.5"),  # close window
+            (15, 30, "1.5"),
+            (18, 0, "2.0"),  # after hours: illiquid by definition
+            (6, 0, "2.0"),  # pre-open
+        ],
+    )
     def test_session_multipliers(self, calc, hh, mm, expected):
         ts = datetime(2026, 1, 5, hh, mm, tzinfo=IST)
         assert calc.time_multiplier(ts) == D(expected)
@@ -400,9 +400,7 @@ class TestTimeOfDay:
 
     def test_effective_spread_helper(self, calc):
         base = calc.get_effective_spread(999.5, 1000.5)
-        at_open = calc.get_effective_spread(
-            999.5, 1000.5, datetime(2026, 1, 5, 9, 20, tzinfo=IST)
-        )
+        at_open = calc.get_effective_spread(999.5, 1000.5, datetime(2026, 1, 5, 9, 20, tzinfo=IST))
         assert at_open == base * 2
 
     def test_effective_spread_rejects_crossed_quote(self, calc):
@@ -416,8 +414,7 @@ class TestLiquidityTiers:
         return SlippageCalculator(
             SlippageConfig(
                 model=FixedBpsSlippage(bps_value=10),
-                symbol_tiers={"INFY": LiquidityTier.LARGE_CAP,
-                              "SMALLCO": LiquidityTier.SMALL_CAP},
+                symbol_tiers={"INFY": LiquidityTier.LARGE_CAP, "SMALLCO": LiquidityTier.SMALL_CAP},
             )
         )
 
@@ -425,7 +422,7 @@ class TestLiquidityTiers:
         large = calc.calculate_slippage(buy(symbol="INFY"), QUOTE)
         small = calc.calculate_slippage(buy(symbol="SMALLCO"), QUOTE)
         assert large.bps == D("10.000000")
-        assert small.bps == D("25.000000")    # 2.5x
+        assert small.bps == D("25.000000")  # 2.5x
 
     def test_unknown_symbol_uses_default_tier(self, calc):
         assert calc.config.tier_for("NEVERHEARDOF") == LiquidityTier.LARGE_CAP
@@ -462,13 +459,16 @@ class TestConfiguration:
     def test_ships_a_loadable_default_file(self):
         assert load_slippage_config().model.name == "hybrid"
 
-    @pytest.mark.parametrize("profile, model_name", [
-        ("backtest", "zero"),
-        ("simple", "fixed"),
-        ("realistic", "hybrid"),
-        ("pessimistic", "hybrid"),
-        ("optimistic", "spread"),
-    ])
+    @pytest.mark.parametrize(
+        "profile, model_name",
+        [
+            ("backtest", "zero"),
+            ("simple", "fixed"),
+            ("realistic", "hybrid"),
+            ("pessimistic", "hybrid"),
+            ("optimistic", "spread"),
+        ],
+    )
     def test_every_shipped_profile_loads(self, profile, model_name):
         assert load_slippage_config(profile=profile).model.name == model_name
 
@@ -533,9 +533,7 @@ class TestResolveModel:
         assert model.bps_value == D("12")
 
     def test_nested_hybrid_from_dict(self):
-        model = resolve_slippage_model(
-            {"model": "hybrid", "spread": {"spread_fraction": 0.25}}
-        )
+        model = resolve_slippage_model({"model": "hybrid", "spread": {"spread_fraction": 0.25}})
         assert model.spread.spread_fraction == D("0.25")
 
     def test_unknown_name_lists_options(self):
@@ -555,9 +553,7 @@ class TestResolveModel:
 class TestCalculator:
     def test_explicit_parameters_without_an_order(self):
         calc = SlippageCalculator(model=FixedBpsSlippage(bps_value=10))
-        est = calc.calculate_slippage(
-            market_data=QUOTE, symbol="INFY", side="buy", quantity=100
-        )
+        est = calc.calculate_slippage(market_data=QUOTE, symbol="INFY", side="buy", quantity=100)
         assert est.quantity == D("100.00000000")
 
     def test_missing_context_rejected(self):
@@ -595,7 +591,7 @@ class TestStatistics:
         assert stats["count"] == 5
         assert stats["mean_bps"] == 10.0
         assert stats["median_bps"] == 10.0
-        assert stats["total_amount"] == D("500.0000")     # 5 x 100 x 1.00
+        assert stats["total_amount"] == D("500.0000")  # 5 x 100 x 1.00
 
     def test_per_symbol_breakdown(self):
         calc = SlippageCalculator(

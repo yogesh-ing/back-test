@@ -79,14 +79,16 @@ class DbSource:
         # Find the best source timeframe (finest available)
         source_tf = self._find_best_source_tf(engine, symbol, interval)
 
-        query = text("""
+        query = text(
+            """
             SELECT ts, open, high, low, close, volume
             FROM market_data_cache
             WHERE symbol = :symbol
               AND timeframe = :timeframe
               AND ts BETWEEN :start AND :end
             ORDER BY ts ASC
-        """)
+        """
+        )
 
         df = pd.read_sql(
             query,
@@ -101,9 +103,16 @@ class DbSource:
 
         log.debug("[db] %s tf=%s %s..%s → %d rows", symbol, source_tf, start, end, len(df))
         if df.empty:
-            log.warning("[db] no bars for %s (timeframe=%s, %s..%s) — check the symbol exists "
-                        "in market_data_cache: SELECT DISTINCT timeframe FROM market_data_cache "
-                        "WHERE symbol='%s'", symbol, source_tf, start, end, symbol)
+            log.warning(
+                "[db] no bars for %s (timeframe=%s, %s..%s) — check the symbol exists "
+                "in market_data_cache: SELECT DISTINCT timeframe FROM market_data_cache "
+                "WHERE symbol='%s'",
+                symbol,
+                source_tf,
+                start,
+                end,
+                symbol,
+            )
             raise ValueError(
                 f"Symbol '{symbol}' not found in database for timeframe '{source_tf}' "
                 f"between {start} and {end}. "
@@ -119,13 +128,24 @@ class DbSource:
                 log.debug("[db] resampling %s: %s → %s", symbol, source_tf, interval)
                 df = self._resample(df, interval)
             else:
-                log.warning("[db] interval %r has no resample rule (known: %s) — returning "
-                            "stored %s bars unsampled", interval, sorted(_INTERVAL_TO_RULE),
-                            source_tf)
+                log.warning(
+                    "[db] interval %r has no resample rule (known: %s) — returning "
+                    "stored %s bars unsampled",
+                    interval,
+                    sorted(_INTERVAL_TO_RULE),
+                    source_tf,
+                )
 
         out = normalize_candles(df)
-        log.info("[db] %s %s..%s → %d bars @ %s (stored as %s)", symbol, start, end, len(out),
-                 interval, source_tf)
+        log.info(
+            "[db] %s %s..%s → %d bars @ %s (stored as %s)",
+            symbol,
+            start,
+            end,
+            len(out),
+            interval,
+            source_tf,
+        )
         return out
 
     def _find_best_source_tf(self, engine, symbol: str, requested: str) -> str:
@@ -137,20 +157,24 @@ class DbSource:
         # If requesting daily-or-coarser and we have it stored, use it
         # directly (fast, no resample needed)
         if requested in ("1day", "1week"):
-            check = text("""
+            check = text(
+                """
                 SELECT 1 FROM market_data_cache
                 WHERE symbol = :sym AND timeframe = :tf LIMIT 1
-            """)
+            """
+            )
             with engine.connect() as conn:
                 if conn.execute(check, {"sym": symbol, "tf": requested}).fetchone():
                     return requested
 
         # For intraday: find finest available
         for tf in _SOURCE_TF_PRIORITY:
-            check = text("""
+            check = text(
+                """
                 SELECT 1 FROM market_data_cache
                 WHERE symbol = :sym AND timeframe = :tf LIMIT 1
-            """)
+            """
+            )
             with engine.connect() as conn:
                 if conn.execute(check, {"sym": symbol, "tf": tf}).fetchone():
                     return tf
@@ -175,13 +199,19 @@ class DbSource:
                 f"Supported: {list(_INTERVAL_TO_RULE.keys())}"
             )
 
-        resampled = df.resample(rule).agg({
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum",
-        }).dropna(subset=["close"])
+        resampled = (
+            df.resample(rule)
+            .agg(
+                {
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                }
+            )
+            .dropna(subset=["close"])
+        )
 
         return resampled
 
@@ -191,16 +221,21 @@ class DbSource:
         for the given timeframe.
         """
         engine = self._get_engine()
-        query = text("""
+        query = text(
+            """
             SELECT DISTINCT symbol FROM market_data_cache
             WHERE timeframe = :timeframe
             ORDER BY symbol ASC
-        """)
+        """
+        )
         with engine.connect() as conn:
             result = conn.execute(query, {"timeframe": timeframe})
             rows = [row[0] for row in result.fetchall()]
         log.info("[db] list_symbols(timeframe=%s) → %d symbols", timeframe, len(rows))
         if not rows:
-            log.warning("[db] market_data_cache has no rows for timeframe=%r — check what was "
-                        "ingested (SELECT DISTINCT timeframe FROM market_data_cache)", timeframe)
+            log.warning(
+                "[db] market_data_cache has no rows for timeframe=%r — check what was "
+                "ingested (SELECT DISTINCT timeframe FROM market_data_cache)",
+                timeframe,
+            )
         return rows

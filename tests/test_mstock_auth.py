@@ -32,6 +32,7 @@ def test_env_file_is_loaded_for_live_auth(tmp_path, monkeypatch):
     try:
         os.chdir(tmp_path)
         import backtest
+
         importlib.reload(backtest)
         assert os.getenv("MSTOCK_USERNAME") == "liveuser"
         assert os.getenv("MSTOCK_PASSWORD") == "livepass"
@@ -172,49 +173,55 @@ def test_get_session_token_ignores_short_cached_token(monkeypatch, tmp_path):
         os.chdir(old_cwd)
 
 
-@pytest.mark.skip(reason="Card 07 live bring-up deferred (requires mStock credentials and auth testing)")
+@pytest.mark.skip(
+    reason="Card 07 live bring-up deferred (requires mStock credentials and auth testing)"
+)
 def test_totp_auth_calls_verify_totp():
     """Test 16: auth_mode='totp' ⇒ calls verify_totp with the preset code (not generate_session)."""
     # This test is for Card 07 live bring-up (deferred).
     # Mock the auth module if it doesn't exist yet.
     try:
-        from backtest.live.auth import verify_totp, generate_session
+        from backtest.live.auth import generate_session, verify_totp
     except ImportError:
         pytest.skip("Live auth module not yet built (Card 07)")
         return
-    
+
     with patch("backtest.live.auth.verify_totp") as mock_verify:
         with patch("backtest.live.auth.generate_session") as mock_gen:
             mock_verify.return_value = {"token": "mock_token"}
-            
+
             # Simulate auth_mode="totp" flow
             result = verify_totp("preset_code_123")
-            
+
             mock_verify.assert_called_once_with("preset_code_123")
             mock_gen.assert_not_called()
 
 
-@pytest.mark.skip(reason="Card 07 live bring-up deferred (requires mStock credentials and auth testing)")
+@pytest.mark.skip(
+    reason="Card 07 live bring-up deferred (requires mStock credentials and auth testing)"
+)
 def test_otp_auth_calls_generate_session():
     """Test 17: auth_mode='otp' ⇒ calls generate_session with the preset code."""
     try:
-        from backtest.live.auth import verify_totp, generate_session
+        from backtest.live.auth import generate_session, verify_totp
     except ImportError:
         pytest.skip("Live auth module not yet built (Card 07)")
         return
-    
+
     with patch("backtest.live.auth.generate_session") as mock_gen:
         with patch("backtest.live.auth.verify_totp") as mock_verify:
             mock_gen.return_value = {"token": "mock_token"}
-            
+
             # Simulate auth_mode="otp" flow
             result = generate_session("preset_code_456")
-            
+
             mock_gen.assert_called_once_with("preset_code_456")
             mock_verify.assert_not_called()
 
 
-@pytest.mark.skip(reason="Card 07 live bring-up deferred (requires mStock credentials and auth testing)")
+@pytest.mark.skip(
+    reason="Card 07 live bring-up deferred (requires mStock credentials and auth testing)"
+)
 def test_mstock_totp_env_used():
     """Test 18: MSTOCK_TOTP env used when no explicit code is passed."""
     try:
@@ -222,7 +229,7 @@ def test_mstock_totp_env_used():
     except ImportError:
         pytest.skip("Live auth module not yet built (Card 07)")
         return
-    
+
     with patch.dict(os.environ, {"MSTOCK_TOTP": "env_code_789"}):
         code = get_auth_code(explicit_code=None)
         assert code == "env_code_789"

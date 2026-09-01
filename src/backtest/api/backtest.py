@@ -39,12 +39,9 @@ from typing import Any
 from flask import Blueprint, current_app, jsonify, request
 
 from backtest.adapters.backtest_adapter import BacktestAdapter
-from backtest.engine.backtest_runner import (
-    run_backtest as _run_driver,
-    run_quick_screen,
-    resolve_interval,
-    resolve_warmup_start,
-)
+from backtest.engine.backtest_runner import resolve_interval, resolve_warmup_start
+from backtest.engine.backtest_runner import run_backtest as _run_driver
+from backtest.engine.backtest_runner import run_quick_screen
 from backtest.logging_config import get_logger, timed
 from backtest.runner import build_source
 from backtest.strategy.registry import get_strategy
@@ -113,7 +110,9 @@ def _summarise(payload: dict, label: str, params: dict | None = None) -> None:
         log.warning(
             "[result] %s produced 0 trades over %s bars — check that the date range is "
             "longer than the strategy's warmup (params=%s)",
-            label, cfg.get("bars"), params if params is not None else cfg.get("strategy_params"),
+            label,
+            cfg.get("bars"),
+            params if params is not None else cfg.get("strategy_params"),
         )
 
 
@@ -179,8 +178,15 @@ def run_backtest_endpoint() -> tuple:
     mode = str(data.get("mode", "")).strip().lower()
     log.info(
         "[run] strategy=%s symbol=%s timeframe=%s→%s range=%s..%s capital=%s mode=%s params=%s",
-        strategy, symbol, timeframe, interval, from_date, to_date, capital,
-        mode or "driver", params,
+        strategy,
+        symbol,
+        timeframe,
+        interval,
+        from_date,
+        to_date,
+        capital,
+        mode or "driver",
+        params,
     )
     problems = _check_params(resolved, params, f"run/{strategy}")
     if problems:
@@ -202,7 +208,13 @@ def run_backtest_endpoint() -> tuple:
             # Legacy vectorized quick filter (prev-close fills, built-in costs).
             with timed(log, f"[run] {strategy} on {symbol} (quick_screen)", logging.DEBUG):
                 result = run_quick_screen(
-                    candles_full, strategy, params, symbol, capital, from_date, to_date,
+                    candles_full,
+                    strategy,
+                    params,
+                    symbol,
+                    capital,
+                    from_date,
+                    to_date,
                 )
             engine = "quick_screen"
         else:
@@ -220,8 +232,7 @@ def run_backtest_endpoint() -> tuple:
 
     payload = BacktestAdapter(result).to_all()
     payload["config"].update(
-        {"timeframe": timeframe, "from_date": from_date, "to_date": to_date,
-         "engine": engine}
+        {"timeframe": timeframe, "from_date": from_date, "to_date": to_date, "engine": engine}
     )
     _summarise(payload, f"run/{strategy}", params)
     return jsonify(payload), 200
@@ -257,7 +268,11 @@ def run_many() -> tuple:
         return jsonify({"error": "shared.capital must be a number"}), 400
     log.info(
         "[run-many] %d slots on %s %s..%s capital=%s — %s",
-        len(slots), symbol, from_date, to_date, capital,
+        len(slots),
+        symbol,
+        from_date,
+        to_date,
+        capital,
         ", ".join(
             f"#{sl.get('id')}:{sl.get('strategy')}@{sl.get('timeframe', '1D')}" for sl in slots
         ),
@@ -267,7 +282,10 @@ def run_many() -> tuple:
 
     # Calculate warmup start date
     warmup_start = resolve_warmup_start(
-        from_date, WARMUP_BARS, log_prefix="[run-many]", label="shared.from_date",
+        from_date,
+        WARMUP_BARS,
+        log_prefix="[run-many]",
+        label="shared.from_date",
     )
 
     # One PLAIN-DICT job per slot (P2.3): the work runs in a process pool,
@@ -318,9 +336,13 @@ def run_many() -> tuple:
                 job.get("params") or {},
             )
     failed = [k for k, v in results.items() if isinstance(v, dict) and "error" in v]
-    log.info("[run-many] done in %.1f ms: %d ok, %d failed%s",
-             t.elapsed_ms, len(results) - len(failed), len(failed),
-             f" (slots {', '.join(failed)})" if failed else "")
+    log.info(
+        "[run-many] done in %.1f ms: %d ok, %d failed%s",
+        t.elapsed_ms,
+        len(results) - len(failed),
+        len(failed),
+        f" (slots {', '.join(failed)})" if failed else "",
+    )
 
     return jsonify({"results": results}), 200
 
@@ -358,12 +380,24 @@ def run_single_backtest(params: dict) -> dict:
 
         source = build_source(str(params.get("source_name", "synthetic")))
         candles_full = source.get_candles(symbol, str(params["warmup_start"]), to_date, interval)
-        log.debug("[slot %s] %s: %d bars @ %s (%s)",
-                  sid, strategy, len(candles_full), interval, mode or "driver")
+        log.debug(
+            "[slot %s] %s: %d bars @ %s (%s)",
+            sid,
+            strategy,
+            len(candles_full),
+            interval,
+            mode or "driver",
+        )
 
         if mode == QUICK_SCREEN:
             result = run_quick_screen(
-                candles_full, strategy, slot_params, symbol, capital, from_date, to_date,
+                candles_full,
+                strategy,
+                slot_params,
+                symbol,
+                capital,
+                from_date,
+                to_date,
             )
             engine = "quick_screen"
         else:

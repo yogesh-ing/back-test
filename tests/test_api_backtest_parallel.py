@@ -90,10 +90,13 @@ def test_multiple_backtests_run_in_process_pool(client, tmp_path, monkeypatch):
 
 def test_broken_job_isolated_in_process_pool(client):
     """One bad strategy fails only its own job; the neighbours still succeed."""
-    resp = client.post("/api/backtest/run-many", json=_many_body(
-        2,
-        extra_slot={"id": 2, "strategy": "no_such_strategy", "timeframe": "1D", "params": {}},
-    ))
+    resp = client.post(
+        "/api/backtest/run-many",
+        json=_many_body(
+            2,
+            extra_slot={"id": 2, "strategy": "no_such_strategy", "timeframe": "1D", "params": {}},
+        ),
+    )
     assert resp.status_code == 200
     results = resp.get_json()["results"]
     assert "error" in results["2"]
@@ -102,10 +105,16 @@ def test_broken_job_isolated_in_process_pool(client):
 
 def test_quick_screen_slot_runs_in_process_pool(client):
     """The vectorized quick path works from a worker process too."""
-    body = _many_body(2, extra_slot={
-        "id": 2, "strategy": "sma_crossover", "timeframe": "1D",
-        "params": {"fast": 10, "slow": 30}, "mode": "quick_screen",
-    })
+    body = _many_body(
+        2,
+        extra_slot={
+            "id": 2,
+            "strategy": "sma_crossover",
+            "timeframe": "1D",
+            "params": {"fast": 10, "slow": 30},
+            "mode": "quick_screen",
+        },
+    )
     resp = client.post("/api/backtest/run-many", json=body)
     assert resp.status_code == 200
     results = resp.get_json()["results"]

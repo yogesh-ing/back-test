@@ -94,7 +94,7 @@ class MStockOrderError(RuntimeError):
     Raised when there is no active session, the order has no broker id,
     mStock answers non-2xx, or the payload carries an error reason. The
     message is user-facing (no stack traces or internal details).
-"""
+    """
 
 
 def _rejection_reason(payload: Any) -> str | None:
@@ -314,7 +314,9 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         """
         token = self._require_session()
         payload = self._request(
-            "POST", _ORDER_PLACEMENT_PATH, token,
+            "POST",
+            _ORDER_PLACEMENT_PATH,
+            token,
             form=self._map_order_to_broker_payload(order),
         )
         order_id = self._extract_order_id(payload)
@@ -402,7 +404,9 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         """Pre-trade margin check — ``POST /openapi/typea/margins/orders`` (JSON)."""
         token = self._require_session()
         payload = self._request(
-            "POST", _ORDER_MARGIN_PATH, token,
+            "POST",
+            _ORDER_MARGIN_PATH,
+            token,
             json_body=self._map_order_to_broker_payload(order),
         )
         data = payload if isinstance(payload, dict) else {}
@@ -522,8 +526,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
 
         if not resp.ok:
             raise MStockOrderError(
-                _rejection_reason(payload)
-                or f"mStock {method} failed (HTTP {resp.status_code})"
+                _rejection_reason(payload) or f"mStock {method} failed (HTTP {resp.status_code})"
             )
         reason = _rejection_reason(payload)
         if reason:
@@ -572,6 +575,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         order-book row schema; fields are read best-effort by their
         documented names (order_id/tradingsymbol/transaction_type/...).
         """
+
         def _str(key: str) -> str | None:
             value = row.get(key)
             return str(value) if value is not None else None

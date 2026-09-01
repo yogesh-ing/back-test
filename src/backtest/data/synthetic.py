@@ -26,7 +26,9 @@ class SyntheticSource:
             raise ValueError("replay_speed must be > 0")
         self.replay_speed = float(replay_speed)
 
-    def get_candles(self, symbol: str, start: str, end: str, interval: str = "1day") -> pd.DataFrame:
+    def get_candles(
+        self, symbol: str, start: str, end: str, interval: str = "1day"
+    ) -> pd.DataFrame:
         start_dt = pd.Timestamp(start)
         end_dt = pd.Timestamp(end)
         idx = pd.date_range(start=start_dt, end=end_dt, freq="B")
@@ -34,11 +36,13 @@ class SyntheticSource:
         if interval not in self.SUPPORTED_INTERVALS:
             log.warning(
                 "[synthetic] interval %r is not supported — returning daily business bars "
-                "(gap G6: timeframe is cosmetic unless the source is 'db')", interval,
+                "(gap G6: timeframe is cosmetic unless the source is 'db')",
+                interval,
             )
         if len(idx) <= 50:
-            log.warning("[synthetic] %s %s..%s → only %d bars (need > 50)",
-                        symbol, start, end, len(idx))
+            log.warning(
+                "[synthetic] %s %s..%s → only %d bars (need > 50)", symbol, start, end, len(idx)
+            )
             raise ValueError("synthetic range must be > 50 rows for validation")
 
         seed = int(sha256(str(symbol).encode("utf-8")).hexdigest()[:8], 16)
@@ -71,6 +75,13 @@ class SyntheticSource:
             index=pd.DatetimeIndex(idx),
         )
 
-        log.debug("[synthetic] %s %s..%s → %d bars (%.2f → %.2f)", symbol, start, end,
-                  len(frame), frame["close"].iloc[0], frame["close"].iloc[-1])
+        log.debug(
+            "[synthetic] %s %s..%s → %d bars (%.2f → %.2f)",
+            symbol,
+            start,
+            end,
+            len(frame),
+            frame["close"].iloc[0],
+            frame["close"].iloc[-1],
+        )
         return normalize_candles(frame)

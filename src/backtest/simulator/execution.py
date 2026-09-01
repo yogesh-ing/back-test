@@ -46,7 +46,8 @@ from __future__ import annotations
 import logging
 import random
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime
+from datetime import datetime
+from datetime import time as dtime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
@@ -60,14 +61,12 @@ from backtest.simulator.fill_providers import (
     FillDecision,
     FillProvider,
     SimulatedFillProvider,
+)
+from backtest.simulator.fill_providers import (
     apply_price_improvement as _apply_price_improvement_impl,
-    simulate_latency as _simulate_latency_impl,
 )
-from backtest.simulator.money import (
-    ZERO,
-    quantize_price,
-    to_decimal,
-)
+from backtest.simulator.fill_providers import simulate_latency as _simulate_latency_impl
+from backtest.simulator.money import ZERO, quantize_price, to_decimal
 from backtest.simulator.slippage import MarketSnapshot, SlippageCalculator
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -96,9 +95,7 @@ logger = logging.getLogger("backtest.simulator.execution")
 
 _DUST = Decimal("0.00000001")
 
-DEFAULT_EXECUTION_CONFIG_PATH = (
-    Path(__file__).resolve().parents[3] / "config" / "execution.yaml"
-)
+DEFAULT_EXECUTION_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "execution.yaml"
 
 
 class RealismLevel:
@@ -286,8 +283,11 @@ class ExecutionConfig:
         self.realism = RealismLevel.validate(self.realism)
         self.segment = TradeSegment.validate(self.segment)
         for name in (
-            "min_latency_ms", "max_latency_ms", "max_participation",
-            "touch_fill_probability", "price_improvement_probability",
+            "min_latency_ms",
+            "max_latency_ms",
+            "max_participation",
+            "touch_fill_probability",
+            "price_improvement_probability",
             "price_improvement_bps",
         ):
             value = to_decimal(getattr(self, name), name)
@@ -312,9 +312,7 @@ class ExecutionConfig:
                     f"{name} is a probability and must be between 0 and 1",
                     code="invalid_execution_config",
                 )
-        self.halted_symbols = frozenset(
-            str(s).strip().upper() for s in self.halted_symbols
-        )
+        self.halted_symbols = frozenset(str(s).strip().upper() for s in self.halted_symbols)
 
     @classmethod
     def preset(cls, level: str, **overrides: Any) -> "ExecutionConfig":
@@ -412,9 +410,7 @@ def load_execution_config(
     """
     config_path = Path(path) if path else DEFAULT_EXECUTION_CONFIG_PATH
     if path is not None and not config_path.exists():
-        raise ValidationError(
-            f"execution config not found: {config_path}", code="config_not_found"
-        )
+        raise ValidationError(f"execution config not found: {config_path}", code="config_not_found")
     if not config_path.exists():
         return ExecutionConfig.preset(profile or RealismLevel.REALISTIC)
 
@@ -590,9 +586,7 @@ class OrderExecutor:
             from zoneinfo import ZoneInfo
 
             local = (
-                when.astimezone(ZoneInfo(cfg.session_timezone))
-                if when.tzinfo is not None
-                else when
+                when.astimezone(ZoneInfo(cfg.session_timezone)) if when.tzinfo is not None else when
             )
         except Exception:  # pragma: no cover - missing tzdata
             local = when
@@ -620,9 +614,7 @@ class OrderExecutor:
 
     # -- helpers -----------------------------------------------------------
 
-    def simulate_latency(
-        self, min_ms: Any = None, max_ms: Any = None
-    ) -> Decimal:
+    def simulate_latency(self, min_ms: Any = None, max_ms: Any = None) -> Decimal:
         """Draw a fill latency in milliseconds (delegates to the canonical
         :func:`backtest.simulator.fill_providers.simulate_latency`).
 
@@ -718,9 +710,7 @@ class OrderExecutor:
 
     # -- main entry point --------------------------------------------------
 
-    def execute(
-        self, order: "Order", market_data: Mapping[str, Any] | Any
-    ) -> ExecutionResult:
+    def execute(self, order: "Order", market_data: Mapping[str, Any] | Any) -> ExecutionResult:
         """Attempt to execute ``order`` against one market snapshot.
 
         Never raises for ordinary outcomes — a rejection or a no-fill is
@@ -772,8 +762,9 @@ class OrderExecutor:
                 available_liquidity=liquidity,
             )
             self._record(result)
-            logger.warning("cancelled %s: [%s] %s", order.symbol,
-                           RejectionCode.FOK_UNFILLABLE, reason)
+            logger.warning(
+                "cancelled %s: [%s] %s", order.symbol, RejectionCode.FOK_UNFILLABLE, reason
+            )
             self._fire(ExecutionEvent.REJECT, order, result)
             return result
 
@@ -781,8 +772,10 @@ class OrderExecutor:
         if order.order_type in (OrderType.LIMIT, OrderType.STOP_LIMIT):
             if not self._limit_fills(order, snapshot):
                 return self._no_fill(
-                    order, "limit touched but not traded through (queue position)",
-                    requested, liquidity,
+                    order,
+                    "limit touched but not traded through (queue position)",
+                    requested,
+                    liquidity,
                 )
 
         # --- price + fees + fill (ticket P3.3) ---
@@ -792,9 +785,7 @@ class OrderExecutor:
         # (order state, portfolio, results, hooks) is shared by both.
         decision = self._fill_provider.get_fill(order, market_data, fill_qty, self._rng)
         if decision.fill is None:
-            return self._no_fill(
-                order, "fill provider reported no trade", fill_qty, liquidity
-            )
+            return self._no_fill(order, "fill provider reported no trade", fill_qty, liquidity)
         fill = decision.fill
         order.add_fill(fill)
 
@@ -823,12 +814,19 @@ class OrderExecutor:
         self._record(result)
         logger.info(
             "%s %s %s @ %s (%s of %s, %.0fms)",
-            status, order.side, fill_qty, fill.fill_price, fill_qty, requested,
+            status,
+            order.side,
+            fill_qty,
+            fill.fill_price,
+            fill_qty,
+            requested,
             float(decision.latency_ms),
         )
         self._fire(
             ExecutionEvent.FILL if complete else ExecutionEvent.PARTIAL_FILL,
-            order, fill, result,
+            order,
+            fill,
+            result,
         )
         return result
 
@@ -1120,9 +1118,7 @@ class OrderExecutor:
             "fill_rate": round(len(traded) / len(self._results), 4),
             "quantity_requested": requested,
             "quantity_filled": got,
-            "quantity_fill_rate": (
-                round(float(got / requested), 4) if requested > ZERO else 0.0
-            ),
+            "quantity_fill_rate": (round(float(got / requested), 4) if requested > ZERO else 0.0),
             "mean_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
             "rejections_by_code": by_code,
         }

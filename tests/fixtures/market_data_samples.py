@@ -7,14 +7,16 @@ performance benchmarks and load testing.
 from __future__ import annotations
 
 import random
-from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 
-def generate_random_ticks(symbol: str = "INFY", count: int = 100, start_price: float = 100.0) -> List[Dict[str, Any]]:
+def generate_random_ticks(
+    symbol: str = "INFY", count: int = 100, start_price: float = 100.0
+) -> List[Dict[str, Any]]:
     """Generate random ticks for testing bar aggregation."""
     ticks = []
     price = start_price
@@ -42,11 +44,15 @@ def generate_random_ticks(symbol: str = "INFY", count: int = 100, start_price: f
     return ticks
 
 
-def generate_ohlcv_bars(symbol: str = "INFY", count: int = 100, start_price: float = 100.0, timeframe: str = "1min") -> pd.DataFrame:
+def generate_ohlcv_bars(
+    symbol: str = "INFY", count: int = 100, start_price: float = 100.0, timeframe: str = "1min"
+) -> pd.DataFrame:
     """Generate synthetic OHLCV bars."""
 
     np.random.seed(42)
-    dates = pd.date_range("2024-01-01", periods=count, freq="1min" if timeframe == "1min" else "D", tz="UTC")
+    dates = pd.date_range(
+        "2024-01-01", periods=count, freq="1min" if timeframe == "1min" else "D", tz="UTC"
+    )
     close = start_price + np.cumsum(np.random.randn(count) * 0.5)
 
     df = pd.DataFrame(
@@ -70,7 +76,15 @@ def generate_ohlcv_bars(symbol: str = "INFY", count: int = 100, start_price: flo
 def generate_corrupted_bars() -> List[Dict[str, Any]]:
     """Generate corrupted bars for validator tests."""
 
-    valid_bar = {"symbol": "INFY", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000, "timestamp": datetime.now(timezone.utc)}
+    valid_bar = {
+        "symbol": "INFY",
+        "open": 100,
+        "high": 101,
+        "low": 99,
+        "close": 100,
+        "volume": 1000,
+        "timestamp": datetime.now(timezone.utc),
+    }
 
     corrupted = [
         # Missing field
@@ -88,13 +102,23 @@ def generate_corrupted_bars() -> List[Dict[str, Any]]:
         # Bid > Ask
         {"symbol": "INFY", "bid": 102, "ask": 101, "last": 100},
         # Future timestamp
-        {"symbol": "INFY", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000, "timestamp": datetime.now(timezone.utc) + timedelta(hours=1)},
+        {
+            "symbol": "INFY",
+            "open": 100,
+            "high": 101,
+            "low": 99,
+            "close": 100,
+            "volume": 1000,
+            "timestamp": datetime.now(timezone.utc) + timedelta(hours=1),
+        },
     ]
 
     return [valid_bar] + corrupted
 
 
-def generate_spike_data(symbol: str = "INFY", base_price: float = 100.0, spike_price: float = 200.0) -> List[Dict[str, Any]]:
+def generate_spike_data(
+    symbol: str = "INFY", base_price: float = 100.0, spike_price: float = 200.0
+) -> List[Dict[str, Any]]:
     """Generate data with price spike for validator tests."""
 
     base = datetime(2024, 1, 2, 9, 15, tzinfo=timezone.utc)

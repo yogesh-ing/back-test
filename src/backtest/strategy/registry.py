@@ -44,8 +44,9 @@ def _discover() -> None:
         try:
             importlib.import_module(full_name)
         except Exception as exc:  # noqa: BLE001 — must not crash discovery
-            logger.warning("Skipping strategy module %s: %s: %s",
-                           full_name, exc.__class__.__name__, exc)
+            logger.warning(
+                "Skipping strategy module %s: %s: %s", full_name, exc.__class__.__name__, exc
+            )
             logger.debug("Strategy module %s failed to import", full_name, exc_info=True)
 
 
@@ -94,9 +95,12 @@ def get_all() -> list[dict[str, Any]]:
                 "params": cls.param_schema(),
             }
         )
-    logger.info("catalogue: %d strategies (%s)%s", len(catalogue),
-                ", ".join(c["name"] for c in catalogue) or "none",
-                f", {skipped} skipped" if skipped else "")
+    logger.info(
+        "catalogue: %d strategies (%s)%s",
+        len(catalogue),
+        ", ".join(c["name"] for c in catalogue) or "none",
+        f", {skipped} skipped" if skipped else "",
+    )
     return catalogue
 
 

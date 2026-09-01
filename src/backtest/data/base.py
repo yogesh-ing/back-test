@@ -26,8 +26,9 @@ MSTOCK_INTERVAL_MAP = {
 
 @runtime_checkable
 class DataSource(Protocol):
-    def get_candles(self, symbol: str, start: str, end: str, interval: str = "1day") -> pd.DataFrame:
-        ...
+    def get_candles(
+        self, symbol: str, start: str, end: str, interval: str = "1day"
+    ) -> pd.DataFrame: ...
 
 
 def normalize_candles(df: pd.DataFrame) -> pd.DataFrame:

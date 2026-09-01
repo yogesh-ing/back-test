@@ -22,8 +22,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from backtest.forward.engine import ForwardTestingEngine
-from backtest.forward.engine import STATE_VERSION
+from backtest.forward.engine import STATE_VERSION, ForwardTestingEngine
 from backtest.simulator.engine_loop import Bar
 from backtest.simulator.enums import OrderSide
 from backtest.simulator.execution import free_executor
@@ -130,8 +129,7 @@ def _snapshot(engine):
         "equity": float(pf.calculate_total_equity()),
         "cash": str(pf.current_cash),
         "positions": {
-            sym: (float(p.quantity), str(p.average_entry_price))
-            for sym, p in pf.positions.items()
+            sym: (float(p.quantity), str(p.average_entry_price)) for sym, p in pf.positions.items()
         },
         "closed": len(pf.closed_positions),
         "realized_pnl": str(pf.realized_pnl),
@@ -222,8 +220,10 @@ def _run_one_bar(engine):
     """Process exactly the next unprocessed bar (bar index 2)."""
     symbol = engine.config.data.symbols[0]
     candles = engine.data_source.get_candles(
-        symbol, engine.config.data.start_date,
-        engine.config.data.end_date, engine.config.data.timeframe,
+        symbol,
+        engine.config.data.start_date,
+        engine.config.data.end_date,
+        engine.config.data.timeframe,
     )
     offset = engine._processed_bars.get(symbol, 0)
     assert offset == 2
@@ -310,7 +310,10 @@ def test_portfolio_order_ledger_roundtrips_through_json():
     order ledger is part of the state file now)."""
     pf = Portfolio(name="ledger", initial_capital=100_000)
     order = Order(
-        symbol="TEST", side=OrderSide.BUY, quantity=100, order_type="MARKET",
+        symbol="TEST",
+        side=OrderSide.BUY,
+        quantity=100,
+        order_type="MARKET",
         portfolio_id=pf.portfolio_id,
     )
     order.validate()
@@ -332,7 +335,10 @@ def test_executor_state_roundtrip_keeps_armed_timing():
     executor = free_executor(portfolio)
 
     order = Order(
-        symbol="TEST", side=OrderSide.BUY, quantity=10, order_type="MARKET",
+        symbol="TEST",
+        side=OrderSide.BUY,
+        quantity=10,
+        order_type="MARKET",
         portfolio_id=portfolio.portfolio_id,
     )
     order.validate()

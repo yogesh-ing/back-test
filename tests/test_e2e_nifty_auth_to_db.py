@@ -44,6 +44,7 @@ INTERVAL_DAYS = 90  # 3 months
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _resolve_nifty_token(client: MStockClient) -> str:
     """Resolve NIFTY index token from the scriptmaster."""
     resp = requests.get(
@@ -57,11 +58,19 @@ def _resolve_nifty_token(client: MStockClient) -> str:
     # Find symbol and token columns
     cols_lower = {str(c).strip().lower(): c for c in frame.columns}
     symbol_col = next(
-        (cols_lower[k] for k in ("tradingsymbol", "symbol", "name", "instrumentname") if k in cols_lower),
+        (
+            cols_lower[k]
+            for k in ("tradingsymbol", "symbol", "name", "instrumentname")
+            if k in cols_lower
+        ),
         None,
     )
     token_col = next(
-        (cols_lower[k] for k in ("instrument_token", "token", "securitytoken", "security_token") if k in cols_lower),
+        (
+            cols_lower[k]
+            for k in ("instrument_token", "token", "securitytoken", "security_token")
+            if k in cols_lower
+        ),
         None,
     )
     if not symbol_col or not token_col:
@@ -84,7 +93,8 @@ def _persist_to_db(bars: list[dict], symbol: str, exchange: str, timeframe: str)
     """Insert OHLCV bars into market_data_cache and return row count."""
     engine = create_engine(DB_URL, echo=False)
 
-    insert_sql = text("""
+    insert_sql = text(
+        """
         INSERT INTO market_data_cache
             (symbol, exchange, timeframe, ts, open, high, low, close, volume, source, ingested_at)
         VALUES
@@ -96,7 +106,8 @@ def _persist_to_db(bars: list[dict], symbol: str, exchange: str, timeframe: str)
                 close = EXCLUDED.close,
                 volume = EXCLUDED.volume,
                 ingested_at = now()
-    """)
+    """
+    )
 
     rows = []
     for bar in bars:
@@ -105,35 +116,39 @@ def _persist_to_db(bars: list[dict], symbol: str, exchange: str, timeframe: str)
             ts = pd.Timestamp(ts_raw)
             if ts.tzinfo is not None:
                 ts = ts.tz_convert("UTC").tz_localize(None)
-            rows.append({
-                "symbol": symbol,
-                "exchange": exchange,
-                "timeframe": timeframe,
-                "ts": ts.to_pydatetime(),
-                "open": float(bar.get("o", bar.get("open", 0))),
-                "high": float(bar.get("h", bar.get("high", 0))),
-                "low": float(bar.get("l", bar.get("low", 0))),
-                "close": float(bar.get("c", bar.get("close", 0))),
-                "volume": int(bar.get("v", bar.get("volume", 0))),
-                "source": "mstock",
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "timeframe": timeframe,
+                    "ts": ts.to_pydatetime(),
+                    "open": float(bar.get("o", bar.get("open", 0))),
+                    "high": float(bar.get("h", bar.get("high", 0))),
+                    "low": float(bar.get("l", bar.get("low", 0))),
+                    "close": float(bar.get("c", bar.get("close", 0))),
+                    "volume": int(bar.get("v", bar.get("volume", 0))),
+                    "source": "mstock",
+                }
+            )
         elif isinstance(bar, (list, tuple)) and len(bar) >= 6:
             ts_raw = bar[0]
             ts = pd.Timestamp(ts_raw)
             if ts.tzinfo is not None:
                 ts = ts.tz_convert("UTC").tz_localize(None)
-            rows.append({
-                "symbol": symbol,
-                "exchange": exchange,
-                "timeframe": timeframe,
-                "ts": ts.to_pydatetime(),
-                "open": float(bar[1]),
-                "high": float(bar[2]),
-                "low": float(bar[3]),
-                "close": float(bar[4]),
-                "volume": int(bar[5]),
-                "source": "mstock",
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "timeframe": timeframe,
+                    "ts": ts.to_pydatetime(),
+                    "open": float(bar[1]),
+                    "high": float(bar[2]),
+                    "low": float(bar[3]),
+                    "close": float(bar[4]),
+                    "volume": int(bar[5]),
+                    "source": "mstock",
+                }
+            )
 
     if not rows:
         raise ValueError("No rows to persist")
@@ -153,44 +168,79 @@ def _validate_in_db(symbol: str, exchange: str, timeframe: str) -> dict:
 
     with engine.connect() as conn:
         # 1. Row count
-        count_row = conn.execute(text(
-            "SELECT count(*) as cnt FROM market_data_cache "
-            "WHERE symbol = :symbol AND exchange = :exchange AND timeframe = :timeframe"
-        ), {"symbol": symbol, "exchange": exchange, "timeframe": timeframe}).mappings().first()
+        count_row = (
+            conn.execute(
+                text(
+                    "SELECT count(*) as cnt FROM market_data_cache "
+                    "WHERE symbol = :symbol AND exchange = :exchange AND timeframe = :timeframe"
+                ),
+                {"symbol": symbol, "exchange": exchange, "timeframe": timeframe},
+            )
+            .mappings()
+            .first()
+        )
         summary["row_count"] = count_row["cnt"]
 
         # 2. Date range
-        range_row = conn.execute(text(
-            "SELECT min(ts) as earliest, max(ts) as latest FROM market_data_cache "
-            "WHERE symbol = :symbol AND exchange = :exchange AND timeframe = :timeframe"
-        ), {"symbol": symbol, "exchange": exchange, "timeframe": timeframe}).mappings().first()
+        range_row = (
+            conn.execute(
+                text(
+                    "SELECT min(ts) as earliest, max(ts) as latest FROM market_data_cache "
+                    "WHERE symbol = :symbol AND exchange = :exchange AND timeframe = :timeframe"
+                ),
+                {"symbol": symbol, "exchange": exchange, "timeframe": timeframe},
+            )
+            .mappings()
+            .first()
+        )
         summary["earliest"] = str(range_row["earliest"])
         summary["latest"] = str(range_row["latest"])
 
         # 3. OHLCV sanity - no zero/negative prices, no high < low
-        bad_rows = conn.execute(text(
-            "SELECT count(*) as bad FROM market_data_cache "
-            "WHERE symbol = :symbol AND exchange = :exchange AND timeframe = :timeframe "
-            "AND (open <= 0 OR high <= 0 OR low <= 0 OR close <= 0 OR high < low)"
-        ), {"symbol": symbol, "exchange": exchange, "timeframe": timeframe}).mappings().first()
+        bad_rows = (
+            conn.execute(
+                text(
+                    "SELECT count(*) as bad FROM market_data_cache "
+                    "WHERE symbol = :symbol AND exchange = :exchange AND timeframe = :timeframe "
+                    "AND (open <= 0 OR high <= 0 OR low <= 0 OR close <= 0 OR high < low)"
+                ),
+                {"symbol": symbol, "exchange": exchange, "timeframe": timeframe},
+            )
+            .mappings()
+            .first()
+        )
         summary["bad_ohlcv_rows"] = bad_rows["bad"]
 
         # 4. Sample rows (first 5)
-        sample = conn.execute(text(
-            "SELECT ts, open, high, low, close, volume "
-            "FROM market_data_cache "
-            "WHERE symbol = :symbol AND exchange = :exchange AND timeframe = :timeframe "
-            "ORDER BY ts ASC LIMIT 5"
-        ), {"symbol": symbol, "exchange": exchange, "timeframe": timeframe}).mappings().all()
+        sample = (
+            conn.execute(
+                text(
+                    "SELECT ts, open, high, low, close, volume "
+                    "FROM market_data_cache "
+                    "WHERE symbol = :symbol AND exchange = :exchange AND timeframe = :timeframe "
+                    "ORDER BY ts ASC LIMIT 5"
+                ),
+                {"symbol": symbol, "exchange": exchange, "timeframe": timeframe},
+            )
+            .mappings()
+            .all()
+        )
         summary["sample_first_5"] = [dict(r) for r in sample]
 
         # 5. Latest 5 rows
-        latest = conn.execute(text(
-            "SELECT ts, open, high, low, close, volume "
-            "FROM market_data_cache "
-            "WHERE symbol = :symbol AND exchange = :exchange AND timeframe = :timeframe "
-            "ORDER BY ts DESC LIMIT 5"
-        ), {"symbol": symbol, "exchange": exchange, "timeframe": timeframe}).mappings().all()
+        latest = (
+            conn.execute(
+                text(
+                    "SELECT ts, open, high, low, close, volume "
+                    "FROM market_data_cache "
+                    "WHERE symbol = :symbol AND exchange = :exchange AND timeframe = :timeframe "
+                    "ORDER BY ts DESC LIMIT 5"
+                ),
+                {"symbol": symbol, "exchange": exchange, "timeframe": timeframe},
+            )
+            .mappings()
+            .all()
+        )
         summary["sample_last_5"] = [dict(r) for r in latest]
 
     engine.dispose()
@@ -200,6 +250,7 @@ def _validate_in_db(symbol: str, exchange: str, timeframe: str) -> dict:
 # ---------------------------------------------------------------------------
 # Main test flow
 # ---------------------------------------------------------------------------
+
 
 def main():
     print("=" * 70)
@@ -270,13 +321,17 @@ def main():
 
     print("\n  First 5 rows:")
     for row in summary["sample_first_5"]:
-        print(f"    {row['ts']}  O={row['open']:>10.2f}  H={row['high']:>10.2f}  "
-              f"L={row['low']:>10.2f}  C={row['close']:>10.2f}  V={row['volume']:>12}")
+        print(
+            f"    {row['ts']}  O={row['open']:>10.2f}  H={row['high']:>10.2f}  "
+            f"L={row['low']:>10.2f}  C={row['close']:>10.2f}  V={row['volume']:>12}"
+        )
 
     print("\n  Last 5 rows:")
     for row in summary["sample_last_5"]:
-        print(f"    {row['ts']}  O={row['open']:>10.2f}  H={row['high']:>10.2f}  "
-              f"L={row['low']:>10.2f}  C={row['close']:>10.2f}  V={row['volume']:>12}")
+        print(
+            f"    {row['ts']}  O={row['open']:>10.2f}  H={row['high']:>10.2f}  "
+            f"L={row['low']:>10.2f}  C={row['close']:>10.2f}  V={row['volume']:>12}"
+        )
 
     # ── Assertions ────────────────────────────────────────────────────────
     errors = []

@@ -265,15 +265,11 @@ class DatabaseManager:
             try:
                 engine = create_engine(cfg.url, **self._engine_kwargs())
             except Exception as exc:
-                raise ConnectionError(
-                    f"could not build engine for {cfg.safe_url}: {exc}"
-                ) from exc
+                raise ConnectionError(f"could not build engine for {cfg.safe_url}: {exc}") from exc
 
             self._install_listeners(engine)
             self._engine = engine
-            self._session_factory = sessionmaker(
-                bind=engine, expire_on_commit=False, future=True
-            )
+            self._session_factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
             # Fail fast and loudly rather than at the first query.
             try:
@@ -282,9 +278,7 @@ class DatabaseManager:
                 self._engine = None
                 self._session_factory = None
                 engine.dispose()
-                raise ConnectionError(
-                    f"database unreachable at {cfg.safe_url}: {exc}"
-                ) from exc
+                raise ConnectionError(f"database unreachable at {cfg.safe_url}: {exc}") from exc
 
             atexit.register(self._atexit_dispose)
             logger.info("database connected (%s)", cfg.dialect)
@@ -461,9 +455,7 @@ class DatabaseManager:
                 last = exc
                 if attempt >= attempts:
                     break
-                delay = min(
-                    cfg.retry_max_delay, cfg.retry_base_delay * (2 ** (attempt - 1))
-                )
+                delay = min(cfg.retry_max_delay, cfg.retry_base_delay * (2 ** (attempt - 1)))
                 # Jitter prevents a fleet of workers reconnecting in lockstep
                 # after a database restart.
                 delay *= 0.5 + random.random()
@@ -480,9 +472,7 @@ class DatabaseManager:
 
         self._stats["failures"] += 1
         assert last is not None
-        raise ConnectionError(
-            f"{label} failed after {attempts} attempt(s): {last}"
-        ) from last
+        raise ConnectionError(f"{label} failed after {attempts} attempt(s): {last}") from last
 
     # -- context managers --------------------------------------------------
 
@@ -600,9 +590,7 @@ class DatabaseManager:
     # dict of values. Never interpolate values into the SQL string — bind
     # parameters are what keep this injection-safe.
 
-    def execute_query(
-        self, sql: str, params: Mapping[str, Any] | None = None
-    ) -> int:
+    def execute_query(self, sql: str, params: Mapping[str, Any] | None = None) -> int:
         """Execute a statement and return the affected row count.
 
         For ``SELECT`` use :meth:`fetch_all` or :meth:`fetch_one` instead;
@@ -624,9 +612,7 @@ class DatabaseManager:
 
         return self._retrying("execute_query", run)
 
-    def execute_many(
-        self, sql: str, params_list: Sequence[Mapping[str, Any]]
-    ) -> int:
+    def execute_many(self, sql: str, params_list: Sequence[Mapping[str, Any]]) -> int:
         """Execute one statement against many parameter sets.
 
         Uses the driver's executemany path, which is dramatically faster than
@@ -646,9 +632,7 @@ class DatabaseManager:
 
         return self._retrying("execute_many", run)
 
-    def fetch_one(
-        self, sql: str, params: Mapping[str, Any] | None = None
-    ) -> dict[str, Any] | None:
+    def fetch_one(self, sql: str, params: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
         """Return the first row as a dict, or ``None`` if there are no rows."""
 
         def run() -> dict[str, Any] | None:
@@ -658,9 +642,7 @@ class DatabaseManager:
 
         return self._retrying("fetch_one", run)
 
-    def fetch_all(
-        self, sql: str, params: Mapping[str, Any] | None = None
-    ) -> list[dict[str, Any]]:
+    def fetch_all(self, sql: str, params: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
         """Return every row as a list of dicts (empty list if none)."""
 
         def run() -> list[dict[str, Any]]:
@@ -670,9 +652,7 @@ class DatabaseManager:
 
         return self._retrying("fetch_all", run)
 
-    def fetch_scalar(
-        self, sql: str, params: Mapping[str, Any] | None = None
-    ) -> Any:
+    def fetch_scalar(self, sql: str, params: Mapping[str, Any] | None = None) -> Any:
         """Return the first column of the first row, or ``None``.
 
         Convenient for ``SELECT count(*)`` and similar.
@@ -747,4 +727,3 @@ def _compact(sql: str, limit: int = 200) -> str:
     """Collapse whitespace and truncate, for readable one-line log entries."""
     flat = " ".join(str(sql).split())
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
-

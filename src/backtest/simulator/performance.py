@@ -36,7 +36,7 @@ import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -44,8 +44,8 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from backtest.simulator.money import ZERO, money, to_decimal
 from backtest.simulator.errors import ValidationError
+from backtest.simulator.money import ZERO, money, to_decimal
 
 logger = logging.getLogger("backtest.simulator.performance")
 
@@ -93,7 +93,12 @@ class PerformanceCalculator:
         Optional DatabaseManager for persistence to PERFORMANCE_METRICS
     """
 
-    def __init__(self, portfolio: Any, config: Optional[PerformanceConfig | Mapping[str, Any]] = None, db_manager: Any = None):
+    def __init__(
+        self,
+        portfolio: Any,
+        config: Optional[PerformanceConfig | Mapping[str, Any]] = None,
+        db_manager: Any = None,
+    ):
         self.portfolio = portfolio
 
         if config is None:
@@ -109,11 +114,21 @@ class PerformanceCalculator:
         self._equity_df: Optional[pd.DataFrame] = None
         self._returns: Optional[pd.Series] = None
 
-        logger.info("PerformanceCalculator initialized: risk_free=%.2f%% periods=%s", float(self.config.risk_free_rate) * 100, self.config.periods_per_year)
+        logger.info(
+            "PerformanceCalculator initialized: risk_free=%.2f%% periods=%s",
+            float(self.config.risk_free_rate) * 100,
+            self.config.periods_per_year,
+        )
 
     # -- equity curve --------------------------------------------------------
 
-    def update_equity_curve(self, ts: Optional[datetime] = None, equity: Optional[Any] = None, cash: Optional[Any] = None, position_value: Optional[Any] = None) -> Dict[str, Any]:
+    def update_equity_curve(
+        self,
+        ts: Optional[datetime] = None,
+        equity: Optional[Any] = None,
+        cash: Optional[Any] = None,
+        position_value: Optional[Any] = None,
+    ) -> Dict[str, Any]:
         """Append equity snapshot and update internal DataFrame.
 
         If no args, uses portfolio's current equity.
@@ -128,9 +143,25 @@ class PerformanceCalculator:
                 ts_val = point.ts
             else:
                 # Fallback
-                equity_val = to_decimal(equity, "equity") if equity is not None else money(self.portfolio.calculate_total_equity() if hasattr(self.portfolio, "calculate_total_equity") else 100000)
-                cash_val = to_decimal(cash, "cash") if cash is not None else money(getattr(self.portfolio, "current_cash", 0))
-                pos_val = to_decimal(position_value, "position_value") if position_value is not None else ZERO
+                equity_val = (
+                    to_decimal(equity, "equity")
+                    if equity is not None
+                    else money(
+                        self.portfolio.calculate_total_equity()
+                        if hasattr(self.portfolio, "calculate_total_equity")
+                        else 100000
+                    )
+                )
+                cash_val = (
+                    to_decimal(cash, "cash")
+                    if cash is not None
+                    else money(getattr(self.portfolio, "current_cash", 0))
+                )
+                pos_val = (
+                    to_decimal(position_value, "position_value")
+                    if position_value is not None
+                    else ZERO
+                )
                 ts_val = ts or datetime.now(timezone.utc)
 
             # Invalidate cached df
@@ -179,7 +210,11 @@ class PerformanceCalculator:
                     return df
 
             # Fallback: single point from current equity
-            equity = float(self.portfolio.calculate_total_equity() if hasattr(self.portfolio, "calculate_total_equity") else 100000)
+            equity = float(
+                self.portfolio.calculate_total_equity()
+                if hasattr(self.portfolio, "calculate_total_equity")
+                else 100000
+            )
             df = pd.DataFrame([{"total_equity": equity}], index=[pd.Timestamp.now(tz="UTC")])
             self._equity_df = df
             return df
@@ -223,7 +258,11 @@ class PerformanceCalculator:
             }
 
         try:
-            initial = float(self.portfolio.initial_capital) if hasattr(self.portfolio, "initial_capital") else float(df["total_equity"].iloc[0])
+            initial = (
+                float(self.portfolio.initial_capital)
+                if hasattr(self.portfolio, "initial_capital")
+                else float(df["total_equity"].iloc[0])
+            )
             final = float(df["total_equity"].iloc[-1])
 
             total_return = final - initial
@@ -236,7 +275,9 @@ class PerformanceCalculator:
             else:
                 cagr = 0.0
 
-            annualized_return = returns.mean() * self.config.periods_per_year if len(returns) > 0 else 0.0
+            annualized_return = (
+                returns.mean() * self.config.periods_per_year if len(returns) > 0 else 0.0
+            )
 
             # Daily returns
             daily_returns = returns.tolist()
@@ -324,7 +365,9 @@ class PerformanceCalculator:
         try:
             # Volatility
             volatility = float(returns.std(ddof=0)) if len(returns) > 0 else 0.0
-            annualized_vol = volatility * math.sqrt(self.config.periods_per_year) if volatility else 0.0
+            annualized_vol = (
+                volatility * math.sqrt(self.config.periods_per_year) if volatility else 0.0
+            )
 
             # Drawdown
             equity = df["total_equity"]
@@ -345,7 +388,11 @@ class PerformanceCalculator:
                 peak_idx = cummax.idxmax() if hasattr(cummax, "idxmax") else None
                 trough_idx = drawdown.idxmin() if hasattr(drawdown, "idxmin") else None
                 if peak_idx is not None and trough_idx is not None:
-                    duration = (trough_idx - peak_idx).days if hasattr(trough_idx - peak_idx, "days") else 0
+                    duration = (
+                        (trough_idx - peak_idx).days
+                        if hasattr(trough_idx - peak_idx, "days")
+                        else 0
+                    )
                 else:
                     duration = 0
             except Exception:
@@ -387,7 +434,12 @@ class PerformanceCalculator:
         returns_metrics = self.calculate_returns_metrics()
 
         if returns.empty:
-            return {"sharpe_ratio": 0.0, "sortino_ratio": 0.0, "calmar_ratio": 0.0, "information_ratio": 0.0}
+            return {
+                "sharpe_ratio": 0.0,
+                "sortino_ratio": 0.0,
+                "calmar_ratio": 0.0,
+                "information_ratio": 0.0,
+            }
 
         try:
             # Sharpe: (mean return - risk_free) / volatility, annualized
@@ -396,16 +448,32 @@ class PerformanceCalculator:
             volatility = risk_metrics.get("volatility", 0) or returns.std(ddof=0)
 
             if volatility and volatility != 0:
-                sharpe = float(excess_returns.mean() / volatility * math.sqrt(self.config.periods_per_year)) if len(excess_returns) > 0 else 0.0
+                sharpe = (
+                    float(
+                        excess_returns.mean() / volatility * math.sqrt(self.config.periods_per_year)
+                    )
+                    if len(excess_returns) > 0
+                    else 0.0
+                )
             else:
                 sharpe = 0.0
 
             # Sortino: downside deviation
             try:
                 downside_returns = returns[returns < 0]
-                downside_vol = float(downside_returns.std(ddof=0)) if len(downside_returns) > 0 else 0.0
+                downside_vol = (
+                    float(downside_returns.std(ddof=0)) if len(downside_returns) > 0 else 0.0
+                )
                 if downside_vol and downside_vol != 0:
-                    sortino = float(excess_returns.mean() / downside_vol * math.sqrt(self.config.periods_per_year)) if len(excess_returns) > 0 else 0.0
+                    sortino = (
+                        float(
+                            excess_returns.mean()
+                            / downside_vol
+                            * math.sqrt(self.config.periods_per_year)
+                        )
+                        if len(excess_returns) > 0
+                        else 0.0
+                    )
                 else:
                     sortino = 0.0
             except Exception:
@@ -424,7 +492,11 @@ class PerformanceCalculator:
                     active_returns = returns - bench
                     tracking_error = float(active_returns.std(ddof=0))
                     if tracking_error != 0:
-                        information_ratio = float(active_returns.mean() / tracking_error * math.sqrt(self.config.periods_per_year))
+                        information_ratio = float(
+                            active_returns.mean()
+                            / tracking_error
+                            * math.sqrt(self.config.periods_per_year)
+                        )
                 except Exception:
                     pass
 
@@ -434,7 +506,13 @@ class PerformanceCalculator:
                 # Beta placeholder – would need benchmark correlation
                 beta = 1.0
                 if beta != 0:
-                    treynor = float((returns.mean() * self.config.periods_per_year - float(self.config.risk_free_rate)) / beta)
+                    treynor = float(
+                        (
+                            returns.mean() * self.config.periods_per_year
+                            - float(self.config.risk_free_rate)
+                        )
+                        / beta
+                    )
             except Exception:
                 pass
 
@@ -507,10 +585,16 @@ class PerformanceCalculator:
             largest_win = max((t["pnl"] for t in trades if t["pnl"] > 0), default=0.0)
             largest_loss = min((t["pnl"] for t in trades if t["pnl"] < 0), default=0.0)
 
-            profit_factor = gross_profit / gross_loss if gross_loss != 0 else float("inf") if gross_profit > 0 else 0.0
+            profit_factor = (
+                gross_profit / gross_loss
+                if gross_loss != 0
+                else float("inf") if gross_profit > 0 else 0.0
+            )
 
             # Average holding period
-            holding_periods = [t["holding_minutes"] for t in trades if t["holding_minutes"] is not None]
+            holding_periods = [
+                t["holding_minutes"] for t in trades if t["holding_minutes"] is not None
+            ]
             avg_holding = sum(holding_periods) / len(holding_periods) if holding_periods else 0.0
 
             # Expectancy: (win_rate * avg_win) - (loss_rate * avg_loss)
@@ -653,19 +737,61 @@ class PerformanceCalculator:
                     total_trades=metrics.get("total_trades", 0),
                     winning_trades=metrics.get("winning_trades", 0),
                     losing_trades=metrics.get("losing_trades", 0),
-                    win_rate=Decimal(str(metrics.get("win_rate", 0))) if metrics.get("win_rate") is not None else None,
+                    win_rate=(
+                        Decimal(str(metrics.get("win_rate", 0)))
+                        if metrics.get("win_rate") is not None
+                        else None
+                    ),
                     avg_win=money(metrics.get("avg_win", 0)) if metrics.get("avg_win") else None,
                     avg_loss=money(metrics.get("avg_loss", 0)) if metrics.get("avg_loss") else None,
-                    largest_win=money(metrics.get("largest_win", 0)) if metrics.get("largest_win") else None,
-                    largest_loss=money(metrics.get("largest_loss", 0)) if metrics.get("largest_loss") else None,
-                    profit_factor=to_decimal(metrics.get("profit_factor", 0), "profit_factor") if metrics.get("profit_factor") and metrics["profit_factor"] != float("inf") else None,
-                    expectancy=money(metrics.get("expectancy", 0)) if metrics.get("expectancy") else None,
-                    sharpe_ratio=to_decimal(metrics.get("sharpe_ratio", 0), "sharpe_ratio") if metrics.get("sharpe_ratio") else None,
-                    sortino_ratio=to_decimal(metrics.get("sortino_ratio", 0), "sortino_ratio") if metrics.get("sortino_ratio") else None,
-                    max_drawdown=money(metrics.get("max_drawdown", 0)) if metrics.get("max_drawdown") else None,
-                    max_drawdown_percentage=to_decimal(metrics.get("max_drawdown_percentage", 0), "max_drawdown_percentage") if metrics.get("max_drawdown_percentage") else None,
-                    total_return=money(metrics.get("total_return", 0)) if metrics.get("total_return") else None,
-                    total_return_percentage=to_decimal(metrics.get("total_return_pct", 0), "total_return_pct") if metrics.get("total_return_pct") else None,
+                    largest_win=(
+                        money(metrics.get("largest_win", 0)) if metrics.get("largest_win") else None
+                    ),
+                    largest_loss=(
+                        money(metrics.get("largest_loss", 0))
+                        if metrics.get("largest_loss")
+                        else None
+                    ),
+                    profit_factor=(
+                        to_decimal(metrics.get("profit_factor", 0), "profit_factor")
+                        if metrics.get("profit_factor") and metrics["profit_factor"] != float("inf")
+                        else None
+                    ),
+                    expectancy=(
+                        money(metrics.get("expectancy", 0)) if metrics.get("expectancy") else None
+                    ),
+                    sharpe_ratio=(
+                        to_decimal(metrics.get("sharpe_ratio", 0), "sharpe_ratio")
+                        if metrics.get("sharpe_ratio")
+                        else None
+                    ),
+                    sortino_ratio=(
+                        to_decimal(metrics.get("sortino_ratio", 0), "sortino_ratio")
+                        if metrics.get("sortino_ratio")
+                        else None
+                    ),
+                    max_drawdown=(
+                        money(metrics.get("max_drawdown", 0))
+                        if metrics.get("max_drawdown")
+                        else None
+                    ),
+                    max_drawdown_percentage=(
+                        to_decimal(
+                            metrics.get("max_drawdown_percentage", 0), "max_drawdown_percentage"
+                        )
+                        if metrics.get("max_drawdown_percentage")
+                        else None
+                    ),
+                    total_return=(
+                        money(metrics.get("total_return", 0))
+                        if metrics.get("total_return")
+                        else None
+                    ),
+                    total_return_percentage=(
+                        to_decimal(metrics.get("total_return_pct", 0), "total_return_pct")
+                        if metrics.get("total_return_pct")
+                        else None
+                    ),
                     total_commission=money(metrics.get("total_commission", 0)),
                     total_slippage=money(0),  # Would need slippage tracking
                 )

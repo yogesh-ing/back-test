@@ -32,7 +32,9 @@ from typing import Any, Dict, Mapping, Optional
 
 from backtest.data.source_tags import SOURCE_TAG_VALUES
 from backtest.simulator.errors import ValidationError
-from backtest.simulator.money import ZERO, ONE, money, price as to_price, to_decimal
+from backtest.simulator.money import ONE, ZERO, money
+from backtest.simulator.money import price as to_price
+from backtest.simulator.money import to_decimal
 
 logger = logging.getLogger("backtest.simulator.bucket_risk")
 
@@ -66,9 +68,7 @@ class BucketRiskLimits:
     max_open_positions: Optional[int] = None
     min_trade_value: Optional[Decimal] = None
     max_leverage: Decimal = Decimal("1")
-    allowed_sources: frozenset = field(
-        default_factory=lambda: frozenset(SOURCE_TAG_VALUES)
-    )
+    allowed_sources: frozenset = field(default_factory=lambda: frozenset(SOURCE_TAG_VALUES))
 
     def __post_init__(self) -> None:
         for name in (
@@ -224,9 +224,7 @@ class BucketRiskLimits:
 
         for symbol, pos in positions.items():
             qty = abs(getattr(pos, "quantity", 0) or 0)
-            price = getattr(pos, "current_price", None) or getattr(
-                pos, "average_entry_price", None
-            )
+            price = getattr(pos, "current_price", None) or getattr(pos, "average_entry_price", None)
             if qty is None or price is None:
                 continue
             try:
@@ -246,11 +244,7 @@ class BucketRiskLimits:
                         f"{self.max_position_pct:.2%}"
                     )
 
-        if (
-            self.max_gross_exposure_pct is not None
-            and equity > ZERO
-            and gross is not None
-        ):
+        if self.max_gross_exposure_pct is not None and equity > ZERO and gross is not None:
             gross_pct = gross / equity
             if gross_pct > self.max_gross_exposure_pct:
                 reasons.append(
@@ -288,9 +282,7 @@ BUCKET_RISK_LIMITS: Dict[str, BucketRiskLimits] = {
 }
 
 #: Public override fields (for config ``risk.buckets.<bucket>`` validation).
-BUCKET_RISK_FIELDS: frozenset = frozenset(
-    f.name for f in dataclasses.fields(BucketRiskLimits)
-)
+BUCKET_RISK_FIELDS: frozenset = frozenset(f.name for f in dataclasses.fields(BucketRiskLimits))
 
 
 def resolve_bucket_risk(
@@ -346,8 +338,7 @@ def resolve_bucket_risk(
         unknown_fields = set(bucket_overrides) - BUCKET_RISK_FIELDS
         if unknown_fields:
             raise ValidationError(
-                f"unknown risk limit override(s) for bucket {mode!r}: "
-                f"{sorted(unknown_fields)}",
+                f"unknown risk limit override(s) for bucket {mode!r}: " f"{sorted(unknown_fields)}",
                 code="unknown_limit_override",
             )
         merged = {f.name: getattr(base, f.name) for f in dataclasses.fields(BucketRiskLimits)}
@@ -355,7 +346,9 @@ def resolve_bucket_risk(
         limits = BucketRiskLimits(**merged)
         logger.info(
             "bucket risk %s/%s: canonical defaults overridden (%s)",
-            mode, source, ", ".join(sorted(bucket_overrides)),
+            mode,
+            source,
+            ", ".join(sorted(bucket_overrides)),
         )
     else:
         limits = base

@@ -30,17 +30,13 @@ from typing import TYPE_CHECKING, Any, Mapping
 from backtest.simulator.enums import OrderType
 from backtest.simulator.errors import ValidationError
 from backtest.simulator.fill import Fill, LiquidityFlag
-from backtest.simulator.money import (
-    ZERO,
-    quantize_price,
-    to_decimal,
-)
+from backtest.simulator.money import ZERO, quantize_price, to_decimal
 
 if TYPE_CHECKING:  # pragma: no cover
     from backtest.simulator.execution import ExecutionConfig
+    from backtest.simulator.fees import CommissionCalculator
     from backtest.simulator.order import Order
     from backtest.simulator.slippage import SlippageCalculator
-    from backtest.simulator.fees import CommissionCalculator
 
 __all__ = [
     "FillDecision",
@@ -174,11 +170,7 @@ class SimulatedFillProvider(FillProvider):
             OrderType.LIMIT,
             OrderType.STOP_LIMIT,
         ):
-            price = (
-                min(price, order.limit_price)
-                if order.is_buy
-                else max(price, order.limit_price)
-            )
+            price = min(price, order.limit_price) if order.is_buy else max(price, order.limit_price)
 
         breakdown = self.fees.calculate(
             quantity=quantity,

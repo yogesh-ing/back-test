@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, current_app
+from flask import Blueprint, current_app, jsonify
 
 from backtest.data.db_source import DbSource
 from backtest.logging_config import get_logger
@@ -38,7 +38,6 @@ def list_symbols() -> tuple:
         log.info("/api/symbols: %d symbols @ %s", len(syms), timeframe)
         return jsonify({"symbols": syms, "count": len(syms), "timeframe": timeframe}), 200
     except Exception as exc:
-        log.warning("Could not list symbols from the database: %s: %s",
-                    exc.__class__.__name__, exc)
+        log.warning("Could not list symbols from the database: %s: %s", exc.__class__.__name__, exc)
         log.debug("symbol listing traceback", exc_info=True)
         return jsonify({"error": "Database unavailable", "symbols": [], "count": 0}), 500

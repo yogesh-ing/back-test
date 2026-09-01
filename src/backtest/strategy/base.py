@@ -246,9 +246,7 @@ class Strategy(ABC):
             )
         lo, hi = spec.get("min"), spec.get("max")
         if lo is not None and hi is not None and lo > hi:
-            raise StrategyContractError(
-                f"{strategy_name}: param '{pname}' min ({lo}) > max ({hi})"
-            )
+            raise StrategyContractError(f"{strategy_name}: param '{pname}' min ({lo}) > max ({hi})")
         if lo is not None and default is not None and default < lo:
             raise StrategyContractError(
                 f"{strategy_name}: param '{pname}' default ({default}) < min ({lo})"

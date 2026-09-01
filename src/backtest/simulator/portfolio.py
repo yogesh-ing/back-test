@@ -48,15 +48,10 @@ from backtest.simulator.errors import (
     ShortSellingNotAllowedError,
     ValidationError,
 )
-from backtest.simulator.money import (
-    ZERO,
-    is_zero,
-    money,
-    price as to_price,
-    quantize_money,
-    to_decimal,
-)
 from backtest.simulator.fill import PositionImpact as PositionImpactResult
+from backtest.simulator.money import ZERO, is_zero, money
+from backtest.simulator.money import price as to_price
+from backtest.simulator.money import quantize_money, to_decimal
 from backtest.simulator.order import Order
 from backtest.simulator.position import Position
 
@@ -373,7 +368,9 @@ class Portfolio:
 
         logger.info(
             "portfolio created: %s (%s %s)",
-            self.name, self.base_currency, self.initial_capital,
+            self.name,
+            self.base_currency,
+            self.initial_capital,
         )
 
     # -- valuation ---------------------------------------------------------
@@ -501,9 +498,7 @@ class Portfolio:
 
     # -- validation --------------------------------------------------------
 
-    def can_open_position(
-        self, symbol: str, quantity: Any, at_price: Any
-    ) -> PositionCheck:
+    def can_open_position(self, symbol: str, quantity: Any, at_price: Any) -> PositionCheck:
         """Check every limit for a proposed new position.
 
         Returns a :class:`PositionCheck` rather than a bare bool so the caller
@@ -643,9 +638,7 @@ class Portfolio:
                 symbol=position.symbol,
             )
         if position.symbol in self.positions:
-            raise DuplicatePositionError(
-                f"an open position already exists for {position.symbol}"
-            )
+            raise DuplicatePositionError(f"an open position already exists for {position.symbol}")
         position.portfolio_id = self.portfolio_id
         self.positions[position.symbol] = position
         logger.info("position added: %s qty=%s", position.symbol, position.quantity)
@@ -706,7 +699,12 @@ class Portfolio:
 
         logger.info(
             "opened %s %s %s @ %s (commission %s), cash now %s",
-            position.position_type, abs(qty), symbol, px, fee, self.current_cash,
+            position.position_type,
+            abs(qty),
+            symbol,
+            px,
+            fee,
+            self.current_cash,
         )
         return position
 
@@ -752,7 +750,10 @@ class Portfolio:
 
         logger.info(
             "reduced %s by %s @ %s, realised %s",
-            position.symbol, result.quantity_closed, at_price, result.realized_pnl,
+            position.symbol,
+            result.quantity_closed,
+            at_price,
+            result.realized_pnl,
         )
         return position
 
@@ -910,13 +911,14 @@ class Portfolio:
             self.positions[symbol] = opened
             object.__setattr__(fill, "position_id", opened.position_id)
 
-            self.current_cash = quantize_money(
-                self.current_cash + fill.calculate_cash_delta()
-            )
+            self.current_cash = quantize_money(self.current_cash + fill.calculate_cash_delta())
             self.total_commission = quantize_money(self.total_commission + fill.total_fees)
             logger.info(
-                "fill opened %s %s %s @ %s", opened.position_type, fill.quantity,
-                symbol, fill.fill_price,
+                "fill opened %s %s %s @ %s",
+                opened.position_type,
+                fill.quantity,
+                symbol,
+                fill.fill_price,
             )
             return PositionImpactResult(
                 action=PositionAction.OPEN,
@@ -935,7 +937,11 @@ class Portfolio:
 
         logger.info(
             "fill %s %s %s @ %s -> cash %s",
-            applied.action, fill.quantity, symbol, fill.fill_price, self.current_cash,
+            applied.action,
+            fill.quantity,
+            symbol,
+            fill.fill_price,
+            self.current_cash,
         )
         return applied
 
@@ -1043,9 +1049,7 @@ class Portfolio:
             mode=payload.get("mode", "paper"),
             source=payload.get("source", "synthetic"),
             created_at=(
-                datetime.fromisoformat(payload["created_at"])
-                if payload.get("created_at")
-                else None
+                datetime.fromisoformat(payload["created_at"]) if payload.get("created_at") else None
             ),
         )
         portfolio.realized_pnl = money(payload.get("realized_pnl", ZERO))

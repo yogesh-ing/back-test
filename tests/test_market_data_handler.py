@@ -6,10 +6,14 @@ from datetime import datetime, timezone
 
 import pytest
 
-from backtest.live.market_data_handler import MarketDataHandler, BarBuilder, MockBrokerFeed, MStockBrokerFeed
 from backtest.live.data_validator import DataValidator
+from backtest.live.market_data_handler import (
+    BarBuilder,
+    MarketDataHandler,
+    MockBrokerFeed,
+    MStockBrokerFeed,
+)
 from backtest.live.time_manager import TimeManager
-
 
 # ---------------------------------------------------------------------------
 # MockBrokerFeed
@@ -122,7 +126,15 @@ def test_bar_builder_timeframe_5min():
 def test_bar_builder_add_bar_direct():
     builder = BarBuilder(symbol="INFY", timeframe="1min")
 
-    bar = {"symbol": "INFY", "timestamp": "2024-01-02T09:15:00+05:30", "open": 100, "high": 101, "low": 99, "close": 100.5, "volume": 1000}
+    bar = {
+        "symbol": "INFY",
+        "timestamp": "2024-01-02T09:15:00+05:30",
+        "open": 100,
+        "high": 101,
+        "low": 99,
+        "close": 100.5,
+        "volume": 1000,
+    }
     normalized = builder.add_bar(bar)
 
     assert normalized["symbol"] == "INFY"
@@ -139,7 +151,14 @@ def test_normalize_tick():
     handler = MarketDataHandler(provider="mock")
 
     # Standard format
-    tick = {"symbol": "INFY", "bid": 99, "ask": 101, "last": 100, "volume": 100, "timestamp": "2024-01-02T09:15:00+05:30"}
+    tick = {
+        "symbol": "INFY",
+        "bid": 99,
+        "ask": 101,
+        "last": 100,
+        "volume": 100,
+        "timestamp": "2024-01-02T09:15:00+05:30",
+    }
     normalized = handler.normalize_tick(tick)
     assert normalized is not None
     assert normalized["symbol"] == "INFY"
@@ -173,7 +192,15 @@ def test_normalize_tick():
 def test_normalize_bar():
     handler = MarketDataHandler(provider="mock")
 
-    bar = {"symbol": "INFY", "open": 100, "high": 101, "low": 99, "close": 100.5, "volume": 1000, "timestamp": "2024-01-02T09:15:00+05:30"}
+    bar = {
+        "symbol": "INFY",
+        "open": 100,
+        "high": 101,
+        "low": 99,
+        "close": 100.5,
+        "volume": 1000,
+        "timestamp": "2024-01-02T09:15:00+05:30",
+    }
     normalized = handler.normalize_bar(bar)
     assert normalized is not None
     assert normalized["open"] == 100
@@ -226,7 +253,14 @@ def test_handler_tick_flow():
     ticks_received = []
     handler.on_tick_received(lambda tick: ticks_received.append(tick))
 
-    tick = {"symbol": "INFY", "bid": 99, "ask": 101, "last": 100, "volume": 10, "timestamp": "2024-01-02T09:15:10+05:30"}
+    tick = {
+        "symbol": "INFY",
+        "bid": 99,
+        "ask": 101,
+        "last": 100,
+        "volume": 10,
+        "timestamp": "2024-01-02T09:15:10+05:30",
+    }
     handler.inject_tick(tick)
 
     assert len(ticks_received) == 1
@@ -242,20 +276,28 @@ def test_handler_tick_flow():
 
 
 def test_handler_bar_aggregation():
-    handler = MarketDataHandler(symbols=["INFY"], provider="mock", timeframe="1min", timeframes=["1min", "5min"])
+    handler = MarketDataHandler(
+        symbols=["INFY"], provider="mock", timeframe="1min", timeframes=["1min", "5min"]
+    )
     handler.connect()
 
     bars_closed = []
     handler.on_bar_closed(lambda bar: bars_closed.append(bar))
 
     # Inject ticks within same minute – no bar closed yet
-    handler.inject_tick({"symbol": "INFY", "last": 100, "volume": 10, "timestamp": "2024-01-02T09:15:10+05:30"})
-    handler.inject_tick({"symbol": "INFY", "last": 101, "volume": 5, "timestamp": "2024-01-02T09:15:20+05:30"})
+    handler.inject_tick(
+        {"symbol": "INFY", "last": 100, "volume": 10, "timestamp": "2024-01-02T09:15:10+05:30"}
+    )
+    handler.inject_tick(
+        {"symbol": "INFY", "last": 101, "volume": 5, "timestamp": "2024-01-02T09:15:20+05:30"}
+    )
 
     assert len(bars_closed) == 0
 
     # Next minute – should close previous bar
-    handler.inject_tick({"symbol": "INFY", "last": 102, "volume": 8, "timestamp": "2024-01-02T09:16:10+05:30"})
+    handler.inject_tick(
+        {"symbol": "INFY", "last": 102, "volume": 8, "timestamp": "2024-01-02T09:16:10+05:30"}
+    )
 
     assert len(bars_closed) == 1
     assert bars_closed[0]["open"] == 100
@@ -270,7 +312,15 @@ def test_handler_bar_direct():
     bars_closed = []
     handler.on_bar_closed(lambda bar: bars_closed.append(bar))
 
-    bar = {"symbol": "INFY", "open": 100, "high": 101, "low": 99, "close": 100.5, "volume": 1000, "timestamp": "2024-01-02T09:15:00+05:30"}
+    bar = {
+        "symbol": "INFY",
+        "open": 100,
+        "high": 101,
+        "low": 99,
+        "close": 100.5,
+        "volume": 1000,
+        "timestamp": "2024-01-02T09:15:00+05:30",
+    }
     handler.inject_bar(bar)
 
     assert len(bars_closed) == 1
@@ -300,7 +350,14 @@ def test_handler_buffer_management():
 
     # Inject 10 ticks, buffer should only keep last 5
     for i in range(10):
-        handler.inject_tick({"symbol": "INFY", "last": 100 + i, "volume": 1, "timestamp": f"2024-01-02T09:15:{i:02d}+05:30"})
+        handler.inject_tick(
+            {
+                "symbol": "INFY",
+                "last": 100 + i,
+                "volume": 1,
+                "timestamp": f"2024-01-02T09:15:{i:02d}+05:30",
+            }
+        )
 
     recent = handler.get_recent_ticks("INFY", count=10)
     assert len(recent) == 5  # bounded
@@ -314,8 +371,28 @@ def test_handler_get_latest_data():
     handler = MarketDataHandler(symbols=["INFY", "TCS"], provider="mock", timeframe="1min")
     handler.connect()
 
-    handler.inject_bar({"symbol": "INFY", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000, "timestamp": "2024-01-02T09:15:00+05:30"})
-    handler.inject_bar({"symbol": "TCS", "open": 200, "high": 201, "low": 199, "close": 200, "volume": 1000, "timestamp": "2024-01-02T09:15:00+05:30"})
+    handler.inject_bar(
+        {
+            "symbol": "INFY",
+            "open": 100,
+            "high": 101,
+            "low": 99,
+            "close": 100,
+            "volume": 1000,
+            "timestamp": "2024-01-02T09:15:00+05:30",
+        }
+    )
+    handler.inject_bar(
+        {
+            "symbol": "TCS",
+            "open": 200,
+            "high": 201,
+            "low": 199,
+            "close": 200,
+            "volume": 1000,
+            "timestamp": "2024-01-02T09:15:00+05:30",
+        }
+    )
 
     latest = handler.get_latest_data()
     assert "INFY" in latest
@@ -327,7 +404,9 @@ def test_handler_stats():
     handler.connect()
 
     handler.inject_tick({"symbol": "INFY", "last": 100})
-    handler.inject_bar({"symbol": "INFY", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000})
+    handler.inject_bar(
+        {"symbol": "INFY", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000}
+    )
 
     stats = handler.get_stats()
     assert stats["ticks_received"] == 1
@@ -346,7 +425,9 @@ def test_handler_observer_pattern():
     handler.on_bar_closed(lambda bar: bar_count.append(1))
 
     handler.inject_tick({"symbol": "INFY", "last": 100})
-    handler.inject_bar({"symbol": "INFY", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000})
+    handler.inject_bar(
+        {"symbol": "INFY", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000}
+    )
 
     assert len(tick_count) == 1
     assert len(bar_count) == 1
@@ -364,5 +445,7 @@ def test_handler_with_mstock_provider():
     assert handler.is_connected() is True
 
     # Inject mock bar still works
-    handler.inject_bar({"symbol": "INFY", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000})
+    handler.inject_bar(
+        {"symbol": "INFY", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000}
+    )
     assert handler.get_current_bar("INFY") is not None

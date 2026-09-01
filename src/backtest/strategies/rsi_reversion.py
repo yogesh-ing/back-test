@@ -12,16 +12,28 @@ class RsiReversion(Strategy):
     author = "Trading Bot"
     params = {
         "period": {
-            "default": 14, "min": 2, "max": 50, "type": "int",
-            "label": "RSI Period", "tooltip": "Lookback window for the RSI calculation.",
+            "default": 14,
+            "min": 2,
+            "max": 50,
+            "type": "int",
+            "label": "RSI Period",
+            "tooltip": "Lookback window for the RSI calculation.",
         },
         "lower": {
-            "default": 30, "min": 1, "max": 49, "type": "int",
-            "label": "Oversold Level", "tooltip": "Enter long when RSI falls below this level.",
+            "default": 30,
+            "min": 1,
+            "max": 49,
+            "type": "int",
+            "label": "Oversold Level",
+            "tooltip": "Enter long when RSI falls below this level.",
         },
         "exit_level": {
-            "default": 55, "min": 50, "max": 90, "type": "int",
-            "label": "Exit Level", "tooltip": "Exit the position when RSI rises above this level.",
+            "default": 55,
+            "min": 50,
+            "max": 90,
+            "type": "int",
+            "label": "Exit Level",
+            "tooltip": "Exit the position when RSI rises above this level.",
         },
     }
 

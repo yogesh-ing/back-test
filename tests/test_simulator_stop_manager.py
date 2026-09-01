@@ -13,7 +13,9 @@ from backtest.simulator.stop_manager import StopManager, StopType, TakeProfitTyp
 def make_portfolio():
     from backtest.simulator.portfolio import PortfolioLimits
 
-    return Portfolio(name="stop_test", initial_capital=100000, limits=PortfolioLimits(allow_short=True))
+    return Portfolio(
+        name="stop_test", initial_capital=100000, limits=PortfolioLimits(allow_short=True)
+    )
 
 
 def make_position(portfolio, symbol="INFY", qty=100, entry_price=100):
@@ -125,7 +127,9 @@ def test_atr_based_stop():
     # Long SL = 100 - 2*2 = 96
     assert stop.price == Decimal("96")
 
-    tp = manager.add_take_profit(pos, target_type="atr_based", params={"atr": 2, "atr_multiplier": 3})
+    tp = manager.add_take_profit(
+        pos, target_type="atr_based", params={"atr": 2, "atr_multiplier": 3}
+    )
     # Long TP via ATR-based? Actually ATR-based is StopType, but we use add_take_profit with atr_based
     # For take profit, if we use atr_based as stop_type, it will still calculate as entry +/- atr*mult
     # Our implementation for ATR-based doesn't distinguish is_take_profit for TP? It does: for long TP, entry + atr*mult
@@ -231,7 +235,9 @@ def test_risk_reward_take_profit():
     manager = StopManager(portfolio)
 
     # Risk 2%, RR 2:1 => target 4% above
-    tp = manager.add_take_profit(pos, target_type="risk_reward", params={"risk_reward_ratio": 2, "stop_pct": 0.02})
+    tp = manager.add_take_profit(
+        pos, target_type="risk_reward", params={"risk_reward_ratio": 2, "stop_pct": 0.02}
+    )
     # 100 * (1 + 0.02*2) =104
     assert tp.price == Decimal("104")
 
@@ -256,7 +262,9 @@ def test_breakeven_move():
     manager = StopManager(portfolio)
 
     stop = manager.add_stop_loss(
-        pos, stop_type="percentage", params={"pct": 0.02, "move_to_breakeven": True, "breakeven_trigger_pct": 0.03}
+        pos,
+        stop_type="percentage",
+        params={"pct": 0.02, "move_to_breakeven": True, "breakeven_trigger_pct": 0.03},
     )
     # Initial stop 98
     assert stop.price == Decimal("98")
@@ -272,7 +280,9 @@ def test_scale_out():
     pos = make_position(portfolio, qty=100, entry_price=100)
     manager = StopManager(portfolio)
 
-    tp = manager.add_take_profit(pos, target_type="percentage", params={"pct": 0.05, "scale_out_pct": 0.5})
+    tp = manager.add_take_profit(
+        pos, target_type="percentage", params={"pct": 0.05, "scale_out_pct": 0.5}
+    )
     assert tp.scale_out_pct == Decimal("0.5")
     assert tp.quantity == Decimal("50")  # 50% of 100
 
@@ -282,8 +292,12 @@ def test_oco_orders():
     pos = make_position(portfolio, qty=100, entry_price=100)
     manager = StopManager(portfolio)
 
-    sl = manager.add_stop_loss(pos, stop_type="percentage", params={"pct": 0.02, "oco_group": "exit1"})
-    tp = manager.add_take_profit(pos, target_type="percentage", params={"pct": 0.04, "oco_group": "exit1"})
+    sl = manager.add_stop_loss(
+        pos, stop_type="percentage", params={"pct": 0.02, "oco_group": "exit1"}
+    )
+    tp = manager.add_take_profit(
+        pos, target_type="percentage", params={"pct": 0.04, "oco_group": "exit1"}
+    )
 
     assert sl.oco_group == "exit1"
     assert tp.oco_group == "exit1"

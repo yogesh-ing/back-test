@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, date, time as dtime, timedelta, timezone
+from datetime import date, datetime
+from datetime import time as dtime
+from datetime import timedelta, timezone
 from typing import Any, List, Optional, Union
 from zoneinfo import ZoneInfo
 
@@ -66,32 +68,32 @@ NYSE_CLOSE = dtime(16, 0)
 # NSE holidays 2024-2025 (partial list, for testing – full calendar would use pandas_market_calendars)
 NSE_HOLIDAYS_2024 = [
     date(2024, 1, 26),  # Republic Day
-    date(2024, 3, 8),   # Mahashivratri
+    date(2024, 3, 8),  # Mahashivratri
     date(2024, 3, 25),  # Holi
     date(2024, 3, 29),  # Good Friday
     date(2024, 4, 11),  # Id-Ul-Fitr
     date(2024, 4, 17),  # Ram Navami
-    date(2024, 5, 1),   # Maharashtra Day
+    date(2024, 5, 1),  # Maharashtra Day
     date(2024, 6, 17),  # Bakri Id
     date(2024, 7, 17),  # Moharram
     date(2024, 8, 15),  # Independence Day
     date(2024, 10, 2),  # Gandhi Jayanti
     date(2024, 11, 1),  # Diwali
-    date(2024, 11, 15), # Gurunanak Jayanti
-    date(2024, 12, 25), # Christmas
+    date(2024, 11, 15),  # Gurunanak Jayanti
+    date(2024, 12, 25),  # Christmas
 ]
 
 NYSE_HOLIDAYS_2024 = [
-    date(2024, 1, 1),   # New Year
+    date(2024, 1, 1),  # New Year
     date(2024, 1, 15),  # MLK
     date(2024, 2, 19),  # Presidents
     date(2024, 3, 29),  # Good Friday
     date(2024, 5, 27),  # Memorial
     date(2024, 6, 19),  # Juneteenth
-    date(2024, 7, 4),   # Independence
-    date(2024, 9, 2),   # Labor
-    date(2024, 11, 28), # Thanksgiving
-    date(2024, 12, 25), # Christmas
+    date(2024, 7, 4),  # Independence
+    date(2024, 9, 2),  # Labor
+    date(2024, 11, 28),  # Thanksgiving
+    date(2024, 12, 25),  # Christmas
 ]
 
 
@@ -240,7 +242,13 @@ class TimeManager:
 
         self.timezone = self.hours.timezone
 
-        logger.info("TimeManager initialized: market=%s tz=%s holidays=%s mock=%s", self.market, self.timezone, len(self.hours.holidays), bool(mock_time))
+        logger.info(
+            "TimeManager initialized: market=%s tz=%s holidays=%s mock=%s",
+            self.market,
+            self.timezone,
+            len(self.hours.holidays),
+            bool(mock_time),
+        )
 
         if ntp_sync:
             self.sync_with_ntp()
@@ -371,12 +379,22 @@ class TimeManager:
                 # Days to Monday
                 days_ahead = 7 - candidate.weekday()
                 candidate = candidate + timedelta(days=days_ahead)
-                candidate = candidate.replace(hour=self.hours.open.hour, minute=self.hours.open.minute, second=0, microsecond=0)
+                candidate = candidate.replace(
+                    hour=self.hours.open.hour,
+                    minute=self.hours.open.minute,
+                    second=0,
+                    microsecond=0,
+                )
                 continue
 
             if candidate.date() in self.hours.holidays:
                 candidate = candidate + timedelta(days=1)
-                candidate = candidate.replace(hour=self.hours.open.hour, minute=self.hours.open.minute, second=0, microsecond=0)
+                candidate = candidate.replace(
+                    hour=self.hours.open.hour,
+                    minute=self.hours.open.minute,
+                    second=0,
+                    microsecond=0,
+                )
                 continue
 
             open_minutes = self.hours.open.hour * 60 + self.hours.open.minute
@@ -385,17 +403,32 @@ class TimeManager:
 
             if curr_minutes <= open_minutes:
                 # Before or at open – today open is next
-                candidate = candidate.replace(hour=self.hours.open.hour, minute=self.hours.open.minute, second=0, microsecond=0)
+                candidate = candidate.replace(
+                    hour=self.hours.open.hour,
+                    minute=self.hours.open.minute,
+                    second=0,
+                    microsecond=0,
+                )
                 return candidate
             elif curr_minutes <= close_minutes:
                 # Currently open, next open is tomorrow
                 candidate = candidate + timedelta(days=1)
-                candidate = candidate.replace(hour=self.hours.open.hour, minute=self.hours.open.minute, second=0, microsecond=0)
+                candidate = candidate.replace(
+                    hour=self.hours.open.hour,
+                    minute=self.hours.open.minute,
+                    second=0,
+                    microsecond=0,
+                )
                 continue
             else:
                 # After close, next day open
                 candidate = candidate + timedelta(days=1)
-                candidate = candidate.replace(hour=self.hours.open.hour, minute=self.hours.open.minute, second=0, microsecond=0)
+                candidate = candidate.replace(
+                    hour=self.hours.open.hour,
+                    minute=self.hours.open.minute,
+                    second=0,
+                    microsecond=0,
+                )
                 continue
 
         raise ValueError("Could not find next market open within 1 year")
@@ -415,7 +448,12 @@ class TimeManager:
         for _ in range(365):
             if candidate.weekday() >= 5 or candidate.date() in self.hours.holidays:
                 candidate = candidate + timedelta(days=1)
-                candidate = candidate.replace(hour=self.hours.close.hour, minute=self.hours.close.minute, second=0, microsecond=0)
+                candidate = candidate.replace(
+                    hour=self.hours.close.hour,
+                    minute=self.hours.close.minute,
+                    second=0,
+                    microsecond=0,
+                )
                 continue
 
             open_minutes = self.hours.open.hour * 60 + self.hours.open.minute
@@ -424,21 +462,38 @@ class TimeManager:
 
             if curr_minutes < open_minutes:
                 # Before open, close is today
-                candidate = candidate.replace(hour=self.hours.close.hour, minute=self.hours.close.minute, second=0, microsecond=0)
+                candidate = candidate.replace(
+                    hour=self.hours.close.hour,
+                    minute=self.hours.close.minute,
+                    second=0,
+                    microsecond=0,
+                )
                 return candidate
             elif curr_minutes <= close_minutes:
                 # Currently open, close today
-                candidate = candidate.replace(hour=self.hours.close.hour, minute=self.hours.close.minute, second=0, microsecond=0)
+                candidate = candidate.replace(
+                    hour=self.hours.close.hour,
+                    minute=self.hours.close.minute,
+                    second=0,
+                    microsecond=0,
+                )
                 return candidate
             else:
                 # After close, next day close
                 candidate = candidate + timedelta(days=1)
-                candidate = candidate.replace(hour=self.hours.close.hour, minute=self.hours.close.minute, second=0, microsecond=0)
+                candidate = candidate.replace(
+                    hour=self.hours.close.hour,
+                    minute=self.hours.close.minute,
+                    second=0,
+                    microsecond=0,
+                )
                 continue
 
         raise ValueError("Could not find next market close within 1 year")
 
-    def get_trading_days_between(self, start: Union[str, datetime, date], end: Union[str, datetime, date]) -> List[date]:
+    def get_trading_days_between(
+        self, start: Union[str, datetime, date], end: Union[str, datetime, date]
+    ) -> List[date]:
         """Get list of trading days between start and end inclusive."""
         start_date = _parse_timestamp(start).date() if not isinstance(start, date) else start
         end_date = _parse_timestamp(end).date() if not isinstance(end, date) else end
@@ -507,7 +562,9 @@ class TimeManager:
         elif tf in ("week", "1week", "1w"):
             # Monday as start of week
             days_since_monday = local.weekday()
-            aligned = (local - timedelta(days=days_since_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
+            aligned = (local - timedelta(days=days_since_monday)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
         elif tf in ("month", "1month", "1mo", "m"):
             aligned = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         else:
@@ -524,7 +581,9 @@ class TimeManager:
 
         return aligned
 
-    def is_bar_closed(self, bar_timestamp: Any, timeframe: str, current_time: Optional[datetime] = None) -> bool:
+    def is_bar_closed(
+        self, bar_timestamp: Any, timeframe: str, current_time: Optional[datetime] = None
+    ) -> bool:
         """Check if a bar is closed (i.e., current time is past bar's close).
 
         For example, a 5min bar starting at 09:15 is closed at 09:20.

@@ -12,8 +12,12 @@ class DonchianBreakout(Strategy):
     author = "Trading Bot"
     params = {
         "lookback": {
-            "default": 20, "min": 2, "max": 100, "type": "int",
-            "label": "Lookback", "tooltip": "Channel window for the highest high / lowest low.",
+            "default": 20,
+            "min": 2,
+            "max": 100,
+            "type": "int",
+            "label": "Lookback",
+            "tooltip": "Channel window for the highest high / lowest low.",
         },
     }
     stop_loss = 0.05

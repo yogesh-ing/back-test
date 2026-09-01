@@ -39,7 +39,8 @@ TABLE_NAME = "instruments"
 # ---------------------------------------------------------------------------
 # Table DDL (created if missing)
 # ---------------------------------------------------------------------------
-CREATE_TABLE_SQL = text("""
+CREATE_TABLE_SQL = text(
+    """
 CREATE TABLE IF NOT EXISTS instruments (
     instrument_token   BIGINT PRIMARY KEY,
     exchange_token     BIGINT,
@@ -55,7 +56,8 @@ CREATE TABLE IF NOT EXISTS instruments (
     exchange           VARCHAR(16),
     fetched_at         TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
-""")
+"""
+)
 
 CREATE_INDEXES_SQL = [
     "CREATE INDEX IF NOT EXISTS ix_instruments_symbol ON instruments (tradingsymbol)",
@@ -67,6 +69,7 @@ CREATE_INDEXES_SQL = [
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _ensure_table(engine):
     """Create instruments table and indexes if they don't exist."""
@@ -90,12 +93,23 @@ def _bulk_upsert(engine, frame: pd.DataFrame) -> int:
 
     # Use COPY for bulk insert (fastest path for PostgreSQL)
     cols = [
-        "instrument_token", "exchange_token", "tradingsymbol", "name",
-        "last_price", "expiry", "strike", "tick_size", "lot_size",
-        "instrument_type", "segment", "exchange", "fetched_at",
+        "instrument_token",
+        "exchange_token",
+        "tradingsymbol",
+        "name",
+        "last_price",
+        "expiry",
+        "strike",
+        "tick_size",
+        "lot_size",
+        "instrument_type",
+        "segment",
+        "exchange",
+        "fetched_at",
     ]
 
-    upsert_sql = text("""
+    upsert_sql = text(
+        """
         INSERT INTO instruments
             (instrument_token, exchange_token, tradingsymbol, name,
              last_price, expiry, strike, tick_size, lot_size,
@@ -117,7 +131,8 @@ def _bulk_upsert(engine, frame: pd.DataFrame) -> int:
             segment         = EXCLUDED.segment,
             exchange        = EXCLUDED.exchange,
             fetched_at      = EXCLUDED.fetched_at
-    """)
+    """
+    )
 
     # Build list of dicts, converting pandas types to native Python
     records = []
@@ -142,7 +157,9 @@ def _bulk_upsert(engine, frame: pd.DataFrame) -> int:
             batch = records[i : i + BATCH_SIZE]
             conn.execute(upsert_sql, batch)
             total_inserted += len(batch)
-            print(f"    Upserted batch {i // BATCH_SIZE + 1}: {len(batch)} rows (total: {total_inserted})")
+            print(
+                f"    Upserted batch {i // BATCH_SIZE + 1}: {len(batch)} rows (total: {total_inserted})"
+            )
         conn.commit()
 
     return total_inserted
@@ -157,57 +174,93 @@ def _validate(engine, total_fetched: int) -> dict:
         summary["total_rows"] = row["cnt"]
 
         # 2. By exchange
-        rows = conn.execute(text(
-            f"SELECT exchange, count(*) as cnt FROM {TABLE_NAME} GROUP BY exchange ORDER BY cnt DESC"
-        )).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    f"SELECT exchange, count(*) as cnt FROM {TABLE_NAME} GROUP BY exchange ORDER BY cnt DESC"
+                )
+            )
+            .mappings()
+            .all()
+        )
         summary["by_exchange"] = [dict(r) for r in rows]
 
         # 3. By instrument_type (top 10)
-        rows = conn.execute(text(
-            f"SELECT instrument_type, count(*) as cnt FROM {TABLE_NAME} "
-            f"GROUP BY instrument_type ORDER BY cnt DESC LIMIT 10"
-        )).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    f"SELECT instrument_type, count(*) as cnt FROM {TABLE_NAME} "
+                    f"GROUP BY instrument_type ORDER BY cnt DESC LIMIT 10"
+                )
+            )
+            .mappings()
+            .all()
+        )
         summary["by_type_top10"] = [dict(r) for r in rows]
 
         # 4. By segment (top 10)
-        rows = conn.execute(text(
-            f"SELECT segment, count(*) as cnt FROM {TABLE_NAME} "
-            f"GROUP BY segment ORDER BY cnt DESC LIMIT 10"
-        )).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    f"SELECT segment, count(*) as cnt FROM {TABLE_NAME} "
+                    f"GROUP BY segment ORDER BY cnt DESC LIMIT 10"
+                )
+            )
+            .mappings()
+            .all()
+        )
         summary["by_segment_top10"] = [dict(r) for r in rows]
 
         # 5. Sample: first 5 equity instruments
-        rows = conn.execute(text(
-            f"SELECT instrument_token, tradingsymbol, name, exchange, instrument_type, tick_size, lot_size "
-            f"FROM {TABLE_NAME} WHERE instrument_type = 'EQ' ORDER BY tradingsymbol LIMIT 5"
-        )).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    f"SELECT instrument_token, tradingsymbol, name, exchange, instrument_type, tick_size, lot_size "
+                    f"FROM {TABLE_NAME} WHERE instrument_type = 'EQ' ORDER BY tradingsymbol LIMIT 5"
+                )
+            )
+            .mappings()
+            .all()
+        )
         sample_eq = [dict(r) for r in rows]
         summary["sample_equity_5"] = sample_eq
 
         # 6. Check for NIFTY
-        rows = conn.execute(text(
-            f"SELECT instrument_token, tradingsymbol, name, exchange, segment "
-            f"FROM {TABLE_NAME} WHERE tradingsymbol ILIKE '%NIFTY%' "
-            f"AND instrument_type = 'EQ' ORDER BY tradingsymbol LIMIT 10"
-        )).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    f"SELECT instrument_token, tradingsymbol, name, exchange, segment "
+                    f"FROM {TABLE_NAME} WHERE tradingsymbol ILIKE '%NIFTY%' "
+                    f"AND instrument_type = 'EQ' ORDER BY tradingsymbol LIMIT 10"
+                )
+            )
+            .mappings()
+            .all()
+        )
         summary["nifty_matches"] = [dict(r) for r in rows]
 
         # 7. Distinct instrument types count
-        row = conn.execute(text(
-            f"SELECT count(DISTINCT instrument_type) as cnt FROM {TABLE_NAME}"
-        )).mappings().first()
+        row = (
+            conn.execute(text(f"SELECT count(DISTINCT instrument_type) as cnt FROM {TABLE_NAME}"))
+            .mappings()
+            .first()
+        )
         summary["distinct_types"] = row["cnt"]
 
         # 8. Distinct exchanges count
-        row = conn.execute(text(
-            f"SELECT count(DISTINCT exchange) as cnt FROM {TABLE_NAME}"
-        )).mappings().first()
+        row = (
+            conn.execute(text(f"SELECT count(DISTINCT exchange) as cnt FROM {TABLE_NAME}"))
+            .mappings()
+            .first()
+        )
         summary["distinct_exchanges"] = row["cnt"]
 
         # 9. fetched_at freshness
-        row = conn.execute(text(
-            f"SELECT max(fetched_at) as last_fetch FROM {TABLE_NAME}"
-        )).mappings().first()
+        row = (
+            conn.execute(text(f"SELECT max(fetched_at) as last_fetch FROM {TABLE_NAME}"))
+            .mappings()
+            .first()
+        )
         summary["last_fetch"] = str(row["last_fetch"])
 
     return summary
@@ -216,6 +269,7 @@ def _validate(engine, total_fetched: int) -> dict:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     print("=" * 70)
@@ -298,11 +352,15 @@ def main():
 
     print(f"\n  Sample Equity Instruments:")
     for r in summary["sample_equity_5"]:
-        print(f"    {r['instrument_token']:>8} | {r['tradingsymbol']:<20} | {r['name'][:40]:<40} | tick={r['tick_size']} lot={r['lot_size']}")
+        print(
+            f"    {r['instrument_token']:>8} | {r['tradingsymbol']:<20} | {r['name'][:40]:<40} | tick={r['tick_size']} lot={r['lot_size']}"
+        )
 
     print(f"\n  NIFTY Matches (equity):")
     for r in summary["nifty_matches"]:
-        print(f"    {r['instrument_token']:>8} | {r['tradingsymbol']:<30} | {r['name'][:50]:<50} | {r['exchange']}/{r['segment']}")
+        print(
+            f"    {r['instrument_token']:>8} | {r['tradingsymbol']:<30} | {r['name'][:50]:<50} | {r['exchange']}/{r['segment']}"
+        )
 
     # -- Assertions ----------------------------------------------------------
     errors = []

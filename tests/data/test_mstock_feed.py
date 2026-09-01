@@ -30,8 +30,14 @@ class _FakeClient:
 
 
 def _bar(ts: str, close: float) -> dict:
-    return {"ts": ts, "open": close, "high": close + 1, "low": close - 1,
-            "close": close, "volume": 1000}
+    return {
+        "ts": ts,
+        "open": close,
+        "high": close + 1,
+        "low": close - 1,
+        "close": close,
+        "volume": 1000,
+    }
 
 
 def test_iter_bars_yields_realtime_bars():
@@ -42,7 +48,9 @@ def test_iter_bars_yields_realtime_bars():
     bars = list(feed.iter_bars("RELIANCE", max_bars=3, market_gate=False, sleep=lambda s: None))
 
     assert [b["ts"] for b in bars] == [
-        "2024-01-02 09:10:00", "2024-01-02 09:11:00", "2024-01-02 09:12:00"
+        "2024-01-02 09:10:00",
+        "2024-01-02 09:11:00",
+        "2024-01-02 09:12:00",
     ]
     assert [b["close"] for b in bars] == [100, 101, 102]
     assert client.latest_calls == ["RELIANCE"] * 3
@@ -64,8 +72,9 @@ def test_iter_bars_skips_duplicate_bars():
         stop_check.n = getattr(stop_check, "n", 0) + 1
         return stop_check.n > 10
 
-    for bar in feed.iter_bars("DEMO", stop_check=stop_check, market_gate=False,
-                              sleep=lambda s: None):
+    for bar in feed.iter_bars(
+        "DEMO", stop_check=stop_check, market_gate=False, sleep=lambda s: None
+    ):
         seen.append(bar["ts"])
 
     assert seen == ["T1", "T2"]  # duplicates skipped
@@ -79,8 +88,9 @@ def test_iter_bars_stops_on_stop_check():
         stop_check.n = getattr(stop_check, "n", 0) + 1
         return stop_check.n > 2  # allow 2 polls, then stop
 
-    bars = list(feed.iter_bars("DEMO", stop_check=stop_check, market_gate=False,
-                               sleep=lambda s: None))
+    bars = list(
+        feed.iter_bars("DEMO", stop_check=stop_check, market_gate=False, sleep=lambda s: None)
+    )
     assert len(bars) == 2
 
 
@@ -133,8 +143,7 @@ def test_get_candles_parses_http_candles(monkeypatch):
 
     # Auth + instrument resolution
     monkeypatch.setattr("backtest.live.auth.get_session_token", lambda: "sess-token")
-    monkeypatch.setattr(feed_mod, "_resolve_security_token",
-                        lambda *a, **k: "54321")
+    monkeypatch.setattr(feed_mod, "_resolve_security_token", lambda *a, **k: "54321")
 
     class _Resp:
         status_code = 200
@@ -143,10 +152,14 @@ def test_get_candles_parses_http_candles(monkeypatch):
             return None
 
         def json(self):
-            return {"data": {"candles": [
-                ["2024-01-02 09:15:00", 100.0, 101.0, 99.5, 100.5, 1000],
-                ["2024-01-02 09:16:00", 100.5, 102.0, 100.0, 101.5, 2000],
-            ]}}
+            return {
+                "data": {
+                    "candles": [
+                        ["2024-01-02 09:15:00", 100.0, 101.0, 99.5, 100.5, 1000],
+                        ["2024-01-02 09:16:00", 100.5, 102.0, 100.0, 101.5, 2000],
+                    ]
+                }
+            }
 
     monkeypatch.setattr("requests.get", lambda *a, **k: _Resp())
 

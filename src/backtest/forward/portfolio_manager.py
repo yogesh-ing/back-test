@@ -24,20 +24,21 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from backtest.forward.feed import SyntheticFeed
-from backtest.forward.paper_runner import OrderLedger, PaperBroker
-from backtest.forward.risk_supervisor import (
-    HALT_FLATTEN,
-    STATE_HALTED,
-    GlobalRiskConfig,
-    RiskSupervisor,
-)
 from backtest.forward.paper_runner import (
     STATUS_PAUSED,
     STATUS_RUNNING,
     STATUS_STOPPED,
     VALID_INSTANCE_MODES,
+    OrderLedger,
+    PaperBroker,
     RunnerConfig,
     StrategyRunner,
+)
+from backtest.forward.risk_supervisor import (
+    HALT_FLATTEN,
+    STATE_HALTED,
+    GlobalRiskConfig,
+    RiskSupervisor,
 )
 
 logger = logging.getLogger("backtest.forward.portfolio")
@@ -72,13 +73,15 @@ class PortfolioManager:
         self.halt_mode: Optional[str] = None
         self.halted_ts: Optional[str] = None
         self.last_report: Dict[str, Any] = {}
-        self.tick_count: int = 0    # bar events processed
-        self.tick_index: int = 0   # complete feed ticks (all symbols)
+        self.tick_count: int = 0  # bar events processed
+        self.tick_index: int = 0  # complete feed ticks (all symbols)
 
         # Feed
         self.feed = SyntheticFeed(
-            on_bar=self._on_bar, tick_seconds=tick_seconds,
-            warmup_bars=warmup_bars, on_tick_end=self._on_tick_end,
+            on_bar=self._on_bar,
+            tick_seconds=tick_seconds,
+            warmup_bars=warmup_bars,
+            on_tick_end=self._on_tick_end,
         )
         self._auto_start_feed = auto_start_feed
 
@@ -94,8 +97,9 @@ class PortfolioManager:
     ) -> str:
         """Spawn a runner from config. Returns its instance_id."""
         with self._lock:
-            runner = StrategyRunner(config, ledger=self.ledger,
-                                    broker=self.broker, strategy=strategy)
+            runner = StrategyRunner(
+                config, ledger=self.ledger, broker=self.broker, strategy=strategy
+            )
             self._runners[runner.instance_id] = runner
             self.total_capital += config.allocated_capital
 
@@ -108,9 +112,13 @@ class PortfolioManager:
                 if self._auto_start_feed:
                     self.feed.start(warmup=True)
 
-            logger.info("Runner added: %s (%s) alloc=%.0f — %d runners total",
-                        runner.config.name, runner.instance_id[:8],
-                        config.allocated_capital, len(self._runners))
+            logger.info(
+                "Runner added: %s (%s) alloc=%.0f — %d runners total",
+                runner.config.name,
+                runner.instance_id[:8],
+                config.allocated_capital,
+                len(self._runners),
+            )
             return runner.instance_id
 
     def remove_runner(self, instance_id: str) -> bool:
@@ -195,8 +203,11 @@ class PortfolioManager:
             for runner in self._runners.values():
                 if runner.status == STATUS_RUNNING:
                     runner.pause()
-            logger.critical("EMERGENCY FLATTEN: %d positions closed across %d runners",
-                            count, len(self._runners))
+            logger.critical(
+                "EMERGENCY FLATTEN: %d positions closed across %d runners",
+                count,
+                len(self._runners),
+            )
             self._evaluate_risk()
             return count
 
@@ -232,8 +243,9 @@ class PortfolioManager:
             # Daily PnL is session-anchored (baseline fixed at first bar /
             # explicit reset) so warmup/replay does not roll the day.
             if self._current_day is None:
-                self._current_day = (str(bar.get("ts", ""))[:10]
-                                     or datetime.now(timezone.utc).date().isoformat())
+                self._current_day = (
+                    str(bar.get("ts", ""))[:10] or datetime.now(timezone.utc).date().isoformat()
+                )
                 self._day_start_equity = self._aggregate_equity()
 
             for runner in self._runners.values():
@@ -306,9 +318,7 @@ class PortfolioManager:
         if mode is not None:
             mode = str(mode).strip().lower()
             if mode not in VALID_INSTANCE_MODES:
-                raise ValueError(
-                    f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}"
-                )
+                raise ValueError(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
         with self._lock:
             states = [r.get_state() for r in self._runners.values()]
         if mode is not None:
@@ -327,9 +337,7 @@ class PortfolioManager:
         if mode is not None:
             mode = str(mode).strip().lower()
             if mode not in VALID_INSTANCE_MODES:
-                raise ValueError(
-                    f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}"
-                )
+                raise ValueError(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
         with self._lock:
             states = [r.get_state() for r in self._runners.values()]
         if mode is not None:
@@ -361,9 +369,13 @@ class PortfolioManager:
                 "total_capital": round(total_capital, 2),
                 "total_equity": round(equity, 2),
                 "deployed_capital": round(deployed, 2),
-                "deployed_pct": round(deployed / self.total_capital, 4) if self.total_capital > 0 else 0.0,
+                "deployed_pct": (
+                    round(deployed / self.total_capital, 4) if self.total_capital > 0 else 0.0
+                ),
                 "daily_pnl": round(daily, 2),
-                "daily_pnl_pct": round(daily / self._day_start_equity, 6) if self._day_start_equity else 0.0,
+                "daily_pnl_pct": (
+                    round(daily / self._day_start_equity, 6) if self._day_start_equity else 0.0
+                ),
                 "realized_pnl": round(realized, 2),
                 "open_positions": open_positions,
                 "runner_count": len(states),
@@ -420,7 +432,9 @@ class PortfolioManager:
                     runner.apply_markdown(symbol, price * (1 - crash_pct), ts=ts)
                     injected += 1
             self._evaluate_risk()
-        logger.warning("Crash simulation: %d positions marked at -%.0f%%", injected, crash_pct * 100)
+        logger.warning(
+            "Crash simulation: %d positions marked at -%.0f%%", injected, crash_pct * 100
+        )
         return injected
 
     def stress_test(

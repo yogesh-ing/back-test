@@ -124,7 +124,10 @@ def test_no_money_column_is_a_float(engine):
 def test_foreign_keys_declared(engine):
     insp = inspect(engine)
     assert {fk["referred_table"] for fk in insp.get_foreign_keys("positions")} == {"portfolios"}
-    assert {fk["referred_table"] for fk in insp.get_foreign_keys("fills")} == {"orders", "positions"}
+    assert {fk["referred_table"] for fk in insp.get_foreign_keys("fills")} == {
+        "orders",
+        "positions",
+    }
     assert {fk["referred_table"] for fk in insp.get_foreign_keys("trades")} == {
         "portfolios",
         "positions",
@@ -475,13 +478,9 @@ def test_duplicate_equity_timestamp_rejected(session, portfolio):
 
 def test_portfolio_constraints(session):
     _reject(session, Portfolio(name="z", initial_capital=Decimal("0"), current_cash=Decimal("0")))
-    session.add(
-        Portfolio(name="dup", initial_capital=Decimal("1"), current_cash=Decimal("1"))
-    )
+    session.add(Portfolio(name="dup", initial_capital=Decimal("1"), current_cash=Decimal("1")))
     session.commit()
-    _reject(
-        session, Portfolio(name="dup", initial_capital=Decimal("1"), current_cash=Decimal("1"))
-    )
+    _reject(session, Portfolio(name="dup", initial_capital=Decimal("1"), current_cash=Decimal("1")))
 
 
 def test_orphan_foreign_key_rejected(session):
@@ -503,9 +502,7 @@ def test_orphan_foreign_key_rejected(session):
 
 def test_deleting_portfolio_cascades_but_preserves_logs(engine):
     with Session(engine) as s:
-        p = Portfolio(
-            name="Doomed", initial_capital=Decimal("1000"), current_cash=Decimal("1000")
-        )
+        p = Portfolio(name="Doomed", initial_capital=Decimal("1000"), current_cash=Decimal("1000"))
         s.add(p)
         s.commit()
         pid = p.portfolio_id

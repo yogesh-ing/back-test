@@ -83,7 +83,7 @@ import signal
 import time
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
@@ -96,7 +96,9 @@ from backtest.simulator.money import ZERO, money
 
 logger = logging.getLogger("backtest.forward.engine")
 
-DEFAULT_FORWARD_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "forward_testing.yaml"
+DEFAULT_FORWARD_CONFIG_PATH = (
+    Path(__file__).resolve().parents[3] / "config" / "forward_testing.yaml"
+)
 DEFAULT_STATE_FILE = Path("state/forward_state.json")
 
 #: State-file format version (tickets F-04 + #7).
@@ -298,15 +300,19 @@ class ForwardTestingConfig:
                 "parameters": dict(self.strategy.parameters),
             },
             "risk": {
-                "max_position_size": str(self.risk.max_position_size) if self.risk.max_position_size else None,
+                "max_position_size": (
+                    str(self.risk.max_position_size) if self.risk.max_position_size else None
+                ),
                 "max_positions": self.risk.max_positions,
                 "max_drawdown_pct": str(self.risk.max_drawdown_pct),
                 "daily_loss_limit_pct": str(self.risk.daily_loss_limit_pct),
                 "buckets": {
                     bucket: {
-                        field: (str(value) if isinstance(value, Decimal) else
-                                sorted(value) if isinstance(value, (set, frozenset)) else
-                                value)
+                        field: (
+                            str(value)
+                            if isinstance(value, Decimal)
+                            else sorted(value) if isinstance(value, (set, frozenset)) else value
+                        )
                         for field, value in values.items()
                     }
                     for bucket, values in self.risk.buckets.items()
@@ -475,7 +481,9 @@ class MockRiskManager:
             if hasattr(order, "symbol") and hasattr(order, "quantity"):
                 # For BUY orders opening new positions
                 if not self.portfolio.has_position(order.symbol):
-                    check = self.portfolio.can_open_position(order.symbol, order.quantity, order.limit_price or 100)
+                    check = self.portfolio.can_open_position(
+                        order.symbol, order.quantity, order.limit_price or 100
+                    )
                     if not check:
                         return False, f"{check.code}: {check.reason}"
             # Drawdown check
@@ -602,7 +610,9 @@ def _normalize_mode(mode: Any, default: Any = None) -> str:
     if mode not in valid:
         logger.warning(
             "state mode %r is not one of %s; falling back to %r",
-            mode, sorted(valid), fallback,
+            mode,
+            sorted(valid),
+            fallback,
         )
         return fallback
     return mode
@@ -623,7 +633,9 @@ def _normalize_source(source: Any, default: Any = None) -> str:
     if source not in SOURCE_TAG_VALUES:
         logger.warning(
             "state source %r is not one of %s; falling back to %r",
-            source, sorted(SOURCE_TAG_VALUES), fallback,
+            source,
+            sorted(SOURCE_TAG_VALUES),
+            fallback,
         )
         return fallback
     return source
@@ -685,8 +697,12 @@ class StateManager:
                 "engine_id": getattr(getattr(engine, "portfolio", None), "portfolio_id", None),
                 "mode": mode,
                 "source": source,
-                "portfolio": engine.portfolio.to_dict() if hasattr(engine.portfolio, "to_dict") else {},
-                "adapter": engine.adapter.get_state() if hasattr(engine.adapter, "get_state") else {},
+                "portfolio": (
+                    engine.portfolio.to_dict() if hasattr(engine.portfolio, "to_dict") else {}
+                ),
+                "adapter": (
+                    engine.adapter.get_state() if hasattr(engine.adapter, "get_state") else {}
+                ),
                 "executor": executor_state,
                 "engine_runtime": {
                     "loop_count": getattr(engine, "_loop_count", 0),
@@ -696,7 +712,11 @@ class StateManager:
                     },
                     "processed_bars": dict(getattr(engine, "_processed_bars", {})),
                 },
-                "performance": engine.performance.equity_curve if hasattr(engine.performance, "equity_curve") else [],
+                "performance": (
+                    engine.performance.equity_curve
+                    if hasattr(engine.performance, "equity_curve")
+                    else []
+                ),
                 "config": engine.config.to_dict(),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "loop_count": engine._loop_count,
@@ -707,7 +727,11 @@ class StateManager:
             tmp.replace(self.state_file)
             logger.info(
                 "State saved to %s (v%s %s/%s, loop %s)",
-                self.state_file, STATE_VERSION, mode, source, engine._loop_count,
+                self.state_file,
+                STATE_VERSION,
+                mode,
+                source,
+                engine._loop_count,
             )
             return str(self.state_file)
         except Exception as exc:
@@ -760,13 +784,17 @@ class StateManager:
         try:
             version = int(version)
         except (TypeError, ValueError):
-            logger.warning("State file %s has non-integer state_version %r; treating as v1", file_path, version)
+            logger.warning(
+                "State file %s has non-integer state_version %r; treating as v1", file_path, version
+            )
             version = 1
 
         if version > STATE_VERSION:
             logger.warning(
                 "State file %s is format v%s but this build supports <= v%s; refusing to load",
-                file_path, version, STATE_VERSION,
+                file_path,
+                version,
+                STATE_VERSION,
             )
             return None
 
@@ -774,7 +802,9 @@ class StateManager:
             logger.warning(
                 "State file %s is legacy format v%s; migrating to v%s semantics in memory "
                 "(kept read-only on disk; rewritten on next save)",
-                file_path, version, STATE_VERSION,
+                file_path,
+                version,
+                STATE_VERSION,
             )
 
         # Normalize the F-04 classification in memory (never mutates this
@@ -784,7 +814,12 @@ class StateManager:
         data["source"] = _normalize_source(data.get("source"), default=source)
         data["state_version"] = STATE_VERSION
 
-        logger.info("State loaded from %s (v%s, loop %s)", file_path, data["state_version"], data.get("loop_count", "?"))
+        logger.info(
+            "State loaded from %s (v%s, loop %s)",
+            file_path,
+            data["state_version"],
+            data.get("loop_count", "?"),
+        )
         return data
 
     def should_save(self, last_save: datetime, interval_minutes: float) -> bool:
@@ -1011,9 +1046,7 @@ class ForwardTestingEngine:
             timestamp=to_python_scalar(ForwardTestingEngine._bar_ts(bar)),
         )
 
-    def _submit_orders(
-        self, signals: Iterable[Any], market_data: Mapping[str, Any]
-    ) -> List[Any]:
+    def _submit_orders(self, signals: Iterable[Any], market_data: Mapping[str, Any]) -> List[Any]:
         """Signal → Order → ``executor.submit`` (arms for the NEXT bar).
 
         Same sequence the canonical ``run_engine_loop`` uses: while bar ``t``
@@ -1023,7 +1056,10 @@ class ForwardTestingEngine:
         """
         created: List[Any] = []
         if self.executor is None:
-            logger.warning("no executor; %d signal(s) created without fill path", len(signals) if signals else 0)
+            logger.warning(
+                "no executor; %d signal(s) created without fill path",
+                len(signals) if signals else 0,
+            )
             return created
         for order in self.adapter.create_orders(signals, market_data=market_data):
             # Ticket #9 — risk teeth for the LIVE bucket: every real-fill
@@ -1062,8 +1098,10 @@ class ForwardTestingEngine:
         if not allowed:
             logger.warning(
                 "Risk rejected live order %s %s x%s: %s",
-                getattr(order, "symbol", "?"), getattr(order, "side", "?"),
-                getattr(order, "quantity", "?"), reason,
+                getattr(order, "symbol", "?"),
+                getattr(order, "side", "?"),
+                getattr(order, "quantity", "?"),
+                reason,
             )
         return allowed
 
@@ -1121,7 +1159,9 @@ class ForwardTestingEngine:
             from backtest.simulator.bucket_risk import resolve_bucket_risk
 
             self._bucket_key, self._bucket_limits = resolve_bucket_risk(
-                run_mode, run_source, overrides=self.config.risk.buckets,
+                run_mode,
+                run_source,
+                overrides=self.config.risk.buckets,
             )
         except Exception as exc:
             # A live/synthetic run etc. must be refused BEFORE any trading —
@@ -1143,11 +1183,17 @@ class ForwardTestingEngine:
                 # New-format classification (mode/source on the state file) is
                 # advisory here — the engine's live config always wins, and the
                 # portfolio row already carries the authoritative classification.
-                if state.get("mode") not in (None, run_mode) or state.get("source") not in (None, run_source):
+                if state.get("mode") not in (None, run_mode) or state.get("source") not in (
+                    None,
+                    run_source,
+                ):
                     logger.warning(
                         "State classification (%s/%s) != engine classification (%s/%s); "
                         "engine config wins, state will be rewritten on next save",
-                        state.get("mode"), state.get("source"), run_mode, run_source,
+                        state.get("mode"),
+                        state.get("source"),
+                        run_mode,
+                        run_source,
                     )
                 try:
                     from backtest.simulator.portfolio import Portfolio
@@ -1179,8 +1225,10 @@ class ForwardTestingEngine:
                 )
                 logger.info(
                     "New portfolio created: %s %s (%s/%s)",
-                    self.portfolio.name, self.portfolio.initial_capital,
-                    self.portfolio.mode, self.portfolio.source,
+                    self.portfolio.name,
+                    self.portfolio.initial_capital,
+                    self.portfolio.mode,
+                    self.portfolio.source,
                 )
 
         # Ticket #8 — no silent classification downgrade. The engine's
@@ -1193,8 +1241,10 @@ class ForwardTestingEngine:
                 "Portfolio %s is classified %s/%s but the engine config is LIVE — "
                 "upgrading to live/%s so state/DB can never show a live run "
                 "reclassified as paper",
-                self.portfolio.name, getattr(self.portfolio, "mode", "?"),
-                getattr(self.portfolio, "source", "?"), run_source,
+                self.portfolio.name,
+                getattr(self.portfolio, "mode", "?"),
+                getattr(self.portfolio, "source", "?"),
+                run_source,
             )
             self.portfolio.mode = "live"
             self.portfolio.source = run_source
@@ -1205,7 +1255,9 @@ class ForwardTestingEngine:
                 "PAPER — engine config wins, reclassifying to paper/%s (a paper run "
                 "must never claim live). This usually means the state file belongs "
                 "to a different run; the accounting restores unchanged.",
-                self.portfolio.name, getattr(self.portfolio, "source", "?"), run_source,
+                self.portfolio.name,
+                getattr(self.portfolio, "source", "?"),
+                run_source,
             )
             self.portfolio.mode = "paper"
             self.portfolio.source = run_source
@@ -1233,9 +1285,11 @@ class ForwardTestingEngine:
             )
         logger.info(
             "Bucket risk %s/%s: %s",
-            self._bucket_key, run_source,
+            self._bucket_key,
+            run_source,
             ", ".join(
-                f"{k}={v}" for k, v in self._bucket_limits.to_dict().items()
+                f"{k}={v}"
+                for k, v in self._bucket_limits.to_dict().items()
                 if k != "allowed_sources"
             ),
         )
@@ -1264,7 +1318,9 @@ class ForwardTestingEngine:
 
                 StratCls = get_strategy(self.config.strategy.name)
                 self.strategy = StratCls(**self.config.strategy.parameters)
-                logger.info("Strategy loaded: %s %s", self.strategy.name, self.config.strategy.parameters)
+                logger.info(
+                    "Strategy loaded: %s %s", self.strategy.name, self.config.strategy.parameters
+                )
             except Exception as exc:
                 logger.error("Failed to load strategy %s: %s", self.config.strategy.name, exc)
                 raise
@@ -1301,7 +1357,8 @@ class ForwardTestingEngine:
             self.sizer = PositionSizer(cfg)
             logger.info(
                 "Position sizer initialized: %s (bucket %s caps)",
-                cfg.method, self._bucket_key,
+                cfg.method,
+                self._bucket_key,
             )
         except Exception as exc:
             logger.warning("Failed to init sizer, using fixed 100: %s", exc)
@@ -1311,9 +1368,9 @@ class ForwardTestingEngine:
 
         # Execution
         try:
-            from backtest.simulator.execution import OrderExecutor, ExecutionConfig
-            from backtest.simulator.slippage import SlippageCalculator
+            from backtest.simulator.execution import ExecutionConfig, OrderExecutor
             from backtest.simulator.fees import CommissionCalculator
+            from backtest.simulator.slippage import SlippageCalculator
 
             exec_cfg = ExecutionConfig()
             # Try to load from file
@@ -1338,16 +1395,23 @@ class ForwardTestingEngine:
 
                 fill_provider = BrokerFillProvider(broker=self._resolve_live_broker())
                 self.executor = OrderExecutor(
-                    config=exec_cfg, slippage=slippage, fees=fees,
-                    portfolio=self.portfolio, fill_provider=fill_provider,
+                    config=exec_cfg,
+                    slippage=slippage,
+                    fees=fees,
+                    portfolio=self.portfolio,
+                    fill_provider=fill_provider,
                 )
                 logger.info(
                     "Order executor initialized: %s — LIVE (broker %s)",
-                    exec_cfg.realism, type(fill_provider.broker).__name__,
+                    exec_cfg.realism,
+                    type(fill_provider.broker).__name__,
                 )
             else:
                 self.executor = OrderExecutor(
-                    config=exec_cfg, slippage=slippage, fees=fees, portfolio=self.portfolio,
+                    config=exec_cfg,
+                    slippage=slippage,
+                    fees=fees,
+                    portfolio=self.portfolio,
                 )
                 logger.info("Order executor initialized: %s", exec_cfg.realism)
         except Exception as exc:
@@ -1385,8 +1449,8 @@ class ForwardTestingEngine:
 
         # Data handler – try real implementation first, fallback to mock placeholder
         try:
-            from backtest.live.market_data_handler import MarketDataHandler as RealMarketDataHandler
             from backtest.live.data_validator import DataValidator as RealDataValidator
+            from backtest.live.market_data_handler import MarketDataHandler as RealMarketDataHandler
             from backtest.live.time_manager import TimeManager as RealTimeManager
 
             self.data_handler = RealMarketDataHandler(
@@ -1404,7 +1468,9 @@ class ForwardTestingEngine:
         except Exception as exc:
             logger.warning("Failed to init real MarketDataHandler, using mock placeholder: %s", exc)
             self.data_handler = MockMarketDataHandler(
-                symbols=self.config.data.symbols, provider=self.config.data.provider, data_source=self.data_source
+                symbols=self.config.data.symbols,
+                provider=self.config.data.provider,
+                data_source=self.data_source,
             )
             self.validator = MockDataValidator()
             self.time_manager = MockTimeManager(market=self.config.system.market)
@@ -1419,7 +1485,8 @@ class ForwardTestingEngine:
 
         # Risk manager – try real implementation
         try:
-            from backtest.simulator.risk_manager import RiskManager as RealRiskManager, RiskConfig as RealRiskConfig
+            from backtest.simulator.risk_manager import RiskConfig as RealRiskConfig
+            from backtest.simulator.risk_manager import RiskManager as RealRiskManager
 
             # Ticket #9 — the pre-trade risk config is built from the bucket
             # caps (keyed on the classification), with drawdown/daily-loss
@@ -1432,13 +1499,17 @@ class ForwardTestingEngine:
             logger.info("Using real RiskManager (Step 15, bucket %s)", self._bucket_key)
         except Exception as exc:
             logger.warning("Failed to init real RiskManager, using mock: %s", exc)
-            self.risk_manager = MockRiskManager(portfolio=self.portfolio, risk_config=self.config.risk)
+            self.risk_manager = MockRiskManager(
+                portfolio=self.portfolio, risk_config=self.config.risk
+            )
 
         # Stop manager – try real implementation
         try:
             from backtest.simulator.stop_manager import StopManager as RealStopManager
 
-            self.stop_manager = RealStopManager(portfolio=self.portfolio, backtest_mode=self.config.system.backtest_mode)
+            self.stop_manager = RealStopManager(
+                portfolio=self.portfolio, backtest_mode=self.config.system.backtest_mode
+            )
             logger.info("Using real StopManager (Step 16)")
         except Exception as exc:
             logger.warning("Failed to init real StopManager, using mock: %s", exc)
@@ -1486,14 +1557,15 @@ class ForwardTestingEngine:
                 str(sym): _ts_from_key(ts) for sym, ts in (runtime.get("last_bar_ts") or {}).items()
             }
             self._processed_bars = {
-                str(sym): int(count)
-                for sym, count in (runtime.get("processed_bars") or {}).items()
+                str(sym): int(count) for sym, count in (runtime.get("processed_bars") or {}).items()
             }
             if state.get("executor") and self.executor is not None:
                 try:
                     # Share the portfolio's order objects so fills update the
                     # same graph (sync_orders sees the executor's transitions).
-                    self.executor.restore_state(state["executor"], orders=self.portfolio.pending_orders)
+                    self.executor.restore_state(
+                        state["executor"], orders=self.portfolio.pending_orders
+                    )
                     logger.info(
                         "Executor restored: %d in-flight order(s), %d armed",
                         len(self.portfolio.pending_orders),
@@ -1504,10 +1576,16 @@ class ForwardTestingEngine:
             if self._loop_count:
                 logger.info(
                     "Resumed runtime: loop_count=%s processed=%s",
-                    self._loop_count, self._processed_bars,
+                    self._loop_count,
+                    self._processed_bars,
                 )
 
-        logger.info("System initialized: portfolio=%s strategy=%s symbols=%s", self.portfolio.name, self.strategy.name, self.config.data.symbols)
+        logger.info(
+            "System initialized: portfolio=%s strategy=%s symbols=%s",
+            self.portfolio.name,
+            self.strategy.name,
+            self.config.data.symbols,
+        )
 
     def _resolve_live_broker(self) -> Any:
         """The broker for live orders (ticket #8).
@@ -1533,7 +1611,12 @@ class ForwardTestingEngine:
 
         self._running = True
         self._paused = False
-        logger.warning("Engine starting: %s (dry_run=%s backtest=%s)", self.portfolio.name, self.config.system.dry_run, self.config.system.backtest_mode)
+        logger.warning(
+            "Engine starting: %s (dry_run=%s backtest=%s)",
+            self.portfolio.name,
+            self.config.system.dry_run,
+            self.config.system.backtest_mode,
+        )
 
         self.on_start()
 
@@ -1595,7 +1678,11 @@ class ForwardTestingEngine:
 
     def run_loop(self):
         """Main event loop for live trading."""
-        logger.info("Entering main loop: interval=%s save_interval=%s", self.config.system.loop_interval_seconds, self.config.system.save_state_interval_minutes)
+        logger.info(
+            "Entering main loop: interval=%s save_interval=%s",
+            self.config.system.loop_interval_seconds,
+            self.config.system.save_state_interval_minutes,
+        )
 
         while self._running:
             if self._paused:
@@ -1651,12 +1738,16 @@ class ForwardTestingEngine:
                 self.performance.update_metrics(self.portfolio)
 
                 # Save state periodically
-                if self.state_manager.should_save(self._last_save, self.config.system.save_state_interval_minutes):
+                if self.state_manager.should_save(
+                    self._last_save, self.config.system.save_state_interval_minutes
+                ):
                     self.state_manager.save_state(self)
                     self._last_save = datetime.now(timezone.utc)
 
                 # Heartbeat
-                if (datetime.now(timezone.utc) - self._last_heartbeat).total_seconds() >= self.config.system.heartbeat_interval_seconds:
+                if (
+                    datetime.now(timezone.utc) - self._last_heartbeat
+                ).total_seconds() >= self.config.system.heartbeat_interval_seconds:
                     self._log_heartbeat()
                     self._last_heartbeat = datetime.now(timezone.utc)
 
@@ -1713,7 +1804,9 @@ class ForwardTestingEngine:
                 remaining = candles.iloc[offset:]
                 logger.info(
                     "Replaying %s bars for %s (%s already processed%s)",
-                    len(remaining), symbol, offset,
+                    len(remaining),
+                    symbol,
+                    offset,
                     ", resuming" if offset else "",
                 )
 
@@ -1759,7 +1852,9 @@ class ForwardTestingEngine:
                     self._processed_bars[symbol] = offset + pos + 1
 
                     # Save state periodically
-                    if self.state_manager.should_save(self._last_save, self.config.system.save_state_interval_minutes):
+                    if self.state_manager.should_save(
+                        self._last_save, self.config.system.save_state_interval_minutes
+                    ):
                         self.state_manager.save_state(self)
                         self._last_save = datetime.now(timezone.utc)
 
@@ -1776,7 +1871,11 @@ class ForwardTestingEngine:
     def _log_heartbeat(self):
         try:
             equity = self.portfolio.calculate_total_equity()
-            exposure = self.portfolio.get_current_exposure() if hasattr(self.portfolio, "get_current_exposure") else {}
+            exposure = (
+                self.portfolio.get_current_exposure()
+                if hasattr(self.portfolio, "get_current_exposure")
+                else {}
+            )
             metrics = self.performance.get_metrics()
 
             logger.info(

@@ -39,12 +39,18 @@ class _StubBroker(BrokerAuthBase):
         return {"success": True, "message": "credentials verified", "requires_totp": True}
 
     def verify_totp(self, totp_code: str) -> dict[str, Any]:
-        return {"success": True, "message": "session established",
-                "expires_at": "2026-08-25T15:45:00"}
+        return {
+            "success": True,
+            "message": "session established",
+            "expires_at": "2026-08-25T15:45:00",
+        }
 
     def get_session_status(self) -> dict[str, Any]:
-        return {"status": STATUS_AUTHENTICATED,
-                "expires_at": "2026-08-25T15:45:00", "broker": self.broker_name}
+        return {
+            "status": STATUS_AUTHENTICATED,
+            "expires_at": "2026-08-25T15:45:00",
+            "broker": self.broker_name,
+        }
 
     def logout(self) -> None:
         return None
@@ -240,6 +246,7 @@ def test_order_method_behaviour_contract():
 def test_auth_and_order_contracts_compose():
     """A live broker implements BOTH ABCs (the P3.2 MStockBroker shape):
     missing any of the nine methods must raise."""
+
     class _Combined(_StubBroker, BrokerOrderBase):  # auth-only stub, no orders
 
         pass
