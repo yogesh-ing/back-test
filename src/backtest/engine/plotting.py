@@ -3,8 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402  # must import after matplotlib.use("Agg")
 
 
 def plot_result(result, path=None, show=False):
@@ -18,7 +19,9 @@ def plot_result(result, path=None, show=False):
 
     axes[2].plot(result.equity.index, result.candles["close"].values, color="black", alpha=0.5)
     mask = result.position.abs() > 0
-    axes[2].scatter(result.equity.index[mask], result.candles["close"].values[mask], color="tab:blue", s=8)
+    axes[2].scatter(
+        result.equity.index[mask], result.candles["close"].values[mask], color="tab:blue", s=8
+    )
     axes[2].set_title("Close with position")
 
     fig.tight_layout()

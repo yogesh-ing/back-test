@@ -138,9 +138,7 @@ class BrokerSessionManager:
             return {
                 "status": status.get("status"),
                 "broker": status.get("broker", broker.broker_name),
-                "broker_display_name": getattr(
-                    broker, "broker_display_name", broker.broker_name
-                ),
+                "broker_display_name": getattr(broker, "broker_display_name", broker.broker_name),
                 "expires_at": status.get("expires_at"),
             }
 

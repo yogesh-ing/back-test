@@ -17,7 +17,11 @@ from backtest.strategy.registry import get_strategy, list_strategies
 
 def _print_metrics(result):
     m = result.metrics
-    print(f"strategy={m.get('strategy', 'unknown')} symbol={m.get('symbol', 'NA')} final_equity={m.get('final_equity', 0):.2f} total_return={m.get('total_return', 0):.4f} sharpe={m.get('sharpe', 0):.4f}")
+    print(
+        f"strategy={m.get('strategy', 'unknown')} symbol={m.get('symbol', 'NA')} "
+        f"final_equity={m.get('final_equity', 0):.2f} "
+        f"total_return={m.get('total_return', 0):.4f} sharpe={m.get('sharpe', 0):.4f}"
+    )
     if m.get("stop_loss") is not None or m.get("take_profit") is not None:
         print(f"Risk: stop_loss={m.get('stop_loss')} take_profit={m.get('take_profit')}")
 
@@ -35,6 +39,7 @@ def list_command(args):
 
 def preflight_command(args):
     from backtest.live.preflight import print_preflight
+
     exit_code = print_preflight()
     raise SystemExit(exit_code)
 
@@ -58,10 +63,16 @@ def run_command(args):
     result = run_on_source(source, spec, cfg)
     _print_metrics(result)
     if (args.plot or not args.no_chart) and not args.json:
-        default_path = f"charts/{args.strategy}_{args.symbol}_{args.interval}_{int(datetime.now().timestamp())}.png"
+        default_path = (
+            f"charts/{args.strategy}_{args.symbol}_{args.interval}_"
+            f"{int(datetime.now().timestamp())}.png"
+        )
         out = args.plot if isinstance(args.plot, str) else default_path
         if args.chart_dir:
-            out = f"{args.chart_dir}/{args.strategy}_{args.symbol}_{args.interval}_{int(datetime.now().timestamp())}.png"
+            out = (
+                f"{args.chart_dir}/{args.strategy}_{args.symbol}_{args.interval}_"
+                f"{int(datetime.now().timestamp())}.png"
+            )
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         plot_result(result, path=out)
         print(f"chart={out}")
@@ -79,20 +90,40 @@ def compare_command(args):
         stop_loss=args.stop_loss,
         take_profit=args.take_profit,
     )
-    results = compare_strategies(source, args.symbol, args.from_date, args.to_date, names, args.interval, config=cfg)
+    results = compare_strategies(
+        source, args.symbol, args.from_date, args.to_date, names, args.interval, config=cfg
+    )
     rows = []
     for name, result in results.items():
         metric = result.metrics
-        rows.append({"name": name, "sharpe": metric.get("sharpe", 0), "cagr": metric.get("cagr", 0), "total_return": metric.get("total_return", 0), "final_equity": metric.get("final_equity", 0)})
+        rows.append(
+            {
+                "name": name,
+                "sharpe": metric.get("sharpe", 0),
+                "cagr": metric.get("cagr", 0),
+                "total_return": metric.get("total_return", 0),
+                "final_equity": metric.get("final_equity", 0),
+            }
+        )
     sort_by = args.sort_by or "sharpe"
     reverse = sort_by != "volatility"
     rows.sort(key=lambda item: item[sort_by], reverse=reverse)
     for row in rows:
-        print(f"{row['name']} sharpe={row['sharpe']:.4f} total_return={row['total_return']:.4f} final_equity={row['final_equity']:.2f}")
+        print(
+            f"{row['name']} sharpe={row['sharpe']:.4f} "
+            f"total_return={row['total_return']:.4f} final_equity={row['final_equity']:.2f}"
+        )
     if args.json:
         print(json.dumps(rows, indent=2, default=str))
     if not args.no_chart:
-        out = args.chart_dir and f"{args.chart_dir}/compare_{args.symbol}_{args.interval}_{int(datetime.now().timestamp())}.png" or f"charts/compare_{args.symbol}_{args.interval}_{int(datetime.now().timestamp())}.png"
+        out = (
+            args.chart_dir
+            and (
+                f"{args.chart_dir}/compare_{args.symbol}_{args.interval}_"
+                f"{int(datetime.now().timestamp())}.png"
+            )
+            or f"charts/compare_{args.symbol}_{args.interval}_{int(datetime.now().timestamp())}.png"
+        )
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         plot_comparison({name: results[name] for name in results}, path=out)
         print(f"chart={out}")
@@ -111,7 +142,15 @@ def papertrade_command(args):
         print(f"data_source_tag={app_source_tag(args.source)} (--source={args.source})")
         names = [n.strip() for n in args.strategies.split(",") if n.strip()]
         allocations = {name: args.capital for name in names}
-        result = run_walkforward(source, names, args.symbol, args.from_date, args.to_date, allocations=allocations, interval=args.interval)
+        result = run_walkforward(
+            source,
+            names,
+            args.symbol,
+            args.from_date,
+            args.to_date,
+            allocations=allocations,
+            interval=args.interval,
+        )
         for name, equity_list in result["equity"].items():
             final = equity_list[-1] if len(equity_list) > 0 else args.capital
             pnl_pct = (final - args.capital) / args.capital * 100
@@ -143,7 +182,11 @@ def papertrade_command(args):
             final = equity_list[-1] if len(equity_list) > 0 else args.capital
             pnl_pct = (final - args.capital) / args.capital * 100
             print(f"strategy={name} final_equity={final:.2f} return={pnl_pct:.2f}%")
-        print(f"state_file={state_file} processed_bars={result['state'].get('processed_bars', 0)} resume_count={result['state'].get('resume_count', 0)}")
+        print(
+            f"state_file={state_file} "
+            f"processed_bars={result['state'].get('processed_bars', 0)} "
+            f"resume_count={result['state'].get('resume_count', 0)}"
+        )
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
@@ -156,7 +199,7 @@ def build_parser():
         "--log-level",
         default="WARNING",
         help="DEBUG | INFO | WARNING (default) | ERROR — go to DEBUG to see the "
-             "strategy/engine path and the traceback of any failure",
+        "strategy/engine path and the traceback of any failure",
     )
     common.add_argument("--log-file", default=None, help="also append log lines to this file")
 
@@ -202,7 +245,20 @@ def build_parser():
     compare_parser.add_argument("--stop-loss", type=float, default=None)
     compare_parser.add_argument("--take-profit", type=float, default=None)
     compare_parser.add_argument("--data-root", default="data")
-    compare_parser.add_argument("--sort-by", choices=["sharpe", "cagr", "total_return", "max_drawdown", "calmar", "win_rate", "volatility", "num_trades"], default="sharpe")
+    compare_parser.add_argument(
+        "--sort-by",
+        choices=[
+            "sharpe",
+            "cagr",
+            "total_return",
+            "max_drawdown",
+            "calmar",
+            "win_rate",
+            "volatility",
+            "num_trades",
+        ],
+        default="sharpe",
+    )
     compare_parser.add_argument("--json", action="store_true")
     compare_parser.add_argument("--chart-dir", default=None)
     compare_parser.add_argument("--no-chart", action="store_true")

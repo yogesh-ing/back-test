@@ -26,40 +26,12 @@ here; see :mod:`backtest.simulator.money` for the reasoning.
 
 from __future__ import annotations
 
-from backtest.simulator.errors import (
-    DuplicatePositionError,
-    InsufficientFundsError,
-    LimitExceededError,
-    PortfolioStateError,
-    PositionError,
-    PositionNotFoundError,
-    ShortSellingNotAllowedError,
-    SimulatorError,
-    ValidationError,
-)
-from backtest.simulator.money import (
-    MONEY_PLACES,
-    PRICE_PLACES,
-    ZERO,
-    money,
-    price,
-    to_decimal,
-)
-from backtest.simulator.portfolio import (
-    EquityPoint,
-    Portfolio,
-    PortfolioLimits,
-    PortfolioStatus,
-    PositionCheck,
-)
-from backtest.simulator.enums import (
-    TERMINAL_STATUSES,
-    VALID_TRANSITIONS,
-    WORKING_STATUSES,
-    OrderSide,
-    OrderStatus,
-    OrderType,
-    TimeInForce,
+from backtest.simulator.bucket_risk import (
+    BUCKET_RISK_LIMITS,
+    LIVE_BUCKET,
+    PAPER_BUCKET,
+    BucketRiskLimits,
+    resolve_bucket_risk,
 )
 from backtest.simulator.commission import (
     CommissionModel,
@@ -71,11 +43,25 @@ from backtest.simulator.commission import (
     ZeroCommission,
     resolve_commission_model,
 )
-from backtest.simulator.fill import (
-    Fill,
-    LiquidityFlag,
-    PositionAction,
-    PositionImpact,
+from backtest.simulator.enums import (
+    TERMINAL_STATUSES,
+    VALID_TRANSITIONS,
+    WORKING_STATUSES,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TimeInForce,
+)
+from backtest.simulator.errors import (
+    DuplicatePositionError,
+    InsufficientFundsError,
+    LimitExceededError,
+    PortfolioStateError,
+    PositionError,
+    PositionNotFoundError,
+    ShortSellingNotAllowedError,
+    SimulatorError,
+    ValidationError,
 )
 from backtest.simulator.execution import (
     DEFAULT_EXECUTION_CONFIG_PATH,
@@ -104,7 +90,56 @@ from backtest.simulator.fees import (
     load_broker_profile,
     resolve_fee_schedule,
 )
+from backtest.simulator.fill import Fill, LiquidityFlag, PositionAction, PositionImpact
 from backtest.simulator.lots import CostBasisMethod, Lot, LotBook, LotConsumption
+from backtest.simulator.money import MONEY_PLACES, PRICE_PLACES, ZERO, money, price, to_decimal
+from backtest.simulator.order import (
+    FillLike,
+    InvalidTransitionError,
+    Order,
+    OrderEvent,
+    OrderValidationError,
+    StatusChange,
+)
+from backtest.simulator.performance import PerformanceCalculator, PerformanceConfig
+from backtest.simulator.portfolio import (
+    EquityPoint,
+    Portfolio,
+    PortfolioLimits,
+    PortfolioStatus,
+    PositionCheck,
+)
+from backtest.simulator.position import (
+    DividendResult,
+    Position,
+    PositionType,
+    ReduceResult,
+    SplitResult,
+)
+from backtest.simulator.position_sizing import (
+    DEFAULT_SIZING_CONFIG_PATH,
+    ATRBasedSizer,
+    FixedDollarSizer,
+    FixedQuantitySizer,
+    KellySizer,
+    PercentagePortfolioSizer,
+    PositionSizer,
+    RiskBasedSizer,
+    RiskParams,
+    SizingConfig,
+    SizingConstraints,
+    SizingMethod,
+    SizingResult,
+    VolatilitySizer,
+    load_position_sizing_config,
+)
+from backtest.simulator.risk_manager import (
+    DEFAULT_RISK_CONFIG_PATH,
+    RiskCheckResult,
+    RiskConfig,
+    RiskManager,
+    load_risk_config,
+)
 from backtest.simulator.slippage import (
     DEFAULT_SLIPPAGE_CONFIG_PATH,
     FixedBpsSlippage,
@@ -122,52 +157,6 @@ from backtest.simulator.slippage import (
     load_slippage_config,
     resolve_slippage_model,
 )
-from backtest.simulator.order import (
-    FillLike,
-    InvalidTransitionError,
-    Order,
-    OrderEvent,
-    OrderValidationError,
-    StatusChange,
-)
-from backtest.simulator.position import (
-    DividendResult,
-    Position,
-    PositionType,
-    ReduceResult,
-    SplitResult,
-)
-from backtest.simulator.position_sizing import (
-    ATRBasedSizer,
-    DEFAULT_SIZING_CONFIG_PATH,
-    FixedDollarSizer,
-    FixedQuantitySizer,
-    KellySizer,
-    PercentagePortfolioSizer,
-    PositionSizer,
-    RiskBasedSizer,
-    RiskParams,
-    SizingConfig,
-    SizingConstraints,
-    SizingMethod,
-    SizingResult,
-    VolatilitySizer,
-    load_position_sizing_config,
-)
-from backtest.simulator.bucket_risk import (
-    BUCKET_RISK_LIMITS,
-    BucketRiskLimits,
-    LIVE_BUCKET,
-    PAPER_BUCKET,
-    resolve_bucket_risk,
-)
-from backtest.simulator.risk_manager import (
-    DEFAULT_RISK_CONFIG_PATH,
-    RiskCheckResult,
-    RiskConfig,
-    RiskManager,
-    load_risk_config,
-)
 from backtest.simulator.stop_manager import (
     DEFAULT_STOP_CONFIG_PATH,
     Stop,
@@ -178,7 +167,6 @@ from backtest.simulator.stop_manager import (
     TakeProfitType,
     load_stop_config,
 )
-from backtest.simulator.performance import PerformanceCalculator, PerformanceConfig
 from backtest.simulator.trade_analyzer import AnalyzedTrade, TradeAnalyzer
 
 __all__ = [

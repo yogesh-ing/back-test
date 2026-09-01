@@ -20,12 +20,15 @@ class CsvSource:
     def __init__(self, root: str = "data") -> None:
         self.root = root
 
-    def get_candles(self, symbol: str, start: str, end: str, interval: str = "1day") -> pd.DataFrame:
+    def get_candles(
+        self, symbol: str, start: str, end: str, interval: str = "1day"
+    ) -> pd.DataFrame:
         path = os.path.join(self.root, f"{symbol}.csv")
         if interval not in self.SUPPORTED_INTERVALS:
             log.warning(
                 "[csv] interval %r is not supported — using the file's own bar size as-is "
-                "(gap G6: timeframe is cosmetic unless the source is 'db')", interval,
+                "(gap G6: timeframe is cosmetic unless the source is 'db')",
+                interval,
             )
         if not os.path.exists(path):
             log.error("[csv] no such file for %r: %s (looked in root=%r)", symbol, path, self.root)
@@ -41,7 +44,13 @@ class CsvSource:
             df = df.set_index("datetime")
 
         out = normalize_candles(df)
-        log.debug("[csv] %s → %d bars %s..%s (file covers %s..%s; range filter is the "
-                  "caller's job)", symbol, len(out), start, end,
-                  out.index[0].date(), out.index[-1].date())
+        log.debug(
+            "[csv] %s → %d bars %s..%s (file covers %s..%s; range filter is the " "caller's job)",
+            symbol,
+            len(out),
+            start,
+            end,
+            out.index[0].date(),
+            out.index[-1].date(),
+        )
         return out

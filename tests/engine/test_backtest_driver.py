@@ -56,8 +56,9 @@ def _funded_all_in(symbol: str, price: float, portfolio: Portfolio) -> int:
 
 
 def _paper_pnl(bars: pd.DataFrame, strategy) -> float:
-    portfolio = Portfolio(name="forward", initial_capital=INITIAL_CAPITAL,
-                          mode="paper", source="synthetic")
+    portfolio = Portfolio(
+        name="forward", initial_capital=INITIAL_CAPITAL, mode="paper", source="synthetic"
+    )
     runner = PaperRunner(
         portfolio=portfolio,
         source=_FrameSource(bars),
@@ -73,8 +74,9 @@ def _paper_pnl(bars: pd.DataFrame, strategy) -> float:
 
 
 def _driver_pnl(bars: pd.DataFrame, strategy, source=None, source_tag=None):
-    portfolio = Portfolio(name="backtest", initial_capital=INITIAL_CAPITAL,
-                          mode="paper", source="replay")
+    portfolio = Portfolio(
+        name="backtest", initial_capital=INITIAL_CAPITAL, mode="paper", source="replay"
+    )
     driver = BacktestDriver(
         source=source or _FrameSource(bars),
         strategy=strategy,
@@ -93,9 +95,13 @@ def _driver_pnl(bars: pd.DataFrame, strategy, source=None, source_tag=None):
 
 def _vectorized_pnl(bars: pd.DataFrame, strategy, commission_pct=0.0, slippage_pct=0.0) -> float:
     signals = strategy.generate_signals(bars)
-    result = Backtester(BacktestConfig(initial_capital=INITIAL_CAPITAL,
-                                       commission_pct=commission_pct,
-                                       slippage_pct=slippage_pct)).run(bars, signals)
+    result = Backtester(
+        BacktestConfig(
+            initial_capital=INITIAL_CAPITAL,
+            commission_pct=commission_pct,
+            slippage_pct=slippage_pct,
+        )
+    ).run(bars, signals)
     return float(result.equity.iloc[-1] - INITIAL_CAPITAL)
 
 

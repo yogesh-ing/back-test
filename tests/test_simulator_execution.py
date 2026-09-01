@@ -43,8 +43,14 @@ D = Decimal
 IST = ZoneInfo("Asia/Kolkata")
 
 # volume 10,000 → 10% participation gives 1,000 shares of capacity
-MD = {"bid": 999.5, "ask": 1000.5, "last": 1000, "volume": 10_000,
-      "avg_volume": 1_000_000, "atr": 15}
+MD = {
+    "bid": 999.5,
+    "ask": 1000.5,
+    "last": 1000,
+    "volume": 10_000,
+    "avg_volume": 1_000_000,
+    "atr": 15,
+}
 
 
 def executor(**kw) -> OrderExecutor:
@@ -74,20 +80,25 @@ class TestExecutionConfig:
         real = ExecutionConfig.preset("realistic")
         pess = ExecutionConfig.preset("pessimistic")
         assert opt.max_participation > real.max_participation > pess.max_participation
-        assert opt.touch_fill_probability > real.touch_fill_probability > pess.touch_fill_probability
+        assert (
+            opt.touch_fill_probability > real.touch_fill_probability > pess.touch_fill_probability
+        )
         assert opt.max_latency_ms < real.max_latency_ms < pess.max_latency_ms
 
     def test_unknown_level_rejected(self):
         with pytest.raises(ValidationError, match="unknown realism level"):
             ExecutionConfig.preset("magical")
 
-    @pytest.mark.parametrize("kwargs, match", [
-        (dict(min_latency_ms=100, max_latency_ms=50), "max_latency_ms"),
-        (dict(max_participation=0), "max_participation must be positive"),
-        (dict(touch_fill_probability=D("1.5")), "probability"),
-        (dict(price_improvement_probability=D("2")), "probability"),
-        (dict(min_latency_ms=-1), "must not be negative"),
-    ])
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            (dict(min_latency_ms=100, max_latency_ms=50), "max_latency_ms"),
+            (dict(max_participation=0), "max_participation must be positive"),
+            (dict(touch_fill_probability=D("1.5")), "probability"),
+            (dict(price_improvement_probability=D("2")), "probability"),
+            (dict(min_latency_ms=-1), "must not be negative"),
+        ],
+    )
     def test_invalid_config_rejected(self, kwargs, match):
         with pytest.raises(ValidationError, match=match):
             ExecutionConfig(**kwargs)
@@ -251,7 +262,7 @@ class TestLimitOrders:
 
     def test_touch_never_fills_at_zero_probability(self):
         ex = executor(config=ExecutionConfig(touch_fill_probability=D("0"), seed=7))
-        order = Order.limit("INFY", "buy", 100, 1000.5)   # exactly the ask
+        order = Order.limit("INFY", "buy", 100, 1000.5)  # exactly the ask
         order.submit()
         result = ex.execute(order, MD)
         assert result.status == ExecutionStatus.NO_FILL
@@ -272,7 +283,7 @@ class TestLimitOrders:
             order.submit()
             if ex.execute(order, MD).did_trade:
                 fills += 1
-        assert 70 <= fills <= 130          # generous band around 100
+        assert 70 <= fills <= 130  # generous band around 100
 
     def test_never_fills_worse_than_the_limit(self):
         ex = executor()
@@ -460,15 +471,15 @@ class TestTimeInForce:
 
 class TestLatency:
     def test_within_the_configured_range(self):
-        ex = executor(config=ExecutionConfig(
-            min_latency_ms=D("50"), max_latency_ms=D("500"), seed=7))
+        ex = executor(
+            config=ExecutionConfig(min_latency_ms=D("50"), max_latency_ms=D("500"), seed=7)
+        )
         for _ in range(50):
             value = ex.simulate_latency()
             assert D("50") <= value <= D("500")
 
     def test_zero_range_is_exact(self):
-        ex = executor(config=ExecutionConfig(
-            min_latency_ms=D("0"), max_latency_ms=D("0"), seed=7))
+        ex = executor(config=ExecutionConfig(min_latency_ms=D("0"), max_latency_ms=D("0"), seed=7))
         assert ex.simulate_latency() == D("0")
 
     def test_explicit_bounds(self):
@@ -484,24 +495,29 @@ class TestLatency:
 
 class TestPriceImprovement:
     def test_never_improves_at_zero_probability(self):
-        ex = executor(config=ExecutionConfig(
-            price_improvement_probability=D("0"), seed=7),
-            slippage=SlippageCalculator.disabled())
+        ex = executor(
+            config=ExecutionConfig(price_improvement_probability=D("0"), seed=7),
+            slippage=SlippageCalculator.disabled(),
+        )
         prices = {ex.execute(buy(10), MD).fill.fill_price for _ in range(20)}
         assert prices == {D("1000.50000000")}
 
     def test_always_improves_at_probability_one(self):
-        ex = executor(config=ExecutionConfig(
-            price_improvement_probability=D("1"),
-            price_improvement_bps=D("10"), seed=7),
-            slippage=SlippageCalculator.disabled())
+        ex = executor(
+            config=ExecutionConfig(
+                price_improvement_probability=D("1"), price_improvement_bps=D("10"), seed=7
+            ),
+            slippage=SlippageCalculator.disabled(),
+        )
         assert ex.execute(buy(10), MD).fill.fill_price < D("1000.5")
 
     def test_improvement_favours_the_seller_upward(self):
-        ex = executor(config=ExecutionConfig(
-            price_improvement_probability=D("1"),
-            price_improvement_bps=D("10"), seed=7),
-            slippage=SlippageCalculator.disabled())
+        ex = executor(
+            config=ExecutionConfig(
+                price_improvement_probability=D("1"), price_improvement_bps=D("10"), seed=7
+            ),
+            slippage=SlippageCalculator.disabled(),
+        )
         order = Order.market("INFY", "sell", 10)
         order.submit()
         assert ex.execute(order, MD).fill.fill_price > D("999.5")
@@ -549,9 +565,7 @@ class TestRealismLevels:
     def test_more_pessimism_means_less_fill(self):
         filled = {}
         for level in RealismLevel.ALL:
-            ex = OrderExecutor.for_realism(
-                level, fees=CommissionCalculator.for_broker("zerodha")
-            )
+            ex = OrderExecutor.for_realism(level, fees=CommissionCalculator.for_broker("zerodha"))
             order = buy(5000)
             filled[level] = ex.execute(order, MD).filled_quantity
         assert filled["optimistic"] > filled["realistic"] > filled["pessimistic"]
@@ -597,9 +611,7 @@ class TestEvents:
 
     def test_failing_callback_does_not_break_execution(self):
         ex = executor()
-        ex.add_callback(
-            ExecutionEvent.FILL, lambda *_: (_ for _ in ()).throw(RuntimeError("boom"))
-        )
+        ex.add_callback(ExecutionEvent.FILL, lambda *_: (_ for _ in ()).throw(RuntimeError("boom")))
         assert ex.execute(buy(100), MD).status == ExecutionStatus.FILLED
 
 
@@ -639,13 +651,13 @@ class TestStatistics:
 
     def test_counts_and_rates(self):
         ex = executor()
-        ex.execute(buy(100), MD)          # filled
-        ex.execute(buy(5000), MD)         # partial
+        ex.execute(buy(100), MD)  # filled
+        ex.execute(buy(5000), MD)  # partial
         resting = Order.limit("INFY", "buy", 100, 900)
         resting.submit()
-        ex.execute(resting, MD)           # no fill
+        ex.execute(resting, MD)  # no fill
         ex.halt("INFY")
-        ex.execute(buy(100), MD)          # rejected
+        ex.execute(buy(100), MD)  # rejected
 
         stats = ex.statistics()
         assert stats["count"] == 4
@@ -698,8 +710,11 @@ class TestPortfolioIntegration:
 
     def test_round_trip_reconciles(self):
         p = Portfolio(name="p", initial_capital=D("10000000"))
-        ex = executor(portfolio=p, slippage=SlippageCalculator.disabled(),
-                      fees=CommissionCalculator.for_broker("zero"))
+        ex = executor(
+            portfolio=p,
+            slippage=SlippageCalculator.disabled(),
+            fees=CommissionCalculator.for_broker("zero"),
+        )
         b = Order.market("INFY", "buy", 500, portfolio_id=p.portfolio_id)
         b.submit()
         ex.execute(b, MD)

@@ -16,7 +16,6 @@ import requests
 from backtest.live.auth import get_auth_code, login, verify_totp
 from backtest.live.mstock import MStockClient, _candles_to_frame
 
-
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_MSTOCK_LIVE_TEST") != "1",
     reason="set RUN_MSTOCK_LIVE_TEST=1 to run against mStock",
@@ -47,7 +46,9 @@ def _resolve_nifty_index(frame: pd.DataFrame) -> str:
         ),
     )
     if token_column is None:
-        raise AssertionError(f"instrument master has no security-token column: {list(frame.columns)}")
+        raise AssertionError(
+            f"instrument master has no security-token column: {list(frame.columns)}"
+        )
 
     text_frame = frame.fillna("").astype(str)
     searchable_columns = [
@@ -59,18 +60,26 @@ def _resolve_nifty_index(frame: pd.DataFrame) -> str:
     if not searchable_columns:
         searchable_columns = list(frame.columns)
 
-    nifty_mask = text_frame[searchable_columns].apply(
-        lambda column: column.str.contains("NIFTY", case=False, regex=False)
-    ).any(axis=1)
-    derivative_mask = text_frame[searchable_columns].apply(
-        lambda column: column.str.contains("FUT|OPT| CE| PE", case=False, regex=True)
-    ).any(axis=1)
-    non_index_mask = text_frame[searchable_columns].apply(
-        lambda column: column.str.contains("ETF|BEES", case=False, regex=True)
-    ).any(axis=1)
-    index_mask = text_frame[searchable_columns].apply(
-        lambda column: column.str.contains("NIFTY ?50|INDEX", case=False, regex=True)
-    ).any(axis=1)
+    nifty_mask = (
+        text_frame[searchable_columns]
+        .apply(lambda column: column.str.contains("NIFTY", case=False, regex=False))
+        .any(axis=1)
+    )
+    derivative_mask = (
+        text_frame[searchable_columns]
+        .apply(lambda column: column.str.contains("FUT|OPT| CE| PE", case=False, regex=True))
+        .any(axis=1)
+    )
+    non_index_mask = (
+        text_frame[searchable_columns]
+        .apply(lambda column: column.str.contains("ETF|BEES", case=False, regex=True))
+        .any(axis=1)
+    )
+    index_mask = (
+        text_frame[searchable_columns]
+        .apply(lambda column: column.str.contains("NIFTY ?50|INDEX", case=False, regex=True))
+        .any(axis=1)
+    )
     candidates = frame[nifty_mask & index_mask & ~derivative_mask & ~non_index_mask]
     if candidates.empty:
         candidates = frame[nifty_mask & ~derivative_mask & ~non_index_mask]

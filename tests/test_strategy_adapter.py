@@ -7,27 +7,28 @@ integration with Portfolio and OrderExecutor.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from decimal import Decimal
+
 import pandas as pd
 import pytest
-from decimal import Decimal
-from datetime import datetime, timezone
 
-from backtest.strategy.base import Strategy
-from backtest.simulator import CommissionCalculator, ExecutionConfig, SlippageCalculator
-from backtest.simulator.engine_loop import Bar
-from backtest.simulator.portfolio import Portfolio
-from backtest.simulator.execution import OrderExecutor
-from backtest.forward.strategy_adapter import (
-    StrategyAdapter,
-    Signal,
-    SignalAction,
-    FixedQuantitySizer,
-    FixedDollarSizer,
-    PercentagePortfolioSizer,
-)
 from backtest.db.config import DatabaseConfig
 from backtest.db.manager import DatabaseManager
 from backtest.db.models import Base
+from backtest.forward.strategy_adapter import (
+    FixedDollarSizer,
+    FixedQuantitySizer,
+    PercentagePortfolioSizer,
+    Signal,
+    SignalAction,
+    StrategyAdapter,
+)
+from backtest.simulator import CommissionCalculator, ExecutionConfig, SlippageCalculator
+from backtest.simulator.engine_loop import Bar
+from backtest.simulator.execution import OrderExecutor
+from backtest.simulator.portfolio import Portfolio
+from backtest.strategy.base import Strategy
 
 
 class DummyLongStrategy(Strategy):
@@ -287,7 +288,9 @@ def test_portfolio_validation():
 def test_multi_symbol():
     strat = DummyLongStrategy(threshold=100)
     portfolio = Portfolio(name="multi_test", initial_capital=200000)
-    adapter = StrategyAdapter(strategy=strat, portfolio=portfolio, symbols=["INFY", "TCS"], min_bars=1)
+    adapter = StrategyAdapter(
+        strategy=strat, portfolio=portfolio, symbols=["INFY", "TCS"], min_bars=1
+    )
 
     bars = [
         make_bar("INFY", "2024-01-01T09:15:00+05:30", 101),
@@ -312,7 +315,13 @@ def test_on_market_data_tick_vs_bar():
     adapter = StrategyAdapter(strategy=strat, portfolio=portfolio, symbols=["INFY"], min_bars=1)
 
     # tick data (no close) should not generate signal
-    tick = {"symbol": "INFY", "bid": 100, "ask": 101, "last": 100.5, "timestamp": "2024-01-01T09:15:00+05:30"}
+    tick = {
+        "symbol": "INFY",
+        "bid": 100,
+        "ask": 101,
+        "last": 100.5,
+        "timestamp": "2024-01-01T09:15:00+05:30",
+    }
     sigs = adapter.on_market_data(tick)
     assert len(sigs) == 0
 
@@ -368,7 +377,9 @@ def test_orders_fill_at_next_open_not_signal_bar():
         executor.submit(order)
 
     # Feeding bar t again only ARMS the order — no fill, no look-ahead.
-    assert executor.step(Bar(open=Decimal("100"), close=Decimal("101"), volume=Decimal("1000"))) == []
+    assert (
+        executor.step(Bar(open=Decimal("100"), close=Decimal("101"), volume=Decimal("1000"))) == []
+    )
 
     # Next bar t+1: fill at its OPEN (103), never bar t's close (101).
     results = executor.step(Bar(open=Decimal("103"), close=Decimal("110"), volume=Decimal("1000")))
@@ -398,7 +409,11 @@ def test_signal_strength_and_indicators():
     assert sig.strength is not None
     assert sig.indicators is not None
     assert "close" in sig.indicators
-    assert "fast_sma" in sig.indicators or "slow_sma" in sig.indicators or "signal_value" in sig.indicators
+    assert (
+        "fast_sma" in sig.indicators
+        or "slow_sma" in sig.indicators
+        or "signal_value" in sig.indicators
+    )
 
 
 def test_db_logging():
@@ -435,7 +450,9 @@ def test_allow_short():
     strat = DummyShortStrategy()
     portfolio = Portfolio(name="short_test", initial_capital=100000)
     # short not allowed by default
-    adapter = StrategyAdapter(strategy=strat, portfolio=portfolio, symbols=["INFY"], min_bars=1, allow_short=False)
+    adapter = StrategyAdapter(
+        strategy=strat, portfolio=portfolio, symbols=["INFY"], min_bars=1, allow_short=False
+    )
 
     bar = make_bar("INFY", "2024-01-01T09:15:00+05:30", 101)
     sigs = adapter.on_bar_close(bar)
@@ -538,14 +555,14 @@ class TargetReturningStrategy(Strategy):
     [
         ([0, 1, 1, 1, 0], False),
         ([0, 1, 1, 1, 0], True),
-        ([0, 1, 0, 1, 0], False),          # 1-bar spikes
-        ([0, 1, 1, 0, 1, 1, 0], False),    # re-entry
-        ([0, -1, -1, 0], True),            # persistent short
-        ([0, -1, 0, -1, 0], True),         # short spikes
-        ([0, 1, -1, -1, 0], True),         # flip long→short
-        ([0, -1, 1, 1, 0], True),          # flip short→long
-        ([0, 1, -1, 0, 1], True),          # flip then flat
-        ([0, 1, -1, 1, -1, 0], True),      # flip back and forth
+        ([0, 1, 0, 1, 0], False),  # 1-bar spikes
+        ([0, 1, 1, 0, 1, 1, 0], False),  # re-entry
+        ([0, -1, -1, 0], True),  # persistent short
+        ([0, -1, 0, -1, 0], True),  # short spikes
+        ([0, 1, -1, -1, 0], True),  # flip long→short
+        ([0, -1, 1, 1, 0], True),  # flip short→long
+        ([0, 1, -1, 0, 1], True),  # flip then flat
+        ([0, 1, -1, 1, -1, 0], True),  # flip back and forth
     ],
 )
 def test_transition_decisions_match_old_position_based(targets, allow_short):

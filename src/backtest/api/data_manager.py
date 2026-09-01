@@ -33,21 +33,21 @@ log = get_logger(__name__)
 # -----------------------------------------------------------------------
 _lock = threading.Lock()
 _job: dict[str, Any] = {
-    "status": "idle",       # idle | running | done | error
-    "symbol": "",           # current symbol being fetched
-    "fetched": 0,           # symbols completed
-    "total": 0,             # total symbols to fetch
-    "bars_total": 0,        # total bars inserted
-    "bars_symbol": 0,       # bars for current symbol
-    "failed": 0,            # symbols that failed
-    "failed_list": [],      # list of (symbol, error) tuples
+    "status": "idle",  # idle | running | done | error
+    "symbol": "",  # current symbol being fetched
+    "fetched": 0,  # symbols completed
+    "total": 0,  # total symbols to fetch
+    "bars_total": 0,  # total bars inserted
+    "bars_symbol": 0,  # bars for current symbol
+    "failed": 0,  # symbols that failed
+    "failed_list": [],  # list of (symbol, error) tuples
     "from_date": "",
     "to_date": "",
     "timeframe": "day",
-    "error": None,          # last error message
+    "error": None,  # last error message
     "started_at": None,
     "elapsed": "",
-    "cancel": False,        # flag to stop the job
+    "cancel": False,  # flag to stop the job
 }
 
 # Single DB-URL authority (ticket P4.3): FORWARD_TEST_DB_URL env >
@@ -60,13 +60,18 @@ MSTOCK_BASE_URL = os.getenv("MSTOCK_BASE_URL", "https://api.mstock.trade").rstri
 _MSTOCK_INTERVAL_MAP = MSTOCK_INTERVAL_MAP
 
 CHUNK_DAYS_MAP = {
-    "1day": 800, "1min": 2, "5min": 10, "15min": 30, "1hour": 120,
+    "1day": 800,
+    "1min": 2,
+    "5min": 10,
+    "15min": 30,
+    "1hour": 120,
 }
 
 
 # -----------------------------------------------------------------------
 # API Endpoints
 # -----------------------------------------------------------------------
+
 
 @data_bp.get("/api/data/status")
 def fetch_status() -> tuple:
@@ -103,12 +108,25 @@ def fetch_start() -> tuple:
     symbols = data.get("symbols")  # None = all from instruments table
 
     if timeframe not in _MSTOCK_INTERVAL_MAP:
-        return jsonify({"error": f"Unsupported timeframe: {timeframe}. Use: {list(_MSTOCK_INTERVAL_MAP.keys())}"}), 400
+        return (
+            jsonify(
+                {
+                    "error": (
+                        f"Unsupported timeframe: {timeframe}. "
+                        f"Use: {list(_MSTOCK_INTERVAL_MAP.keys())}"
+                    )
+                }
+            ),
+            400,
+        )
 
     # Validate auth token exists
     token_file = os.path.join(os.getcwd(), ".mstock_session_token")
     if not os.path.exists(token_file):
-        return jsonify({"error": "No auth token. Please authenticate via the Broker button first."}), 401
+        return (
+            jsonify({"error": "No auth token. Please authenticate via the Broker button first."}),
+            401,
+        )
 
     with open(token_file) as f:
         token = f.read().strip()
@@ -118,10 +136,21 @@ def fetch_start() -> tuple:
     # Reset job state
     with _lock:
         _job.update(
-            status="running", symbol="", fetched=0, total=0,
-            bars_total=0, bars_symbol=0, failed=0, failed_list=[],
-            from_date=from_date, to_date=to_date, timeframe=timeframe,
-            error=None, started_at=time.time(), elapsed="", cancel=False,
+            status="running",
+            symbol="",
+            fetched=0,
+            total=0,
+            bars_total=0,
+            bars_symbol=0,
+            failed=0,
+            failed_list=[],
+            from_date=from_date,
+            to_date=to_date,
+            timeframe=timeframe,
+            error=None,
+            started_at=time.time(),
+            elapsed="",
+            cancel=False,
         )
 
     # Launch background thread
@@ -132,7 +161,17 @@ def fetch_start() -> tuple:
     )
     thread.start()
 
-    return jsonify({"status": "started", "timeframe": timeframe, "from_date": from_date, "to_date": to_date}), 200
+    return (
+        jsonify(
+            {
+                "status": "started",
+                "timeframe": timeframe,
+                "from_date": from_date,
+                "to_date": to_date,
+            }
+        ),
+        200,
+    )
 
 
 @data_bp.get("/api/data/inventory")
@@ -140,13 +179,15 @@ def inventory() -> tuple:
     """Return per-symbol data availability summary."""
     try:
         engine = create_engine(DB_URL, echo=False)
-        sql = text("""
+        sql = text(
+            """
             SELECT symbol, timeframe, COUNT(*) as bars,
                    MIN(ts) as earliest, MAX(ts) as latest
             FROM market_data_cache
             GROUP BY symbol, timeframe
             ORDER BY symbol, timeframe
-        """)
+        """
+        )
         with engine.connect() as conn:
             rows = conn.execute(sql).mappings().all()
         engine.dispose()
@@ -157,18 +198,25 @@ def inventory() -> tuple:
             sym = r["symbol"]
             if sym not in symbols:
                 symbols[sym] = []
-            symbols[sym].append({
-                "timeframe": r["timeframe"],
-                "bars": r["bars"],
-                "earliest": str(r["earliest"])[:10] if r["earliest"] else None,
-                "latest": str(r["latest"])[:10] if r["latest"] else None,
-            })
+            symbols[sym].append(
+                {
+                    "timeframe": r["timeframe"],
+                    "bars": r["bars"],
+                    "earliest": str(r["earliest"])[:10] if r["earliest"] else None,
+                    "latest": str(r["latest"])[:10] if r["latest"] else None,
+                }
+            )
 
-        return jsonify({
-            "symbols": symbols,
-            "total_symbols": len(symbols),
-            "total_bars": sum(s["bars"] for slist in symbols.values() for s in slist),
-        }), 200
+        return (
+            jsonify(
+                {
+                    "symbols": symbols,
+                    "total_symbols": len(symbols),
+                    "total_bars": sum(s["bars"] for slist in symbols.values() for s in slist),
+                }
+            ),
+            200,
+        )
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
@@ -177,24 +225,36 @@ def inventory() -> tuple:
 # Background fetch job
 # -----------------------------------------------------------------------
 
-def _run_fetch_job(token: str, timeframe: str, from_date: str, to_date: str, symbols: list[str] | None):
+
+def _run_fetch_job(
+    token: str, timeframe: str, from_date: str, to_date: str, symbols: list[str] | None
+):
     """Background thread: fetch historical data for all/some symbols."""
     engine = create_engine(DB_URL, echo=False)
     api_key = os.getenv("MSTOCK_API_KEY", "")
     mstock_tf = _MSTOCK_INTERVAL_MAP.get(timeframe, timeframe)
     chunk_days = CHUNK_DAYS_MAP.get(timeframe, 800)
-    log.info("[data] fetch job starting: timeframe=%s range=%s..%s mstock_tf=%s chunk_days=%d "
-             "symbols=%s api_key=%s", timeframe, from_date, to_date, mstock_tf, chunk_days,
-             "all" if not symbols else f"{len(symbols)} requested",
-             "set" if api_key else "MISSING — every request will fail")
+    log.info(
+        "[data] fetch job starting: timeframe=%s range=%s..%s mstock_tf=%s chunk_days=%d "
+        "symbols=%s api_key=%s",
+        timeframe,
+        from_date,
+        to_date,
+        mstock_tf,
+        chunk_days,
+        "all" if not symbols else f"{len(symbols)} requested",
+        "set" if api_key else "MISSING — every request will fail",
+    )
 
     # Load instruments
     instruments = _load_instruments(engine, symbols)
     total = len(instruments)
     if not total:
-        log.warning("[data] no instruments matched (symbols=%s) — is the `instruments` table "
-                    "populated? Run scripts/fetch_nifty500_historical.py first",
-                    ",".join(symbols) if symbols else "NSE/BSE equities")
+        log.warning(
+            "[data] no instruments matched (symbols=%s) — is the `instruments` table "
+            "populated? Run scripts/fetch_nifty500_historical.py first",
+            ",".join(symbols) if symbols else "NSE/BSE equities",
+        )
     else:
         log.info("[data] %d instruments to fetch", total)
 
@@ -218,17 +278,30 @@ def _run_fetch_job(token: str, timeframe: str, from_date: str, to_date: str, sym
             _job["bars_symbol"] = 0
 
         try:
-            bars = _fetch_bars_chunked(api_key, token, sec_token, from_date, to_date, inst_exchange, mstock_tf, chunk_days)
+            bars = _fetch_bars_chunked(
+                api_key, token, sec_token, from_date, to_date, inst_exchange, mstock_tf, chunk_days
+            )
             if not bars:
-                log.warning("[data] %s: API returned no bars for %s..%s (%s) — nothing stored",
-                            symbol, from_date, to_date, mstock_tf)
+                log.warning(
+                    "[data] %s: API returned no bars for %s..%s (%s) — nothing stored",
+                    symbol,
+                    from_date,
+                    to_date,
+                    mstock_tf,
+                )
                 with _lock:
                     _job["fetched"] += 1
                 continue
 
             inserted = _persist_bars(engine, bars, symbol, inst_exchange, timeframe)
-            log.info("[data] %s: %d bars fetched, %d inserted (%d/%d done)",
-                     symbol, len(bars), inserted, i, total)
+            log.info(
+                "[data] %s: %d bars fetched, %d inserted (%d/%d done)",
+                symbol,
+                len(bars),
+                inserted,
+                i,
+                total,
+            )
 
             with _lock:
                 _job["fetched"] += 1
@@ -236,8 +309,9 @@ def _run_fetch_job(token: str, timeframe: str, from_date: str, to_date: str, sym
                 _job["bars_symbol"] = inserted
 
         except Exception as exc:  # noqa: BLE001 — a bad symbol must not kill the job
-            log.warning("[data] %s failed (%d/%d): %s: %s", symbol, i, total,
-                        exc.__class__.__name__, exc)
+            log.warning(
+                "[data] %s failed (%d/%d): %s: %s", symbol, i, total, exc.__class__.__name__, exc
+            )
             log.debug("[data] %s traceback", symbol, exc_info=True)
             with _lock:
                 _job["failed"] += 1
@@ -254,8 +328,13 @@ def _run_fetch_job(token: str, timeframe: str, from_date: str, to_date: str, sym
     with _lock:
         _job["status"] = "done"
         _job["symbol"] = ""
-        log.info("[data] fetch job finished: %d/%d symbols ok, %d failed, %d bars inserted",
-                 _job["fetched"] - _job["failed"], total, _job["failed"], _job["bars_total"])
+        log.info(
+            "[data] fetch job finished: %d/%d symbols ok, %d failed, %d bars inserted",
+            _job["fetched"] - _job["failed"],
+            total,
+            _job["failed"],
+            _job["bars_total"],
+        )
 
     engine.dispose()
 
@@ -288,14 +367,23 @@ def _load_instruments(engine, symbols: list[str] | None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _fetch_bars_chunked(api_key: str, token: str, sec_token: str,
-                         from_date: str, to_date: str, segment: str,
-                         mstock_tf: str, chunk_days: int) -> list[dict]:
+def _fetch_bars_chunked(
+    api_key: str,
+    token: str,
+    sec_token: str,
+    from_date: str,
+    to_date: str,
+    segment: str,
+    mstock_tf: str,
+    chunk_days: int,
+) -> list[dict]:
     """Fetch OHLCV bars from mStock, chunked by date range."""
     from datetime import datetime, timedelta
 
     headers = {"X-Mirae-Version": "1", "Authorization": f"token {api_key}:{token}"}
-    url = f"{MSTOCK_BASE_URL}/openapi/typea/instruments/historical/{segment}/{sec_token}/{mstock_tf}"
+    url = (
+        f"{MSTOCK_BASE_URL}/openapi/typea/instruments/historical/{segment}/{sec_token}/{mstock_tf}"
+    )
 
     start = datetime.strptime(from_date, "%Y-%m-%d")
     end = datetime.strptime(to_date, "%Y-%m-%d")
@@ -312,8 +400,13 @@ def _fetch_bars_chunked(api_key: str, token: str, sec_token: str,
             bars = _extract_bars(payload)
             all_bars.extend(bars)
         except Exception as exc:  # noqa: BLE001 — skip bad chunks, but say so
-            log.warning("[data] chunk %s..%s failed (%s: %s) — those bars are missing",
-                        chunk_start, chunk_end, exc.__class__.__name__, exc)
+            log.warning(
+                "[data] chunk %s..%s failed (%s: %s) — those bars are missing",
+                chunk_start,
+                chunk_end,
+                exc.__class__.__name__,
+                exc,
+            )
         chunk_start = chunk_end + timedelta(days=1)
         time.sleep(0.15)
 
@@ -344,15 +437,18 @@ def _persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timefram
     if not bars:
         return 0
 
-    sql = text("""
+    sql = text(
+        """
         INSERT INTO market_data_cache
             (symbol, exchange, timeframe, ts, open, high, low, close, volume, source, ingested_at)
         VALUES
-            (:symbol, :exchange, :timeframe, :ts, :open, :high, :low, :close, :volume, :source, now())
+            (:symbol, :exchange, :timeframe, :ts, :open, :high, :low, :close, :volume,"""
+        """ :source, now())
         ON CONFLICT (symbol, exchange, timeframe, ts) DO UPDATE
             SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
                 close = EXCLUDED.close, volume = EXCLUDED.volume, ingested_at = now()
-    """)
+    """
+    )
 
     rows = []
     skipped: list[str] = []
@@ -363,7 +459,12 @@ def _persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timefram
                 ts = pd.Timestamp(ts_raw)
                 if ts.tzinfo is not None:
                     ts = ts.tz_convert("UTC").tz_localize(None)
-                o, h, l, c = float(bar.get("o", bar.get("open", 0))), float(bar.get("h", bar.get("high", 0))), float(bar.get("l", bar.get("low", 0))), float(bar.get("c", bar.get("close", 0)))
+                o, h, l, c = (
+                    float(bar.get("o", bar.get("open", 0))),
+                    float(bar.get("h", bar.get("high", 0))),
+                    float(bar.get("l", bar.get("low", 0))),
+                    float(bar.get("c", bar.get("close", 0))),
+                )
                 v = int(bar.get("v", bar.get("volume", 0)))
             elif isinstance(bar, (list, tuple)) and len(bar) >= 6:
                 ts = pd.Timestamp(bar[0])
@@ -381,30 +482,45 @@ def _persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timefram
                 skipped.append(f"{ts}: OHLC inconsistent (o={o} h={h} l={l} c={c})")
                 continue
 
-            rows.append({
-                "symbol": symbol, "exchange": exchange, "timeframe": timeframe,
-                "ts": ts.to_pydatetime(), "open": o, "high": h, "low": l, "close": c,
-                "volume": v, "source": "mstock",
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "timeframe": timeframe,
+                    "ts": ts.to_pydatetime(),
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "close": c,
+                    "volume": v,
+                    "source": "mstock",
+                }
+            )
         except Exception as exc:  # noqa: BLE001 — one malformed bar must not lose the rest
             skipped.append(f"{bar!r:.60}: {exc.__class__.__name__}: {exc}")
             continue
 
     if skipped:
-        log.warning("[data] %s: dropped %d/%d bars while parsing (e.g. %s)", symbol,
-                    len(skipped), len(bars), skipped[0])
+        log.warning(
+            "[data] %s: dropped %d/%d bars while parsing (e.g. %s)",
+            symbol,
+            len(skipped),
+            len(bars),
+            skipped[0],
+        )
         log.debug("[data] %s full drop list: %s", symbol, "; ".join(skipped[:50]))
 
     if not rows:
-        log.warning("[data] %s: %d bars fetched but none were usable — nothing to insert",
-                    symbol, len(bars))
+        log.warning(
+            "[data] %s: %d bars fetched but none were usable — nothing to insert", symbol, len(bars)
+        )
         return 0
 
     total = 0
     chunk_size = 500
     with engine.connect() as conn:
         for i in range(0, len(rows), chunk_size):
-            chunk = rows[i:i + chunk_size]
+            chunk = rows[i : i + chunk_size]
             conn.execute(sql, chunk)
             total += len(chunk)
         conn.commit()

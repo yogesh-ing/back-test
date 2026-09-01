@@ -45,7 +45,7 @@ def test_forward_page_exposes_taxonomy_from_canonical_vocabulary(client):
         assert f'value="{source}"' in html
     assert 'id="dataSource"' in html
     # Risk implication surfaced (T9-aware copy present).
-    assert "id=\"taxonomyHint\"" in html
+    assert 'id="taxonomyHint"' in html
     assert "free-play" in html
     # Resume affordance (T7-aware) — visible choice vs fresh start.
     assert 'id="resumeBanner"' in html

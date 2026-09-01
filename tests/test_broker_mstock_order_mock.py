@@ -13,12 +13,7 @@ from typing import Any
 
 import pytest
 
-from backtest.brokers import (
-    MStockBroker,
-    MStockOrderError,
-    BrokerOrder,
-    BrokerOrderId,
-)
+from backtest.brokers import BrokerOrder, BrokerOrderId, MStockBroker, MStockOrderError
 
 FAKE_TOKEN = "tok-abcdef0123456789"
 
@@ -68,6 +63,7 @@ def _mock_http(monkeypatch, outcome: _FakeResponse | Exception, calls: list | No
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
+
         return fake
 
     monkeypatch.setattr("requests.get", _make("GET"))
@@ -116,8 +112,14 @@ def test_place_order_hits_regular_endpoint_with_auth(live_broker, monkeypatch):
 
 def test_place_order_limit_price_mapped(live_broker, monkeypatch):
     calls = _mock_http(monkeypatch, _FakeResponse(200, {"data": {"order_id": 77}}))
-    order = BrokerOrder(symbol="DEMO", side="SELL", quantity=5,
-                        order_type="LIMIT", limit_price=999.5, product="DELIVERY")
+    order = BrokerOrder(
+        symbol="DEMO",
+        side="SELL",
+        quantity=5,
+        order_type="LIMIT",
+        limit_price=999.5,
+        product="DELIVERY",
+    )
 
     result = live_broker.place_order(order)
 
@@ -171,8 +173,13 @@ def test_expired_session_cannot_place_orders(broker, monkeypatch):
 
 def test_modify_order_hits_put_with_broker_id(live_broker, monkeypatch):
     calls = _mock_http(monkeypatch, _FakeResponse(200, {"status": "success"}))
-    order = BrokerOrder(broker_order_id=BrokerOrderId("550123"), symbol="DEMO",
-                        quantity=20, order_type="LIMIT", limit_price=101.0)
+    order = BrokerOrder(
+        broker_order_id=BrokerOrderId("550123"),
+        symbol="DEMO",
+        quantity=20,
+        order_type="LIMIT",
+        limit_price=101.0,
+    )
 
     assert live_broker.modify_order(order) is None
 
@@ -296,8 +303,9 @@ def test_poll_fill_returns_normalized_fill_row_for_complete_order(live_broker, m
 
 def test_poll_fill_uses_filled_quantity_for_partial(live_broker, monkeypatch):
     """A partial fill reports the filled qty, not the requested 100."""
-    partial = dict(_BOOK_ROW, status="PARTIAL", quantity=100,
-                   filled_quantity=37, average_price=1005.5)
+    partial = dict(
+        _BOOK_ROW, status="PARTIAL", quantity=100, filled_quantity=37, average_price=1005.5
+    )
     _mock_http(monkeypatch, _FakeResponse(200, [partial]))
 
     row = live_broker.poll_fill("550123")
@@ -318,10 +326,17 @@ def test_poll_fill_unknown_id_is_none(live_broker, monkeypatch):
 
 
 def test_calculate_order_margin_hits_json_endpoint(live_broker, monkeypatch):
-    calls = _mock_http(monkeypatch, _FakeResponse(200, {
-        "initial_margin": 50100.0, "maintenance_margin": 25050.0,
-        "available_margin": 100000.0,
-    }))
+    calls = _mock_http(
+        monkeypatch,
+        _FakeResponse(
+            200,
+            {
+                "initial_margin": 50100.0,
+                "maintenance_margin": 25050.0,
+                "available_margin": 100000.0,
+            },
+        ),
+    )
     order = BrokerOrder(symbol="RELIANCE", quantity=10)
 
     margin = live_broker.calculate_order_margin(order)
@@ -340,9 +355,15 @@ def test_calculate_order_margin_hits_json_endpoint(live_broker, monkeypatch):
 
 
 def test_calculate_order_margin_unfunded(live_broker, monkeypatch):
-    _mock_http(monkeypatch, _FakeResponse(200, {
-        "data": {"initial_margin": 50100.0, "available_margin": 1000.0},
-    }))
+    _mock_http(
+        monkeypatch,
+        _FakeResponse(
+            200,
+            {
+                "data": {"initial_margin": 50100.0, "available_margin": 1000.0},
+            },
+        ),
+    )
     margin = live_broker.calculate_order_margin(BrokerOrder(symbol="DEMO", quantity=10))
     assert margin.is_funded is False
     assert margin.maintenance_margin == 50100.0  # falls back to initial

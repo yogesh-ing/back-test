@@ -37,12 +37,8 @@ from flask import Blueprint, current_app, jsonify, request
 from backtest.adapters.backtest_adapter import BacktestAdapter
 from backtest.brokers.session_manager import get_session_manager
 from backtest.data.source_tags import SOURCE_TAG_VALUES, app_source_tag
+from backtest.engine.backtest_runner import resolve_interval, resolve_warmup_start, run_quick_screen
 from backtest.engine.backtester import BacktestResult
-from backtest.engine.backtest_runner import (
-    resolve_interval,
-    resolve_warmup_start,
-    run_quick_screen,
-)
 from backtest.engine.metrics import compute_metrics
 from backtest.logging_config import get_logger, timed
 from backtest.runner import build_source
@@ -169,9 +165,7 @@ class ForwardSession:
         self.mode = str(mode).strip().lower()
         self.source = str(source).strip().lower()
         if self.mode not in ("paper", "live") or self.source not in SOURCE_TAG_VALUES:
-            raise ValueError(
-                f"invalid classification {self.mode}/{self.source!r}"
-            )
+            raise ValueError(f"invalid classification {self.mode}/{self.source!r}")
 
         self.lock = threading.RLock()
         self.status: str = "running"
@@ -206,9 +200,14 @@ class ForwardSession:
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-        log.info("[forward:%s] session created for %s/%s — %d bars @ %s",
-                 self.short_id, symbol, strategy, self.total,
-                 f"{self.bars_per_second:g} bars/s" if self.bars_per_second else "manual clock")
+        log.info(
+            "[forward:%s] session created for %s/%s — %d bars @ %s",
+            self.short_id,
+            symbol,
+            strategy,
+            self.total,
+            f"{self.bars_per_second:g} bars/s" if self.bars_per_second else "manual clock",
+        )
         if self.bars_per_second > 0 and self.total > 1:
             self._start_clock()
 
@@ -251,7 +250,7 @@ class ForwardSession:
         """
         with self.lock:
             if self.bars_per_second <= 0:
-                return self._revealed          # frozen clock: only advance() steps it
+                return self._revealed  # frozen clock: only advance() steps it
             self._pending += max(0.0, float(seconds)) * self.bars_per_second
             whole = int(self._pending)
             if whole <= 0:
@@ -275,12 +274,24 @@ class ForwardSession:
                 self._revealed = self.total
                 self.status = "stopped"
                 self.stopped_at = datetime.now()
-                log.info("[forward:%s] replay complete — %d/%d bars for %s/%s, auto-stopped",
-                         self.short_id, self.total, self.total, self.symbol, self.strategy)
+                log.info(
+                    "[forward:%s] replay complete — %d/%d bars for %s/%s, auto-stopped",
+                    self.short_id,
+                    self.total,
+                    self.total,
+                    self.symbol,
+                    self.strategy,
+                )
             elif self._revealed != before:
-                log.debug("[forward:%s] revealed %d/%d (%.1f%%) — %s/%s", self.short_id,
-                          self._revealed, self.total,
-                          100.0 * self._revealed / self.total, self.symbol, self.strategy)
+                log.debug(
+                    "[forward:%s] revealed %d/%d (%.1f%%) — %s/%s",
+                    self.short_id,
+                    self._revealed,
+                    self.total,
+                    100.0 * self._revealed / self.total,
+                    self.symbol,
+                    self.strategy,
+                )
             return self._revealed
 
     def stop(self) -> None:
@@ -291,11 +302,18 @@ class ForwardSession:
                 self.stopped_at = datetime.now()
         self._wake.set()
         if already:
-            log.debug("[forward:%s] stop ignored — status is already %s", self.short_id,
-                      self.status)
+            log.debug(
+                "[forward:%s] stop ignored — status is already %s", self.short_id, self.status
+            )
         else:
-            log.info("[forward:%s] stopped at bar %d/%d (%s/%s)", self.short_id,
-                     self._revealed, self.total, self.symbol, self.strategy)
+            log.info(
+                "[forward:%s] stopped at bar %d/%d (%s/%s)",
+                self.short_id,
+                self._revealed,
+                self.total,
+                self.symbol,
+                self.strategy,
+            )
 
     # -- state derivation --------------------------------------------------- #
 
@@ -323,13 +341,15 @@ class ForwardSession:
         # metrics for the revealed prefix, and stamp the run metadata the adapter
         # surfaces on the config block.
         prefix.metrics = compute_metrics(prefix)
-        prefix.metrics.update({
-            "strategy": self.strategy,
-            "symbol": self.symbol,
-            "strategy_params": self.params,
-            "stop_loss": self.config.stop_loss,
-            "take_profit": self.config.take_profit,
-        })
+        prefix.metrics.update(
+            {
+                "strategy": self.strategy,
+                "symbol": self.symbol,
+                "strategy_params": self.params,
+                "stop_loss": self.config.stop_loss,
+                "take_profit": self.config.take_profit,
+            }
+        )
         return prefix
 
     def _signals_upto(self, cutoff: Any) -> dict[str, Any]:
@@ -371,20 +391,24 @@ class ForwardSession:
         pnl = float(open_trade["pnl"]) if open_trade else 0.0
         entry_date = open_trade["date"] if open_trade else _fmt_ts(last_idx)
         bars_held = max(0, (n - 1) - self._index_of(entry_date)) if open_trade else 0
-        return [{
-            "symbol": self.symbol,
-            "side": "LONG" if cur_pos > 0 else "SHORT",
-            # This engine sizes in exposure units (1.0 = fully invested), not lots.
-            "qty": abs(cur_pos),
-            "exposure_pct": round(abs(cur_pos) * 100.0, 2),
-            "entry": _f(entry, 2),
-            "current": _f(last_close, 2),
-            "price_change_pct": round(price_change * 100.0, 2),
-            "unrealized_pnl": _f(pnl, 2),
-            "unrealized_pnl_pct": round((pnl / entry_equity * 100.0) if entry_equity else 0.0, 2),
-            "entry_date": entry_date,
-            "bars_held": bars_held,
-        }]
+        return [
+            {
+                "symbol": self.symbol,
+                "side": "LONG" if cur_pos > 0 else "SHORT",
+                # This engine sizes in exposure units (1.0 = fully invested), not lots.
+                "qty": abs(cur_pos),
+                "exposure_pct": round(abs(cur_pos) * 100.0, 2),
+                "entry": _f(entry, 2),
+                "current": _f(last_close, 2),
+                "price_change_pct": round(price_change * 100.0, 2),
+                "unrealized_pnl": _f(pnl, 2),
+                "unrealized_pnl_pct": round(
+                    (pnl / entry_equity * 100.0) if entry_equity else 0.0, 2
+                ),
+                "entry_date": entry_date,
+                "bars_held": bars_held,
+            }
+        ]
 
     def _index_of(self, date_str: str) -> int:
         try:
@@ -497,8 +521,11 @@ def _register(session: ForwardSession) -> None:
                     break
             else:
                 _SESSIONS.pop(next(iter(_SESSIONS)), None)
-    log.info("[forward:%s] started (%d session(s) in memory, active id is now this one)",
-             session.short_id, len(_SESSIONS))
+    log.info(
+        "[forward:%s] started (%d session(s) in memory, active id is now this one)",
+        session.short_id,
+        len(_SESSIONS),
+    )
 
 
 def _reset_session() -> None:
@@ -548,11 +575,23 @@ def _load_candles(symbol: str, from_date: str, to_date: str, timeframe: str):
     warmup_start = resolve_warmup_start(from_date, WARMUP_BARS, log_prefix="[forward]")
     interval = resolve_interval(timeframe, log_prefix="[forward]")
     candles = _source().get_candles(symbol, warmup_start, to_date, interval)
-    log.debug("[forward] fetched %d bars for %s @ %s (%s..%s)", len(candles), symbol,
-              interval, warmup_start, to_date)
+    log.debug(
+        "[forward] fetched %d bars for %s @ %s (%s..%s)",
+        len(candles),
+        symbol,
+        interval,
+        warmup_start,
+        to_date,
+    )
     if len(candles) < 2:
-        log.warning("[forward] only %d bar(s) available for %s in %s..%s — the replay will "
-                    "complete instantly", len(candles), symbol, from_date, to_date)
+        log.warning(
+            "[forward] only %d bar(s) available for %s in %s..%s — the replay will "
+            "complete instantly",
+            len(candles),
+            symbol,
+            from_date,
+            to_date,
+        )
     return candles
 
 
@@ -603,8 +642,12 @@ def _resolve_dates(data: dict) -> tuple[str, str, list[str]]:
     if from_date > to_date:
         raise ValueError(f"from_date ({from_date}) must be <= to_date ({to_date})")
     if defaults:
-        log.info("[forward] /start defaulted %s → replay window %s..%s",
-                 ", ".join(defaults), from_date, to_date)
+        log.info(
+            "[forward] /start defaulted %s → replay window %s..%s",
+            ", ".join(defaults),
+            from_date,
+            to_date,
+        )
     return from_date, to_date, defaults
 
 
@@ -621,12 +664,16 @@ def _resolve_speed(data: dict, cfg: Any) -> float:
     try:
         speed = float(raw)
     except (TypeError, ValueError):
-        log.warning("[forward] bars_per_second=%r is not a number — using default %s",
-                    raw, DEFAULT_BARS_PER_SECOND)
+        log.warning(
+            "[forward] bars_per_second=%r is not a number — using default %s",
+            raw,
+            DEFAULT_BARS_PER_SECOND,
+        )
         return DEFAULT_BARS_PER_SECOND
     if speed < 0:
-        log.warning("[forward] bars_per_second=%s is negative — clock starts frozen (manual)",
-                    speed)
+        log.warning(
+            "[forward] bars_per_second=%s is negative — clock starts frozen (manual)", speed
+        )
         return 0.0
     return speed
 
@@ -652,8 +699,9 @@ def start() -> tuple:
     try:
         mode, source = _resolve_classification(data)
     except ValidationError as exc:
-        log.warning("[forward] /start classification refused: %s (client=%s)",
-                    exc, request.remote_addr)
+        log.warning(
+            "[forward] /start classification refused: %s (client=%s)", exc, request.remote_addr
+        )
         return jsonify({"error": str(exc)}), 400
 
     symbol = (data.get("symbol") or "").strip().upper()
@@ -663,14 +711,23 @@ def start() -> tuple:
 
     # Auth guard — required for live mode (paper replays need no session).
     if mode == "live" and not get_session_manager().is_authenticated():
-        log.warning("[forward] /start refused for %s/%s: broker session not authenticated "
-                    "(client=%s) — open the broker auth modal or use mode=paper",
-                    strategy, symbol, request.remote_addr)
-        return jsonify({
-            "success": False,
-            "error": "broker_not_authenticated",
-            "message": "Valid broker session required to start live forward test",
-        }), 403
+        log.warning(
+            "[forward] /start refused for %s/%s: broker session not authenticated "
+            "(client=%s) — open the broker auth modal or use mode=paper",
+            strategy,
+            symbol,
+            request.remote_addr,
+        )
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "broker_not_authenticated",
+                    "message": "Valid broker session required to start live forward test",
+                }
+            ),
+            403,
+        )
 
     # Live-never-simulated (ticket #8): this web replay only simulates fills.
     # Refuse a live-labelled run loudly instead of silently paper-filling it —
@@ -678,13 +735,20 @@ def start() -> tuple:
     if mode == "live":
         log.warning(
             "[forward] /start refused live mode for %s/%s: %s",
-            strategy, symbol, LIVE_NOT_WIRED_MESSAGE,
+            strategy,
+            symbol,
+            LIVE_NOT_WIRED_MESSAGE,
         )
-        return jsonify({
-            "success": False,
-            "error": "live_execution_not_wired",
-            "message": LIVE_NOT_WIRED_MESSAGE,
-        }), 400
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "live_execution_not_wired",
+                    "message": LIVE_NOT_WIRED_MESSAGE,
+                }
+            ),
+            400,
+        )
     timeframe = data.get("timeframe", "1D")
     try:
         from_date, to_date, date_defaults = _resolve_dates(data)
@@ -705,8 +769,17 @@ def start() -> tuple:
     speed = _resolve_speed(data, current_app.config)
     log.info(
         "[forward] /start strategy=%s symbol=%s mode=%s source=%s timeframe=%s "
-        "range=%s..%s capital=%s speed=%s params=%s", strategy, symbol, mode, source,
-        timeframe, from_date, to_date, capital, speed, params,
+        "range=%s..%s capital=%s speed=%s params=%s",
+        strategy,
+        symbol,
+        mode,
+        source,
+        timeframe,
+        from_date,
+        to_date,
+        capital,
+        speed,
+        params,
     )
 
     try:
@@ -718,7 +791,13 @@ def start() -> tuple:
 
     try:
         result = run_quick_screen(
-            candles_full, strategy, params, symbol, capital, from_date, to_date,
+            candles_full,
+            strategy,
+            params,
+            symbol,
+            capital,
+            from_date,
+            to_date,
         )
     except ValueError as exc:
         log.warning("[forward] /start rejected by strategy/engine: %s", exc)
@@ -731,37 +810,60 @@ def start() -> tuple:
         return jsonify({"error": f"forward test failed: {exc}"}), 500
 
     session = ForwardSession(
-        state_id=uuid.uuid4().hex, strategy=strategy, symbol=symbol, timeframe=timeframe,
-        capital=capital, params=params, result=result, from_date=from_date, to_date=to_date,
-        bars_per_second=speed, mode=mode, source=source,
+        state_id=uuid.uuid4().hex,
+        strategy=strategy,
+        symbol=symbol,
+        timeframe=timeframe,
+        capital=capital,
+        params=params,
+        result=result,
+        from_date=from_date,
+        to_date=to_date,
+        bars_per_second=speed,
+        mode=mode,
+        source=source,
     )
     _register(session)
     snap = session.snapshot()
     total = snap["progress"]["total"]
     if speed > 0:
-        log.info("[forward:%s] replay running: %d bars @ %g/s ≈ %.0fs — poll "
-                 "GET /api/forward/status?state_id=%s", session.short_id, total, speed,
-                 total / speed, session.state_id)
+        log.info(
+            "[forward:%s] replay running: %d bars @ %g/s ≈ %.0fs — poll "
+            "GET /api/forward/status?state_id=%s",
+            session.short_id,
+            total,
+            speed,
+            total / speed,
+            session.state_id,
+        )
     else:
-        log.info("[forward:%s] replay paused (%d bars, clock frozen) — step it with "
-                 "session.advance(bars) or start with bars_per_second > 0",
-                 session.short_id, total)
+        log.info(
+            "[forward:%s] replay paused (%d bars, clock frozen) — step it with "
+            "session.advance(bars) or start with bars_per_second > 0",
+            session.short_id,
+            total,
+        )
 
-    return jsonify({
-        "status": "running",
-        "total": total,
-        "revealed": snap["progress"]["revealed"],
-        "state_id": session.state_id,
-        "symbol": symbol,
-        "strategy": strategy,
-        "mode": mode,
-        "source": source,
-        "bars_per_second": session.bars_per_second,
-        # What the replay actually runs on, including anything we filled in for
-        # the caller (see _resolve_dates / gap G5).
-        "config": snap["config"],
-        "defaults_applied": date_defaults,
-    }), 200
+    return (
+        jsonify(
+            {
+                "status": "running",
+                "total": total,
+                "revealed": snap["progress"]["revealed"],
+                "state_id": session.state_id,
+                "symbol": symbol,
+                "strategy": strategy,
+                "mode": mode,
+                "source": source,
+                "bars_per_second": session.bars_per_second,
+                # What the replay actually runs on, including anything we filled in for
+                # the caller (see _resolve_dates / gap G5).
+                "config": snap["config"],
+                "defaults_applied": date_defaults,
+            }
+        ),
+        200,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -782,8 +884,16 @@ def stop() -> tuple:
         log.info("[forward] /stop with no active session — nothing to do")
         return jsonify({"status": "idle"}), 200
     session.stop()
-    return jsonify({"status": "stopped", "state_id": session.state_id,
-                    "progress": session.snapshot()["progress"]}), 200
+    return (
+        jsonify(
+            {
+                "status": "stopped",
+                "state_id": session.state_id,
+                "progress": session.snapshot()["progress"],
+            }
+        ),
+        200,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -799,8 +909,10 @@ def _session_or_404():
         if state_id:
             log.warning("[forward] status/trades/equity for unknown session %r", state_id)
             return None, (jsonify({"error": f"unknown session: {state_id}"}), 404)
-        return None, (jsonify({"status": "idle",
-                               "progress": {"revealed": 0, "total": 0, "pct": 0.0}}), 200)
+        return None, (
+            jsonify({"status": "idle", "progress": {"revealed": 0, "total": 0, "pct": 0.0}}),
+            200,
+        )
     return session, None
 
 
@@ -827,18 +939,20 @@ def trades() -> tuple:
     snap = session.snapshot()
     out = []
     for t in snap["trades"]:
-        out.append({
-            "id": t.get("id"),
-            "symbol": session.symbol,
-            "side": t.get("side"),
-            "entry": t.get("entry"),
-            "exit": t.get("exit"),
-            "pnl": t.get("pnl"),
-            "status": "open" if t.get("is_open") else "closed",
-            "result": t.get("result"),
-            "date": t.get("date"),
-            "exit_date": t.get("exit_date"),
-        })
+        out.append(
+            {
+                "id": t.get("id"),
+                "symbol": session.symbol,
+                "side": t.get("side"),
+                "entry": t.get("entry"),
+                "exit": t.get("exit"),
+                "pnl": t.get("pnl"),
+                "status": "open" if t.get("is_open") else "closed",
+                "result": t.get("result"),
+                "date": t.get("date"),
+                "exit_date": t.get("exit_date"),
+            }
+        )
     return jsonify(out), 200
 
 

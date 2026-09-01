@@ -46,21 +46,18 @@ from __future__ import annotations
 import logging
 import statistics as _stats
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from datetime import datetime, time as dtime, timezone
+from dataclasses import dataclass, field, fields
+from datetime import datetime
+from datetime import time as dtime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from backtest.simulator.enums import OrderSide, OrderType
 from backtest.simulator.errors import ValidationError
-from backtest.simulator.money import (
-    ZERO,
-    price as to_price,
-    quantize_money,
-    quantize_price,
-    to_decimal,
-)
+from backtest.simulator.money import ZERO
+from backtest.simulator.money import price as to_price
+from backtest.simulator.money import quantize_money, quantize_price, to_decimal
 
 if TYPE_CHECKING:  # pragma: no cover
     from backtest.simulator.order import Order
@@ -88,9 +85,7 @@ logger = logging.getLogger("backtest.simulator.slippage")
 _BPS = Decimal("10000")
 _HALF = Decimal("0.5")
 
-DEFAULT_SLIPPAGE_CONFIG_PATH = (
-    Path(__file__).resolve().parents[3] / "config" / "slippage.yaml"
-)
+DEFAULT_SLIPPAGE_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "slippage.yaml"
 
 
 class LiquidityTier:
@@ -409,9 +404,7 @@ class VolumeImpactSlippage(SlippageModel):
             return ZERO
         participation = min(qty / adv, self.max_participation)
         # Decimal.sqrt keeps the whole pipeline off binary floats.
-        return (self.coefficient_bps * participation.sqrt()).quantize(
-            Decimal("0.000001")
-        )
+        return (self.coefficient_bps * participation.sqrt()).quantize(Decimal("0.000001"))
 
     def bps(self, snapshot, quantity, side, order_type=OrderType.MARKET):
         if snapshot.avg_volume is None:
@@ -462,9 +455,7 @@ class VolatilitySlippage(SlippageModel):
         if self.size_scaling and quantity is not None and avg_volume is not None:
             adv = to_decimal(avg_volume, "avg_volume")
             if adv > ZERO:
-                participation = min(
-                    abs(to_decimal(quantity, "quantity")) / adv, Decimal("1")
-                )
+                participation = min(abs(to_decimal(quantity, "quantity")) / adv, Decimal("1"))
                 # (1 + sqrt(p)) so a tiny order is unaffected and a full-day
                 # order pays double.
                 base *= Decimal("1") + participation.sqrt()
@@ -473,9 +464,7 @@ class VolatilitySlippage(SlippageModel):
     def bps(self, snapshot, quantity, side, order_type=OrderType.MARKET):
         if snapshot.atr is None:
             return ZERO, {}
-        value = self.volatility_bps(
-            snapshot.atr, snapshot.mid, quantity, snapshot.avg_volume
-        )
+        value = self.volatility_bps(snapshot.atr, snapshot.mid, quantity, snapshot.avg_volume)
         return value, {"volatility": value}
 
     def to_dict(self) -> dict[str, Any]:
@@ -678,12 +667,9 @@ class SlippageConfig:
                 "session windows must not be negative", code="invalid_slippage_config"
             )
         self.tier_multipliers = {
-            str(k): to_decimal(v, "tier multiplier")
-            for k, v in self.tier_multipliers.items()
+            str(k): to_decimal(v, "tier multiplier") for k, v in self.tier_multipliers.items()
         }
-        self.symbol_tiers = {
-            str(k).strip().upper(): str(v) for k, v in self.symbol_tiers.items()
-        }
+        self.symbol_tiers = {str(k).strip().upper(): str(v) for k, v in self.symbol_tiers.items()}
         self.symbol_overrides = {
             str(k).strip().upper(): to_decimal(v, "symbol override")
             for k, v in self.symbol_overrides.items()
@@ -741,9 +727,7 @@ def load_slippage_config(
     """
     config_path = Path(path) if path else DEFAULT_SLIPPAGE_CONFIG_PATH
     if path is not None and not config_path.exists():
-        raise ValidationError(
-            f"slippage config not found: {config_path}", code="config_not_found"
-        )
+        raise ValidationError(f"slippage config not found: {config_path}", code="config_not_found")
     if not config_path.exists():
         return SlippageConfig()
 
@@ -777,7 +761,7 @@ def load_slippage_config(
     if "session_close" in merged:
         merged["session_close"] = _parse_time(merged["session_close"], "session_close")
 
-    known = {f for f in SlippageConfig.__dataclass_fields__}
+    known = {f.name for f in fields(SlippageConfig)}
     unknown = set(merged) - known
     if unknown:
         raise ValidationError(
@@ -842,9 +826,7 @@ class SlippageCalculator:
         impact = (
             model.volume
             if isinstance(model, HybridSlippage)
-            else model
-            if isinstance(model, VolumeImpactSlippage)
-            else VolumeImpactSlippage()
+            else model if isinstance(model, VolumeImpactSlippage) else VolumeImpactSlippage()
         )
         return impact.impact_bps(order_size, avg_volume)
 
@@ -855,16 +837,12 @@ class SlippageCalculator:
         bid_d = to_price(bid, "bid")
         ask_d = to_price(ask, "ask")
         if bid_d > ask_d:
-            raise ValidationError(
-                "crossed quote: bid is above ask", code="crossed_quote"
-            )
+            raise ValidationError("crossed quote: bid is above ask", code="crossed_quote")
         mid = (bid_d + ask_d) / 2
         if mid <= ZERO:
             return ZERO
         spread_bps = (ask_d - bid_d) / mid * _BPS
-        return (spread_bps * self.time_multiplier(time_of_day)).quantize(
-            Decimal("0.000001")
-        )
+        return (spread_bps * self.time_multiplier(time_of_day)).quantize(Decimal("0.000001"))
 
     def calculate_volatility_adjustment(
         self, atr: Any, order_size: Any = None, price: Any = None, avg_volume: Any = None
@@ -874,9 +852,7 @@ class SlippageCalculator:
         vol = (
             model.volatility
             if isinstance(model, HybridSlippage)
-            else model
-            if isinstance(model, VolatilitySlippage)
-            else VolatilitySlippage()
+            else model if isinstance(model, VolatilitySlippage) else VolatilitySlippage()
         )
         return vol.volatility_bps(atr, price or Decimal("1"), order_size, avg_volume)
 
@@ -896,9 +872,7 @@ class SlippageCalculator:
             from zoneinfo import ZoneInfo
 
             local = (
-                when.astimezone(ZoneInfo(cfg.session_timezone))
-                if when.tzinfo is not None
-                else when
+                when.astimezone(ZoneInfo(cfg.session_timezone)) if when.tzinfo is not None else when
             )
         except Exception:  # pragma: no cover - missing tzdata
             logger.debug("timezone %s unavailable; using naive time", cfg.session_timezone)
@@ -971,19 +945,12 @@ class SlippageCalculator:
         reference = (
             to_price(reference_price, "reference_price")
             if reference_price is not None
-            else (snapshot.ask if side is OrderSide.BUY else snapshot.bid)
-            or snapshot.last
+            else (snapshot.ask if side is OrderSide.BUY else snapshot.bid) or snapshot.last
         )
         if reference <= ZERO:
-            raise ValidationError(
-                "reference price must be positive", code="invalid_price"
-            )
+            raise ValidationError("reference price must be positive", code="invalid_price")
 
-        model = (
-            resolve_slippage_model(model_type)
-            if model_type is not None
-            else self.config.model
-        )
+        model = resolve_slippage_model(model_type) if model_type is not None else self.config.model
         base_bps, components = model.bps(snapshot, qty, side, order_type)
 
         multipliers: dict[str, Decimal] = {}
@@ -1001,9 +968,7 @@ class SlippageCalculator:
         total_bps = min(max(total_bps, ZERO), self.config.max_bps)
         total_bps = total_bps.quantize(Decimal("0.000001"))
 
-        executed = quantize_price(
-            reference * (Decimal("1") + total_bps / _BPS * side.sign)
-        )
+        executed = quantize_price(reference * (Decimal("1") + total_bps / _BPS * side.sign))
 
         # A limit order cannot fill worse than its limit — that is what makes
         # it a limit order. Cap and record it.
@@ -1015,9 +980,9 @@ class SlippageCalculator:
             elif side is OrderSide.SELL and executed < limit:
                 executed, capped = limit, True
             if capped:
-                total_bps = (
-                    abs(executed - reference) / reference * _BPS
-                ).quantize(Decimal("0.000001"))
+                total_bps = (abs(executed - reference) / reference * _BPS).quantize(
+                    Decimal("0.000001")
+                )
 
         breakdown = {**components, **multipliers}
         estimate = SlippageEstimate(
@@ -1036,7 +1001,12 @@ class SlippageCalculator:
             self._history.append(estimate)
         logger.debug(
             "slippage %s %s %s: %s bps -> %s (from %s)%s",
-            symbol, side, qty, total_bps, executed, reference,
+            symbol,
+            side,
+            qty,
+            total_bps,
+            executed,
+            reference,
             " [capped at limit]" if capped else "",
         )
         return estimate
@@ -1099,4 +1069,3 @@ class SlippageCalculator:
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"<SlippageCalculator {self.config.model.name} n={len(self._history)}>"
-

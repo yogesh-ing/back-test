@@ -18,7 +18,9 @@ Quick start
 >>> from backtest.simulator.portfolio import Portfolio
 >>> from backtest.simulator.position_sizing import PositionSizer, SizingConfig
 >>> portfolio = Portfolio(name="test", initial_capital=100000)
->>> sizer = PositionSizer.from_config(SizingConfig(method="risk_based", risk_per_trade=0.01, stop_loss_pct=0.02))
+>>> sizer = PositionSizer.from_config(
+...     SizingConfig(method="risk_based", risk_per_trade=0.01, stop_loss_pct=0.02)
+... )
 >>> qty = sizer.calculate_position_size(symbol="INFY", current_price=1500, portfolio=portfolio)
 
 Constraints are applied after the raw calculation:
@@ -35,14 +37,15 @@ All monetary values are :class:`Decimal` to match the rest of ``simulator/``.
 from __future__ import annotations
 
 import logging
-import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 from backtest.simulator.errors import ValidationError
-from backtest.simulator.money import ZERO, ONE, money, price as to_price, to_decimal, quantize_money, quantize_price
+from backtest.simulator.money import ONE, ZERO, money
+from backtest.simulator.money import price as to_price
+from backtest.simulator.money import quantize_money, to_decimal
 
 logger = logging.getLogger("backtest.simulator.position_sizing")
 
@@ -153,7 +156,13 @@ class RiskParams:
     max_concentration_pct: Optional[Decimal] = None
 
     def __post_init__(self) -> None:
-        for name in ("max_risk_per_trade", "stop_loss_pct", "risk_amount", "max_total_risk", "max_concentration_pct"):
+        for name in (
+            "max_risk_per_trade",
+            "stop_loss_pct",
+            "risk_amount",
+            "max_total_risk",
+            "max_concentration_pct",
+        ):
             v = getattr(self, name)
             if v is not None:
                 dec = to_decimal(v, name)
@@ -235,7 +244,12 @@ class SizingConstraints:
     max_open_positions: Optional[int] = None
 
     def __post_init__(self) -> None:
-        for name in ("max_position_value", "max_position_pct", "max_gross_exposure_pct", "min_trade_value"):
+        for name in (
+            "max_position_value",
+            "max_position_pct",
+            "max_gross_exposure_pct",
+            "min_trade_value",
+        ):
             v = getattr(self, name)
             if v is not None:
                 dec = to_decimal(v, name)
@@ -352,12 +366,14 @@ class SizingConfig:
         if not isinstance(self.constraints, SizingConstraints):
             # allow dict
             if isinstance(self.constraints, dict):
+                # pylint: disable-next=not-a-mapping  # narrowed to dict by the isinstance above
                 self.constraints = SizingConstraints(**self.constraints)
             else:
                 raise ValidationError("constraints must be SizingConstraints or dict")
 
         if not isinstance(self.risk_params, RiskParams):
             if isinstance(self.risk_params, dict):
+                # pylint: disable-next=not-a-mapping  # narrowed to dict by the isinstance above
                 self.risk_params = RiskParams(**self.risk_params)
             else:
                 raise ValidationError("risk_params must be RiskParams or dict")
@@ -532,8 +548,16 @@ class RiskBasedSizer:
         stop_loss_pct: Any = None,
         **kwargs: Any,
     ) -> Decimal:
-        rp = to_decimal(risk_per_trade, "risk_per_trade") if risk_per_trade is not None else self.risk_per_trade
-        sl = to_decimal(stop_loss_pct, "stop_loss_pct") if stop_loss_pct is not None else self.stop_loss_pct
+        rp = (
+            to_decimal(risk_per_trade, "risk_per_trade")
+            if risk_per_trade is not None
+            else self.risk_per_trade
+        )
+        sl = (
+            to_decimal(stop_loss_pct, "stop_loss_pct")
+            if stop_loss_pct is not None
+            else self.stop_loss_pct
+        )
 
         equity = _resolve_equity(portfolio)
         price = _resolve_price(current_price, signal, portfolio)
@@ -606,7 +630,11 @@ class VolatilitySizer:
         if effective_atr is None or effective_atr <= ZERO:
             raise ValidationError("ATR is required for volatility-based sizing")
 
-        mult = to_decimal(atr_multiplier, "atr_multiplier") if atr_multiplier is not None else self.atr_multiplier
+        mult = (
+            to_decimal(atr_multiplier, "atr_multiplier")
+            if atr_multiplier is not None
+            else self.atr_multiplier
+        )
 
         # risk amount: either absolute or % of equity
         if risk_amount is not None:
@@ -622,7 +650,9 @@ class VolatilitySizer:
         qty = (risk_amt / denominator).quantize(Decimal("1"))
         return max(Decimal("1"), qty)
 
-    def apply_volatility_based(self, atr: Any, risk_amount: Any, atr_multiplier: Any = Decimal("1")) -> Decimal:
+    def apply_volatility_based(
+        self, atr: Any, risk_amount: Any, atr_multiplier: Any = Decimal("1")
+    ) -> Decimal:
         self.atr = to_price(atr, "atr")
         self.risk_amount = money(risk_amount, "risk_amount")
         self.atr_multiplier = to_decimal(atr_multiplier, "atr_multiplier")
@@ -667,7 +697,9 @@ class KellySizer:
         if not (ZERO < self.kelly_fraction <= ONE):
             raise ValidationError("kelly_fraction must be in (0, 1]")
 
-    def _kelly_fraction_raw(self, win_rate: Decimal, avg_win: Decimal, avg_loss: Decimal) -> Decimal:
+    def _kelly_fraction_raw(
+        self, win_rate: Decimal, avg_win: Decimal, avg_loss: Decimal
+    ) -> Decimal:
         """Calculate raw Kelly fraction (can be negative)."""
         if avg_loss == ZERO:
             return ZERO
@@ -694,7 +726,11 @@ class KellySizer:
         wr = to_decimal(win_rate, "win_rate") if win_rate is not None else self.win_rate
         aw = to_decimal(avg_win, "avg_win") if avg_win is not None else self.avg_win
         al = to_decimal(avg_loss, "avg_loss") if avg_loss is not None else self.avg_loss
-        kf = to_decimal(kelly_fraction, "kelly_fraction") if kelly_fraction is not None else self.kelly_fraction
+        kf = (
+            to_decimal(kelly_fraction, "kelly_fraction")
+            if kelly_fraction is not None
+            else self.kelly_fraction
+        )
 
         equity = _resolve_equity(portfolio)
         price = _resolve_price(current_price, signal, portfolio)
@@ -768,7 +804,9 @@ class PositionSizer:
         elif method == SizingMethod.PERCENTAGE_PORTFOLIO:
             return PercentagePortfolioSizer(percentage=config.percentage)
         elif method == SizingMethod.RISK_BASED:
-            return RiskBasedSizer(risk_per_trade=config.risk_per_trade, stop_loss_pct=config.stop_loss_pct)
+            return RiskBasedSizer(
+                risk_per_trade=config.risk_per_trade, stop_loss_pct=config.stop_loss_pct
+            )
         elif method in (SizingMethod.VOLATILITY, SizingMethod.ATR_BASED):
             return VolatilitySizer(
                 risk_amount=config.risk_amount or config.fixed_dollar_amount,
@@ -819,12 +857,13 @@ class PositionSizer:
         # Resolve symbol and price
         sym = symbol
         if sym is None and signal is not None:
-            sym = getattr(signal, "symbol", None) or (signal.get("symbol") if isinstance(signal, dict) else None)
+            sym = getattr(signal, "symbol", None) or (
+                signal.get("symbol") if isinstance(signal, dict) else None
+            )
 
         price = _resolve_price(current_price, signal, portfolio)
 
         # Merge risk_params overrides
-        effective_config = self.config
         if risk_params is not None:
             if isinstance(risk_params, RiskParams):
                 rp = risk_params
@@ -832,10 +871,11 @@ class PositionSizer:
                 # build from dict, merging with existing
                 rp_dict = self.config.risk_params.to_dict()
                 rp_dict.update({k: v for k, v in risk_params.items() if v is not None})
-                # remove None string values that to_dict produced as None? Actually to_dict returns str or None
+                # remove None string values that to_dict produced as None?
+                # Actually to_dict returns str or None
                 # Let's build RiskParams directly from merged dict filtering
                 merged = {}
-                for k in RiskParams.__dataclass_fields__:
+                for k in (f.name for f in fields(RiskParams)):
                     if k in risk_params and risk_params[k] is not None:
                         merged[k] = risk_params[k]
                     else:
@@ -853,11 +893,13 @@ class PositionSizer:
             else:
                 rp = self.config.risk_params
 
-            # If risk_params overrides contain sizing-relevant fields, rebuild inner sizer temporarily?
+            # If risk_params overrides contain sizing-relevant fields,
+            # rebuild inner sizer temporarily?
             # For simplicity, pass them as kwargs to inner calculate
             kwargs.update(
                 {
-                    "risk_per_trade": getattr(rp, "max_risk_per_trade", None) or getattr(rp, "risk_per_trade", None),
+                    "risk_per_trade": getattr(rp, "max_risk_per_trade", None)
+                    or getattr(rp, "risk_per_trade", None),
                     "stop_loss_pct": getattr(rp, "stop_loss_pct", None),
                     "risk_amount": getattr(rp, "risk_amount", None),
                     "atr_multiplier": getattr(rp, "atr_multiplier", None),
@@ -915,14 +957,18 @@ class PositionSizer:
         """Like calculate_position_size but returns full SizingResult with audit."""
         sym = symbol
         if sym is None and signal is not None:
-            sym = getattr(signal, "symbol", None) or (signal.get("symbol") if isinstance(signal, dict) else None)
+            sym = getattr(signal, "symbol", None) or (
+                signal.get("symbol") if isinstance(signal, dict) else None
+            )
 
         price = _resolve_price(current_price, signal, portfolio)
         raw_qty = self._inner.calculate_position_size(
             signal=signal, portfolio=portfolio, current_price=price, **kwargs
         )
         raw_qty = to_price(raw_qty, "raw_quantity")
-        result = self._apply_constraints(raw_qty=raw_qty, price=price, symbol=sym, portfolio=portfolio, signal=signal)
+        result = self._apply_constraints(
+            raw_qty=raw_qty, price=price, symbol=sym, portfolio=portfolio, signal=signal
+        )
         return result
 
     def _apply_constraints(
@@ -982,7 +1028,9 @@ class PositionSizer:
             if qty > max_qty_by_value:
                 qty = max_qty_by_value
                 constrained = True
-                reason_parts.append(f"capped to max_position_value {constraints.max_position_value}")
+                reason_parts.append(
+                    f"capped to max_position_value {constraints.max_position_value}"
+                )
 
         # Max position % of equity
         if constraints.max_position_pct is not None and portfolio is not None:
@@ -995,7 +1043,9 @@ class PositionSizer:
                 if qty > max_qty_by_pct:
                     qty = max_qty_by_pct
                     constrained = True
-                    reason_parts.append(f"capped to max_position_pct {constraints.max_position_pct}")
+                    reason_parts.append(
+                        f"capped to max_position_pct {constraints.max_position_pct}"
+                    )
             except Exception as exc:
                 logger.debug("max_position_pct check failed: %s", exc)
 
@@ -1003,7 +1053,11 @@ class PositionSizer:
         if constraints.max_gross_exposure_pct is not None and portfolio is not None and symbol:
             try:
                 equity = _resolve_equity(portfolio)
-                gross = portfolio.calculate_gross_exposure() if hasattr(portfolio, "calculate_gross_exposure") else ZERO
+                gross = (
+                    portfolio.calculate_gross_exposure()
+                    if hasattr(portfolio, "calculate_gross_exposure")
+                    else ZERO
+                )
                 max_gross = equity * constraints.max_gross_exposure_pct
                 # If already over, no new position
                 if gross >= max_gross:
@@ -1020,11 +1074,15 @@ class PositionSizer:
                 remaining = max_gross - gross
                 max_qty_by_gross = (remaining / price).quantize(Decimal("1"))
                 if constraints.round_lots:
-                    max_qty_by_gross = (max_qty_by_gross // constraints.lot_size) * constraints.lot_size
+                    max_qty_by_gross = (
+                        max_qty_by_gross // constraints.lot_size
+                    ) * constraints.lot_size
                 if qty > max_qty_by_gross:
                     qty = max_qty_by_gross
                     constrained = True
-                    reason_parts.append(f"capped to max_gross_exposure_pct {constraints.max_gross_exposure_pct}")
+                    reason_parts.append(
+                        f"capped to max_gross_exposure_pct {constraints.max_gross_exposure_pct}"
+                    )
             except Exception as exc:
                 logger.debug("max_gross_exposure check failed: %s", exc)
 
@@ -1068,17 +1126,29 @@ class PositionSizer:
     # -- spec-required helpers (apply_*) -----------------------------------
 
     def apply_fixed_quantity(self, quantity: Any) -> Decimal:
-        self.config = SizingConfig(method=SizingMethod.FIXED_QUANTITY, fixed_quantity=quantity, constraints=self.config.constraints)
+        self.config = SizingConfig(
+            method=SizingMethod.FIXED_QUANTITY,
+            fixed_quantity=quantity,
+            constraints=self.config.constraints,
+        )
         self._inner = FixedQuantitySizer(quantity=quantity)
         return self._inner.quantity
 
     def apply_fixed_dollar_amount(self, dollar_amount: Any) -> Decimal:
-        self.config = SizingConfig(method=SizingMethod.FIXED_DOLLAR, fixed_dollar_amount=dollar_amount, constraints=self.config.constraints)
+        self.config = SizingConfig(
+            method=SizingMethod.FIXED_DOLLAR,
+            fixed_dollar_amount=dollar_amount,
+            constraints=self.config.constraints,
+        )
         self._inner = FixedDollarSizer(dollar_amount=dollar_amount)
         return self._inner.dollar_amount
 
     def apply_percentage_of_portfolio(self, percentage: Any) -> Decimal:
-        self.config = SizingConfig(method=SizingMethod.PERCENTAGE_PORTFOLIO, percentage=percentage, constraints=self.config.constraints)
+        self.config = SizingConfig(
+            method=SizingMethod.PERCENTAGE_PORTFOLIO,
+            percentage=percentage,
+            constraints=self.config.constraints,
+        )
         self._inner = PercentagePortfolioSizer(percentage=percentage)
         return self._inner.percentage
 
@@ -1092,7 +1162,9 @@ class PositionSizer:
         self._inner = RiskBasedSizer(risk_per_trade=risk_per_trade, stop_loss_pct=stop_loss_pct)
         return self._inner.risk_per_trade
 
-    def apply_kelly_criterion(self, win_rate: Any, avg_win: Any, avg_loss: Any, fraction: Any = Decimal("0.5")) -> Decimal:
+    def apply_kelly_criterion(
+        self, win_rate: Any, avg_win: Any, avg_loss: Any, fraction: Any = Decimal("0.5")
+    ) -> Decimal:
         self.config = SizingConfig(
             method=SizingMethod.KELLY,
             win_rate=win_rate,
@@ -1101,12 +1173,18 @@ class PositionSizer:
             kelly_fraction=fraction,
             constraints=self.config.constraints,
         )
-        self._inner = KellySizer(win_rate=win_rate, avg_win=avg_win, avg_loss=avg_loss, kelly_fraction=fraction)
+        self._inner = KellySizer(
+            win_rate=win_rate, avg_win=avg_win, avg_loss=avg_loss, kelly_fraction=fraction
+        )
         return self._inner._kelly_fraction_raw(
-            to_decimal(win_rate, "win_rate"), to_decimal(avg_win, "avg_win"), to_decimal(avg_loss, "avg_loss")
+            to_decimal(win_rate, "win_rate"),
+            to_decimal(avg_win, "avg_win"),
+            to_decimal(avg_loss, "avg_loss"),
         )
 
-    def apply_volatility_based(self, atr: Any, risk_amount: Any, atr_multiplier: Any = Decimal("1")) -> Decimal:
+    def apply_volatility_based(
+        self, atr: Any, risk_amount: Any, atr_multiplier: Any = Decimal("1")
+    ) -> Decimal:
         self.config = SizingConfig(
             method=SizingMethod.ATR_BASED,
             atr=atr,
@@ -1114,7 +1192,9 @@ class PositionSizer:
             atr_multiplier=atr_multiplier,
             constraints=self.config.constraints,
         )
-        self._inner = VolatilitySizer(risk_amount=risk_amount, atr=atr, atr_multiplier=atr_multiplier)
+        self._inner = VolatilitySizer(
+            risk_amount=risk_amount, atr=atr, atr_multiplier=atr_multiplier
+        )
         return self._inner.atr
 
     # -- factory -----------------------------------------------------------
@@ -1218,7 +1298,9 @@ def all_in_size(symbol: str, price: float, portfolio: Any) -> int:
 # ---------------------------------------------------------------------------
 
 
-def load_position_sizing_config(path: str | Path | None = None, profile: str | None = None) -> SizingConfig:
+def load_position_sizing_config(
+    path: str | Path | None = None, profile: str | None = None
+) -> SizingConfig:
     """Load sizing config from YAML.
 
     Falls back to default fixed quantity when file absent.
@@ -1274,7 +1356,9 @@ def load_position_sizing_config(path: str | Path | None = None, profile: str | N
 
     if profiles:
         if chosen not in profiles and chosen != "default":
-            raise ValidationError(f"unknown sizing profile {chosen!r}; available: {sorted(profiles)}")
+            raise ValidationError(
+                f"unknown sizing profile {chosen!r}; available: {sorted(profiles)}"
+            )
         if chosen in profiles:
             merged.update(profiles[chosen] or {})
 
@@ -1283,7 +1367,7 @@ def load_position_sizing_config(path: str | Path | None = None, profile: str | N
     risk_params_data = merged.pop("risk_params", None)
 
     # known fields
-    known = set(SizingConfig.__dataclass_fields__.keys())
+    known = {f.name for f in fields(SizingConfig)}
     # allow constraints and risk_params as nested, already popped
     unknown = set(merged) - known
     if unknown:
@@ -1297,8 +1381,16 @@ def load_position_sizing_config(path: str | Path | None = None, profile: str | N
         raise ValidationError(f"unknown sizing config keys: {sorted(unknown)}")
 
     if constraints_data:
-        merged["constraints"] = SizingConstraints(**constraints_data) if isinstance(constraints_data, dict) else constraints_data
+        merged["constraints"] = (
+            SizingConstraints(**constraints_data)
+            if isinstance(constraints_data, dict)
+            else constraints_data
+        )
     if risk_params_data:
-        merged["risk_params"] = RiskParams(**risk_params_data) if isinstance(risk_params_data, dict) else risk_params_data
+        merged["risk_params"] = (
+            RiskParams(**risk_params_data)
+            if isinstance(risk_params_data, dict)
+            else risk_params_data
+        )
 
     return SizingConfig(**merged)

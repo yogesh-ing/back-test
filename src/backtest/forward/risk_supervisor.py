@@ -27,7 +27,7 @@ from backtest.data.universe import CORRELATION_GROUPS, correlation_group_for
 
 logger = logging.getLogger("backtest.forward.risk")
 
-HALT_PAUSE = "PAUSE_AND_HOLD"      # Mode A: stop new entries, let SL/TP ride
+HALT_PAUSE = "PAUSE_AND_HOLD"  # Mode A: stop new entries, let SL/TP ride
 HALT_FLATTEN = "EMERGENCY_FLATTEN"  # Mode B: cancel/exit everything
 
 STATE_NORMAL = "NORMAL"
@@ -43,10 +43,10 @@ class GlobalRiskConfig:
     are injected via :class:`PortfolioManager(risk_config=...)` or env config.
     """
 
-    daily_loss_limit: float = 250_000.0     # absolute account currency
-    max_drawdown_pct: float = 0.25          # fraction of peak equity
-    max_leverage: float = 1.0               # V1 telemetry
-    breach_mode: str = HALT_PAUSE           # daily-loss response mode
+    daily_loss_limit: float = 250_000.0  # absolute account currency
+    max_drawdown_pct: float = 0.25  # fraction of peak equity
+    max_leverage: float = 1.0  # V1 telemetry
+    breach_mode: str = HALT_PAUSE  # daily-loss response mode
     correlation_warning_threshold: int = 3
 
     def __post_init__(self) -> None:
@@ -98,8 +98,10 @@ class RiskSupervisor:
 
     def check_portfolio_daily_loss(self, daily_pnl: float) -> Optional[str]:
         if daily_pnl <= -abs(self.config.daily_loss_limit):
-            return (f"Global daily loss {daily_pnl:,.2f} breached limit "
-                    f"-{abs(self.config.daily_loss_limit):,.2f}")
+            return (
+                f"Global daily loss {daily_pnl:,.2f} breached limit "
+                f"-{abs(self.config.daily_loss_limit):,.2f}"
+            )
         return None
 
     def check_portfolio_max_drawdown(self, equity: float, peak_equity: float) -> Optional[str]:
@@ -107,16 +109,18 @@ class RiskSupervisor:
             return None
         dd = (peak_equity - equity) / peak_equity
         if dd >= self.config.max_drawdown_pct:
-            return (f"Portfolio drawdown {dd:.2%} breached max "
-                    f"{self.config.max_drawdown_pct:.2%} (equity {equity:,.2f} "
-                    f"vs peak {peak_equity:,.2f})")
+            return (
+                f"Portfolio drawdown {dd:.2%} breached max "
+                f"{self.config.max_drawdown_pct:.2%} (equity {equity:,.2f} "
+                f"vs peak {peak_equity:,.2f})"
+            )
         return None
 
     def check_correlation_concentration(self, runners: List[Any]) -> List[Dict[str, Any]]:
         """Flag correlation groups with >= threshold concurrent LONG positions."""
         group_longs: Dict[str, set] = {}
         for runner in runners:
-            state = runner.get_state()
+            _ = runner.get_state()  # unused; call kept unchanged (F841, ticket #11)
             for pos in runner.positions.values():
                 if pos["side"] != "LONG":
                     continue
@@ -128,20 +132,25 @@ class RiskSupervisor:
         warnings: List[Dict[str, Any]] = []
         for gid, symbols in group_longs.items():
             threshold = CORRELATION_GROUPS.get(gid, {}).get(
-                "threshold", self.config.correlation_warning_threshold)
+                "threshold", self.config.correlation_warning_threshold
+            )
             if len(symbols) >= threshold:
                 meta = CORRELATION_GROUPS.get(gid, {})
-                warnings.append({
-                    "kind": "HIGH_CONCENTRATION",
-                    "group": gid,
-                    "label": meta.get("label", gid),
-                    "symbols": sorted(symbols),
-                    "count": len(symbols),
-                    "threshold": threshold,
-                    "message": (f"High concentration: {len(symbols)} LONG positions in "
-                                f"correlated {meta.get('label', gid)} instruments "
-                                f"({', '.join(sorted(symbols))})"),
-                })
+                warnings.append(
+                    {
+                        "kind": "HIGH_CONCENTRATION",
+                        "group": gid,
+                        "label": meta.get("label", gid),
+                        "symbols": sorted(symbols),
+                        "count": len(symbols),
+                        "threshold": threshold,
+                        "message": (
+                            f"High concentration: {len(symbols)} LONG positions in "
+                            f"correlated {meta.get('label', gid)} instruments "
+                            f"({', '.join(sorted(symbols))})"
+                        ),
+                    }
+                )
         return warnings
 
     # -- one-shot evaluation ----------------------------------------------
@@ -184,8 +193,9 @@ class RiskSupervisor:
             # Log once — the manager latches and keeps calling evaluate, so
             # avoid re-logging the same breach on every subsequent tick.
             if not already_halted:
-                logger.critical("CIRCUIT BREAKER: %s (mode=%s)",
-                                report.halt_reason, report.halt_mode)
+                logger.critical(
+                    "CIRCUIT BREAKER: %s (mode=%s)", report.halt_reason, report.halt_mode
+                )
         elif already_halted:
             # Stay latched until an explicit reset.
             report.halted = True

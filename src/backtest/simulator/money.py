@@ -14,7 +14,7 @@ Two quantisation levels mirror the schema:
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 __all__ = [

@@ -16,8 +16,8 @@ import pytest
 from backtest.api import forward as fwd
 from backtest.brokers.base import (
     STATUS_AUTHENTICATED,
-    STATUS_EXPIRING_SOON,
     STATUS_EXPIRED,
+    STATUS_EXPIRING_SOON,
     STATUS_UNAUTHENTICATED,
     BrokerAuthBase,
 )
@@ -127,9 +127,13 @@ def _reset_forward_session():
 
 
 _CFG = {
-    "strategy": "sma_crossover", "symbol": "DEMO", "timeframe": "1D",
-    "from_date": "2024-01-01", "to_date": "2024-12-31",
-    "capital": 10_000, "params": {"fast": 10, "slow": 30},
+    "strategy": "sma_crossover",
+    "symbol": "DEMO",
+    "timeframe": "1D",
+    "from_date": "2024-01-01",
+    "to_date": "2024-12-31",
+    "capital": 10_000,
+    "params": {"fast": 10, "slow": 30},
 }
 
 
@@ -178,10 +182,10 @@ def test_start_with_dates_reports_no_defaults(client):
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"from_date": "01-01-2024"},                       # wrong format
-        {"from_date": "not-a-date"},                      # nonsense
-        {"to_date": "2024-13-45"},                        # impossible date
-        {"from_date": "2024-12-31", "to_date": "2024-01-01"},   # inverted
+        {"from_date": "01-01-2024"},  # wrong format
+        {"from_date": "not-a-date"},  # nonsense
+        {"to_date": "2024-13-45"},  # impossible date
+        {"from_date": "2024-12-31", "to_date": "2024-01-01"},  # inverted
     ],
 )
 def test_start_rejects_unusable_dates(client, overrides):
@@ -204,8 +208,17 @@ def test_status_shape_matches_adapter_plus_live_fields(client):
     client.post("/api/forward/start", json=_CFG)
     body = client.get("/api/forward/status").get_json()
     # adapter shape (reusable components) + forward-specific fields
-    for key in ("metrics", "equity", "drawdown", "trades", "signals", "config",
-                "positions", "progress", "status"):
+    for key in (
+        "metrics",
+        "equity",
+        "drawdown",
+        "trades",
+        "signals",
+        "config",
+        "positions",
+        "progress",
+        "status",
+    ):
         assert key in body
     assert body["status"] == "running"
     assert 0 <= body["progress"]["pct"] <= 100
@@ -242,7 +255,7 @@ def test_clock_advances_without_any_polling(client):
     started = client.post("/api/forward/start", json={**_CFG, "bars_per_second": 40}).get_json()
     sid = started["state_id"]
     before = client.get(f"/api/forward/status?state_id={sid}").get_json()["progress"]["revealed"]
-    time.sleep(0.5)          # 40 bars/s ⇒ ≥ 10 more bars revealed, no /status in between
+    time.sleep(0.5)  # 40 bars/s ⇒ ≥ 10 more bars revealed, no /status in between
     after = client.get(f"/api/forward/status?state_id={sid}").get_json()["progress"]["revealed"]
     assert after > before, "server-side clock must advance on its own"
 
@@ -251,10 +264,10 @@ def test_replay_completes_and_auto_stops(client):
     started = _start(client)
     sid = started["state_id"]
     session = _session(client, sid)
-    session.advance(session.total)          # run the clock to the end
+    session.advance(session.total)  # run the clock to the end
     final = client.get(f"/api/forward/status?state_id={sid}").get_json()
     assert final["progress"]["pct"] == 100.0
-    assert final["status"] == "stopped"      # auto-stop at the last bar
+    assert final["status"] == "stopped"  # auto-stop at the last bar
 
 
 # ---------------------------------------------------------------------------
@@ -270,8 +283,9 @@ def test_signals_never_leak_beyond_the_revealed_prefix(client):
         session.advance(4)
         snap = client.get(f"/api/forward/status?state_id={sid}").get_json()
         cutoff = snap["last_bar_ts"]
-        future = [x for x in snap["signals"]["buys"] + snap["signals"]["sells"]
-                  if x["date"] > cutoff]
+        future = [
+            x for x in snap["signals"]["buys"] + snap["signals"]["sells"] if x["date"] > cutoff
+        ]
         assert not future, f"at bar {snap['progress']['revealed']}, payload exposed {future}"
         assert len(snap["signals"]["candles"]) == snap["progress"]["revealed"]
 
@@ -286,12 +300,19 @@ def test_metrics_are_real_numbers_not_zeros(client):
     started = _start(client)
     sid = started["state_id"]
     session = _session(client, sid)
-    session.advance(60)                       # enough for fast/slow 10/30 to trade
+    session.advance(60)  # enough for fast/slow 10/30 to trade
     metrics = client.get(f"/api/forward/status?state_id={sid}").get_json()["metrics"]
     assert metrics["total_trades"] >= 1
     assert metrics["final_equity"] != _CFG["capital"], "equity must move as the replay runs"
-    assert {"total_pnl", "total_return_pct", "win_rate_pct", "max_drawdown_pct", "sharpe",
-            "closed_trades", "open_trades"} <= set(metrics)
+    assert {
+        "total_pnl",
+        "total_return_pct",
+        "win_rate_pct",
+        "max_drawdown_pct",
+        "sharpe",
+        "closed_trades",
+        "open_trades",
+    } <= set(metrics)
 
 
 def test_positions_are_marked_to_market_as_the_replay_runs(client):
@@ -412,7 +433,7 @@ def test_stop_halts_progress(client):
     before = client.get(f"/api/forward/status?state_id={sid}").get_json()["progress"]["pct"]
     stopped = client.post("/api/forward/stop", json={"state_id": sid})
     assert stopped.get_json()["status"] == "stopped"
-    session.advance(5)          # a stopped session ignores the clock
+    session.advance(5)  # a stopped session ignores the clock
     after = client.get(f"/api/forward/status?state_id={sid}").get_json()
     assert after["status"] == "stopped"
     assert after["progress"]["pct"] == before
@@ -433,8 +454,18 @@ def test_trades_endpoint_marks_open_legs(client):
     _session(client, sid).advance(60)
     rows = client.get(f"/api/forward/trades?state_id={sid}").get_json()
     assert rows
-    assert {"id", "symbol", "side", "entry", "exit", "pnl", "status", "result",
-            "date", "exit_date"} <= set(rows[0])
+    assert {
+        "id",
+        "symbol",
+        "side",
+        "entry",
+        "exit",
+        "pnl",
+        "status",
+        "result",
+        "date",
+        "exit_date",
+    } <= set(rows[0])
     assert any(r["status"] in {"open", "closed"} for r in rows)
 
 

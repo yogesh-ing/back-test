@@ -25,8 +25,10 @@ def list_strategies() -> tuple:
     ]
     log.debug("/api/strategies → %d entries", len(catalogue))
     if not catalogue:
-        log.warning("/api/strategies returned an empty catalogue — check that "
-                    "src/backtest/strategies/*.py exist and import cleanly")
+        log.warning(
+            "/api/strategies returned an empty catalogue — check that "
+            "src/backtest/strategies/*.py exist and import cleanly"
+        )
     return jsonify(catalogue), 200
 
 

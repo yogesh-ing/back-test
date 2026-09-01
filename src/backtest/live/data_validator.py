@@ -37,10 +37,9 @@ import logging
 import math
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
-from decimal import Decimal
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional
 
 import pandas as pd
 
@@ -198,7 +197,11 @@ class DataValidator:
     True
     """
 
-    def __init__(self, config: Optional[ValidatorConfig | Mapping[str, Any]] = None, symbols: Optional[List[str]] = None):
+    def __init__(
+        self,
+        config: Optional[ValidatorConfig | Mapping[str, Any]] = None,
+        symbols: Optional[List[str]] = None,
+    ):
         if config is None:
             self.config = ValidatorConfig()
         elif isinstance(config, dict):
@@ -209,15 +212,24 @@ class DataValidator:
         self.symbols = [str(s).upper() for s in (symbols or [])]
 
         # Per-symbol history for statistical checks
-        self._price_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=self.config.spike_window * 2))
-        self._volume_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=self.config.volume_window * 2))
+        self._price_history: Dict[str, deque] = defaultdict(
+            lambda: deque(maxlen=self.config.spike_window * 2)
+        )
+        self._volume_history: Dict[str, deque] = defaultdict(
+            lambda: deque(maxlen=self.config.volume_window * 2)
+        )
         self._last_timestamp: Dict[str, datetime] = {}
         self._consecutive_failures: Dict[str, int] = defaultdict(int)
         self._total_checks: int = 0
         self._failed_checks: int = 0
         self._failure_by_code: Dict[str, int] = defaultdict(int)
 
-        logger.info("DataValidator initialized: strictness=%s spike_thr=%.1f vol_mult=%.1f", self.config.strictness, self.config.spike_threshold_std, self.config.volume_threshold_multiplier)
+        logger.info(
+            "DataValidator initialized: strictness=%s spike_thr=%.1f vol_mult=%.1f",
+            self.config.strictness,
+            self.config.spike_threshold_std,
+            self.config.volume_threshold_multiplier,
+        )
 
     # -- public API --------------------------------------------------------
 
@@ -226,7 +238,9 @@ class DataValidator:
         self._total_checks += 1
 
         if not isinstance(tick_data, Mapping):
-            return self._fail("invalid_type", "tick must be a mapping", {"type": str(type(tick_data))})
+            return self._fail(
+                "invalid_type", "tick must be a mapping", {"type": str(type(tick_data))}
+            )
 
         symbol = str(tick_data.get("symbol", "")).upper()
         if not symbol:
@@ -239,11 +253,22 @@ class DataValidator:
                 try:
                     price = float(val)
                     if price <= 0:
-                        return self._fail("invalid_price", f"{key} must be positive, got {price}", {"symbol": symbol, key: price})
+                        return self._fail(
+                            "invalid_price",
+                            f"{key} must be positive, got {price}",
+                            {"symbol": symbol, key: price},
+                        )
                     if price < self.config.min_price or price > self.config.max_price:
-                        return self._fail("price_out_of_range", f"{key} {price} out of range [{self.config.min_price}, {self.config.max_price}]", {"symbol": symbol})
+                        return self._fail(
+                            "price_out_of_range",
+                            f"{key} {price} out of range "
+                            f"[{self.config.min_price}, {self.config.max_price}]",
+                            {"symbol": symbol},
+                        )
                 except (ValueError, TypeError):
-                    return self._fail("invalid_price", f"{key} must be numeric, got {val}", {"symbol": symbol})
+                    return self._fail(
+                        "invalid_price", f"{key} must be numeric, got {val}", {"symbol": symbol}
+                    )
 
         # Bid <= Ask
         if self.config.check_bid_ask:
@@ -252,7 +277,11 @@ class DataValidator:
             if bid is not None and ask is not None:
                 try:
                     if float(bid) > float(ask):
-                        return self._fail("bid_gt_ask", f"bid {bid} > ask {ask}", {"symbol": symbol, "bid": bid, "ask": ask})
+                        return self._fail(
+                            "bid_gt_ask",
+                            f"bid {bid} > ask {ask}",
+                            {"symbol": symbol, "bid": bid, "ask": ask},
+                        )
                 except (ValueError, TypeError):
                     pass
 
@@ -265,10 +294,14 @@ class DataValidator:
                 try:
                     b = float(bid)
                     a = float(ask)
-                    l = float(last)
+                    last_px = float(last)
                     tolerance = (a - b) * self.config.bid_ask_tolerance_pct if a > b else 0
-                    if not (b - tolerance <= l <= a + tolerance):
-                        return self._fail("last_outside_spread", f"last {l} outside bid/ask [{b}, {a}] with tolerance {tolerance}", {"symbol": symbol})
+                    if not (b - tolerance <= last_px <= a + tolerance):
+                        return self._fail(
+                            "last_outside_spread",
+                            f"last {last_px} outside bid/ask [{b}, {a}] with tolerance {tolerance}",
+                            {"symbol": symbol},
+                        )
                 except (ValueError, TypeError):
                     pass
 
@@ -278,9 +311,15 @@ class DataValidator:
             try:
                 v = float(vol)
                 if v < 0:
-                    return self._fail("negative_volume", f"volume must be non-negative, got {v}", {"symbol": symbol})
+                    return self._fail(
+                        "negative_volume",
+                        f"volume must be non-negative, got {v}",
+                        {"symbol": symbol},
+                    )
             except (ValueError, TypeError):
-                return self._fail("invalid_volume", f"volume must be numeric, got {vol}", {"symbol": symbol})
+                return self._fail(
+                    "invalid_volume", f"volume must be numeric, got {vol}", {"symbol": symbol}
+                )
 
         # Timestamp chronological
         ts_result = self._check_timestamp(tick_data, symbol)
@@ -291,13 +330,17 @@ class DataValidator:
         if self.config.spike_detection_enabled:
             last = tick_data.get("last")
             if last is not None:
-                spike_result = self.check_for_spikes(last, symbol, threshold=self.config.spike_threshold_std)
+                spike_result = self.check_for_spikes(
+                    last, symbol, threshold=self.config.spike_threshold_std
+                )
                 if not spike_result.valid:
                     return spike_result
 
         # Volume anomaly
         if self.config.volume_anomaly_enabled and vol is not None:
-            vol_result = self.check_volume_anomaly(vol, symbol, threshold=self.config.volume_threshold_multiplier)
+            vol_result = self.check_volume_anomaly(
+                vol, symbol, threshold=self.config.volume_threshold_multiplier
+            )
             if not vol_result.valid:
                 # Volume anomaly is usually warning, not rejection, depending on strictness
                 if self.config.strictness == "strict":
@@ -334,11 +377,19 @@ class DataValidator:
             try:
                 price = float(val)
                 if price <= 0:
-                    return self._fail("invalid_price", f"{key} must be positive, got {price}", {"symbol": symbol, key: price})
+                    return self._fail(
+                        "invalid_price",
+                        f"{key} must be positive, got {price}",
+                        {"symbol": symbol, key: price},
+                    )
                 if price < self.config.min_price or price > self.config.max_price:
-                    return self._fail("price_out_of_range", f"{key} {price} out of range", {"symbol": symbol})
+                    return self._fail(
+                        "price_out_of_range", f"{key} {price} out of range", {"symbol": symbol}
+                    )
             except (ValueError, TypeError):
-                return self._fail("invalid_price", f"{key} must be numeric, got {val}", {"symbol": symbol})
+                return self._fail(
+                    "invalid_price", f"{key} must be numeric, got {val}", {"symbol": symbol}
+                )
 
         # OHLC relationship
         ohlc_result = self.validate_ohlc_relationship(
@@ -355,11 +406,17 @@ class DataValidator:
             try:
                 v = float(vol)
                 if v < 0:
-                    return self._fail("negative_volume", f"volume must be non-negative, got {v}", {"symbol": symbol})
+                    return self._fail(
+                        "negative_volume",
+                        f"volume must be non-negative, got {v}",
+                        {"symbol": symbol},
+                    )
                 if not self.config.allow_zero_volume and v == 0:
                     return self._fail("zero_volume", "zero volume not allowed", {"symbol": symbol})
             except (ValueError, TypeError):
-                return self._fail("invalid_volume", f"volume must be numeric, got {vol}", {"symbol": symbol})
+                return self._fail(
+                    "invalid_volume", f"volume must be numeric, got {vol}", {"symbol": symbol}
+                )
 
         # Timestamp
         if symbol:
@@ -377,13 +434,17 @@ class DataValidator:
             if self.config.spike_detection_enabled:
                 close = bar_data.get("close")
                 if close is not None:
-                    spike_result = self.check_for_spikes(close, symbol, threshold=self.config.spike_threshold_std)
+                    spike_result = self.check_for_spikes(
+                        close, symbol, threshold=self.config.spike_threshold_std
+                    )
                     if not spike_result.valid:
                         return spike_result
 
             # Volume anomaly
             if self.config.volume_anomaly_enabled and vol is not None:
-                vol_result = self.check_volume_anomaly(vol, symbol, threshold=self.config.volume_threshold_multiplier)
+                vol_result = self.check_volume_anomaly(
+                    vol, symbol, threshold=self.config.volume_threshold_multiplier
+                )
                 if not vol_result.valid and self.config.strictness == "strict":
                     return vol_result
 
@@ -425,7 +486,9 @@ class DataValidator:
 
     # -- specific checks ---------------------------------------------------
 
-    def validate_ohlc_relationship(self, open: Any, high: Any, low: Any, close: Any) -> ValidationResult:
+    def validate_ohlc_relationship(
+        self, open: Any, high: Any, low: Any, close: Any
+    ) -> ValidationResult:
         """Validate OHLC consistency: high >= all, low <= all."""
         if not self.config.check_ohlc_consistency:
             return ValidationResult(valid=True)
@@ -433,19 +496,31 @@ class DataValidator:
         try:
             o = float(open)
             h = float(high)
-            l = float(low)
+            lo = float(low)
             c = float(close)
 
-            if h < o or h < c or h < l:
-                return self._fail("ohlc_high_low", f"high {h} must be >= open {o}, low {l}, close {c}", {"open": o, "high": h, "low": l, "close": c})
+            if h < o or h < c or h < lo:
+                return self._fail(
+                    "ohlc_high_low",
+                    f"high {h} must be >= open {o}, low {lo}, close {c}",
+                    {"open": o, "high": h, "low": lo, "close": c},
+                )
 
-            if l > o or l > c or l > h:
-                return self._fail("ohlc_low_high", f"low {l} must be <= open {o}, high {h}, close {c}", {"open": o, "high": h, "low": l, "close": c})
+            if lo > o or lo > c or lo > h:
+                return self._fail(
+                    "ohlc_low_high",
+                    f"low {lo} must be <= open {o}, high {h}, close {c}",
+                    {"open": o, "high": h, "low": lo, "close": c},
+                )
 
             return ValidationResult(valid=True)
 
         except (ValueError, TypeError) as exc:
-            return self._fail("invalid_ohlc", f"OHLC must be numeric: {exc}", {"open": open, "high": high, "low": low, "close": close})
+            return self._fail(
+                "invalid_ohlc",
+                f"OHLC must be numeric: {exc}",
+                {"open": open, "high": high, "low": low, "close": close},
+            )
 
     def check_for_spikes(self, price: Any, symbol: str, threshold: float = 3.0) -> ValidationResult:
         """Check if price is a spike vs rolling history (Z-score)."""
@@ -454,7 +529,9 @@ class DataValidator:
         try:
             p = float(price)
         except (ValueError, TypeError):
-            return self._fail("invalid_price", f"price must be numeric, got {price}", {"symbol": symbol})
+            return self._fail(
+                "invalid_price", f"price must be numeric, got {price}", {"symbol": symbol}
+            )
 
         history = self._price_history.get(symbol)
         if history is None or len(history) < self.config.spike_min_history:
@@ -481,13 +558,23 @@ class DataValidator:
         if z_score > threshold:
             return self._fail(
                 "price_spike",
-                f"price spike detected for {symbol}: {p} vs mean {mean:.2f} std {std:.2f} z={z_score:.2f} > {threshold}",
-                {"symbol": symbol, "price": p, "mean": mean, "std": std, "z_score": z_score, "threshold": threshold},
+                f"price spike detected for {symbol}: {p} vs mean {mean:.2f} "
+                f"std {std:.2f} z={z_score:.2f} > {threshold}",
+                {
+                    "symbol": symbol,
+                    "price": p,
+                    "mean": mean,
+                    "std": std,
+                    "z_score": z_score,
+                    "threshold": threshold,
+                },
             )
 
         return ValidationResult(valid=True)
 
-    def check_for_gaps(self, timestamp: Any, last_timestamp: Any, max_gap_seconds: float = 300.0) -> ValidationResult:
+    def check_for_gaps(
+        self, timestamp: Any, last_timestamp: Any, max_gap_seconds: float = 300.0
+    ) -> ValidationResult:
         """Check for gaps between timestamps."""
         try:
             # Parse timestamps
@@ -509,17 +596,31 @@ class DataValidator:
             gap = (ts - last_ts).total_seconds()
 
             if gap < 0:
-                return self._fail("timestamp_regression", f"timestamp {ts} before last {last_ts}", {"gap_seconds": gap})
+                return self._fail(
+                    "timestamp_regression",
+                    f"timestamp {ts} before last {last_ts}",
+                    {"gap_seconds": gap},
+                )
 
             if gap > max_gap_seconds:
-                return self._fail("time_gap", f"gap {gap:.1f}s > max {max_gap_seconds}s", {"gap_seconds": gap, "max_gap": max_gap_seconds})
+                return self._fail(
+                    "time_gap",
+                    f"gap {gap:.1f}s > max {max_gap_seconds}s",
+                    {"gap_seconds": gap, "max_gap": max_gap_seconds},
+                )
 
             return ValidationResult(valid=True)
 
         except Exception as exc:
-            return self._fail("invalid_timestamp", f"timestamp parse error: {exc}", {"timestamp": str(timestamp), "last_timestamp": str(last_timestamp)})
+            return self._fail(
+                "invalid_timestamp",
+                f"timestamp parse error: {exc}",
+                {"timestamp": str(timestamp), "last_timestamp": str(last_timestamp)},
+            )
 
-    def check_volume_anomaly(self, volume: Any, symbol: str, threshold: float = 5.0) -> ValidationResult:
+    def check_volume_anomaly(
+        self, volume: Any, symbol: str, threshold: float = 5.0
+    ) -> ValidationResult:
         """Check if volume is anomalous vs avg."""
         symbol = str(symbol).upper()
 
@@ -528,7 +629,9 @@ class DataValidator:
             if vol < 0:
                 return self._fail("negative_volume", f"volume negative {vol}", {"symbol": symbol})
         except (ValueError, TypeError):
-            return self._fail("invalid_volume", f"volume must be numeric, got {volume}", {"symbol": symbol})
+            return self._fail(
+                "invalid_volume", f"volume must be numeric, got {volume}", {"symbol": symbol}
+            )
 
         history = self._volume_history.get(symbol)
         if history is None or len(history) < 5:
@@ -575,19 +678,35 @@ class DataValidator:
                 now = datetime.now(timezone.utc)
                 future_gap = (ts - now).total_seconds()
                 if future_gap > self.config.future_tolerance_seconds:
-                    return self._fail("future_timestamp", f"timestamp {ts} is {future_gap:.1f}s in future", {"symbol": symbol, "timestamp": str(ts)})
+                    return self._fail(
+                        "future_timestamp",
+                        f"timestamp {ts} is {future_gap:.1f}s in future",
+                        {"symbol": symbol, "timestamp": str(ts)},
+                    )
 
             # Chronological check
             if self.config.check_chronological:
                 last_ts = self._last_timestamp.get(symbol)
                 if last_ts is not None:
                     if ts < last_ts:
-                        return self._fail("timestamp_regression", f"timestamp {ts} before last {last_ts} for {symbol}", {"symbol": symbol, "timestamp": str(ts), "last_timestamp": str(last_ts)})
+                        return self._fail(
+                            "timestamp_regression",
+                            f"timestamp {ts} before last {last_ts} for {symbol}",
+                            {
+                                "symbol": symbol,
+                                "timestamp": str(ts),
+                                "last_timestamp": str(last_ts),
+                            },
+                        )
 
             return ValidationResult(valid=True)
 
         except Exception as exc:
-            return self._fail("invalid_timestamp", f"timestamp parse error: {exc}", {"symbol": symbol, "raw": str(ts_raw)})
+            return self._fail(
+                "invalid_timestamp",
+                f"timestamp parse error: {exc}",
+                {"symbol": symbol, "raw": str(ts_raw)},
+            )
 
     def _check_gap(self, data: Mapping[str, Any], symbol: str) -> ValidationResult:
         """Check gap based on last timestamp."""
@@ -612,10 +731,18 @@ class DataValidator:
 
             # Determine max gap based on timeframe
             timeframe = str(data.get("timeframe", "")).lower()
-            max_gap = self.config.max_gap_seconds_daily if timeframe in ("day", "1day", "d") else self.config.max_gap_seconds
+            max_gap = (
+                self.config.max_gap_seconds_daily
+                if timeframe in ("day", "1day", "d")
+                else self.config.max_gap_seconds
+            )
 
             if gap > max_gap:
-                return self._fail("time_gap", f"gap {gap:.1f}s > max {max_gap}s for {symbol}", {"symbol": symbol, "gap_seconds": gap, "max_gap": max_gap})
+                return self._fail(
+                    "time_gap",
+                    f"gap {gap:.1f}s > max {max_gap}s for {symbol}",
+                    {"symbol": symbol, "gap_seconds": gap, "max_gap": max_gap},
+                )
 
             return ValidationResult(valid=True)
 
@@ -653,7 +780,9 @@ class DataValidator:
             except Exception:
                 pass
 
-    def _fail(self, code: str, reason: str, details: Optional[Dict[str, Any]] = None) -> ValidationResult:
+    def _fail(
+        self, code: str, reason: str, details: Optional[Dict[str, Any]] = None
+    ) -> ValidationResult:
         """Create failure result and update stats."""
         self._failed_checks += 1
         self._failure_by_code[code] += 1
@@ -664,14 +793,29 @@ class DataValidator:
             symbol = str(details["symbol"]).upper()
             self._consecutive_failures[symbol] += 1
 
-            if self._consecutive_failures[symbol] >= self.config.max_consecutive_failures_before_alert:
-                logger.warning("Repeated validation failures for %s: %s consecutive, last code=%s reason=%s", symbol, self._consecutive_failures[symbol], code, reason)
+            if (
+                self._consecutive_failures[symbol]
+                >= self.config.max_consecutive_failures_before_alert
+            ):
+                logger.warning(
+                    "Repeated validation failures for %s: %s consecutive, last code=%s reason=%s",
+                    symbol,
+                    self._consecutive_failures[symbol],
+                    code,
+                    reason,
+                )
 
         logger.debug("Validation failed [%s] %s details=%s", code, reason, details)
 
         should_interp = self.config.on_failure == "interpolate"
 
-        return ValidationResult(valid=False, reason=reason, code=code, details=details or {}, should_interpolate=should_interp)
+        return ValidationResult(
+            valid=False,
+            reason=reason,
+            code=code,
+            details=details or {},
+            should_interpolate=should_interp,
+        )
 
     # -- stats -------------------------------------------------------------
 
@@ -679,7 +823,9 @@ class DataValidator:
         return {
             "total_checks": self._total_checks,
             "failed_checks": self._failed_checks,
-            "failure_rate": round(self._failed_checks / self._total_checks, 4) if self._total_checks else 0,
+            "failure_rate": (
+                round(self._failed_checks / self._total_checks, 4) if self._total_checks else 0
+            ),
             "failures_by_code": dict(self._failure_by_code),
             "consecutive_failures": dict(self._consecutive_failures),
         }
@@ -695,4 +841,7 @@ class DataValidator:
         logger.info("Validator reset")
 
     def __repr__(self):
-        return f"<DataValidator strictness={self.config.strictness} checks={self._total_checks} failed={self._failed_checks}>"
+        return (
+            f"<DataValidator strictness={self.config.strictness} "
+            f"checks={self._total_checks} failed={self._failed_checks}>"
+        )

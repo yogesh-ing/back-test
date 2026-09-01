@@ -36,7 +36,6 @@ from backtest.logging_config import (
     with_request_context,
 )
 
-
 # ---------------------------------------------------------------------------
 # isolation
 # ---------------------------------------------------------------------------
@@ -48,8 +47,10 @@ def _restore_logging():
     handlers, level = list(root.handlers), root.level
     named = {
         name: (lg.level, list(lg.handlers))
-        for name, lg in (("backtest", logging.getLogger("backtest")),
-                         ("werkzeug", logging.getLogger("werkzeug")))
+        for name, lg in (
+            ("backtest", logging.getLogger("backtest")),
+            ("werkzeug", logging.getLogger("werkzeug")),
+        )
     }
     yield
     for handler in list(root.handlers):
@@ -106,15 +107,25 @@ def test_log_file_is_written_and_replaced_on_reconfigure(tmp_path):
         handler.flush()
     assert "beta" in second.read_text()
     assert "beta" not in first.read_text()
-    files = [h for h in logging.getLogger().handlers
-             if getattr(h, "_backtest_logging_handler", None) == "file"]
+    files = [
+        h
+        for h in logging.getLogger().handlers
+        if getattr(h, "_backtest_logging_handler", None) == "file"
+    ]
     assert len(files) == 1, "the previous file handler must be replaced, not stacked"
 
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [("DEBUG", logging.DEBUG), ("info", logging.INFO), ("WARNING", logging.WARNING),
-     ("", logging.INFO), ("NOT_A_LEVEL", logging.INFO), (10, 10), ("ALL", logging.DEBUG)],
+    [
+        ("DEBUG", logging.DEBUG),
+        ("info", logging.INFO),
+        ("WARNING", logging.WARNING),
+        ("", logging.INFO),
+        ("NOT_A_LEVEL", logging.INFO),
+        (10, 10),
+        ("ALL", logging.DEBUG),
+    ],
 )
 def test_resolve_level(raw, expected):
     assert resolve_level(raw) == expected
@@ -253,11 +264,18 @@ def test_unhandled_error_becomes_json_and_logs_a_traceback(client, monkeypatch, 
 
     monkeypatch.setattr(backtest_api, "BacktestAdapter", explode)
     with caplog.at_level(logging.DEBUG, logger="backtest"):
-        resp = client.post("/api/backtest/run", json={
-            "strategy": "sma_crossover", "symbol": "DEMO", "timeframe": "1D",
-            "from_date": "2024-01-01", "to_date": "2024-12-31", "capital": 10000,
-            "params": {"fast": 5, "slow": 20},
-        })
+        resp = client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "sma_crossover",
+                "symbol": "DEMO",
+                "timeframe": "1D",
+                "from_date": "2024-01-01",
+                "to_date": "2024-12-31",
+                "capital": 10000,
+                "params": {"fast": 5, "slow": 20},
+            },
+        )
     assert resp.status_code == 500
     body = resp.get_json()
     assert "kaboom" in body["error"] and body["request_id"]
@@ -268,11 +286,18 @@ def test_unhandled_error_becomes_json_and_logs_a_traceback(client, monkeypatch, 
 
 def test_backtest_run_logs_config_and_result(client, caplog):
     with caplog.at_level(logging.DEBUG, logger="backtest"):
-        client.post("/api/backtest/run", json={
-            "strategy": "sma_crossover", "symbol": "DEMO", "timeframe": "1D",
-            "from_date": "2024-01-01", "to_date": "2024-12-31", "capital": 10000,
-            "params": {"fast": 20, "slow": 50},
-        })
+        client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "sma_crossover",
+                "symbol": "DEMO",
+                "timeframe": "1D",
+                "from_date": "2024-01-01",
+                "to_date": "2024-12-31",
+                "capital": 10000,
+                "params": {"fast": 20, "slow": 50},
+            },
+        )
     text = caplog.text
     assert "[run] strategy=sma_crossover symbol=DEMO timeframe=1D→1day" in text
     assert "[result] run/sma_crossover" in text and "bars=262" in text
@@ -282,11 +307,18 @@ def test_backtest_run_logs_config_and_result(client, caplog):
 def test_flat_run_explains_itself(client, caplog):
     """A vacuous backtest used to be silent — it must now say why (G1/G2 era bug hunt)."""
     with caplog.at_level(logging.WARNING, logger="backtest"):
-        resp = client.post("/api/backtest/run", json={
-            "strategy": "sma_crossover", "symbol": "DEMO", "timeframe": "1D",
-            "from_date": "2024-01-01", "to_date": "2024-12-31", "capital": 10000,
-            "params": {"fast": 200, "slow": 250},
-        })
+        resp = client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "sma_crossover",
+                "symbol": "DEMO",
+                "timeframe": "1D",
+                "from_date": "2024-01-01",
+                "to_date": "2024-12-31",
+                "capital": 10000,
+                "params": {"fast": 200, "slow": 250},
+            },
+        )
     assert resp.status_code == 200 and not resp.get_json()["trades"]
     assert "produced NO signals" in caplog.text
     assert "produced 0 trades" in caplog.text
@@ -294,21 +326,35 @@ def test_flat_run_explains_itself(client, caplog):
 
 def test_out_of_range_params_are_flagged(client, caplog):
     with caplog.at_level(logging.WARNING, logger="backtest"):
-        client.post("/api/backtest/run", json={
-            "strategy": "sma_crossover", "symbol": "DEMO", "timeframe": "1D",
-            "from_date": "2024-01-01", "to_date": "2024-12-31", "capital": 10000,
-            "params": {"fast": 9999, "slow": 50},
-        })
+        client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "sma_crossover",
+                "symbol": "DEMO",
+                "timeframe": "1D",
+                "from_date": "2024-01-01",
+                "to_date": "2024-12-31",
+                "capital": 10000,
+                "params": {"fast": 9999, "slow": 50},
+            },
+        )
     assert "fast=9999 is above max 100" in caplog.text
 
 
 def test_unsupported_timeframe_is_flagged(client, caplog):
     with caplog.at_level(logging.WARNING, logger="backtest"):
-        client.post("/api/backtest/run", json={
-            "strategy": "sma_crossover", "symbol": "DEMO", "timeframe": "3H",
-            "from_date": "2024-01-01", "to_date": "2024-12-31", "capital": 10000,
-            "params": {},
-        })
+        client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": "sma_crossover",
+                "symbol": "DEMO",
+                "timeframe": "3H",
+                "from_date": "2024-01-01",
+                "to_date": "2024-12-31",
+                "capital": 10000,
+                "params": {},
+            },
+        )
     assert "unsupported timeframe '3H'" in caplog.text
 
 
@@ -322,12 +368,21 @@ def test_sources_say_when_they_ignore_the_interval(caplog):
 
 def test_run_many_logs_each_slot(client, caplog):
     with caplog.at_level(logging.DEBUG, logger="backtest"):
-        client.post("/api/backtest/run-many", json={
-            "shared": {"symbol": "DEMO", "from_date": "2024-01-01",
-                       "to_date": "2024-12-31", "capital": 10000},
-            "slots": [{"id": 1, "strategy": "sma_crossover", "timeframe": "1D", "params": {}},
-                      {"id": 2, "strategy": "missing_one", "timeframe": "1D", "params": {}}],
-        })
+        client.post(
+            "/api/backtest/run-many",
+            json={
+                "shared": {
+                    "symbol": "DEMO",
+                    "from_date": "2024-01-01",
+                    "to_date": "2024-12-31",
+                    "capital": 10000,
+                },
+                "slots": [
+                    {"id": 1, "strategy": "sma_crossover", "timeframe": "1D", "params": {}},
+                    {"id": 2, "strategy": "missing_one", "timeframe": "1D", "params": {}},
+                ],
+            },
+        )
     assert "[result] slot 1/sma_crossover@1D" in caplog.text
     assert "[slot 2] failed" in caplog.text
     assert "[run-many] done in" in caplog.text and "1 ok, 1 failed" in caplog.text
@@ -339,18 +394,31 @@ def test_forward_lifecycle_is_logged(client, caplog):
     fwd._reset_session()
     with caplog.at_level(logging.DEBUG, logger="backtest"):
         # Ticket #10: mode and source are separate taxonomy dimensions now.
-        client.post("/api/forward/start", json={
-            "strategy": "sma_crossover", "symbol": "DEMO",
-            "mode": "paper", "source": "synthetic",
-            "from_date": "2024-01-01", "to_date": "2024-06-30", "capital": 10000,
-        })
+        client.post(
+            "/api/forward/start",
+            json={
+                "strategy": "sma_crossover",
+                "symbol": "DEMO",
+                "mode": "paper",
+                "source": "synthetic",
+                "from_date": "2024-01-01",
+                "to_date": "2024-06-30",
+                "capital": 10000,
+            },
+        )
         client.get("/api/forward/status")
         client.post("/api/forward/stop", json={})
 
         # Live is refused (no broker session here) — loudly, never paper-filled.
-        client.post("/api/forward/start",
-                    json={"strategy": "sma_crossover", "symbol": "DEMO",
-                          "mode": "live", "source": "mstock"})
+        client.post(
+            "/api/forward/start",
+            json={
+                "strategy": "sma_crossover",
+                "symbol": "DEMO",
+                "mode": "live",
+                "source": "mstock",
+            },
+        )
     text = caplog.text
     assert "[forward] /start strategy=sma_crossover symbol=DEMO mode=paper source=synthetic" in text
     # Session-scoped lines are tagged [forward:<short id>] so two replays can be
@@ -391,8 +459,19 @@ def test_cli_accepts_log_flags_after_the_subcommand():
     from backtest.cli import build_parser
 
     args = build_parser().parse_args(
-        ["run", "--strategy", "sma_crossover", "--symbol", "DEMO",
-         "--from", "2024-01-01", "--to", "2024-12-31", "--log-level", "DEBUG"]
+        [
+            "run",
+            "--strategy",
+            "sma_crossover",
+            "--symbol",
+            "DEMO",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-12-31",
+            "--log-level",
+            "DEBUG",
+        ]
     )
     assert args.log_level == "DEBUG" and args.log_file is None
     # and the default must stay quiet, because CLI stdout is the product
@@ -421,11 +500,12 @@ def test_engine_entry_point_reuses_the_shared_setup():
     engine._setup_logging()
 
     added = [h for h in root.handlers if h not in before]
-    assert all(getattr(h, "_backtest_logging_handler", None) for h in added), (
-        "engine._setup_logging must not install its own handler (that was basicConfig)"
-    )
-    console = [h for h in root.handlers
-               if getattr(h, "_backtest_logging_handler", None) == "console"]
+    assert all(
+        getattr(h, "_backtest_logging_handler", None) for h in added
+    ), "engine._setup_logging must not install its own handler (that was basicConfig)"
+    console = [
+        h for h in root.handlers if getattr(h, "_backtest_logging_handler", None) == "console"
+    ]
     assert len(console) == 1, "exactly one shared console handler, whatever the test order"
     assert logging.getLogger("backtest.forward.engine").getEffectiveLevel() == logging.WARNING
     assert logging.getLogger("werkzeug").getEffectiveLevel() == logging.WARNING
@@ -449,12 +529,13 @@ def test_no_swallowed_exceptions_in_the_debuggable_layers(module_dir):
             ignores_only = all(isinstance(st, ast.Continue) for st in statements) or not statements
             if not ignores_only:
                 continue
-            around = "".join(path.read_text().splitlines()[max(0, node.lineno - 1):node.lineno + 2])
+            around = "".join(
+                path.read_text().splitlines()[max(0, node.lineno - 1) : node.lineno + 2]
+            )
             if "noqa" in around:
                 continue
             logs = any(
-                isinstance(st, ast.Expr) and isinstance(st.value, ast.Call)
-                for st in node.body
+                isinstance(st, ast.Expr) and isinstance(st.value, ast.Call) for st in node.body
             )
             if not logs:
                 offenders.append(f"{path.relative_to(root)}:{node.lineno}")

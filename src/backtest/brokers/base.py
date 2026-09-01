@@ -142,9 +142,7 @@ class BrokerAuthBase(ABC):
 # ---------------------------------------------------------------------------
 
 #: Every value a :class:`BrokerOrder` may report for ``status``.
-ORDER_STATUSES = frozenset(
-    {"OPEN", "PARTIAL", "FILLED", "CANCELLED", "REJECTED", "EXPIRED"}
-)
+ORDER_STATUSES = frozenset({"OPEN", "PARTIAL", "FILLED", "CANCELLED", "REJECTED", "EXPIRED"})
 
 
 # ---------------------------------------------------------------------------

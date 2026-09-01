@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal as D
 
+from backtest.simulator.commission import FlatCommission
 from backtest.simulator.engine_loop import Bar
 from backtest.simulator.enums import OrderSide, OrderType, TimeInForce
 from backtest.simulator.execution import (
@@ -20,10 +21,8 @@ from backtest.simulator.execution import (
     OrderExecutor,
     SimulatedFillProvider,
 )
-from backtest.simulator.fees import BrokerProfile, CommissionCalculator
-from backtest.simulator.commission import FlatCommission
+from backtest.simulator.fees import BrokerProfile, CommissionCalculator, NoStatutoryFees
 from backtest.simulator.fill import Fill
-from backtest.simulator.fees import NoStatutoryFees
 from backtest.simulator.order import Order
 from backtest.simulator.portfolio import Portfolio
 from backtest.simulator.slippage import SlippageCalculator
@@ -69,8 +68,7 @@ def _market_order(
 
 
 def _bar(open_price: float, volume: float = 1_000_000) -> Bar:
-    return Bar(open=open_price, close=open_price, volume=volume,
-               timestamp=datetime(2024, 1, 2))
+    return Bar(open=open_price, close=open_price, volume=volume, timestamp=datetime(2024, 1, 2))
 
 
 # ---------------------------------------------------------------------------
@@ -154,8 +152,9 @@ def test_broker_fill_calls_place_order_and_sets_broker_id():
     }
     broker = _FakeBroker(raw)
     portfolio = Portfolio(name="live", initial_capital=100_000)
-    executor = OrderExecutor(config=_config(), portfolio=portfolio,
-                             fill_provider=BrokerFillProvider(broker))
+    executor = OrderExecutor(
+        config=_config(), portfolio=portfolio, fill_provider=BrokerFillProvider(broker)
+    )
     order = _market_order(quantity=100, portfolio_id=portfolio.portfolio_id)
     executor.submit(order)
 
@@ -188,6 +187,7 @@ def test_unfilled_retry_polls_same_broker_order_never_replaces():
     """Live retry semantics (ticket #8): an order still working after an
     unfilled poll is POLLED again — the venue is never double-placed, and
     the broker id rides the order so a resumed run continues the same order."""
+
     class _PendingBroker:
         def __init__(self):
             self.placed = []
@@ -237,8 +237,13 @@ def test_executor_uses_injected_provider():
     portfolio = Portfolio(name="spy", initial_capital=100_000)
     order = _market_order(quantity=10, portfolio_id=portfolio.portfolio_id)
     decision = FillDecision(
-        fill=Fill(symbol="DEMO", side=OrderSide.BUY, quantity=D("10"),
-                  fill_price=price, order_id=order.order_id),
+        fill=Fill(
+            symbol="DEMO",
+            side=OrderSide.BUY,
+            quantity=D("10"),
+            fill_price=price,
+            order_id=order.order_id,
+        ),
         latency_ms=D("7"),
     )
     spy = _SpyProvider(decision)

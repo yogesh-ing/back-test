@@ -30,11 +30,7 @@ from backtest.simulator import (
     TimeInForce,
     ValidationError,
 )
-from backtest.simulator.enums import (
-    TERMINAL_STATUSES,
-    VALID_TRANSITIONS,
-    WORKING_STATUSES,
-)
+from backtest.simulator.enums import TERMINAL_STATUSES, VALID_TRANSITIONS, WORKING_STATUSES
 
 D = Decimal
 UTC = timezone.utc
@@ -120,7 +116,9 @@ class TestEnums:
 
         sql = (
             pathlib.Path(__file__).resolve().parents[1]
-            / "db" / "migrations" / "001_initial_schema.sql"
+            / "db"
+            / "migrations"
+            / "001_initial_schema.sql"
         ).read_text()
         for enum_cls in (OrderSide, OrderType, OrderStatus, TimeInForce):
             for value in enum_cls.values():
@@ -143,8 +141,14 @@ class TestConstruction:
         assert o.remaining_quantity == D("10.00000000")
 
     def test_string_enums_are_coerced(self):
-        o = Order(symbol="A", side="sell", order_type="limit", quantity=5,
-                  limit_price=100, time_in_force="gtc")
+        o = Order(
+            symbol="A",
+            side="sell",
+            order_type="limit",
+            quantity=5,
+            limit_price=100,
+            time_in_force="gtc",
+        )
         assert o.side is OrderSide.SELL
         assert o.time_in_force is TimeInForce.GTC
 
@@ -205,8 +209,14 @@ class TestValidation:
             o.validate()
 
     def test_trailing_amount_on_non_trailing_rejected(self):
-        o = Order(symbol="A", side="buy", order_type="limit", quantity=1,
-                  limit_price=100, trailing_amount=5)
+        o = Order(
+            symbol="A",
+            side="buy",
+            order_type="limit",
+            quantity=1,
+            limit_price=100,
+            trailing_amount=5,
+        )
         with pytest.raises(OrderValidationError, match="only valid on trailing_stop"):
             o.validate()
 
@@ -340,7 +350,7 @@ class TestFills:
         o = working(quantity=10)
         o.add_fill(quantity=4, fill_price=100)
         o.add_fill(quantity=6, fill_price=110)
-        assert o.average_fill_price == D("106.00000000")   # (400+660)/10
+        assert o.average_fill_price == D("106.00000000")  # (400+660)/10
 
     def test_three_way_average(self):
         o = working(quantity=9)
@@ -416,7 +426,8 @@ class TestMarketOrders:
         assert working().calculate_fill_price({"bid": 99, "ask": 101}) == D("101.00000000")
 
     def test_sell_hits_the_bid(self):
-        o = Order.market("A", "sell", 10); o.submit()
+        o = Order.market("A", "sell", 10)
+        o.submit()
         assert o.calculate_fill_price({"bid": 99, "ask": 101}) == D("99.00000000")
 
     def test_bare_price_is_accepted(self):
@@ -437,71 +448,84 @@ class TestMarketOrders:
         assert not Order.market("A", "buy", 1).is_fillable(100)
 
     def test_terminal_is_not_fillable(self):
-        o = working(); o.cancel("x")
+        o = working()
+        o.cancel("x")
         assert not o.is_fillable(100)
 
 
 class TestLimitOrders:
     def test_buy_fills_at_or_below_limit(self):
-        o = Order.limit("A", "buy", 10, 100); o.submit()
+        o = Order.limit("A", "buy", 10, 100)
+        o.submit()
         assert o.is_fillable({"ask": 100})
         assert o.is_fillable({"ask": 99})
         assert not o.is_fillable({"ask": 101})
 
     def test_sell_fills_at_or_above_limit(self):
-        o = Order.limit("A", "sell", 10, 100); o.submit()
+        o = Order.limit("A", "sell", 10, 100)
+        o.submit()
         assert o.is_fillable({"bid": 100})
         assert o.is_fillable({"bid": 101})
         assert not o.is_fillable({"bid": 99})
 
     def test_buy_gets_price_improvement(self):
         """Fill at the market when it is better than the limit."""
-        o = Order.limit("A", "buy", 10, 100); o.submit()
+        o = Order.limit("A", "buy", 10, 100)
+        o.submit()
         assert o.calculate_fill_price({"ask": 95}) == D("95.00000000")
 
     def test_sell_gets_price_improvement(self):
-        o = Order.limit("A", "sell", 10, 100); o.submit()
+        o = Order.limit("A", "sell", 10, 100)
+        o.submit()
         assert o.calculate_fill_price({"bid": 105}) == D("105.00000000")
 
     def test_fill_price_capped_at_limit(self):
-        o = Order.limit("A", "buy", 10, 100); o.submit()
+        o = Order.limit("A", "buy", 10, 100)
+        o.submit()
         assert o.calculate_fill_price({"ask": 100}) == D("100.00000000")
 
     def test_unfillable_price_request_raises(self):
-        o = Order.limit("A", "buy", 10, 100); o.submit()
+        o = Order.limit("A", "buy", 10, 100)
+        o.submit()
         with pytest.raises(ValidationError, match="not fillable"):
             o.calculate_fill_price({"ask": 105})
 
 
 class TestStopOrders:
     def test_sell_stop_triggers_on_the_way_down(self):
-        o = Order.stop("A", "sell", 10, stop_price=90); o.submit()
+        o = Order.stop("A", "sell", 10, stop_price=90)
+        o.submit()
         assert not o.check_trigger(95)
         assert o.check_trigger(90)
         assert o.triggered and o.triggered_at is not None
 
     def test_buy_stop_triggers_on_the_way_up(self):
-        o = Order.stop("A", "buy", 10, stop_price=110); o.submit()
+        o = Order.stop("A", "buy", 10, stop_price=110)
+        o.submit()
         assert not o.check_trigger(105)
         assert o.check_trigger(110)
 
     def test_trigger_is_sticky(self):
         """Un-triggering would turn a stop into a limit and change the risk."""
-        o = Order.stop("A", "sell", 10, stop_price=90); o.submit()
+        o = Order.stop("A", "sell", 10, stop_price=90)
+        o.submit()
         o.check_trigger(85)
         assert o.check_trigger(120) is True
 
     def test_not_fillable_before_trigger(self):
-        o = Order.stop("A", "sell", 10, stop_price=90); o.submit()
+        o = Order.stop("A", "sell", 10, stop_price=90)
+        o.submit()
         assert not o.is_fillable({"bid": 95, "last": 95})
 
     def test_behaves_as_market_after_trigger(self):
-        o = Order.stop("A", "sell", 10, stop_price=90); o.submit()
+        o = Order.stop("A", "sell", 10, stop_price=90)
+        o.submit()
         assert o.is_fillable({"bid": 88, "last": 88})
         assert o.calculate_fill_price({"bid": 88, "ask": 89, "last": 88}) == D("88.00000000")
 
     def test_trigger_fires_the_callback(self):
-        o = Order.stop("A", "sell", 10, stop_price=90); o.submit()
+        o = Order.stop("A", "sell", 10, stop_price=90)
+        o.submit()
         seen = []
         o.add_callback(OrderEvent.TRIGGER, lambda order, px: seen.append(px))
         o.check_trigger(85)
@@ -513,45 +537,52 @@ class TestStopOrders:
 
 class TestStopLimitOrders:
     def test_needs_both_trigger_and_limit(self):
-        o = Order.stop_limit("A", "sell", 10, stop_price=90, limit_price=88); o.submit()
-        assert not o.is_fillable({"bid": 95, "last": 95})     # not triggered
-        assert not o.is_fillable({"bid": 87, "last": 89})     # triggered, below limit
-        assert o.is_fillable({"bid": 89, "last": 89})         # triggered and at limit
+        o = Order.stop_limit("A", "sell", 10, stop_price=90, limit_price=88)
+        o.submit()
+        assert not o.is_fillable({"bid": 95, "last": 95})  # not triggered
+        assert not o.is_fillable({"bid": 87, "last": 89})  # triggered, below limit
+        assert o.is_fillable({"bid": 89, "last": 89})  # triggered and at limit
 
     def test_fill_price_respects_the_limit(self):
-        o = Order.stop_limit("A", "sell", 10, stop_price=90, limit_price=88); o.submit()
+        o = Order.stop_limit("A", "sell", 10, stop_price=90, limit_price=88)
+        o.submit()
         o.check_trigger(89)
         assert o.calculate_fill_price({"bid": 89, "last": 89}) == D("89.00000000")
 
 
 class TestTrailingStops:
     def test_sell_stop_ratchets_up_only(self):
-        o = Order.trailing_stop("A", "sell", 10, trailing_amount=50); o.submit()
+        o = Order.trailing_stop("A", "sell", 10, trailing_amount=50)
+        o.submit()
         assert o.update_trailing(1500) == D("1450.00000000")
         assert o.update_trailing(1600) == D("1550.00000000")
         # Price retraces; the stop must hold, not loosen.
         assert o.update_trailing(1580) == D("1550.00000000")
 
     def test_buy_stop_ratchets_down_only(self):
-        o = Order.trailing_stop("A", "buy", 10, trailing_amount=50); o.submit()
+        o = Order.trailing_stop("A", "buy", 10, trailing_amount=50)
+        o.submit()
         assert o.update_trailing(1000) == D("1050.00000000")
         assert o.update_trailing(900) == D("950.00000000")
         assert o.update_trailing(950) == D("950.00000000")
 
     def test_high_water_mark_is_tracked(self):
-        o = Order.trailing_stop("A", "sell", 10, trailing_amount=50); o.submit()
+        o = Order.trailing_stop("A", "sell", 10, trailing_amount=50)
+        o.submit()
         for px in (1500, 1600, 1550):
             o.update_trailing(px)
         assert o.extreme_price == D("1600.00000000")
 
     def test_triggers_after_ratcheting(self):
-        o = Order.trailing_stop("A", "sell", 10, trailing_amount=50); o.submit()
+        o = Order.trailing_stop("A", "sell", 10, trailing_amount=50)
+        o.submit()
         for px in (1500, 1550, 1600, 1580):
             assert not o.check_trigger(px)
         assert o.check_trigger(1545)
 
     def test_becomes_market_after_trigger(self):
-        o = Order.trailing_stop("A", "sell", 10, trailing_amount=50); o.submit()
+        o = Order.trailing_stop("A", "sell", 10, trailing_amount=50)
+        o.submit()
         o.check_trigger(1600)
         o.check_trigger(1500)
         assert o.is_fillable({"bid": 1500, "last": 1500})
@@ -565,7 +596,8 @@ class TestTrailingStops:
             o.update_trailing(100)
 
     def test_rejects_non_positive_price(self):
-        o = Order.trailing_stop("A", "sell", 10, trailing_amount=5); o.submit()
+        o = Order.trailing_stop("A", "sell", 10, trailing_amount=5)
+        o.submit()
         with pytest.raises(OrderValidationError, match="must be positive"):
             o.update_trailing(0)
 
@@ -597,7 +629,8 @@ class TestCallbacks:
 
     def test_cancel_and_reject_callbacks(self):
         seen = []
-        a = working(); a.add_callback(OrderEvent.CANCEL, lambda o, r: seen.append(("c", r)))
+        a = working()
+        a.add_callback(OrderEvent.CANCEL, lambda o, r: seen.append(("c", r)))
         a.cancel("why not")
         b = Order.market("A", "buy", 1)
         b.add_callback(OrderEvent.REJECT, lambda o, r: seen.append(("r", r)))
@@ -612,8 +645,15 @@ class TestCallbacks:
 
 class TestSerialisation:
     def test_round_trip(self):
-        o = Order.stop_limit("INFY", "sell", 10, stop_price=1400, limit_price=1390,
-                             time_in_force="gtc", strategy_name="sma")
+        o = Order.stop_limit(
+            "INFY",
+            "sell",
+            10,
+            stop_price=1400,
+            limit_price=1390,
+            time_in_force="gtc",
+            strategy_name="sma",
+        )
         o.submit()
         o.add_fill(quantity=4, fill_price=1395)
         restored = Order.from_dict(o.to_dict())
@@ -706,8 +746,10 @@ class TestPersistence:
         parent = Portfolio(name="p", initial_capital=100_000)
         parent.save_to_db(db)
         o = Order.market("INFY", "buy", 10, portfolio_id=parent.portfolio_id)
-        o.submit(); o.save_to_db(db)
-        o.add_fill(quantity=10, fill_price=1500); o.save_to_db(db)
+        o.submit()
+        o.save_to_db(db)
+        o.add_fill(quantity=10, fill_price=1500)
+        o.save_to_db(db)
         assert db.fetch_scalar("SELECT count(*) FROM orders") == 1
         assert db.fetch_one("SELECT status FROM orders")["status"] == "filled"
 
@@ -726,11 +768,14 @@ class TestPersistence:
         parent = Portfolio(name="p", initial_capital=100_000)
         parent.save_to_db(db)
         for _ in range(1):
-            a = Order.market("INFY", "buy", 1, portfolio_id=parent.portfolio_id,
-                             client_order_id="dup-1")
-            a.submit(); a.save_to_db(db)
-        b = Order.market("INFY", "buy", 1, portfolio_id=parent.portfolio_id,
-                         client_order_id="dup-1")
+            a = Order.market(
+                "INFY", "buy", 1, portfolio_id=parent.portfolio_id, client_order_id="dup-1"
+            )
+            a.submit()
+            a.save_to_db(db)
+        b = Order.market(
+            "INFY", "buy", 1, portfolio_id=parent.portfolio_id, client_order_id="dup-1"
+        )
         b.submit()
         with pytest.raises(IntegrityError):
             b.save_to_db(db)
@@ -783,7 +828,7 @@ class TestPortfolioOrders:
         p = Portfolio(name="p", initial_capital=100_000)
         good = p.add_order(working())
         bad = working(quantity=1)
-        bad.add_fill(quantity=1, fill_price=100)   # now FILLED, cannot cancel
+        bad.add_fill(quantity=1, fill_price=100)  # now FILLED, cannot cancel
         p.pending_orders.append(bad)
         assert p.cancel_all_orders() == 1
         assert good.status is OrderStatus.CANCELLED
@@ -811,6 +856,5 @@ def test_all_decimal_fields_are_decimal_after_restore():
     o.submit()
     o.add_fill(quantity=5, fill_price=1395)
     restored = Order.from_dict(json.loads(json.dumps(o.to_dict())))
-    for field in ("quantity", "filled_quantity", "limit_price", "stop_price",
-                  "average_fill_price"):
+    for field in ("quantity", "filled_quantity", "limit_price", "stop_price", "average_fill_price"):
         assert isinstance(getattr(restored, field), Decimal), field

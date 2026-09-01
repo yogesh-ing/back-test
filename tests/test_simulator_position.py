@@ -19,14 +19,7 @@ import pytest
 
 from backtest.db.manager import DatabaseManager
 from backtest.db.models import Base
-from backtest.simulator import (
-    CostBasisMethod,
-    Lot,
-    LotBook,
-    Portfolio,
-    Position,
-    ValidationError,
-)
+from backtest.simulator import CostBasisMethod, Lot, LotBook, Portfolio, Position, ValidationError
 
 D = Decimal
 UTC = timezone.utc
@@ -60,7 +53,9 @@ class TestLot:
         assert lot.cost == D("1000.0000000000000000")
         assert lot.lot_id
 
-    @pytest.mark.parametrize("kwargs", [dict(quantity=0), dict(quantity=-5), dict(price=0), dict(price=-1)])
+    @pytest.mark.parametrize(
+        "kwargs", [dict(quantity=0), dict(quantity=-5), dict(price=0), dict(price=-1)]
+    )
     def test_rejects_non_positive(self, kwargs):
         with pytest.raises(ValidationError):
             Lot(**{"quantity": 10, "price": 100, **kwargs})
@@ -260,7 +255,7 @@ class TestCostBasisMethods:
         assert len(result.consumed_lots) == 2
         assert result.consumed_lots[0].entry_price == D("100.00000000")
         assert result.consumed_lots[1].entry_price == D("120.00000000")
-        assert result.realized_pnl == D("350.0000")   # 10*30 + 5*10
+        assert result.realized_pnl == D("350.0000")  # 10*30 + 5*10
 
     def test_all_methods_agree_on_a_full_close(self):
         """Lot ordering cannot change the total when everything is sold."""
@@ -269,21 +264,21 @@ class TestCostBasisMethods:
             p = make(method)
             p.add_shares(10, 120)
             totals.add(p.close(130).realized_pnl)
-        assert totals == {D("400.0000")}       # 10*30 + 10*10
+        assert totals == {D("400.0000")}  # 10*30 + 10*10
 
     def test_short_fifo(self):
         """Short 10@100 then 10@80; buy back 10 @90 consumes the 100 lot."""
         p = make(CostBasisMethod.FIFO, qty=-10, px=100)
         p.add_shares(10, 80)
         result = p.reduce_shares(10, 90)
-        assert result.realized_pnl == D("100.0000")    # sold at 100, bought at 90
+        assert result.realized_pnl == D("100.0000")  # sold at 100, bought at 90
         assert p.calculate_average_price() == D("80.00000000")
 
     def test_short_lifo(self):
         p = make(CostBasisMethod.LIFO, qty=-10, px=100)
         p.add_shares(10, 80)
         result = p.reduce_shares(10, 90)
-        assert result.realized_pnl == D("-100.0000")   # sold at 80, bought at 90
+        assert result.realized_pnl == D("-100.0000")  # sold at 80, bought at 90
 
     def test_lot_count_tracks_method(self):
         avg, fifo = make(CostBasisMethod.AVERAGE), make(CostBasisMethod.FIFO)
@@ -322,16 +317,22 @@ class TestLotMetadata:
 
     def test_oldest_lot_age(self):
         p = Position(
-            symbol="A", quantity=10, average_entry_price=100,
-            cost_basis_method=CostBasisMethod.FIFO, opened_at=T0,
+            symbol="A",
+            quantity=10,
+            average_entry_price=100,
+            cost_basis_method=CostBasisMethod.FIFO,
+            opened_at=T0,
         )
         age = p.oldest_lot_age(now=T0 + timedelta(days=400))
         assert age >= timedelta(days=399)
 
     def test_holding_period_per_lot(self):
         p = Position(
-            symbol="A", quantity=10, average_entry_price=100,
-            cost_basis_method=CostBasisMethod.FIFO, opened_at=T0,
+            symbol="A",
+            quantity=10,
+            average_entry_price=100,
+            cost_basis_method=CostBasisMethod.FIFO,
+            opened_at=T0,
         )
         result = p.close(110)
         held = result.consumed_lots[0].holding_period(T0 + timedelta(days=30))
@@ -376,11 +377,11 @@ class TestSplits:
         p.apply_split(2)
         assert p.quantity == D("40.00000000")
         assert p.lot_count == 2
-        assert p.calculate_average_price() == D("75.00000000")   # was 150
+        assert p.calculate_average_price() == D("75.00000000")  # was 150
 
     def test_split_on_short(self):
         p = make(qty=-10, px=100, current_price=100)
-        before = p.market_value                       # -1000
+        before = p.market_value  # -1000
         p.apply_split(2)
         assert p.quantity == D("-20.00000000")
         assert p.average_entry_price == D("50.00000000")
@@ -589,7 +590,7 @@ class TestPositionPersistence:
         reloaded = Portfolio.load_from_db(db, parent.portfolio_id).get_position("INFY")
         assert reloaded.quantity == D("20.00000000")
         assert reloaded.average_entry_price == D("110.00000000")
-        assert reloaded.lot_count == 1        # lot granularity is gone
+        assert reloaded.lot_count == 1  # lot granularity is gone
 
     def test_full_json_snapshot_does_keep_lots(self, db):
         """to_dict()/from_dict() is the lossless path — use it for state files."""

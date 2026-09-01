@@ -18,15 +18,9 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from forward.test_live_engine import FakeLiveBroker, ThresholdStrategy, _bar, _run_live_until
 
 from backtest.simulator.errors import ValidationError
-from forward.test_live_engine import (
-    FakeLiveBroker,
-    ThresholdStrategy,
-    _bar,
-    _run_live_until,
-)
-
 
 # ---------------------------------------------------------------------------
 # Deterministic engine fixture (same shape as test_live_engine._live_engine)
@@ -132,22 +126,34 @@ def test_explicit_bucket_override_wins_in_both_directions():
         # Paper tightened via explicit override -> same 95 cap as the default
         # real-fills bucket.
         tight_paper = _make_engine(
-            tmp / "tight-paper.json", "paper", "synthetic",
-            risk_buckets={"paper": {
-                "max_position_value": 10000, "max_position_pct": 0.10,
-            }},
+            tmp / "tight-paper.json",
+            "paper",
+            "synthetic",
+            risk_buckets={
+                "paper": {
+                    "max_position_value": 10000,
+                    "max_position_pct": 0.10,
+                }
+            },
         )
         assert tight_paper.portfolio.limits.max_position_value == Decimal("10000.0000")
 
         # Real-fills loosened via explicit override -> the full 476 entry.
         broker = FakeLiveBroker(fill_row=None, polls_before_fill=99)
         loose_real = _make_engine(
-            tmp / "loose-real.json", "live", "mstock", broker=broker,
-            risk_buckets={"live": {
-                "max_position_value": None, "max_position_pct": None,
-                "max_gross_exposure_pct": None, "max_open_positions": None,
-                "min_trade_value": None,
-            }},
+            tmp / "loose-real.json",
+            "live",
+            "mstock",
+            broker=broker,
+            risk_buckets={
+                "live": {
+                    "max_position_value": None,
+                    "max_position_pct": None,
+                    "max_gross_exposure_pct": None,
+                    "max_open_positions": None,
+                    "min_trade_value": None,
+                }
+            },
         )
         assert loose_real.portfolio.limits.max_position_value is None
 
@@ -218,9 +224,7 @@ def test_bucket_limits_rekeyed_on_restore_for_real_run():
         assert restored.portfolio.source == "mstock"
         assert restored.portfolio.limits.max_position_value == Decimal("10000.0000")
         assert restored.portfolio.limits.max_position_pct == Decimal("0.10")
-        assert restored.sizer.config.constraints.max_position_value == Decimal(
-            "10000.0000"
-        )
+        assert restored.sizer.config.constraints.max_position_value == Decimal("10000.0000")
 
 
 # ---------------------------------------------------------------------------
@@ -245,12 +249,19 @@ def test_bucket_pre_trade_risk_check_runs_for_real_fills_only():
 
         broker = FakeLiveBroker(fill_row=None, polls_before_fill=99)
         real = _make_engine(
-            tmp / "real.json", "live", "mstock", broker=broker,
-            risk_buckets={"live": {  # permissive: plumbing, not caps
-                "max_position_value": None, "max_position_pct": None,
-                "max_gross_exposure_pct": None, "max_open_positions": None,
-                "min_trade_value": None,
-            }},
+            tmp / "real.json",
+            "live",
+            "mstock",
+            broker=broker,
+            risk_buckets={
+                "live": {  # permissive: plumbing, not caps
+                    "max_position_value": None,
+                    "max_position_pct": None,
+                    "max_gross_exposure_pct": None,
+                    "max_open_positions": None,
+                    "min_trade_value": None,
+                }
+            },
         )
         recorder = _RiskRecorder()
         real.risk_manager = recorder

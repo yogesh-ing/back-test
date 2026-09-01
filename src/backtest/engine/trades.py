@@ -29,7 +29,7 @@ Accounting rules (deliberate, and pinned by ``tests/test_engine_trades.py``)
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Optional
 
 import pandas as pd

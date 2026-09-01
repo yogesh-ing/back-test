@@ -92,9 +92,9 @@ def test_broker_status_js_behaviour():
         text=True,
         timeout=60,
     )
-    assert result.returncode == 0, (
-        f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "12 tests passed" in result.stdout
 
 
@@ -108,9 +108,9 @@ def test_broker_auth_modal_js_behaviour():
         text=True,
         timeout=60,
     )
-    assert result.returncode == 0, (
-        f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "14 tests passed" in result.stdout
 
 
@@ -125,7 +125,7 @@ def test_forward_auth_gate_js_behaviour():
         text=True,
         timeout=60,
     )
-    assert result.returncode == 0, (
-        f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "12 tests passed" in result.stdout

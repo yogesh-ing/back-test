@@ -50,7 +50,10 @@ class MStockClient:
                 token_key = candidate
                 break
         if symbol_key is None or token_key is None:
-            raise ValueError(f"scriptmaster response missing symbol/token columns: {list(lower_frame.columns)[:10]}")
+            raise ValueError(
+                "scriptmaster response missing symbol/token columns: "
+                f"{list(lower_frame.columns)[:10]}"
+            )
 
         matches = lower_frame[lower_frame[symbol_key].astype(str).str.lower() == symbol.lower()]
         if matches.empty:
@@ -79,7 +82,10 @@ class MStockClient:
         """Fetch OHLCV bars from mStock using the TypeA historical route."""
         segment = "NSE"
         security_token = self._resolve_security_token(symbol, segment)
-        endpoint = f"{self.base_url}/openapi/typea/instruments/historical/{segment}/{security_token}/{interval}"
+        endpoint = (
+            f"{self.base_url}/openapi/typea/instruments/historical/"
+            f"{segment}/{security_token}/{interval}"
+        )
         params = {"from": start, "to": end}
         resp = requests.get(endpoint, headers=self.headers, params=params, timeout=30)
         resp.raise_for_status()
@@ -128,13 +134,15 @@ def _candles_to_frame(bars: list[Any]) -> pd.DataFrame:
             raise ValueError(f"unsupported mStock candle format: {bar!r}")
 
         index_values.append(timestamp)
-        data.append({
-            "open": float(values["open"]),
-            "high": float(values["high"]),
-            "low": float(values["low"]),
-            "close": float(values["close"]),
-            "volume": int(values["volume"]),
-        })
+        data.append(
+            {
+                "open": float(values["open"]),
+                "high": float(values["high"]),
+                "low": float(values["low"]),
+                "close": float(values["close"]),
+                "volume": int(values["volume"]),
+            }
+        )
 
     try:
         index = pd.to_datetime(index_values, utc=True).tz_convert(None)
@@ -151,7 +159,9 @@ class MStockSource:
     def __init__(self, token: str | None = None):
         self.client = MStockClient(token)
 
-    def get_candles(self, symbol: str, start: str, end: str, interval: str = "1day") -> pd.DataFrame:
+    def get_candles(
+        self, symbol: str, start: str, end: str, interval: str = "1day"
+    ) -> pd.DataFrame:
         """Fetch candles from mStock and return canonical frame.
 
         ``interval`` is a canonical timeframe (ticket P4.3); it is translated

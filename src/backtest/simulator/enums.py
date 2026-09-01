@@ -51,9 +51,7 @@ class StrEnum(str, enum.Enum):
         for member in cls:
             if member.value == text:
                 return member
-        raise ValueError(
-            f"invalid {cls.__name__} {value!r}; expected one of {cls.values()}"
-        )
+        raise ValueError(f"invalid {cls.__name__} {value!r}; expected one of {cls.values()}")
 
 
 class OrderSide(StrEnum):
@@ -133,9 +131,7 @@ class TimeInForce(StrEnum):
 
 
 #: Statuses from which no transition is allowed.
-TERMINAL_STATUSES = frozenset(
-    {OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED}
-)
+TERMINAL_STATUSES = frozenset({OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED})
 
 #: Statuses in which an order can still receive fills.
 WORKING_STATUSES = frozenset({OrderStatus.PENDING, OrderStatus.PARTIAL})
@@ -157,7 +153,7 @@ VALID_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
     ),
     OrderStatus.PARTIAL: frozenset(
         {
-            OrderStatus.PARTIAL,   # further partial fills
+            OrderStatus.PARTIAL,  # further partial fills
             OrderStatus.FILLED,
             OrderStatus.CANCELLED,
         }

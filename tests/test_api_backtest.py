@@ -36,8 +36,9 @@ def test_run_valid_returns_full_shape(client):
     assert resp.status_code == 200
     body = resp.get_json()
     assert set(body) == _FULL_SHAPE
-    assert {"total_pnl", "win_rate_pct", "max_drawdown_pct", "sharpe",
-            "total_trades"} <= set(body["metrics"])
+    assert {"total_pnl", "win_rate_pct", "max_drawdown_pct", "sharpe", "total_trades"} <= set(
+        body["metrics"]
+    )
     assert body["config"]["strategy"] == "sma_crossover"
     assert body["config"]["symbol"] == "DEMO"
     # P2.2: the default engine is the driver over simulator/.
@@ -49,7 +50,7 @@ def test_run_driver_matches_paper_runner_pnl(client):
     the driver's P&L equals a PaperRunner on the same bars (one loop)."""
     from backtest.data.synthetic import SyntheticSource
     from backtest.engine.backtest_driver import BacktestDriver
-    from backtest.forward.paper_runner import PaperRunner, _FrameSource, _all_in_size, free_executor
+    from backtest.forward.paper_runner import PaperRunner, _all_in_size, _FrameSource, free_executor
     from backtest.simulator.portfolio import Portfolio
     from backtest.strategy.registry import get_strategy
 
@@ -61,8 +62,11 @@ def test_run_driver_matches_paper_runner_pnl(client):
 
     pf = Portfolio(name="check", initial_capital=100_000)
     driver = BacktestDriver(
-        source=_FrameSource(candles), strategy=strategy, portfolio=pf,
-        executor=free_executor(pf, max_participation="1"), symbols=["DEMO"],
+        source=_FrameSource(candles),
+        strategy=strategy,
+        portfolio=pf,
+        executor=free_executor(pf, max_participation="1"),
+        symbols=["DEMO"],
         size_fn=_all_in_size,
     )
     driver.run()
@@ -70,8 +74,11 @@ def test_run_driver_matches_paper_runner_pnl(client):
 
     pf2 = Portfolio(name="check-forward", initial_capital=100_000)
     runner = PaperRunner(
-        portfolio=pf2, source=_FrameSource(candles), strategy=strategy,
-        executor=free_executor(pf2, max_participation="1"), symbols=["DEMO"],
+        portfolio=pf2,
+        source=_FrameSource(candles),
+        strategy=strategy,
+        executor=free_executor(pf2, max_participation="1"),
+        symbols=["DEMO"],
         size_fn=_all_in_size,
     )
     runner.run()
@@ -119,11 +126,19 @@ def test_run_missing_dates_returns_400(client):
 
 
 _MANY = {
-    "shared": {"symbol": "DEMO", "from_date": "2021-01-01", "to_date": "2024-01-01",
-               "capital": 100_000},
+    "shared": {
+        "symbol": "DEMO",
+        "from_date": "2021-01-01",
+        "to_date": "2024-01-01",
+        "capital": 100_000,
+    },
     "slots": [
-        {"id": 1, "strategy": "sma_crossover", "timeframe": "1D",
-         "params": {"fast": 10, "slow": 30}},
+        {
+            "id": 1,
+            "strategy": "sma_crossover",
+            "timeframe": "1D",
+            "params": {"fast": 10, "slow": 30},
+        },
         {"id": 2, "strategy": "rsi_reversion", "timeframe": "1D", "params": {"period": 14}},
         {"id": 3, "strategy": "buy_and_hold", "timeframe": "1D", "params": {}},
         {"id": 4, "strategy": "donchian_breakout", "timeframe": "1D", "params": {"lookback": 20}},
@@ -144,10 +159,19 @@ def test_run_many_returns_all_slots(client):
 def test_run_many_mixed_modes(client):
     body = dict(_MANY)
     body["slots"] = [
-        {"id": 1, "strategy": "sma_crossover", "timeframe": "1D",
-         "params": {"fast": 10, "slow": 30}},
-        {"id": 2, "strategy": "sma_crossover", "timeframe": "1D",
-         "params": {"fast": 10, "slow": 30}, "mode": "quick_screen"},
+        {
+            "id": 1,
+            "strategy": "sma_crossover",
+            "timeframe": "1D",
+            "params": {"fast": 10, "slow": 30},
+        },
+        {
+            "id": 2,
+            "strategy": "sma_crossover",
+            "timeframe": "1D",
+            "params": {"fast": 10, "slow": 30},
+            "mode": "quick_screen",
+        },
     ]
     resp = client.post("/api/backtest/run-many", json=body)
     assert resp.status_code == 200

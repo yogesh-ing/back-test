@@ -18,7 +18,9 @@ class FrameSource:
     def __init__(self, candles: pd.DataFrame) -> None:
         self._candles = candles
 
-    def get_candles(self, symbol: str, start: str, end: str, interval: str = "1day") -> pd.DataFrame:
+    def get_candles(
+        self, symbol: str, start: str, end: str, interval: str = "1day"
+    ) -> pd.DataFrame:
         return self._candles
 
     def __repr__(self) -> str:

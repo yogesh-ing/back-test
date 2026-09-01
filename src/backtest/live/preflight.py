@@ -72,9 +72,9 @@ def print_preflight() -> int:
     """Run preflight and print results. Return exit code."""
     results = run_preflight()
 
-    ok_dns = "OK" if results['dns'].get('ok') else "FAIL"
-    ok_https = "OK" if results['https'].get('ok') else "FAIL"
-    ok_auth = "OK" if results['auth'].get('ok') else "FAIL"
+    ok_dns = "OK" if results["dns"].get("ok") else "FAIL"
+    ok_https = "OK" if results["https"].get("ok") else "FAIL"
+    ok_auth = "OK" if results["auth"].get("ok") else "FAIL"
 
     print("Preflight checks:")
     print(f"  DNS:    [{ok_dns}] {results['dns']}")
@@ -85,5 +85,8 @@ def print_preflight() -> int:
         print("All checks passed.")
         return 0
     else:
-        print("Some checks failed. Fix network or auth env vars, or run the live login flow with a TOTP/OTP prompt.")
+        print(
+            "Some checks failed. Fix network or auth env vars, "
+            "or run the live login flow with a TOTP/OTP prompt."
+        )
         return 1

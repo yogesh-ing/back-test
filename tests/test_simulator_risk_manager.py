@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
 from datetime import date
+from decimal import Decimal
 
 import pytest
 
-from backtest.simulator.portfolio import Portfolio
 from backtest.simulator.order import Order
-from backtest.simulator.risk_manager import RiskManager, RiskConfig, RiskCheckResult, load_risk_config
+from backtest.simulator.portfolio import Portfolio
+from backtest.simulator.risk_manager import (
+    RiskCheckResult,
+    RiskConfig,
+    RiskManager,
+    load_risk_config,
+)
 
 
 def make_portfolio(capital=100000, name="risk_test"):
@@ -17,7 +22,9 @@ def make_portfolio(capital=100000, name="risk_test"):
 
 
 def make_order(symbol="INFY", quantity=100, side="buy", order_type="market", limit_price=None):
-    return Order(symbol=symbol, side=side, quantity=quantity, order_type=order_type, limit_price=limit_price)
+    return Order(
+        symbol=symbol, side=side, quantity=quantity, order_type=order_type, limit_price=limit_price
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -230,11 +237,17 @@ def test_drawdown_limits():
     # Simulate drawdown: equity 90k, peak 100k => 10% drawdown
     portfolio.current_cash = Decimal("90000")
     # Need to mock peak equity via equity_history
-    from backtest.simulator.portfolio import EquityPoint
     from datetime import datetime, timezone
 
+    from backtest.simulator.portfolio import EquityPoint
+
     portfolio.equity_history = [
-        EquityPoint(ts=datetime.now(timezone.utc), total_equity=Decimal("100000"), cash=Decimal("100000"), position_value=Decimal("0"))
+        EquityPoint(
+            ts=datetime.now(timezone.utc),
+            total_equity=Decimal("100000"),
+            cash=Decimal("100000"),
+            position_value=Decimal("0"),
+        )
     ]
 
     cfg = RiskConfig(max_drawdown_pct=0.05)  # 5% max
@@ -284,11 +297,13 @@ def test_leverage():
     # Use limits to allow leverage, but risk manager checks leverage separately
     # Simulate gross 150k, equity 100k => 1.5x >1
     portfolio2.current_cash = Decimal("0")
+
     # Create positions with notional 150k but equity 100k? Let's mock
     # For simplicity, directly test leverage calc: gross 150k, equity 100k
     class MockPF:
         def calculate_total_equity(self):
             return Decimal("100000")
+
         def calculate_gross_exposure(self):
             return Decimal("150000")
 
@@ -340,11 +355,17 @@ def test_emergency_stop():
 def test_circuit_breaker_drawdown():
     portfolio = make_portfolio(100000)
     portfolio.current_cash = Decimal("80000")
-    from backtest.simulator.portfolio import EquityPoint
     from datetime import datetime, timezone
 
+    from backtest.simulator.portfolio import EquityPoint
+
     portfolio.equity_history = [
-        EquityPoint(ts=datetime.now(timezone.utc), total_equity=Decimal("100000"), cash=Decimal("100000"), position_value=Decimal("0"))
+        EquityPoint(
+            ts=datetime.now(timezone.utc),
+            total_equity=Decimal("100000"),
+            cash=Decimal("100000"),
+            position_value=Decimal("0"),
+        )
     ]
 
     cfg = RiskConfig(max_drawdown_pct=0.1)  # 10%

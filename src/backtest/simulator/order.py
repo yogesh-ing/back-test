@@ -46,10 +46,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, runtime_checkable
 
 from backtest.simulator.enums import (
-    TERMINAL_STATUSES,
     VALID_TRANSITIONS,
     OrderSide,
     OrderStatus,
@@ -57,14 +56,9 @@ from backtest.simulator.enums import (
     TimeInForce,
 )
 from backtest.simulator.errors import ValidationError
-from backtest.simulator.money import (
-    ZERO,
-    is_zero,
-    money,
-    price as to_price,
-    quantize_money,
-    quantize_price,
-)
+from backtest.simulator.money import ZERO, money
+from backtest.simulator.money import price as to_price
+from backtest.simulator.money import quantize_money, quantize_price
 
 if TYPE_CHECKING:  # pragma: no cover
     from backtest.db.manager import DatabaseManager
@@ -297,9 +291,7 @@ class Order:
             )
 
         if not self.status_history:
-            self.status_history.append(
-                StatusChange(self.status, self.created_at, "created")
-            )
+            self.status_history.append(StatusChange(self.status, self.created_at, "created"))
 
     # -- derived properties ------------------------------------------------
 
@@ -342,12 +334,7 @@ class Order:
     @property
     def notional(self) -> Decimal:
         """Best available estimate of the order's value."""
-        reference = (
-            self.average_fill_price
-            or self.limit_price
-            or self.stop_price
-            or ZERO
-        )
+        reference = self.average_fill_price or self.limit_price or self.stop_price or ZERO
         return quantize_money(self.quantity * reference)
 
     @property
@@ -371,9 +358,7 @@ class Order:
             Describing the first problem found.
         """
         if self.quantity <= ZERO:
-            raise OrderValidationError(
-                "quantity must be positive", code="invalid_quantity"
-            )
+            raise OrderValidationError("quantity must be positive", code="invalid_quantity")
 
         if self.order_type.needs_limit_price and self.limit_price is None:
             raise OrderValidationError(
@@ -508,12 +493,8 @@ class Order:
 
         self.submitted_at = at or _utcnow()
         self.updated_at = self.submitted_at
-        self.status_history.append(
-            StatusChange(self.status, self.submitted_at, "submitted")
-        )
-        logger.info(
-            "submitted %s %s %s %s", self.side, self.quantity, self.symbol, self.order_type
-        )
+        self.status_history.append(StatusChange(self.status, self.submitted_at, "submitted"))
+        logger.info("submitted %s %s %s %s", self.side, self.quantity, self.symbol, self.order_type)
         self._fire(OrderEvent.SUBMIT, self)
         return self
 
@@ -611,9 +592,7 @@ class Order:
                 "fill quantity must be positive", code="invalid_fill_quantity"
             )
         if px <= ZERO:
-            raise OrderValidationError(
-                "fill price must be positive", code="invalid_fill_price"
-            )
+            raise OrderValidationError("fill price must be positive", code="invalid_fill_price")
         if qty > self.remaining_quantity + _DUST:
             raise OrderValidationError(
                 "fill would exceed the order quantity",
@@ -646,7 +625,12 @@ class Order:
 
         logger.info(
             "fill %s %s @ %s -> %s/%s (%s)",
-            self.symbol, qty, px, self.filled_quantity, self.quantity, self.status,
+            self.symbol,
+            qty,
+            px,
+            self.filled_quantity,
+            self.quantity,
+            self.status,
         )
         return self.status
 
@@ -726,9 +710,7 @@ class Order:
         if fired:
             self.triggered = True
             self.triggered_at = _utcnow()
-            logger.info(
-                "order %s triggered at %s (stop %s)", self.order_id, px, self.stop_price
-            )
+            logger.info("order %s triggered at %s (stop %s)", self.order_id, px, self.stop_price)
             self._fire(OrderEvent.TRIGGER, self, px)
         return fired
 
@@ -753,17 +735,13 @@ class Order:
         if self.order_type is OrderType.MARKET:
             return True
         if self.order_type is OrderType.STOP:
-            return True          # becomes a market order once triggered
+            return True  # becomes a market order once triggered
         if self.order_type in (OrderType.LIMIT, OrderType.STOP_LIMIT):
             assert self.limit_price is not None
-            return (
-                reference <= self.limit_price
-                if self.is_buy
-                else reference >= self.limit_price
-            )
+            return reference <= self.limit_price if self.is_buy else reference >= self.limit_price
         if self.order_type is OrderType.TRAILING_STOP:
-            return True          # market order once triggered
-        return False             # pragma: no cover - exhaustive above
+            return True  # market order once triggered
+        return False  # pragma: no cover - exhaustive above
 
     def calculate_fill_price(self, market_data: Mapping[str, Any] | Any) -> Decimal:
         """The price this order would execute at, before slippage.
@@ -797,11 +775,7 @@ class Order:
             return reference
 
         assert self.limit_price is not None
-        return (
-            min(reference, self.limit_price)
-            if self.is_buy
-            else max(reference, self.limit_price)
-        )
+        return min(reference, self.limit_price) if self.is_buy else max(reference, self.limit_price)
 
     # -- callbacks ---------------------------------------------------------
 
@@ -831,9 +805,7 @@ class Order:
             try:
                 handler(*args)
             except Exception:  # noqa: BLE001 - deliberate isolation
-                logger.exception(
-                    "order callback %s failed for order %s", event, self.order_id
-                )
+                logger.exception("order callback %s failed for order %s", event, self.order_id)
 
     # -- serialisation -----------------------------------------------------
 
@@ -986,8 +958,11 @@ class Order:
     def market(cls, symbol: str, side: Any, quantity: Any, **kwargs: Any) -> "Order":
         """Build a market order."""
         return cls(
-            symbol=symbol, side=side, quantity=quantity,
-            order_type=OrderType.MARKET, **kwargs,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            order_type=OrderType.MARKET,
+            **kwargs,
         )
 
     @classmethod
@@ -996,29 +971,45 @@ class Order:
     ) -> "Order":
         """Build a limit order."""
         return cls(
-            symbol=symbol, side=side, quantity=quantity, order_type=OrderType.LIMIT,
-            limit_price=limit_price, **kwargs,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            order_type=OrderType.LIMIT,
+            limit_price=limit_price,
+            **kwargs,
         )
 
     @classmethod
-    def stop(
-        cls, symbol: str, side: Any, quantity: Any, stop_price: Any, **kwargs: Any
-    ) -> "Order":
+    def stop(cls, symbol: str, side: Any, quantity: Any, stop_price: Any, **kwargs: Any) -> "Order":
         """Build a stop (stop-loss) order."""
         return cls(
-            symbol=symbol, side=side, quantity=quantity, order_type=OrderType.STOP,
-            stop_price=stop_price, **kwargs,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            order_type=OrderType.STOP,
+            stop_price=stop_price,
+            **kwargs,
         )
 
     @classmethod
     def stop_limit(
-        cls, symbol: str, side: Any, quantity: Any,
-        stop_price: Any, limit_price: Any, **kwargs: Any,
+        cls,
+        symbol: str,
+        side: Any,
+        quantity: Any,
+        stop_price: Any,
+        limit_price: Any,
+        **kwargs: Any,
     ) -> "Order":
         """Build a stop-limit order."""
         return cls(
-            symbol=symbol, side=side, quantity=quantity, order_type=OrderType.STOP_LIMIT,
-            stop_price=stop_price, limit_price=limit_price, **kwargs,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            order_type=OrderType.STOP_LIMIT,
+            stop_price=stop_price,
+            limit_price=limit_price,
+            **kwargs,
         )
 
     @classmethod
@@ -1027,8 +1018,12 @@ class Order:
     ) -> "Order":
         """Build a trailing-stop order."""
         return cls(
-            symbol=symbol, side=side, quantity=quantity,
-            order_type=OrderType.TRAILING_STOP, trailing_amount=trailing_amount, **kwargs,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            order_type=OrderType.TRAILING_STOP,
+            trailing_amount=trailing_amount,
+            **kwargs,
         )
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper

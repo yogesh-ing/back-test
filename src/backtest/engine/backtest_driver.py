@@ -96,5 +96,6 @@ class BacktestDriver:
         return self.portfolio.summary()
 
     def __repr__(self) -> str:
-        return (f"<BacktestDriver {getattr(self.strategy, 'name', '?')} "
-                f"on {self.symbols or '…'}>")
+        return (
+            f"<BacktestDriver {getattr(self.strategy, 'name', '?')} " f"on {self.symbols or '…'}>"
+        )

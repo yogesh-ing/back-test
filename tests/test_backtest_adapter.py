@@ -13,8 +13,9 @@ from backtest.runner import run_on_candles
 
 def _run(strategy="sma_crossover", params=None, capital=100_000.0, symbol="DEMO"):
     candles = SyntheticSource().get_candles(symbol, "2021-01-01", "2024-01-01", "day")
-    return candles, run_on_candles(candles, strategy, params or {}, symbol,
-                                   BacktestConfig(initial_capital=capital))
+    return candles, run_on_candles(
+        candles, strategy, params or {}, symbol, BacktestConfig(initial_capital=capital)
+    )
 
 
 def _adapter():
@@ -24,8 +25,14 @@ def _adapter():
 
 def test_to_metrics_has_required_cards():
     m = _adapter().to_metrics()
-    required = {"total_pnl", "total_return_pct", "win_rate_pct", "max_drawdown_pct",
-                "sharpe", "total_trades"}
+    required = {
+        "total_pnl",
+        "total_return_pct",
+        "win_rate_pct",
+        "max_drawdown_pct",
+        "sharpe",
+        "total_trades",
+    }
     assert required <= set(m)
     # PnL card sign is consistent with total return
     assert (m["total_pnl"] >= 0) == (m["total_return_pct"] >= 0)
@@ -86,8 +93,15 @@ def test_to_signals_shape():
 
 def test_to_compare_combines_payload():
     cmp = _adapter().to_compare()
-    for key in ("total_return_pct", "win_rate_pct", "max_drawdown_pct",
-                "sharpe", "total_trades", "metrics", "equity"):
+    for key in (
+        "total_return_pct",
+        "win_rate_pct",
+        "max_drawdown_pct",
+        "sharpe",
+        "total_trades",
+        "metrics",
+        "equity",
+    ):
         assert key in cmp
 
 

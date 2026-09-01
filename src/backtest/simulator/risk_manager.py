@@ -8,7 +8,8 @@ Risk hierarchy
 Order -> Position -> Portfolio
 
 * Order-level: sufficient cash, size limits, restricted symbols, % of daily volume
-* Position-level: max position size per symbol, max % per symbol, max open positions, sector concentration
+* Position-level: max position size per symbol, max % per symbol, max open positions,
+  sector concentration
 * Portfolio-level: max drawdown, daily/weekly/monthly loss limits, max leverage, max total exposure
 
 Circuit breakers
@@ -33,15 +34,17 @@ True
 from __future__ import annotations
 
 import logging
-from collections import defaultdict, deque
-from dataclasses import dataclass, field
-from datetime import datetime, timezone, date, timedelta
+from collections import defaultdict
+from dataclasses import dataclass, field, fields
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set
 
 from backtest.simulator.errors import ValidationError
-from backtest.simulator.money import ZERO, money, to_decimal, price as to_price, quantize_money
+from backtest.simulator.money import ZERO, money
+from backtest.simulator.money import price as to_price
+from backtest.simulator.money import to_decimal
 
 logger = logging.getLogger("backtest.simulator.risk_manager")
 
@@ -84,7 +87,9 @@ class RiskConfig:
     allowed_symbols: Optional[Set[str]] = None  # if set, only these allowed
 
     # Sector limits
-    sector_exposure_limits: Dict[str, Decimal] = field(default_factory=dict)  # sector -> max % of equity
+    sector_exposure_limits: Dict[str, Decimal] = field(
+        default_factory=dict
+    )  # sector -> max % of equity
     symbol_to_sector: Dict[str, str] = field(default_factory=dict)
 
     # Circuit breakers
@@ -113,7 +118,12 @@ class RiskConfig:
                     raise ValidationError(f"{name} must be positive when set")
                 setattr(self, name, dec)
 
-        for name in ("max_drawdown_pct", "daily_loss_limit_pct", "weekly_loss_limit_pct", "monthly_loss_limit_pct"):
+        for name in (
+            "max_drawdown_pct",
+            "daily_loss_limit_pct",
+            "weekly_loss_limit_pct",
+            "monthly_loss_limit_pct",
+        ):
             v = getattr(self, name)
             if v is not None:
                 dec = to_decimal(v, name)
@@ -205,7 +215,7 @@ def load_risk_config(path: str | Path | None = None, profile: str | None = None)
         if "allowed_symbols" in merged and isinstance(merged["allowed_symbols"], list):
             merged["allowed_symbols"] = set(merged["allowed_symbols"])
 
-        known = set(RiskConfig.__dataclass_fields__.keys())
+        known = {f.name for f in fields(RiskConfig)}
         filtered = {k: v for k, v in merged.items() if k in known}
 
         return RiskConfig(**filtered)
@@ -231,7 +241,12 @@ class RiskCheckResult:
         return self.allowed
 
     def to_dict(self):
-        return {"allowed": self.allowed, "code": self.code, "reason": self.reason, "details": dict(self.details)}
+        return {
+            "allowed": self.allowed,
+            "code": self.code,
+            "reason": self.reason,
+            "details": dict(self.details),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +295,8 @@ class RiskManager:
         self._override_until: Optional[datetime] = None
 
         logger.info(
-            "RiskManager initialized: max_pos_pct=%s max_drawdown=%s daily_loss=%s max_positions=%s",
+            "RiskManager initialized: max_pos_pct=%s max_drawdown=%s "
+            "daily_loss=%s max_positions=%s",
             self.config.max_position_pct,
             self.config.max_drawdown_pct,
             self.config.daily_loss_limit_pct,
@@ -289,34 +305,54 @@ class RiskManager:
 
     # -- public API required by spec ---------------------------------------
 
-    def validate_order(self, order: Any, current_price: Any = None, daily_volume: Any = None) -> RiskCheckResult:
+    def validate_order(
+        self, order: Any, current_price: Any = None, daily_volume: Any = None
+    ) -> RiskCheckResult:
         """Validate a single order against all risk limits.
 
         Returns RiskCheckResult with allowed bool and reason.
         """
         # Check if halted
         if self._is_halted and not self._override_active:
-            return RiskCheckResult(False, "trading_halted", f"Trading halted: {self._halt_reason}", {"halt_reason": self._halt_reason})
+            return RiskCheckResult(
+                False,
+                "trading_halted",
+                f"Trading halted: {self._halt_reason}",
+                {"halt_reason": self._halt_reason},
+            )
 
         # Check override expiry
         self._check_override_expiry()
 
-        symbol = getattr(order, "symbol", None) or (order.get("symbol") if isinstance(order, dict) else None)
+        symbol = getattr(order, "symbol", None) or (
+            order.get("symbol") if isinstance(order, dict) else None
+        )
         if symbol:
             symbol = str(symbol).strip().upper()
         else:
             symbol = "UNKNOWN"
 
-        quantity = getattr(order, "quantity", None) or (order.get("quantity") if isinstance(order, dict) else None)
+        quantity = getattr(order, "quantity", None) or (
+            order.get("quantity") if isinstance(order, dict) else None
+        )
         if quantity is None:
-            return RiskCheckResult(False, "missing_quantity", "Order quantity missing", {"symbol": symbol})
+            return RiskCheckResult(
+                False, "missing_quantity", "Order quantity missing", {"symbol": symbol}
+            )
 
         try:
             qty = to_decimal(quantity, "quantity")
             if qty <= ZERO:
-                return RiskCheckResult(False, "invalid_quantity", f"Quantity must be positive, got {qty}", {"symbol": symbol})
+                return RiskCheckResult(
+                    False,
+                    "invalid_quantity",
+                    f"Quantity must be positive, got {qty}",
+                    {"symbol": symbol},
+                )
         except Exception as exc:
-            return RiskCheckResult(False, "invalid_quantity", f"Invalid quantity: {exc}", {"symbol": symbol})
+            return RiskCheckResult(
+                False, "invalid_quantity", f"Invalid quantity: {exc}", {"symbol": symbol}
+            )
 
         # Resolve price
         price = current_price
@@ -338,9 +374,16 @@ class RiskManager:
         try:
             price_dec = to_price(price, "price")
             if price_dec <= ZERO:
-                return RiskCheckResult(False, "invalid_price", f"Price must be positive, got {price_dec}", {"symbol": symbol})
+                return RiskCheckResult(
+                    False,
+                    "invalid_price",
+                    f"Price must be positive, got {price_dec}",
+                    {"symbol": symbol},
+                )
         except Exception as exc:
-            return RiskCheckResult(False, "invalid_price", f"Invalid price: {exc}", {"symbol": symbol})
+            return RiskCheckResult(
+                False, "invalid_price", f"Invalid price: {exc}", {"symbol": symbol}
+            )
 
         # Order-level checks
         result = self._check_order_level(order, symbol, qty, price_dec, daily_volume)
@@ -368,24 +411,56 @@ class RiskManager:
 
         # All passed
         logger.debug("Risk check passed for %s %s @ %s", symbol, qty, price_dec)
-        return RiskCheckResult(True, "ok", "Risk checks passed", {"symbol": symbol, "quantity": str(qty), "price": str(price_dec)})
+        return RiskCheckResult(
+            True,
+            "ok",
+            "Risk checks passed",
+            {"symbol": symbol, "quantity": str(qty), "price": str(price_dec)},
+        )
 
-    def _check_order_level(self, order: Any, symbol: str, qty: Decimal, price: Decimal, daily_volume: Any = None) -> RiskCheckResult:
+    def _check_order_level(
+        self, order: Any, symbol: str, qty: Decimal, price: Decimal, daily_volume: Any = None
+    ) -> RiskCheckResult:
         # Restricted symbols
         if symbol in self.config.restricted_symbols:
-            return RiskCheckResult(False, "restricted_symbol", f"Symbol {symbol} is restricted", {"symbol": symbol})
+            return RiskCheckResult(
+                False, "restricted_symbol", f"Symbol {symbol} is restricted", {"symbol": symbol}
+            )
 
         if self.config.allowed_symbols is not None and symbol not in self.config.allowed_symbols:
-            return RiskCheckResult(False, "symbol_not_allowed", f"Symbol {symbol} not in allowed list", {"symbol": symbol})
+            return RiskCheckResult(
+                False,
+                "symbol_not_allowed",
+                f"Symbol {symbol} not in allowed list",
+                {"symbol": symbol},
+            )
 
         # Order value limits
         notional = qty * price
 
         if self.config.min_order_value is not None and notional < self.config.min_order_value:
-            return RiskCheckResult(False, "below_min_order_value", f"Order value {notional} < min {self.config.min_order_value}", {"symbol": symbol, "notional": str(notional), "min": str(self.config.min_order_value)})
+            return RiskCheckResult(
+                False,
+                "below_min_order_value",
+                f"Order value {notional} < min {self.config.min_order_value}",
+                {
+                    "symbol": symbol,
+                    "notional": str(notional),
+                    "min": str(self.config.min_order_value),
+                },
+            )
 
         if self.config.max_order_value is not None and notional > self.config.max_order_value:
-            return RiskCheckResult(False, "above_max_order_value", f"Order value {notional} > max {self.config.max_order_value}", {"symbol": symbol, "notional": str(notional), "max": str(self.config.max_order_value)})
+            return RiskCheckResult(
+                False,
+                "above_max_order_value",
+                f"Order value {notional} > max {self.config.max_order_value}",
+                {
+                    "symbol": symbol,
+                    "notional": str(notional),
+                    "max": str(self.config.max_order_value),
+                },
+            )
 
         # % of daily volume
         if self.config.max_order_pct_of_daily_volume is not None:
@@ -402,15 +477,22 @@ class RiskManager:
                             return RiskCheckResult(
                                 False,
                                 "exceeds_daily_volume",
-                                f"Order qty {qty} is {pct:.1%} of daily volume {avg_vol_dec} > limit {self.config.max_order_pct_of_daily_volume:.1%}",
-                                {"symbol": symbol, "pct": str(pct), "limit": str(self.config.max_order_pct_of_daily_volume)},
+                                f"Order qty {qty} is {pct:.1%} of daily volume {avg_vol_dec} "
+                                f"> limit {self.config.max_order_pct_of_daily_volume:.1%}",
+                                {
+                                    "symbol": symbol,
+                                    "pct": str(pct),
+                                    "limit": str(self.config.max_order_pct_of_daily_volume),
+                                },
                             )
                 except Exception as exc:
                     logger.debug("Volume check failed: %s", exc)
 
         return RiskCheckResult(True)
 
-    def check_position_limits(self, symbol: str, new_quantity: Any, current_price: Any = None) -> RiskCheckResult:
+    def check_position_limits(
+        self, symbol: str, new_quantity: Any, current_price: Any = None
+    ) -> RiskCheckResult:
         """Check position-level limits for a symbol."""
         symbol = str(symbol).strip().upper()
         qty = to_decimal(new_quantity, "new_quantity")
@@ -424,7 +506,11 @@ class RiskManager:
                 False,
                 "max_position_value",
                 f"Position value {notional} > max {self.config.max_position_value} for {symbol}",
-                {"symbol": symbol, "notional": str(notional), "max": str(self.config.max_position_value)},
+                {
+                    "symbol": symbol,
+                    "notional": str(notional),
+                    "max": str(self.config.max_position_value),
+                },
             )
 
         # Max position % per symbol
@@ -437,8 +523,13 @@ class RiskManager:
                         return RiskCheckResult(
                             False,
                             "max_position_pct",
-                            f"Position would be {pct:.2%} of equity > limit {self.config.max_position_pct:.2%} for {symbol}",
-                            {"symbol": symbol, "pct": str(pct), "limit": str(self.config.max_position_pct)},
+                            f"Position would be {pct:.2%} of equity "
+                            f"> limit {self.config.max_position_pct:.2%} for {symbol}",
+                            {
+                                "symbol": symbol,
+                                "pct": str(pct),
+                                "limit": str(self.config.max_position_pct),
+                            },
                         )
             except Exception as exc:
                 logger.debug("Position pct check failed: %s", exc)
@@ -451,8 +542,12 @@ class RiskManager:
                         return RiskCheckResult(
                             False,
                             "max_open_positions",
-                            f"Already have {len(self.portfolio.positions)} positions, max {self.config.max_open_positions}",
-                            {"open": len(self.portfolio.positions), "max": self.config.max_open_positions},
+                            f"Already have {len(self.portfolio.positions)} positions, "
+                            f"max {self.config.max_open_positions}",
+                            {
+                                "open": len(self.portfolio.positions),
+                                "max": self.config.max_open_positions,
+                            },
                         )
             except Exception as exc:
                 logger.debug("Max positions check failed: %s", exc)
@@ -469,7 +564,9 @@ class RiskManager:
                     for sym, pos in self.portfolio.positions.items():
                         sym_sector = self.config.symbol_to_sector.get(sym)
                         if sym_sector == sector:
-                            sector_exposure += abs(pos.market_value) if hasattr(pos, "market_value") else ZERO
+                            sector_exposure += (
+                                abs(pos.market_value) if hasattr(pos, "market_value") else ZERO
+                            )
 
                     projected = sector_exposure + notional
                     max_sector_value = equity * sector_limit
@@ -477,8 +574,13 @@ class RiskManager:
                         return RiskCheckResult(
                             False,
                             "sector_exposure",
-                            f"Sector {sector} exposure {projected} > limit {max_sector_value} ({sector_limit:.1%})",
-                            {"sector": sector, "exposure": str(projected), "limit": str(max_sector_value)},
+                            f"Sector {sector} exposure {projected} "
+                            f"> limit {max_sector_value} ({sector_limit:.1%})",
+                            {
+                                "sector": sector,
+                                "exposure": str(projected),
+                                "limit": str(max_sector_value),
+                            },
                         )
                 except Exception as exc:
                     logger.debug("Sector check failed: %s", exc)
@@ -516,7 +618,9 @@ class RiskManager:
             return RiskCheckResult(True)
 
         except Exception as exc:
-            return RiskCheckResult(False, "buying_power_error", f"Buying power check error: {exc}", {})
+            return RiskCheckResult(
+                False, "buying_power_error", f"Buying power check error: {exc}", {}
+            )
 
     def check_drawdown_limits(self, portfolio: Any = None) -> RiskCheckResult:
         """Check if drawdown exceeds limit."""
@@ -533,7 +637,9 @@ class RiskManager:
                     )
             return RiskCheckResult(True)
         except Exception as exc:
-            return RiskCheckResult(False, "drawdown_check_error", f"Drawdown check error: {exc}", {})
+            return RiskCheckResult(
+                False, "drawdown_check_error", f"Drawdown check error: {exc}", {}
+            )
 
     def check_daily_loss_limit(self, portfolio: Any = None) -> RiskCheckResult:
         """Check daily loss limit."""
@@ -552,7 +658,11 @@ class RiskManager:
                 # Simplified: use total_return
                 pass
 
-            equity = pf.calculate_total_equity() if hasattr(pf, "calculate_total_equity") else pf.initial_capital
+            equity = (
+                pf.calculate_total_equity()
+                if hasattr(pf, "calculate_total_equity")
+                else pf.initial_capital
+            )
             if equity <= ZERO:
                 return RiskCheckResult(True)
 
@@ -564,20 +674,28 @@ class RiskManager:
                         False,
                         "daily_loss_limit",
                         f"Daily loss {loss_pct:.2%} > limit {self.config.daily_loss_limit_pct:.2%}",
-                        {"daily_pnl": str(daily_pnl), "loss_pct": str(loss_pct), "limit": str(self.config.daily_loss_limit_pct)},
+                        {
+                            "daily_pnl": str(daily_pnl),
+                            "loss_pct": str(loss_pct),
+                            "limit": str(self.config.daily_loss_limit_pct),
+                        },
                     )
 
             return RiskCheckResult(True)
 
         except Exception as exc:
-            return RiskCheckResult(False, "daily_loss_check_error", f"Daily loss check error: {exc}", {})
+            return RiskCheckResult(
+                False, "daily_loss_check_error", f"Daily loss check error: {exc}", {}
+            )
 
     def check_leverage(self, portfolio: Any = None) -> RiskCheckResult:
         """Check leverage ratio."""
         pf = portfolio or self.portfolio
         try:
             equity = pf.calculate_total_equity() if hasattr(pf, "calculate_total_equity") else ZERO
-            gross = pf.calculate_gross_exposure() if hasattr(pf, "calculate_gross_exposure") else ZERO
+            gross = (
+                pf.calculate_gross_exposure() if hasattr(pf, "calculate_gross_exposure") else ZERO
+            )
 
             if equity <= ZERO:
                 return RiskCheckResult(True)
@@ -595,7 +713,9 @@ class RiskManager:
             return RiskCheckResult(True)
 
         except Exception as exc:
-            return RiskCheckResult(False, "leverage_check_error", f"Leverage check error: {exc}", {})
+            return RiskCheckResult(
+                False, "leverage_check_error", f"Leverage check error: {exc}", {}
+            )
 
     def _check_portfolio_level(self, symbol: str, qty: Decimal, price: Decimal) -> RiskCheckResult:
         """Run all portfolio-level checks."""
@@ -618,7 +738,11 @@ class RiskManager:
         if self.config.max_gross_exposure_pct is not None:
             try:
                 equity = self.portfolio.calculate_total_equity()
-                gross = self.portfolio.calculate_gross_exposure() if hasattr(self.portfolio, "calculate_gross_exposure") else ZERO
+                gross = (
+                    self.portfolio.calculate_gross_exposure()
+                    if hasattr(self.portfolio, "calculate_gross_exposure")
+                    else ZERO
+                )
                 new_gross = gross + abs(qty) * price
                 max_gross = equity * self.config.max_gross_exposure_pct
 
@@ -626,7 +750,8 @@ class RiskManager:
                     return RiskCheckResult(
                         False,
                         "max_gross_exposure",
-                        f"Gross exposure {new_gross} > max {max_gross} ({self.config.max_gross_exposure_pct:.1%})",
+                        f"Gross exposure {new_gross} > max {max_gross} "
+                        f"({self.config.max_gross_exposure_pct:.1%})",
                         {"gross": str(new_gross), "max": str(max_gross)},
                     )
             except Exception as exc:
@@ -635,7 +760,11 @@ class RiskManager:
         # Max total exposure absolute
         if self.config.max_total_exposure is not None:
             try:
-                gross = self.portfolio.calculate_gross_exposure() if hasattr(self.portfolio, "calculate_gross_exposure") else ZERO
+                gross = (
+                    self.portfolio.calculate_gross_exposure()
+                    if hasattr(self.portfolio, "calculate_gross_exposure")
+                    else ZERO
+                )
                 new_gross = gross + abs(qty) * price
                 if new_gross > self.config.max_total_exposure:
                     return RiskCheckResult(
@@ -648,7 +777,10 @@ class RiskManager:
                 logger.debug("Total exposure check failed: %s", exc)
 
         # Weekly/monthly loss limits
-        if self.config.weekly_loss_limit_pct is not None or self.config.monthly_loss_limit_pct is not None:
+        if (
+            self.config.weekly_loss_limit_pct is not None
+            or self.config.monthly_loss_limit_pct is not None
+        ):
             # Placeholder – would need historical PnL tracking
             pass
 
@@ -703,8 +835,12 @@ class RiskManager:
                 result = RiskCheckResult(
                     False,
                     "consecutive_losses",
-                    f"Consecutive losses {self._consecutive_losses} >= limit {self.config.max_consecutive_losses}",
-                    {"consecutive_losses": self._consecutive_losses, "limit": self.config.max_consecutive_losses},
+                    f"Consecutive losses {self._consecutive_losses} "
+                    f">= limit {self.config.max_consecutive_losses}",
+                    {
+                        "consecutive_losses": self._consecutive_losses,
+                        "limit": self.config.max_consecutive_losses,
+                    },
                 )
                 self.emergency_stop_all(f"Consecutive losses: {self._consecutive_losses}")
                 return result
@@ -730,7 +866,10 @@ class RiskManager:
     def record_error(self):
         """Record technical error for circuit breaker."""
         self._consecutive_errors += 1
-        if self._consecutive_errors >= self.config.max_consecutive_errors and self.config.pause_on_technical_error:
+        if (
+            self._consecutive_errors >= self.config.max_consecutive_errors
+            and self.config.pause_on_technical_error
+        ):
             self.emergency_stop_all(f"Too many technical errors: {self._consecutive_errors}")
             logger.error("Pausing due to %s consecutive errors", self._consecutive_errors)
 
@@ -770,7 +909,11 @@ class RiskManager:
         self._consecutive_errors = 0
 
         logger.warning("Risk override activated for %s minutes (code=%s)", duration_minutes, code)
-        self._alert("warning", f"Risk override activated for {duration_minutes} min", {"code": code, "duration": duration_minutes})
+        self._alert(
+            "warning",
+            f"Risk override activated for {duration_minutes} min",
+            {"code": code, "duration": duration_minutes},
+        )
 
         return True
 
@@ -794,7 +937,12 @@ class RiskManager:
             if result.allowed:
                 approved.append(order)
             else:
-                logger.info("Risk rejected order %s: [%s] %s", getattr(order, "symbol", "?"), result.code, result.reason)
+                logger.info(
+                    "Risk rejected order %s: [%s] %s",
+                    getattr(order, "symbol", "?"),
+                    result.code,
+                    result.reason,
+                )
         return approved
 
     def validate_signals(self, signals: List[Any]) -> List[Any]:
@@ -805,7 +953,9 @@ class RiskManager:
         # For signals, we check symbol restrictions and position limits
         approved = []
         for signal in signals:
-            symbol = getattr(signal, "symbol", None) or (signal.get("symbol") if isinstance(signal, dict) else None)
+            symbol = getattr(signal, "symbol", None) or (
+                signal.get("symbol") if isinstance(signal, dict) else None
+            )
             if not symbol:
                 continue
 
@@ -816,11 +966,15 @@ class RiskManager:
                 logger.info("Risk rejected signal %s: restricted", symbol)
                 continue
 
-            if self.config.allowed_symbols is not None and symbol not in self.config.allowed_symbols:
+            if (
+                self.config.allowed_symbols is not None
+                and symbol not in self.config.allowed_symbols
+            ):
                 logger.info("Risk rejected signal %s: not allowed", symbol)
                 continue
 
-            # For signals, we don't have quantity yet (sizer will decide), so check portfolio-level only
+            # For signals, we don't have quantity yet (sizer will decide),
+            # so check portfolio-level only
             dd_result = self.check_drawdown_limits()
             if not dd_result.allowed:
                 logger.info("Risk rejected signal %s: %s", symbol, dd_result.reason)
@@ -847,7 +1001,11 @@ class RiskManager:
     def _log_rejection(self, order: Any, result: RiskCheckResult):
         symbol = getattr(order, "symbol", "?")
         logger.info("Risk rejection: %s [%s] %s", symbol, result.code, result.reason)
-        self._alert("warning", f"Risk rejected {symbol}: {result.reason}", {"code": result.code, "symbol": str(symbol), "reason": result.reason, **result.details})
+        self._alert(
+            "warning",
+            f"Risk rejected {symbol}: {result.reason}",
+            {"code": result.code, "symbol": str(symbol), "reason": result.reason, **result.details},
+        )
 
     # -- stats -------------------------------------------------------------
 
@@ -862,4 +1020,8 @@ class RiskManager:
         }
 
     def __repr__(self):
-        return f"<RiskManager halted={self.is_halted()} drawdown_limit={self.config.max_drawdown_pct} daily_loss={self.config.daily_loss_limit_pct}>"
+        return (
+            f"<RiskManager halted={self.is_halted()} "
+            f"drawdown_limit={self.config.max_drawdown_pct} "
+            f"daily_loss={self.config.daily_loss_limit_pct}>"
+        )

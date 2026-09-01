@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from backtest.engine.metrics import compute_metrics
@@ -41,23 +40,27 @@ class Backtester:
             log.error("[engine] run() called with an empty candle frame")
             raise ValueError("candles frame is empty")
         if candles.index.duplicated().any():
-            log.warning("[engine] %d duplicate index entries in the candle frame",
-                        int(candles.index.duplicated().sum()))
+            log.warning(
+                "[engine] %d duplicate index entries in the candle frame",
+                int(candles.index.duplicated().sum()),
+            )
 
         target = pd.Series(signals, index=candles.index, copy=True)
         target = target.reindex(candles.index).fillna(0)
         dropped = len(signals) - len(target)
         if dropped > 0:
-            log.warning("[engine] %d signal bars had no matching candle and were dropped",
-                        dropped)
+            log.warning("[engine] %d signal bars had no matching candle and were dropped", dropped)
         target = target.clip(-1, 1)
 
         risk_managed = self.config.stop_loss is not None or self.config.take_profit is not None
         log.debug(
             "[engine] %s path over %d bars (commission=%.5f slippage=%.5f stop=%s tp=%s)",
-            "risk-managed" if risk_managed else "vectorized", len(candles),
-            self.config.commission_pct, self.config.slippage_pct,
-            self.config.stop_loss, self.config.take_profit,
+            "risk-managed" if risk_managed else "vectorized",
+            len(candles),
+            self.config.commission_pct,
+            self.config.slippage_pct,
+            self.config.stop_loss,
+            self.config.take_profit,
         )
         if risk_managed:
             equity, returns, position = self._run_with_risk(candles, target)
@@ -76,17 +79,21 @@ class Backtester:
         flat = abs(float(equity.iloc[-1] / self.config.initial_capital - 1)) < 1e-12
         log.debug(
             "[engine] done: equity %s → %s, in-market %.1f%% of bars%s",
-            f"{self.config.initial_capital:,.2f}", f"{equity.iloc[-1]:,.2f}",
+            f"{self.config.initial_capital:,.2f}",
+            f"{equity.iloc[-1]:,.2f}",
             100.0 * float((position.abs() > 0).mean()) if len(position) else 0.0,
-            " — FLAT: equity never moved (no signals, or every entry was blocked)"
-            if flat else "",
+            " — FLAT: equity never moved (no signals, or every entry was blocked)" if flat else "",
         )
         if flat:
-            log.warning("[engine] result is flat (equity == initial capital) — see the "
-                        "no-signal warning from backtest.runner for the cause")
+            log.warning(
+                "[engine] result is flat (equity == initial capital) — see the "
+                "no-signal warning from backtest.runner for the cause"
+            )
         return result
 
-    def _run_vectorized(self, candles: pd.DataFrame, target: pd.Series) -> tuple[pd.Series, pd.Series, pd.Series]:
+    def _run_vectorized(
+        self, candles: pd.DataFrame, target: pd.Series
+    ) -> tuple[pd.Series, pd.Series, pd.Series]:
         close = candles["close"]
         held = target.shift(1).fillna(0)
         gross = held * close.pct_change().fillna(0)
@@ -97,10 +104,12 @@ class Backtester:
         position = held.copy()
         return equity, net, position
 
-    def _run_with_risk(self, candles: pd.DataFrame, target: pd.Series) -> tuple[pd.Series, pd.Series, pd.Series]:
-        close = candles["close"]
-        high = candles["high"]
-        low = candles["low"]
+    def _run_with_risk(
+        self, candles: pd.DataFrame, target: pd.Series
+    ) -> tuple[pd.Series, pd.Series, pd.Series]:
+        # Values unused below (rows are read in the loop); keep the lookups so a
+        # malformed frame still fails fast on missing columns (F841, ticket #11).
+        _ = (candles["close"], candles["high"], candles["low"])
 
         # Lag target signals to implement no-lookahead rule (Invariant 1)
         lagged_target = target.shift(1).fillna(0).clip(-1, 1)
@@ -117,10 +126,10 @@ class Backtester:
 
         for idx, row in candles.iterrows():
             prev_close_value = prev_close if prev_close is not None else row["close"]
-            
+
             # Get desired position from lagged signal (previous bar's signal)
             desired = float(lagged_target.loc[idx]) if idx in lagged_target.index else 0.0
-            
+
             # Unblock when desired returns to 0
             if desired == 0:
                 blocked = False
@@ -144,8 +153,16 @@ class Backtester:
             if held != 0:
                 end = row["close"]
                 if held > 0:
-                    stop = entry_price * (1 - self.config.stop_loss) if self.config.stop_loss is not None else None
-                    target_price = entry_price * (1 + self.config.take_profit) if self.config.take_profit is not None else None
+                    stop = (
+                        entry_price * (1 - self.config.stop_loss)
+                        if self.config.stop_loss is not None
+                        else None
+                    )
+                    target_price = (
+                        entry_price * (1 + self.config.take_profit)
+                        if self.config.take_profit is not None
+                        else None
+                    )
                     if stop is not None and row["low"] <= stop:
                         end = stop
                         exit_triggered_cost = True
@@ -155,8 +172,16 @@ class Backtester:
                     else:
                         exit_triggered_cost = False
                 else:
-                    stop = entry_price * (1 + self.config.stop_loss) if self.config.stop_loss is not None else None
-                    target_price = entry_price * (1 - self.config.take_profit) if self.config.take_profit is not None else None
+                    stop = (
+                        entry_price * (1 + self.config.stop_loss)
+                        if self.config.stop_loss is not None
+                        else None
+                    )
+                    target_price = (
+                        entry_price * (1 - self.config.take_profit)
+                        if self.config.take_profit is not None
+                        else None
+                    )
                     if stop is not None and row["high"] >= stop:
                         end = stop
                         exit_triggered_cost = True
@@ -165,10 +190,10 @@ class Backtester:
                         exit_triggered_cost = True
                     else:
                         exit_triggered_cost = False
-                
+
                 # Calculate return with held position (before forced exit changes it)
                 r = held * (end / prev_close_value - 1)
-                
+
                 # Apply exit cost and reset position if stop/target was hit
                 if exit_triggered_cost:
                     bar_cost += abs(held) * (self.config.commission_pct + self.config.slippage_pct)
@@ -182,12 +207,15 @@ class Backtester:
             equity_curve.append(equity)
             net_series.append(net)
             position_series.append(held)
-            
+
             prev_close = row["close"]
             prev_held = held
 
         equity_series = pd.Series(equity_curve[1:], index=candles.index)
         position_series = pd.Series(position_series, index=candles.index)
-        log.debug("[engine] risk-managed path: %d forced stop/target exits over %d bars",
-                  forced_exits, len(candles))
+        log.debug(
+            "[engine] risk-managed path: %d forced stop/target exits over %d bars",
+            forced_exits,
+            len(candles),
+        )
         return equity_series, pd.Series(net_series, index=candles.index), position_series

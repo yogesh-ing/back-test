@@ -40,8 +40,8 @@ from backtest.engine.metrics import compute_metrics
 from backtest.runner import run_on_candles
 from backtest.simulator.bucket_risk import resolve_bucket_risk
 from backtest.simulator.execution import free_executor
-from backtest.simulator.position_sizing import all_in_size
 from backtest.simulator.portfolio import Portfolio
+from backtest.simulator.position_sizing import all_in_size
 from backtest.strategy.registry import get_strategy
 
 logger = logging.getLogger("backtest.engine.backtest_runner")
@@ -73,7 +73,9 @@ def resolve_interval(timeframe: str | None, log_prefix: str = "[timeframe]") -> 
     if key not in SUPPORTED_TIMEFRAMES:
         logger.warning(
             "%s unsupported timeframe %r — falling back to '1day' (supported: %s)",
-            log_prefix, timeframe, ", ".join(SUPPORTED_TIMEFRAMES),
+            log_prefix,
+            timeframe,
+            ", ".join(SUPPORTED_TIMEFRAMES),
         )
         return "1day"
     return key
@@ -96,7 +98,10 @@ def resolve_warmup_start(
         return (from_dt - timedelta(days=warmup_bars * 2)).strftime("%Y-%m-%d")
     except (ValueError, TypeError):
         logger.warning(
-            "%s unparseable %s %r — no warmup applied", log_prefix, label, from_date,
+            "%s unparseable %s %r — no warmup applied",
+            log_prefix,
+            label,
+            from_date,
         )
         return from_date
 
@@ -192,7 +197,10 @@ def run_backtest(
             "[run] %s produced NO signals on %s (%d bars, params=%s) — the run will be "
             "flat: the indicator warmup likely exceeds the window, or the thresholds "
             "never trigger on this data",
-            strategy, symbol, len(candles), params,
+            strategy,
+            symbol,
+            len(candles),
+            params,
         )
     portfolio = Portfolio(name=f"backtest-{strategy}", initial_capital=initial_capital)
     # Ticket #9 — the canonical backtest is a paper-bucket run (simulated
@@ -218,7 +226,8 @@ def run_backtest(
     equity = pd.Series([float(p.total_equity) for p in points], index=index, dtype="float64")
     holding = pd.Series(
         [1.0 if float(p.position_value) > 0 else 0.0 for p in points],
-        index=index, dtype="float64",
+        index=index,
+        dtype="float64",
     )
     result = BacktestResult(
         equity=equity,
@@ -253,7 +262,10 @@ def run_quick_screen(
     trim the warmup prefix off the result.
     """
     result = run_on_candles(
-        candles, strategy, params, symbol,
+        candles,
+        strategy,
+        params,
+        symbol,
         BacktestConfig(initial_capital=initial_capital),
     )
     return trim_to_range(result, from_date, to_date)

@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from datetime import datetime, timezone, timedelta
 
 import pandas as pd
 import pytest
 
-from backtest.simulator.portfolio import Portfolio, EquityPoint
 from backtest.simulator.performance import PerformanceCalculator, PerformanceConfig
+from backtest.simulator.portfolio import EquityPoint, Portfolio
 
 
 def make_portfolio_with_history():
@@ -223,7 +223,9 @@ def test_best_worst_metrics():
 
     for i, eq in enumerate(equities):
         ts = base + timedelta(days=i)
-        point = EquityPoint(ts=ts, total_equity=Decimal(str(eq)), cash=Decimal(str(eq)), position_value=Decimal("0"))
+        point = EquityPoint(
+            ts=ts, total_equity=Decimal(str(eq)), cash=Decimal(str(eq)), position_value=Decimal("0")
+        )
         portfolio.equity_history.append(point)
 
     calc = PerformanceCalculator(portfolio)

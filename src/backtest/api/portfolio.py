@@ -24,9 +24,9 @@ from typing import Tuple
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
 from backtest.data.universe import is_universe, list_universes
+from backtest.forward.paper_runner import TARGET_POOL, TARGET_SINGLE, RunnerConfig
 from backtest.forward.portfolio_manager import get_portfolio_manager
 from backtest.logging_config import get_logger
-from backtest.forward.paper_runner import RunnerConfig, TARGET_POOL, TARGET_SINGLE
 
 portfolio_bp = Blueprint("portfolio_api", __name__)
 log = get_logger(__name__)
@@ -99,9 +99,7 @@ def summary() -> Tuple[Response, int]:
     """Combined stats + instance rows; ``?mode=paper|live`` scopes a bucket."""
     mode = request.args.get("mode") or None
     try:
-        return jsonify(
-            {"success": True, "portfolio": _manager().get_portfolio_summary(mode)}
-        ), 200
+        return jsonify({"success": True, "portfolio": _manager().get_portfolio_summary(mode)}), 200
     except ValueError as exc:
         return _error(str(exc))
 
@@ -161,7 +159,9 @@ def create_runner() -> Tuple[Response, int]:
             timeframe=str(data.get("timeframe", "1hour")),
             strategy_params=params,
             max_pool_positions=int(data.get("max_pool_positions", 5)),
-            position_pct=float(data["position_pct"]) if data.get("position_pct") is not None else None,
+            position_pct=(
+                float(data["position_pct"]) if data.get("position_pct") is not None else None
+            ),
             mode=data.get("mode") or "paper",
             source=data.get("source") or "synthetic",
         )
@@ -171,11 +171,16 @@ def create_runner() -> Tuple[Response, int]:
         return _error(f"invalid runner config: {exc}")
 
     runner = _manager().get_runner(instance_id)
-    return jsonify({
-        "success": True,
-        "instance_id": instance_id,
-        "runner": runner.get_state(),
-    }), 201
+    return (
+        jsonify(
+            {
+                "success": True,
+                "instance_id": instance_id,
+                "runner": runner.get_state(),
+            }
+        ),
+        201,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -242,8 +247,17 @@ def bulk_control(action: str) -> Tuple[Response, int]:
     except RuntimeError as exc:
         return _error(str(exc), 409)
     log.info("bulk action %s affected %d runner(s)", action, n)
-    return jsonify({"success": True, "action": action, "affected": n,
-                    "portfolio": manager.get_portfolio_summary()}), 200
+    return (
+        jsonify(
+            {
+                "success": True,
+                "action": action,
+                "affected": n,
+                "portfolio": manager.get_portfolio_summary(),
+            }
+        ),
+        200,
+    )
 
 
 @portfolio_bp.post("/api/portfolio/emergency_stop")
@@ -251,11 +265,16 @@ def emergency_stop() -> Tuple[Response, int]:
     data = request.get_json(silent=True) or {}
     reason = str(data.get("reason", "manual_emergency"))
     count = _manager().emergency_flatten_all(reason=reason)
-    return jsonify({
-        "success": True,
-        "flattened_positions": count,
-        "portfolio": _manager().get_portfolio_summary(),
-    }), 200
+    return (
+        jsonify(
+            {
+                "success": True,
+                "flattened_positions": count,
+                "portfolio": _manager().get_portfolio_summary(),
+            }
+        ),
+        200,
+    )
 
 
 @portfolio_bp.post("/api/portfolio/test/breach")
@@ -277,10 +296,15 @@ def test_breach() -> Tuple[Response, int]:
         daily_loss_limit=1_000.0 if tighten else None,
         max_drawdown_pct=0.05 if tighten else None,
     )
-    return jsonify({
-        "success": True,
-        "portfolio": summary,
-    }), 200
+    return (
+        jsonify(
+            {
+                "success": True,
+                "portfolio": summary,
+            }
+        ),
+        200,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -311,8 +335,12 @@ def stream() -> Response:
                 # Log once, then at most every 10th repeat, so a broken manager
                 # cannot flood the log at 1 Hz.
                 if errors == 1 or errors % 10 == 0:
-                    log.warning("SSE snapshot failed (%d in a row): %s: %s", errors,
-                                exc.__class__.__name__, exc)
+                    log.warning(
+                        "SSE snapshot failed (%d in a row): %s: %s",
+                        errors,
+                        exc.__class__.__name__,
+                        exc,
+                    )
                 yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
             time.sleep(interval)
 

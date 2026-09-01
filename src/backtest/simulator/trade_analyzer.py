@@ -36,17 +36,16 @@ from __future__ import annotations
 import csv
 import json
 import logging
-from collections import defaultdict, Counter
-from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta, date
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-import numpy as np
 
-from backtest.simulator.money import ZERO, to_decimal, money
+from backtest.simulator.money import ZERO, to_decimal
 
 logger = logging.getLogger("backtest.simulator.trade_analyzer")
 
@@ -158,7 +157,9 @@ class AnalyzedTrade:
             "exit_reason": self.exit_reason,
             "mae": str(self.mae) if self.mae else None,
             "mfe": str(self.mae) if self.mae else None,
-            "execution_quality_bps": str(self.execution_quality_bps) if self.execution_quality_bps else None,
+            "execution_quality_bps": (
+                str(self.execution_quality_bps) if self.execution_quality_bps else None
+            ),
             "holding_category": self.holding_category,
             "pnl_bucket": self.pnl_bucket,
             "day_of_week": self.day_of_week,
@@ -182,15 +183,23 @@ class TradeAnalyzer:
         Optional dict symbol -> DataFrame with OHLCV for MAE/MFE calculation
     """
 
-    def __init__(self, portfolio: Any = None, market_data: Optional[Dict[str, pd.DataFrame]] = None):
+    def __init__(
+        self, portfolio: Any = None, market_data: Optional[Dict[str, pd.DataFrame]] = None
+    ):
         self.portfolio = portfolio
         self.market_data = market_data or {}
 
-        logger.info("TradeAnalyzer initialized: portfolio=%s market_data_symbols=%s", getattr(portfolio, "name", "?") if portfolio else "None", list(self.market_data.keys()))
+        logger.info(
+            "TradeAnalyzer initialized: portfolio=%s market_data_symbols=%s",
+            getattr(portfolio, "name", "?") if portfolio else "None",
+            list(self.market_data.keys()),
+        )
 
     # -- core analysis -------------------------------------------------------
 
-    def analyze_trade(self, trade: Any, price_history: Optional[pd.DataFrame] = None) -> AnalyzedTrade:
+    def analyze_trade(
+        self, trade: Any, price_history: Optional[pd.DataFrame] = None
+    ) -> AnalyzedTrade:
         """Analyze single trade, calculate MAE/MFE and quality metrics.
 
         Parameters
@@ -210,21 +219,28 @@ class TradeAnalyzer:
         else:
             # Try to extract from object (Position or Trade ORM)
             data = {
-                "trade_id": getattr(trade, "trade_id", None) or getattr(trade, "position_id", None) or str(id(trade)),
+                "trade_id": getattr(trade, "trade_id", None)
+                or getattr(trade, "position_id", None)
+                or str(id(trade)),
                 "symbol": getattr(trade, "symbol", "UNKNOWN"),
                 "strategy_name": getattr(trade, "strategy_name", None),
-                "direction": getattr(trade, "direction", None) or getattr(trade, "position_type", "long"),
+                "direction": getattr(trade, "direction", None)
+                or getattr(trade, "position_type", "long"),
                 "quantity": getattr(trade, "quantity", 0),
-                "entry_price": getattr(trade, "entry_price", None) or getattr(trade, "average_entry_price", 0),
-                "exit_price": getattr(trade, "exit_price", None) or getattr(trade, "current_price", 0),
-                "entry_time": getattr(trade, "entry_time", None) or getattr(trade, "opened_at", None),
+                "entry_price": getattr(trade, "entry_price", None)
+                or getattr(trade, "average_entry_price", 0),
+                "exit_price": getattr(trade, "exit_price", None)
+                or getattr(trade, "current_price", 0),
+                "entry_time": getattr(trade, "entry_time", None)
+                or getattr(trade, "opened_at", None),
                 "exit_time": getattr(trade, "exit_time", None) or getattr(trade, "closed_at", None),
                 "gross_pnl": getattr(trade, "gross_pnl", None) or getattr(trade, "realized_pnl", 0),
                 "net_pnl": getattr(trade, "net_pnl", None) or getattr(trade, "realized_pnl", 0),
                 "commission_total": getattr(trade, "commission_total", 0),
                 "slippage_total": getattr(trade, "slippage_total", 0),
                 "holding_period_minutes": getattr(trade, "holding_period_minutes", None),
-                "return_percentage": getattr(trade, "return_percentage", None) or getattr(trade, "return_pct", None),
+                "return_percentage": getattr(trade, "return_percentage", None)
+                or getattr(trade, "return_pct", None),
                 "exit_reason": getattr(trade, "exit_reason", None),
             }
 
@@ -294,15 +310,24 @@ class TradeAnalyzer:
                     trade_bars = hist.loc[mask]
 
                     if not trade_bars.empty:
-                        # For long: MAE is max adverse (lowest low vs entry), MFE is highest high vs entry
+                        # For long: MAE is max adverse (lowest low vs entry),
+                        # MFE is highest high vs entry
                         # For short: inverse
                         direction = str(data.get("direction", "long")).lower()
                         is_long = direction == "long"
 
                         if is_long:
                             # Long: adverse is low below entry, favorable is high above entry
-                            lowest = float(trade_bars["low"].min()) if "low" in trade_bars.columns else float(trade_bars["close"].min())
-                            highest = float(trade_bars["high"].max()) if "high" in trade_bars.columns else float(trade_bars["close"].max())
+                            lowest = (
+                                float(trade_bars["low"].min())
+                                if "low" in trade_bars.columns
+                                else float(trade_bars["close"].min())
+                            )
+                            highest = (
+                                float(trade_bars["high"].max())
+                                if "high" in trade_bars.columns
+                                else float(trade_bars["close"].max())
+                            )
 
                             mae_val = min(0, lowest - float(entry_price))  # negative or zero
                             mfe_val = max(0, highest - float(entry_price))  # positive or zero
@@ -316,11 +341,23 @@ class TradeAnalyzer:
 
                         else:
                             # Short: adverse is high above entry, favorable is low below entry
-                            lowest = float(trade_bars["low"].min()) if "low" in trade_bars.columns else float(trade_bars["close"].min())
-                            highest = float(trade_bars["high"].max()) if "high" in trade_bars.columns else float(trade_bars["close"].max())
+                            lowest = (
+                                float(trade_bars["low"].min())
+                                if "low" in trade_bars.columns
+                                else float(trade_bars["close"].min())
+                            )
+                            highest = (
+                                float(trade_bars["high"].max())
+                                if "high" in trade_bars.columns
+                                else float(trade_bars["close"].max())
+                            )
 
-                            mae_val = min(0, float(entry_price) - highest)  # negative if high above entry
-                            mfe_val = max(0, float(entry_price) - lowest)  # positive if low below entry
+                            mae_val = min(
+                                0, float(entry_price) - highest
+                            )  # negative if high above entry
+                            mfe_val = max(
+                                0, float(entry_price) - lowest
+                            )  # positive if low below entry
 
                             mae = to_decimal(mae_val, "mae")
                             mfe = to_decimal(mfe_val, "mfe")
@@ -344,7 +381,12 @@ class TradeAnalyzer:
                         row = hist.iloc[idx]
                         # Mid price: (high+low)/2 or (bid+ask)/2 or close
                         mid = None
-                        if "bid" in row and "ask" in row and pd.notna(row["bid"]) and pd.notna(row["ask"]):
+                        if (
+                            "bid" in row
+                            and "ask" in row
+                            and pd.notna(row["bid"])
+                            and pd.notna(row["ask"])
+                        ):
                             mid = (float(row["bid"]) + float(row["ask"])) / 2
                         elif "high" in row and "low" in row:
                             mid = (float(row["high"]) + float(row["low"])) / 2
@@ -352,7 +394,8 @@ class TradeAnalyzer:
                             mid = float(row["close"])
 
                         if mid and mid != 0:
-                            # Execution quality bps: (fill - mid)/mid *10000, positive = adverse for buy
+                            # Execution quality bps: (fill - mid)/mid *10000,
+                            # positive = adverse for buy
                             fill = float(entry_price)
                             eq_bps = (fill - mid) / mid * 10000
                             exec_quality_bps = to_decimal(eq_bps, "exec_quality_bps")
@@ -410,7 +453,9 @@ class TradeAnalyzer:
 
         return []
 
-    def categorize_trades(self, trades_list: Optional[List[Any]] = None) -> Dict[str, Dict[str, List[AnalyzedTrade]]]:
+    def categorize_trades(
+        self, trades_list: Optional[List[Any]] = None
+    ) -> Dict[str, Dict[str, List[AnalyzedTrade]]]:
         """Categorize trades by various dimensions.
 
         Returns dict with keys: by_symbol, by_strategy, by_time_of_day, by_day_of_week,
@@ -521,7 +566,10 @@ class TradeAnalyzer:
             if trade.hour_of_day is not None:
                 perf_by_hour[trade.hour_of_day].append(float(trade.net_pnl))
 
-        performance_by_hour = {hour: {"avg_pnl": sum(pnls) / len(pnls), "count": len(pnls), "total_pnl": sum(pnls)} for hour, pnls in perf_by_hour.items()}
+        performance_by_hour = {
+            hour: {"avg_pnl": sum(pnls) / len(pnls), "count": len(pnls), "total_pnl": sum(pnls)}
+            for hour, pnls in perf_by_hour.items()
+        }
 
         # Performance by day of week
         perf_by_day = defaultdict(list)
@@ -529,7 +577,10 @@ class TradeAnalyzer:
             if trade.day_of_week:
                 perf_by_day[trade.day_of_week].append(float(trade.net_pnl))
 
-        performance_by_day = {day: {"avg_pnl": sum(pnls) / len(pnls), "count": len(pnls), "total_pnl": sum(pnls)} for day, pnls in perf_by_day.items()}
+        performance_by_day = {
+            day: {"avg_pnl": sum(pnls) / len(pnls), "count": len(pnls), "total_pnl": sum(pnls)}
+            for day, pnls in perf_by_day.items()
+        }
 
         # Best/worst performing symbols
         perf_by_symbol = defaultdict(list)
@@ -546,7 +597,9 @@ class TradeAnalyzer:
             }
 
         # Sort by total PnL
-        sorted_symbols = sorted(best_worst_symbols.items(), key=lambda x: x[1]["total_pnl"], reverse=True)
+        sorted_symbols = sorted(
+            best_worst_symbols.items(), key=lambda x: x[1]["total_pnl"], reverse=True
+        )
         best_symbol = sorted_symbols[0] if sorted_symbols else None
         worst_symbol = sorted_symbols[-1] if sorted_symbols else None
 
@@ -555,7 +608,10 @@ class TradeAnalyzer:
         for trade in analyzed:
             perf_by_holding[trade.holding_category].append(float(trade.net_pnl))
 
-        optimal_holding = {cat: {"avg_pnl": sum(pnls) / len(pnls), "count": len(pnls)} for cat, pnls in perf_by_holding.items()}
+        optimal_holding = {
+            cat: {"avg_pnl": sum(pnls) / len(pnls), "count": len(pnls)}
+            for cat, pnls in perf_by_holding.items()
+        }
 
         # Entry price vs average price analysis
         # For each symbol, compare entry price to average close during holding?
@@ -582,7 +638,9 @@ class TradeAnalyzer:
             "entry_analysis": entry_analysis,
         }
 
-    def generate_trade_report(self, date_range: Optional[Tuple[datetime, datetime]] = None) -> Dict[str, Any]:
+    def generate_trade_report(
+        self, date_range: Optional[Tuple[datetime, datetime]] = None
+    ) -> Dict[str, Any]:
         """Generate comprehensive trade report.
 
         Parameters
@@ -629,14 +687,21 @@ class TradeAnalyzer:
                 day = trade.exit_time.date()
                 daily_summary[day].append(float(trade.net_pnl))
 
-        daily_report = {str(day): {"total_pnl": sum(pnls), "count": len(pnls)} for day, pnls in daily_summary.items()}
+        daily_report = {
+            str(day): {"total_pnl": sum(pnls), "count": len(pnls)}
+            for day, pnls in daily_summary.items()
+        }
 
         # Trade-by-trade breakdown
         breakdown = [t.to_dict() for t in analyzed]
 
         report = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "date_range": [d.isoformat() if isinstance(d, datetime) else str(d) for d in date_range] if date_range else None,
+            "date_range": (
+                [d.isoformat() if isinstance(d, datetime) else str(d) for d in date_range]
+                if date_range
+                else None
+            ),
             "total_trades": total_trades,
             "winning_trades": winning,
             "losing_trades": losing,
@@ -649,11 +714,21 @@ class TradeAnalyzer:
             "trades": breakdown,
         }
 
-        logger.info("Trade report generated: %s trades, total PnL %.2f, win rate %.1f%%", total_trades, total_pnl, report["win_rate"] * 100)
+        logger.info(
+            "Trade report generated: %s trades, total PnL %.2f, win rate %.1f%%",
+            total_trades,
+            total_pnl,
+            report["win_rate"] * 100,
+        )
 
         return report
 
-    def export_trades(self, format: str = "csv", file_path: Optional[str | Path] = None, trades_list: Optional[List[Any]] = None) -> str:
+    def export_trades(
+        self,
+        format: str = "csv",
+        file_path: Optional[str | Path] = None,
+        trades_list: Optional[List[Any]] = None,
+    ) -> str:
         """Export trades to file.
 
         Parameters
@@ -684,7 +759,10 @@ class TradeAnalyzer:
                 import tempfile
 
                 suffix = ".csv" if fmt == "csv" else ".xlsx" if fmt == "excel" else ".json"
-                file_path = Path(tempfile.gettempdir()) / f"trades_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}"
+                file_path = (
+                    Path(tempfile.gettempdir())
+                    / f"trades_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}"
+                )
 
         file_path = Path(file_path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -728,12 +806,16 @@ class TradeAnalyzer:
 
     # -- additional quality metrics ----------------------------------------
 
-    def calculate_execution_quality(self, trades_list: Optional[List[Any]] = None) -> Dict[str, Any]:
+    def calculate_execution_quality(
+        self, trades_list: Optional[List[Any]] = None
+    ) -> Dict[str, Any]:
         """Calculate execution quality metrics."""
         trades = trades_list or self.get_trades()
         analyzed = [self.analyze_trade(t) for t in trades]
 
-        qualities = [float(t.execution_quality_bps) for t in analyzed if t.execution_quality_bps is not None]
+        qualities = [
+            float(t.execution_quality_bps) for t in analyzed if t.execution_quality_bps is not None
+        ]
 
         if not qualities:
             return {"avg_execution_quality_bps": 0, "count": 0}
@@ -745,7 +827,9 @@ class TradeAnalyzer:
             "count": len(qualities),
         }
 
-    def calculate_slippage_analysis(self, trades_list: Optional[List[Any]] = None) -> Dict[str, Any]:
+    def calculate_slippage_analysis(
+        self, trades_list: Optional[List[Any]] = None
+    ) -> Dict[str, Any]:
         """Analyze slippage across trades."""
         trades = trades_list or self.get_trades()
         analyzed = [self.analyze_trade(t) for t in trades]
@@ -763,4 +847,8 @@ class TradeAnalyzer:
         }
 
     def __repr__(self):
-        return f"<TradeAnalyzer portfolio={getattr(self.portfolio, 'name', '?') if self.portfolio else 'None'} trades={len(self.get_trades())}>"
+        return (
+            f"<TradeAnalyzer "
+            f"portfolio={getattr(self.portfolio, 'name', '?') if self.portfolio else 'None'} "
+            f"trades={len(self.get_trades())}>"
+        )

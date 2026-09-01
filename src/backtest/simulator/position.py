@@ -37,15 +37,9 @@ from typing import TYPE_CHECKING, Any, Sequence
 
 from backtest.simulator.errors import ValidationError
 from backtest.simulator.lots import CostBasisMethod, Lot, LotBook, LotConsumption
-from backtest.simulator.money import (
-    ZERO,
-    is_zero,
-    money,
-    price as to_price,
-    quantize_money,
-    quantize_price,
-    to_decimal,
-)
+from backtest.simulator.money import ZERO, is_zero, money
+from backtest.simulator.money import price as to_price
+from backtest.simulator.money import quantize_money, quantize_price, to_decimal
 
 if TYPE_CHECKING:  # pragma: no cover
     from backtest.db.manager import DatabaseManager
@@ -181,9 +175,7 @@ class Position:
         if self.lot_book is None:
             # A position opened in one go is a single lot.
             self.lot_book = LotBook(method=self.cost_basis_method)
-            self.lot_book.add(
-                abs(self.quantity), self.average_entry_price, self.opened_at
-            )
+            self.lot_book.add(abs(self.quantity), self.average_entry_price, self.opened_at)
         else:
             self.cost_basis_method = self.lot_book.method
             self._sync_average_from_lots()
@@ -353,13 +345,15 @@ class Position:
         cash_delta = quantize_money((-qty * px if self.is_long else qty * px) - fee)
         logger.debug(
             "add_shares %s %s @ %s -> qty=%s avg=%s",
-            self.symbol, qty, px, self.quantity, self.average_entry_price,
+            self.symbol,
+            qty,
+            px,
+            self.quantity,
+            self.average_entry_price,
         )
         return cash_delta
 
-    def reduce_shares(
-        self, quantity: Any, at_price: Any, commission: Any = ZERO
-    ) -> ReduceResult:
+    def reduce_shares(self, quantity: Any, at_price: Any, commission: Any = ZERO) -> ReduceResult:
         """Close part (or all) of the position, realising P&L.
 
         The average entry price is deliberately **unchanged** by a partial
@@ -406,9 +400,7 @@ class Position:
         # Consume tax lots first: which ones go determines both the realised
         # P&L of this close and the cost basis left behind.
         consumed = self.lot_book.consume(qty)
-        realized = quantize_money(
-            sum((c.realized_pnl(px, was_long) for c in consumed), ZERO)
-        )
+        realized = quantize_money(sum((c.realized_pnl(px, was_long) for c in consumed), ZERO))
 
         signed_remaining = self.quantity - (qty if was_long else -qty)
         self.quantity = to_price(signed_remaining, "quantity")
@@ -428,7 +420,11 @@ class Position:
         cash_delta = quantize_money((qty * px if was_long else -qty * px) - fee)
         logger.debug(
             "reduce_shares %s %s @ %s -> realized=%s remaining=%s",
-            self.symbol, qty, px, realized, self.quantity,
+            self.symbol,
+            qty,
+            px,
+            realized,
+            self.quantity,
         )
         return ReduceResult(
             quantity_closed=qty,
@@ -540,8 +536,12 @@ class Position:
 
         logger.info(
             "split %s %s-for-1: %s -> %s shares @ %s -> %s",
-            self.symbol, factor, qty_before, self.quantity,
-            price_before, self.average_entry_price,
+            self.symbol,
+            factor,
+            qty_before,
+            self.quantity,
+            price_before,
+            self.average_entry_price,
         )
         return SplitResult(
             ratio=factor,
@@ -551,9 +551,7 @@ class Position:
             price_after=self.average_entry_price,
         )
 
-    def apply_dividend(
-        self, per_share: Any, reduce_cost_basis: bool = False
-    ) -> DividendResult:
+    def apply_dividend(self, per_share: Any, reduce_cost_basis: bool = False) -> DividendResult:
         """Account for a cash dividend.
 
         Parameters
@@ -580,9 +578,7 @@ class Position:
             )
         amount = to_decimal(per_share, "dividend")
         if amount < ZERO:
-            raise ValidationError(
-                "dividend must not be negative", code="invalid_dividend"
-            )
+            raise ValidationError("dividend must not be negative", code="invalid_dividend")
 
         cash = quantize_money(self.quantity * amount)  # signed by quantity
         if reduce_cost_basis:
@@ -592,7 +588,10 @@ class Position:
 
         logger.info(
             "dividend %s %s/share -> cash %s (cost basis %s)",
-            self.symbol, amount, cash, "reduced" if reduce_cost_basis else "unchanged",
+            self.symbol,
+            amount,
+            cash,
+            "reduced" if reduce_cost_basis else "unchanged",
         )
         return DividendResult(
             per_share=amount, cash_amount=cash, cost_basis_reduced=reduce_cost_basis

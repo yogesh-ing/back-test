@@ -316,8 +316,7 @@ def load_config(
     )
     if profiles and chosen not in profiles:
         raise ConfigError(
-            f"unknown profile {chosen!r} in {config_path}. "
-            f"Available: {sorted(profiles)}"
+            f"unknown profile {chosen!r} in {config_path}. " f"Available: {sorted(profiles)}"
         )
 
     # Layer the sources, least specific first, tracking provenance so

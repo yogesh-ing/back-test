@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -66,7 +66,9 @@ from backtest.simulator.commission import (
 )
 from backtest.simulator.enums import OrderSide
 from backtest.simulator.errors import ValidationError
-from backtest.simulator.money import ZERO, money, price as to_price, to_decimal
+from backtest.simulator.money import ZERO, money
+from backtest.simulator.money import price as to_price
+from backtest.simulator.money import to_decimal
 
 if TYPE_CHECKING:  # pragma: no cover
     from backtest.simulator.order import Order
@@ -93,9 +95,7 @@ logger = logging.getLogger("backtest.simulator.fees")
 #: Contract notes are denominated in paise / cents.
 _PAISE = Decimal("0.01")
 
-DEFAULT_BROKER_CONFIG_PATH = (
-    Path(__file__).resolve().parents[3] / "config" / "brokers.yaml"
-)
+DEFAULT_BROKER_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "brokers.yaml"
 
 
 def _round(amount: Decimal) -> Decimal:
@@ -315,15 +315,13 @@ class IndiaEquityFees(FeeSchedule):
             if isinstance(value, (int, float, Decimal)) and name not in ("name", "currency"):
                 coerced = to_decimal(value, name)
                 if coerced < ZERO:
-                    raise ValidationError(
-                        f"{name} must not be negative", code="invalid_fee_config"
-                    )
+                    raise ValidationError(f"{name} must not be negative", code="invalid_fee_config")
                 setattr(self, name, coerced)
 
     def _stt(self, value: Decimal, side: OrderSide, segment: str) -> Decimal:
         is_sell = side is OrderSide.SELL
         if segment == TradeSegment.EQUITY_DELIVERY:
-            return value * self.stt_delivery              # both sides
+            return value * self.stt_delivery  # both sides
         if segment == TradeSegment.EQUITY_INTRADAY:
             return value * self.stt_intraday_sell if is_sell else ZERO
         if segment == TradeSegment.FUTURES:
@@ -358,9 +356,7 @@ class IndiaEquityFees(FeeSchedule):
         out["ipft"] = ipft
 
         # Stamp duty is a buy-side charge only.
-        out["stamp_duty"] = (
-            ZERO if is_sell else _round(trade_value * self._stamp_rate(segment))
-        )
+        out["stamp_duty"] = ZERO if is_sell else _round(trade_value * self._stamp_rate(segment))
 
         # GST applies to brokerage and the exchange/SEBI charges — not to STT
         # or stamp duty, which are themselves taxes.
@@ -407,13 +403,14 @@ class USEquityFees(FeeSchedule):
 
     def __post_init__(self) -> None:
         for name in (
-            "sec_fee_rate", "finra_taf_per_share", "finra_taf_max", "ecn_fee_per_share",
+            "sec_fee_rate",
+            "finra_taf_per_share",
+            "finra_taf_max",
+            "ecn_fee_per_share",
         ):
             value = to_decimal(getattr(self, name), name)
             if value < ZERO:
-                raise ValidationError(
-                    f"{name} must not be negative", code="invalid_fee_config"
-                )
+                raise ValidationError(f"{name} must not be negative", code="invalid_fee_config")
             setattr(self, name, value)
 
     def charges(self, trade_value, quantity, side, segment, brokerage):
@@ -496,9 +493,7 @@ class CurrencyConverter:
 
     def __post_init__(self) -> None:
         self.base = str(self.base).strip().upper()
-        self.rates = {
-            str(k).strip().upper(): to_decimal(v, "rate") for k, v in self.rates.items()
-        }
+        self.rates = {str(k).strip().upper(): to_decimal(v, "rate") for k, v in self.rates.items()}
         self.rates.setdefault(self.base, Decimal("1"))
         for code, rate in self.rates.items():
             if rate <= ZERO:
@@ -567,10 +562,7 @@ class BrokerProfile:
 
     def model_for(self, segment: str) -> CommissionModel:
         """The brokerage model for a segment, honouring the delivery override."""
-        if (
-            segment == TradeSegment.EQUITY_DELIVERY
-            and self.delivery_commission_model is not None
-        ):
+        if segment == TradeSegment.EQUITY_DELIVERY and self.delivery_commission_model is not None:
             return self.delivery_commission_model
         return self.commission_model
 
@@ -693,9 +685,7 @@ def get_broker_preset(name: str) -> BrokerProfile:
     return BROKER_PRESETS[key]()
 
 
-def load_broker_profile(
-    path: str | Path | None = None, broker: str | None = None
-) -> BrokerProfile:
+def load_broker_profile(path: str | Path | None = None, broker: str | None = None) -> BrokerProfile:
     """Load a broker profile from ``config/brokers.yaml``.
 
     Falls back to the named preset when the file has no matching entry, so
@@ -703,9 +693,7 @@ def load_broker_profile(
     """
     config_path = Path(path) if path else DEFAULT_BROKER_CONFIG_PATH
     if path is not None and not config_path.exists():
-        raise ValidationError(
-            f"broker config not found: {config_path}", code="config_not_found"
-        )
+        raise ValidationError(f"broker config not found: {config_path}", code="config_not_found")
     if not config_path.exists():
         return get_broker_preset(broker or "zerodha")
 
@@ -729,7 +717,7 @@ def load_broker_profile(
 
     payload = dict(brokers[chosen] or {})
     payload.setdefault("name", chosen)
-    known = set(BrokerProfile.__dataclass_fields__)
+    known = {f.name for f in fields(BrokerProfile)}
     unknown = set(payload) - known
     if unknown:
         raise ValidationError(
@@ -908,9 +896,7 @@ class CommissionCalculator:
             segment,
             ZERO,
         )
-        return _round(
-            sum((v for k, v in charges.items() if k in FeeBreakdown.EXCHANGE_KEYS), ZERO)
-        )
+        return _round(sum((v for k, v in charges.items() if k in FeeBreakdown.EXCHANGE_KEYS), ZERO))
 
     # -- main entry point --------------------------------------------------
 
@@ -996,8 +982,13 @@ class CommissionCalculator:
 
         logger.debug(
             "fees %s %s %s @ %s [%s] -> %s (%s bps)",
-            self.broker.name, side, qty, px, segment,
-            breakdown.total, breakdown.effective_bps(trade_value),
+            self.broker.name,
+            side,
+            qty,
+            px,
+            segment,
+            breakdown.total,
+            breakdown.effective_bps(trade_value),
         )
         return breakdown
 
@@ -1039,4 +1030,3 @@ class CommissionCalculator:
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"<CommissionCalculator {self.broker.name} n={len(self._history)}>"
-

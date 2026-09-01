@@ -62,15 +62,18 @@ def old_vocab_db(tmp_path: Path) -> Path:
     conn = sqlite3.connect(db)
     try:
         _apply(conn, SQL_001, SQL_002)
-        _insert_bars(conn, [
-            ("1min", "2024-01-02 09:15:00"),
-            ("5min", "2024-01-02 09:15:00"),
-            ("3min", "2024-01-02 09:15:00"),     # no canonical equivalent
-            ("60min", "2024-01-02 09:15:00"),    # -> 1hour
-            ("day", "2024-01-02 09:15:00"),      # -> 1day
-            ("week", "2024-01-01 09:15:00"),     # -> 1week
-            ("month", "2024-01-01 09:15:00"),    # no canonical equivalent
-        ])
+        _insert_bars(
+            conn,
+            [
+                ("1min", "2024-01-02 09:15:00"),
+                ("5min", "2024-01-02 09:15:00"),
+                ("3min", "2024-01-02 09:15:00"),  # no canonical equivalent
+                ("60min", "2024-01-02 09:15:00"),  # -> 1hour
+                ("day", "2024-01-02 09:15:00"),  # -> 1day
+                ("week", "2024-01-01 09:15:00"),  # -> 1week
+                ("month", "2024-01-01 09:15:00"),  # no canonical equivalent
+            ],
+        )
         conn.commit()
     finally:
         conn.close()
@@ -81,9 +84,10 @@ def test_migration_remaps_rows_and_rebuilds_check(old_vocab_db: Path) -> None:
     conn = sqlite3.connect(old_vocab_db)
     try:
         _apply(conn, SQL_003)
-        tf = [r[0] for r in conn.execute(
-            "SELECT timeframe FROM market_data_cache ORDER BY ts, timeframe"
-        )]
+        tf = [
+            r[0]
+            for r in conn.execute("SELECT timeframe FROM market_data_cache ORDER BY ts, timeframe")
+        ]
         # 3min + month dropped; 60min/day/week remapped; 1min/5min untouched
         assert sorted(tf) == ["1day", "1hour", "1min", "1week", "5min"]
         # the ledger records 003

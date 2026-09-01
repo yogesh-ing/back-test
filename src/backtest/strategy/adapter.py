@@ -28,11 +28,11 @@ from backtest.forward.strategy_adapter import (
 
 # Also re-export the full engine from simulator for convenience
 try:
+    from backtest.simulator.position_sizing import PositionSizer as FullPositionSizer
     from backtest.simulator.position_sizing import (
-        PositionSizer as FullPositionSizer,
+        RiskParams,
         SizingConfig,
         SizingConstraints,
-        RiskParams,
         SizingResult,
         load_position_sizing_config,
     )

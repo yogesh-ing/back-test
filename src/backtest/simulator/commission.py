@@ -27,7 +27,9 @@ from typing import Any, Sequence
 
 from backtest.simulator.enums import OrderSide
 from backtest.simulator.errors import ValidationError
-from backtest.simulator.money import ZERO, money, price as to_price, to_decimal
+from backtest.simulator.money import ZERO, money
+from backtest.simulator.money import price as to_price
+from backtest.simulator.money import to_decimal
 
 __all__ = [
     "CommissionModel",
@@ -136,14 +138,8 @@ class PerShareCommission(CommissionModel):
             self.minimum = money(self.minimum, "minimum")
         if self.maximum is not None:
             self.maximum = money(self.maximum, "maximum")
-        if (
-            self.minimum is not None
-            and self.maximum is not None
-            and self.maximum < self.minimum
-        ):
-            raise ValidationError(
-                "maximum must be >= minimum", code="invalid_commission_config"
-            )
+        if self.minimum is not None and self.maximum is not None and self.maximum < self.minimum:
+            raise ValidationError("maximum must be >= minimum", code="invalid_commission_config")
 
     def calculate(self, quantity: Any, price: Any, side: Any = OrderSide.BUY) -> Decimal:
         qty, _ = self._inputs(quantity, price)
@@ -175,9 +171,7 @@ class PercentageCommission(CommissionModel):
     def __post_init__(self) -> None:
         self.rate = to_decimal(self.rate, "rate")
         if self.rate < ZERO:
-            raise ValidationError(
-                "rate must not be negative", code="invalid_commission_config"
-            )
+            raise ValidationError("rate must not be negative", code="invalid_commission_config")
         if self.rate > Decimal("1"):
             # 100% commission is always a units mistake — 0.03 meaning "0.03%"
             # rather than 3%. Catch it here instead of after a confusing run.
@@ -316,9 +310,7 @@ class PaymentForOrderFlowCommission(CommissionModel):
     name: str = field(default="pfof", init=False)
 
     def __post_init__(self) -> None:
-        self.implied_slippage_bps = to_decimal(
-            self.implied_slippage_bps, "implied_slippage_bps"
-        )
+        self.implied_slippage_bps = to_decimal(self.implied_slippage_bps, "implied_slippage_bps")
         if self.implied_slippage_bps < ZERO:
             raise ValidationError(
                 "implied_slippage_bps must not be negative",

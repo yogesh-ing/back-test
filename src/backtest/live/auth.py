@@ -26,8 +26,8 @@ def generate_totp_code(secret: str | None = None, now: int | None = None) -> str
     current = int(time.time()) if now is None else int(now)
     window = current // 30
     hmac_hash = hmac.new(key, window.to_bytes(8, byteorder="big"), hashlib.sha1).digest()
-    offset_val = hmac_hash[-1] & 0x0f
-    otp = int.from_bytes(hmac_hash[offset_val:offset_val + 4], byteorder="big") & 0x7fffffff
+    offset_val = hmac_hash[-1] & 0x0F
+    otp = int.from_bytes(hmac_hash[offset_val : offset_val + 4], byteorder="big") & 0x7FFFFFFF
     return str(otp % 1_000_000).zfill(6)
 
 

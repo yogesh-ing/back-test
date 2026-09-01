@@ -17,17 +17,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.pool import NullPool, QueuePool, StaticPool
 
-from backtest.db.config import (
-    ENV_PREFIX,
-    ConfigError,
-    DatabaseConfig,
-    load_config,
-)
-from backtest.db.manager import (
-    ConnectionError as DbConnectionError,
-    DatabaseManager,
-    TransactionError,
-)
+from backtest.db.config import ENV_PREFIX, ConfigError, DatabaseConfig, load_config
+from backtest.db.manager import ConnectionError as DbConnectionError
+from backtest.db.manager import DatabaseManager, TransactionError
 
 
 def _has_psycopg2() -> bool:
@@ -45,7 +37,7 @@ def _has_psycopg2() -> bool:
 requires_psycopg2 = pytest.mark.skipif(
     not _has_psycopg2(),
     reason="needs the PostgreSQL driver: pip install -r requirements.txt "
-           "(psycopg2-binary) — otherwise engine creation fails before any connect",
+    "(psycopg2-binary) — otherwise engine creation fails before any connect",
 )
 from backtest.db.models import Base, Portfolio
 
@@ -145,9 +137,7 @@ class TestConfig:
             load_config(path="/nonexistent/database.yaml")
 
     def test_missing_default_file_is_tolerated(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(
-            "backtest.db.config.DEFAULT_CONFIG_PATH", tmp_path / "absent.yaml"
-        )
+        monkeypatch.setattr("backtest.db.config.DEFAULT_CONFIG_PATH", tmp_path / "absent.yaml")
         monkeypatch.setenv(f"{ENV_PREFIX}_URL", "sqlite:///:memory:")
         assert load_config().dialect == "sqlite"
 
@@ -309,7 +299,8 @@ class TestLifecycle:
 
     def test_repr_masks_password(self):
         m = DatabaseManager.from_env(
-            path=str(CONFIG_FILE), profile="testing",
+            path=str(CONFIG_FILE),
+            profile="testing",
             url="postgresql+psycopg2://u:pw@h:5432/d",
         )
         assert "pw" not in repr(m)
@@ -363,7 +354,7 @@ class TestPooling:
     def test_pool_status_reports_metrics(self, db):
         status = db.pool_status()
         assert status["class"] == "StaticPool"
-        assert db.pool_status() != {} 
+        assert db.pool_status() != {}
 
     def test_pool_status_empty_before_connect(self):
         m = DatabaseManager.from_env(path=str(CONFIG_FILE), profile="testing")
@@ -433,9 +424,9 @@ class TestQueries:
 
     def test_named_parameters_are_bound_not_interpolated(self, db):
         _add_portfolio(db, "A")
-        assert db.fetch_one(
-            "SELECT name FROM portfolios WHERE name = :n", {"n": "A"}
-        ) == {"name": "A"}
+        assert db.fetch_one("SELECT name FROM portfolios WHERE name = :n", {"n": "A"}) == {
+            "name": "A"
+        }
 
     def test_sql_injection_is_neutralised(self, db):
         """A malicious value must be treated as data, never as SQL."""
@@ -446,9 +437,7 @@ class TestQueries:
         assert db.fetch_scalar("SELECT count(*) FROM portfolios") == 1
 
     def test_execute_many_inserts_every_row(self, db):
-        rows = [
-            {"i": f"p{i}", "n": f"P{i}", "c": 100 + i} for i in range(50)
-        ]
+        rows = [{"i": f"p{i}", "n": f"P{i}", "c": 100 + i} for i in range(50)]
         db.execute_many(
             "INSERT INTO portfolios (portfolio_id,name,initial_capital,current_cash) "
             "VALUES (:i,:n,:c,:c)",
@@ -896,7 +885,8 @@ class TestTransientClassification:
 
 def test_database_connection_error_alias_is_the_same_class():
     """ConnectionError shadows the builtin; the alias must be interchangeable."""
-    from backtest.db import ConnectionError as Shadowing, DatabaseConnectionError
+    from backtest.db import ConnectionError as Shadowing
+    from backtest.db import DatabaseConnectionError
 
     assert DatabaseConnectionError is Shadowing
     assert issubclass(DatabaseConnectionError, Exception)

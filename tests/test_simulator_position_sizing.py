@@ -2,27 +2,27 @@
 
 from __future__ import annotations
 
-import pytest
 from decimal import Decimal
-import pandas as pd
 
+import pandas as pd
+import pytest
+
+from backtest.simulator.money import money
 from backtest.simulator.portfolio import Portfolio
 from backtest.simulator.position_sizing import (
+    FixedDollarSizer,
+    FixedQuantitySizer,
+    KellySizer,
+    PercentagePortfolioSizer,
     PositionSizer,
+    RiskBasedSizer,
+    RiskParams,
     SizingConfig,
     SizingConstraints,
-    RiskParams,
     SizingMethod,
-    FixedQuantitySizer,
-    FixedDollarSizer,
-    PercentagePortfolioSizer,
-    RiskBasedSizer,
     VolatilitySizer,
-    KellySizer,
     load_position_sizing_config,
 )
-from backtest.simulator.money import money
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -338,8 +338,8 @@ def test_apply_methods():
 
 
 def test_integration_with_adapter():
-    from backtest.strategy.base import Strategy
     from backtest.forward.strategy_adapter import StrategyAdapter
+    from backtest.strategy.base import Strategy
 
     class DummyStrat(Strategy):
         name = ""
@@ -356,10 +356,22 @@ def test_integration_with_adapter():
     cfg = SizingConfig(method="risk_based", risk_per_trade=0.01, stop_loss_pct=0.02)
     sizer = PositionSizer(cfg)
     adapter = StrategyAdapter(
-        strategy=DummyStrat(), portfolio=portfolio, position_sizer=sizer, symbols=["INFY"], min_bars=1
+        strategy=DummyStrat(),
+        portfolio=portfolio,
+        position_sizer=sizer,
+        symbols=["INFY"],
+        min_bars=1,
     )
 
-    bar = {"symbol": "INFY", "timestamp": "2024-01-01T09:15:00+05:30", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000}
+    bar = {
+        "symbol": "INFY",
+        "timestamp": "2024-01-01T09:15:00+05:30",
+        "open": 100,
+        "high": 101,
+        "low": 99,
+        "close": 100,
+        "volume": 1000,
+    }
     sigs = adapter.on_bar_close(bar)
     adapter.create_orders(sigs, market_data=bar)
 
@@ -379,6 +391,16 @@ def test_risk_params_override():
     )
     # risk 2% =2000, loss 2 => 1000
     assert qty == Decimal("1000")
+
+    # same override via a risk_params dict — exercises the dict-merge path
+    # (fields(RiskParams) walk in PositionSizer.calculate_position_size)
+    qty_dict = sizer.calculate_position_size(
+        symbol="INFY",
+        current_price=100,
+        portfolio=portfolio,
+        risk_params={"max_risk_per_trade": 0.02},
+    )
+    assert qty_dict == Decimal("1000")
 
 
 def test_kelly_with_signal():

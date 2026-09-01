@@ -18,12 +18,7 @@ from backtest.data.synthetic import SyntheticSource
 from backtest.engine import backtest_runner as canonical
 from backtest.engine.backtest_driver import BacktestDriver
 from backtest.engine.backtester import BacktestConfig, BacktestResult
-from backtest.forward.paper_runner import (
-    PaperRunner,
-    _FrameSource,
-    _all_in_size,
-    free_executor,
-)
+from backtest.forward.paper_runner import PaperRunner, _all_in_size, _FrameSource, free_executor
 from backtest.runner import run_on_candles
 from backtest.simulator.portfolio import Portfolio
 from backtest.strategy.registry import get_strategy
@@ -71,7 +66,8 @@ def test_run_backtest_matches_paper_runner_pnl(candles):
 
     pf = Portfolio(name="check-forward", initial_capital=_CAPITAL)
     runner = PaperRunner(
-        portfolio=pf, source=_FrameSource(candles),
+        portfolio=pf,
+        source=_FrameSource(candles),
         strategy=get_strategy("sma_crossover")(**_PARAMS),
         executor=free_executor(pf, max_participation="1"),
         symbols=[_SYMBOL],
@@ -88,10 +84,19 @@ def test_run_quick_screen_equals_vectorized_plus_trim(candles):
     """The quick-screen entry = run_on_candles + trim_to_range (same shape,
     same numbers as the historical inline clone)."""
     result = canonical.run_quick_screen(
-        candles, "sma_crossover", _PARAMS, _SYMBOL, _CAPITAL, _START, _END,
+        candles,
+        "sma_crossover",
+        _PARAMS,
+        _SYMBOL,
+        _CAPITAL,
+        _START,
+        _END,
     )
     manual = run_on_candles(
-        candles, "sma_crossover", _PARAMS, _SYMBOL,
+        candles,
+        "sma_crossover",
+        _PARAMS,
+        _SYMBOL,
         BacktestConfig(initial_capital=_CAPITAL),
     )
     manual = canonical.trim_to_range(manual, _START, _END)
@@ -119,14 +124,10 @@ def test_shared_helpers_have_one_canonical_home():
     """FrameSource / free_executor / all_in_size are defined once; the paper
     runner only re-exports them under the historical private spellings."""
     from backtest.data.frame_source import FrameSource
+    from backtest.forward.paper_runner import _all_in_size, _FrameSource
+    from backtest.forward.paper_runner import free_executor as paper_free_executor
     from backtest.simulator.execution import free_executor
     from backtest.simulator.position_sizing import all_in_size
-
-    from backtest.forward.paper_runner import (
-        _FrameSource,
-        _all_in_size,
-        free_executor as paper_free_executor,
-    )
 
     assert _FrameSource is FrameSource
     assert _all_in_size is all_in_size

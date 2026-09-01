@@ -20,26 +20,83 @@ from typing import Dict, List
 # NIFTY 50 constituents (NSE). Equity symbols are stored as plain tickers the
 # same way the rest of the app uses them (e.g. "RELIANCE").
 NIFTY_50: List[str] = [
-    "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "BHARTIARTL", "INFY",
-    "ITC", "SBIN", "LT", "HINDUNILVR", "BAJFINANCE", "KOTAKBANK",
-    "AXISBANK", "MARUTI", "SUNPHARMA", "ASIANPAINT", "TITAN", "BAJAJFINSV",
-    "NESTLEIND", "ULTRACEMCO", "ONGC", "NTPC", "POWERGRID", "M&M",
-    "TATAMOTORS", "TATASTEEL", "WIPRO", "HCLTECH", "ADANIENT", "ADANIPORTS",
-    "COALINDIA", "GRASIM", "JSWSTEEL", "TECHM", "HDFCLIFE", "DRREDDY",
-    "CIPLA", "BRITANNIA", "DIVISLAB", "EICHERMOT", "BAJAJ-AUTO", "HEROMOTOCO",
-    "APOLLOHOSP", "BPCL", "INDUSINDBK", "SBILIFE", "TATACONSUM", "HINDALCO",
-    "TRIDENT", "LTIM",
+    "RELIANCE",
+    "TCS",
+    "HDFCBANK",
+    "ICICIBANK",
+    "BHARTIARTL",
+    "INFY",
+    "ITC",
+    "SBIN",
+    "LT",
+    "HINDUNILVR",
+    "BAJFINANCE",
+    "KOTAKBANK",
+    "AXISBANK",
+    "MARUTI",
+    "SUNPHARMA",
+    "ASIANPAINT",
+    "TITAN",
+    "BAJAJFINSV",
+    "NESTLEIND",
+    "ULTRACEMCO",
+    "ONGC",
+    "NTPC",
+    "POWERGRID",
+    "M&M",
+    "TATAMOTORS",
+    "TATASTEEL",
+    "WIPRO",
+    "HCLTECH",
+    "ADANIENT",
+    "ADANIPORTS",
+    "COALINDIA",
+    "GRASIM",
+    "JSWSTEEL",
+    "TECHM",
+    "HDFCLIFE",
+    "DRREDDY",
+    "CIPLA",
+    "BRITANNIA",
+    "DIVISLAB",
+    "EICHERMOT",
+    "BAJAJ-AUTO",
+    "HEROMOTOCO",
+    "APOLLOHOSP",
+    "BPCL",
+    "INDUSINDBK",
+    "SBILIFE",
+    "TATACONSUM",
+    "HINDALCO",
+    "TRIDENT",
+    "LTIM",
 ]
 
 # Top crypto pairs (USD-quoted).
 TOP_10_CRYPTO: List[str] = [
-    "BTC/USD", "ETH/USD", "SOL/USD", "BNB/USD", "XRP/USD",
-    "DOGE/USD", "ADA/USD", "AVAX/USD", "LINK/USD", "DOT/USD",
+    "BTC/USD",
+    "ETH/USD",
+    "SOL/USD",
+    "BNB/USD",
+    "XRP/USD",
+    "DOGE/USD",
+    "ADA/USD",
+    "AVAX/USD",
+    "LINK/USD",
+    "DOT/USD",
 ]
 
 TOP_20_CRYPTO: List[str] = TOP_10_CRYPTO + [
-    "MATIC/USD", "LTC/USD", "UNI/USD", "ATOM/USD", "ETC/USD",
-    "FIL/USD", "NEAR/USD", "APT/USD", "ARB/USD", "OP/USD",
+    "MATIC/USD",
+    "LTC/USD",
+    "UNI/USD",
+    "ATOM/USD",
+    "ETC/USD",
+    "FIL/USD",
+    "NEAR/USD",
+    "APT/USD",
+    "ARB/USD",
+    "OP/USD",
 ]
 
 
@@ -136,18 +193,30 @@ def is_universe(uid: str) -> bool:
 # ---------------------------------------------------------------------------
 
 register_universe(
-    "NIFTY_50", NIFTY_50, label="NIFTY 50 Pool", sector="equity",
+    "NIFTY_50",
+    NIFTY_50,
+    label="NIFTY 50 Pool",
+    sector="equity",
 )
 register_universe(
-    "NIFTY50", NIFTY_50, label="NIFTY 50 Pool", sector="equity",
+    "NIFTY50",
+    NIFTY_50,
+    label="NIFTY 50 Pool",
+    sector="equity",
 )
 register_universe(
-    "TOP_10_CRYPTO", TOP_10_CRYPTO, label="Top 10 Crypto",
-    sector="crypto", correlation_group="crypto",
+    "TOP_10_CRYPTO",
+    TOP_10_CRYPTO,
+    label="Top 10 Crypto",
+    sector="crypto",
+    correlation_group="crypto",
 )
 register_universe(
-    "TOP_20_CRYPTO", TOP_20_CRYPTO, label="Top 20 Crypto",
-    sector="crypto", correlation_group="crypto",
+    "TOP_20_CRYPTO",
+    TOP_20_CRYPTO,
+    label="Top 20 Crypto",
+    sector="crypto",
+    correlation_group="crypto",
 )
 
 # Correlation groups for the Phase-3 concentration warning. A runner holding

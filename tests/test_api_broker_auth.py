@@ -12,11 +12,7 @@ from typing import Any
 
 import pytest
 
-from backtest.brokers.base import (
-    STATUS_AUTHENTICATED,
-    STATUS_UNAUTHENTICATED,
-    BrokerAuthBase,
-)
+from backtest.brokers.base import STATUS_AUTHENTICATED, STATUS_UNAUTHENTICATED, BrokerAuthBase
 from backtest.brokers.session_manager import get_session_manager, reset_default_manager
 from backtest.web.app import create_app
 
@@ -113,7 +109,9 @@ def test_status_unauthenticated_shape(api):
 
 def test_status_authenticated_after_full_flow(api):
     client, _ = api
-    assert client.post("/api/broker/login", json={"username": "u", "password": "p"}).status_code == 200
+    assert (
+        client.post("/api/broker/login", json={"username": "u", "password": "p"}).status_code == 200
+    )
     assert client.post("/api/broker/verify-totp", json={"totp_code": "123456"}).status_code == 200
 
     body = client.get("/api/broker/status").get_json()
@@ -142,7 +140,11 @@ def test_login_passes_credentials_through_and_returns_contract(api):
     client, stub = api
     resp = client.post("/api/broker/login", json={"username": "trader", "password": "s3cret!"})
     assert resp.status_code == 200
-    assert resp.get_json() == {"success": True, "message": "Credentials verified", "requires_totp": True}
+    assert resp.get_json() == {
+        "success": True,
+        "message": "Credentials verified",
+        "requires_totp": True,
+    }
     assert stub.received_credentials == ("trader", "s3cret!")
 
 
@@ -170,7 +172,11 @@ def test_login_malformed_body_returns_400(api, body):
 
 def test_login_rejected_credentials_propagated_as_flow_failure(api, stub):
     client, _ = api
-    stub.login_result = {"success": False, "message": "Invalid username or password", "requires_totp": False}
+    stub.login_result = {
+        "success": False,
+        "message": "Invalid username or password",
+        "requires_totp": False,
+    }
     resp = client.post("/api/broker/login", json={"username": "u", "password": "wrong"})
     assert resp.status_code == 200  # flow-level failure, not a transport error
     assert resp.get_json()["success"] is False

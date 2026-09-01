@@ -33,7 +33,6 @@ from backtest.forward.engine import ForwardTestingEngine
 from backtest.simulator.fill_providers import BrokerFillProvider
 from backtest.strategy.base import Strategy
 
-
 # ---------------------------------------------------------------------------
 # Deterministic live simulator
 # ---------------------------------------------------------------------------
@@ -199,8 +198,13 @@ def test_fresh_live_start_uses_broker_fill_and_classifies_live():
     with tempfile.TemporaryDirectory() as tmpdir:
         state_file = Path(tmpdir) / "state.json"
         broker = FakeLiveBroker(
-            fill_row={"tradingsymbol": "TEST", "transaction_type": "BUY",
-                      "quantity": 100, "price": 104.5, "brokerage": 20},
+            fill_row={
+                "tradingsymbol": "TEST",
+                "transaction_type": "BUY",
+                "quantity": 100,
+                "price": 104.5,
+                "brokerage": 20,
+            },
             polls_before_fill=1,
         )
         engine = _live_engine(state_file, broker)
@@ -248,8 +252,12 @@ def test_live_streaming_dedupe_holds_against_repeated_bars():
         # And no transition re-fire from the duplicated polls: the second
         # bar's signal history would have doubled on a dedupe leak.
         signals = engine.adapter.signal_history
-        buy_signals = [s for s in signals if getattr(s, "action", None) is not None
-                       and str(getattr(s, "action", "")).upper() == "BUY"]
+        buy_signals = [
+            s
+            for s in signals
+            if getattr(s, "action", None) is not None
+            and str(getattr(s, "action", "")).upper() == "BUY"
+        ]
         assert len(buy_signals) == 1
 
 
@@ -259,8 +267,12 @@ def test_live_order_stays_working_until_broker_reports_fill():
     with tempfile.TemporaryDirectory() as tmpdir:
         state_file = Path(tmpdir) / "state.json"
         broker = FakeLiveBroker(
-            fill_row={"tradingsymbol": "TEST", "transaction_type": "BUY",
-                      "quantity": 100, "price": 104.5},
+            fill_row={
+                "tradingsymbol": "TEST",
+                "transaction_type": "BUY",
+                "quantity": 100,
+                "price": 104.5,
+            },
             polls_before_fill=2,
         )
         engine = _live_engine(state_file, broker)
@@ -291,8 +303,13 @@ def test_live_run_writes_live_rows_to_db():
         Base.metadata.create_all(db.engine)
 
         broker = FakeLiveBroker(
-            fill_row={"tradingsymbol": "TEST", "transaction_type": "BUY",
-                      "quantity": 100, "price": 104.5, "brokerage": 20},
+            fill_row={
+                "tradingsymbol": "TEST",
+                "transaction_type": "BUY",
+                "quantity": 100,
+                "price": 104.5,
+                "brokerage": 20,
+            },
             polls_before_fill=1,
         )
         engine = _live_engine(state_file, broker, db=db)
@@ -304,7 +321,8 @@ def test_live_run_writes_live_rows_to_db():
             row = session.query(PortfolioRow).filter_by(name="LiveRun").one()
             assert row.mode == "live"
             assert row.source == "mstock"
-            from backtest.db.models import Fill as FillRow, Order as OrderRow
+            from backtest.db.models import Fill as FillRow
+            from backtest.db.models import Order as OrderRow
 
             orders = session.query(OrderRow).filter_by(portfolio_id=row.portfolio_id).all()
             assert len(orders) == 1
@@ -343,8 +361,12 @@ def test_resumed_live_reenters_same_loop_and_fills_armed_order_first_bar():
         assert len(payload["executor"]["armed"]) == 1
 
         broker2 = FakeLiveBroker(
-            fill_row={"tradingsymbol": "TEST", "transaction_type": "BUY",
-                      "quantity": 100, "price": 104.5},
+            fill_row={
+                "tradingsymbol": "TEST",
+                "transaction_type": "BUY",
+                "quantity": 100,
+                "price": 104.5,
+            },
             polls_before_fill=0,  # fill on the FIRST poll after restore
         )
         restored = _live_engine(state_file, broker2)
@@ -380,24 +402,28 @@ def test_live_state_never_resurrects_as_paper():
 
         # A state file whose portfolio is stale paper/synthetic but whose
         # run classification (and engine config) is live.
-        state_file.write_text(json.dumps({
-            "state_version": 3,
-            "mode": "live",
-            "source": "mstock",
-            "portfolio": {
-                "name": "LiveRun",
-                "initial_capital": "100000",
-                "current_cash": "100000",
-                "mode": "paper",
-                "source": "synthetic",
-                "limits": {},
-                "positions": [],
-                "closed_positions": [],
-                "equity_history": [],
-                "orders": [],
-            },
-            "adapter": {},
-        }))
+        state_file.write_text(
+            json.dumps(
+                {
+                    "state_version": 3,
+                    "mode": "live",
+                    "source": "mstock",
+                    "portfolio": {
+                        "name": "LiveRun",
+                        "initial_capital": "100000",
+                        "current_cash": "100000",
+                        "mode": "paper",
+                        "source": "synthetic",
+                        "limits": {},
+                        "positions": [],
+                        "closed_positions": [],
+                        "equity_history": [],
+                        "orders": [],
+                    },
+                    "adapter": {},
+                }
+            )
+        )
 
         engine = _live_engine(state_file, broker)
         assert engine.portfolio.mode == "live"
@@ -409,33 +435,40 @@ def test_paper_engine_never_claims_live_on_restore():
     to paper (config authoritative) — never the reverse."""
     with tempfile.TemporaryDirectory() as tmpdir:
         state_file = Path(tmpdir) / "state.json"
-        state_file.write_text(json.dumps({
-            "state_version": 3,
-            "mode": "live",
-            "source": "mstock",
-            "portfolio": {
-                "name": "LiveRun",
-                "initial_capital": "100000",
-                "current_cash": "100000",
-                "mode": "live",
-                "source": "mstock",
-                "limits": {},
-                "positions": [],
-                "closed_positions": [],
-                "equity_history": [],
-                "orders": [],
-            },
-            "adapter": {},
-        }))
+        state_file.write_text(
+            json.dumps(
+                {
+                    "state_version": 3,
+                    "mode": "live",
+                    "source": "mstock",
+                    "portfolio": {
+                        "name": "LiveRun",
+                        "initial_capital": "100000",
+                        "current_cash": "100000",
+                        "mode": "live",
+                        "source": "mstock",
+                        "limits": {},
+                        "positions": [],
+                        "closed_positions": [],
+                        "equity_history": [],
+                        "orders": [],
+                    },
+                    "adapter": {},
+                }
+            )
+        )
 
         engine = ForwardTestingEngine(
             config_dict={
                 "portfolio": {"name": "LiveRun", "initial_capital": 100_000},
                 "strategy": {"name": "threshold_test"},
-                "data": {"symbols": ["TEST"], "provider": "mock",
-                         "mode": "paper", "source": "synthetic"},
-                "system": {"state_file": str(state_file),
-                           "loop_interval_seconds": 0},
+                "data": {
+                    "symbols": ["TEST"],
+                    "provider": "mock",
+                    "mode": "paper",
+                    "source": "synthetic",
+                },
+                "system": {"state_file": str(state_file), "loop_interval_seconds": 0},
             },
             strategy=ThresholdStrategy(),
         )

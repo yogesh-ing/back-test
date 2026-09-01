@@ -69,13 +69,15 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Union
 
 import pandas as pd
 
 from backtest.simulator.enums import OrderSide, OrderType, TimeInForce
 from backtest.simulator.errors import ValidationError
-from backtest.simulator.money import ZERO, money, price as to_price, to_decimal
+from backtest.simulator.money import ZERO, money
+from backtest.simulator.money import price as to_price
+from backtest.simulator.money import to_decimal
 from backtest.simulator.order import Order
 from backtest.strategy.base import Strategy
 
@@ -268,7 +270,9 @@ class Signal:
                 self.direction = SignalDirection.FLAT
 
         if self.signal_type not in SignalType.ALL:
-            self.signal_type = SignalType.ENTRY if self.action == SignalAction.BUY else SignalType.EXIT
+            self.signal_type = (
+                SignalType.ENTRY if self.action == SignalAction.BUY else SignalType.EXIT
+            )
 
     def to_dict(self) -> Dict[str, Any]:
         def _s(v: Optional[Decimal]) -> Optional[str]:
@@ -340,24 +344,22 @@ try:
         FixedQuantitySizer,
         KellySizer,
         PercentagePortfolioSizer,
-        PositionSizer as FullPositionSizer,
-        RiskBasedSizer,
-        VolatilitySizer,
     )
+    from backtest.simulator.position_sizing import PositionSizer as FullPositionSizer
+    from backtest.simulator.position_sizing import RiskBasedSizer, VolatilitySizer
 
     # Adapter's PositionSizer protocol is now the full engine
     PositionSizer = FullPositionSizer  # type: ignore
 
 except Exception:  # pragma: no cover - fallback if simulator not yet loaded
-    from typing import Protocol
+    from typing import Protocol  # noqa: F811  # fallback Protocol when simulator absent
 
     class PositionSizer(Protocol):  # type: ignore[no-redef]
         """Protocol for position sizing engines (Step 14 will expand this)."""
 
         def calculate_position_size(
             self, signal: Signal, portfolio: Any, **kwargs: Any
-        ) -> Decimal:
-            ...
+        ) -> Decimal: ...
 
     class FixedQuantitySizer:  # type: ignore[no-redef]
         """Always return a fixed quantity."""
@@ -512,7 +514,9 @@ class StrategyAdapter:
             self.strategy: Strategy = next(iter(self._strategies.values()))
         else:
             if not isinstance(strategy, Strategy):
-                raise ValidationError("strategy must be an instance of backtest.strategy.base.Strategy")
+                raise ValidationError(
+                    "strategy must be an instance of backtest.strategy.base.Strategy"
+                )
             self._strategies = {}
             self.strategy = strategy
 
@@ -524,7 +528,9 @@ class StrategyAdapter:
         self.default_order_type = str(default_order_type).strip().upper()
         if self.default_order_type not in ("MARKET", "LIMIT"):
             raise ValidationError("default_order_type must be MARKET or LIMIT")
-        self.time_in_force = TimeInForce.parse(time_in_force) if isinstance(time_in_force, str) else time_in_force
+        self.time_in_force = (
+            TimeInForce.parse(time_in_force) if isinstance(time_in_force, str) else time_in_force
+        )
 
         self.position_sizer: PositionSizer = position_sizer or FixedQuantitySizer(100)
 
@@ -645,6 +651,7 @@ class StrategyAdapter:
 
     def _normalize_bar(self, bar: Mapping[str, Any]) -> Dict[str, Any]:
         """Normalize bar dict to canonical keys."""
+
         # support both short and long keys
         def _get(*keys: str, default: Any = None) -> Any:
             for k in keys:
@@ -719,7 +726,13 @@ class StrategyAdapter:
         if len(self._bars[symbol]) > 5000:
             self._bars[symbol] = self._bars[symbol].iloc[-5000:]
 
-        logger.debug("bar appended %s %s close=%s total_bars=%s", symbol, ts, bar["close"], len(self._bars[symbol]))
+        logger.debug(
+            "bar appended %s %s close=%s total_bars=%s",
+            symbol,
+            ts,
+            bar["close"],
+            len(self._bars[symbol]),
+        )
 
     def get_candles(self, symbol: str) -> pd.DataFrame:
         """Return accumulated candles for symbol (completed bars only)."""
@@ -770,14 +783,26 @@ class StrategyAdapter:
                 # call strategy's generate_signals - this is the bridge
                 series = strat.generate_signals(candles)
             except NotImplementedError:
-                logger.warning("strategy %s does not implement generate_signals", getattr(strat, "name", sym))
+                logger.warning(
+                    "strategy %s does not implement generate_signals", getattr(strat, "name", sym)
+                )
                 continue
             except Exception as exc:
-                logger.exception("strategy %s generate_signals failed for %s: %s", getattr(strat, "name", sym), sym, exc)
+                logger.exception(
+                    "strategy %s generate_signals failed for %s: %s",
+                    getattr(strat, "name", sym),
+                    sym,
+                    exc,
+                )
                 continue
 
             if not isinstance(series, pd.Series):
-                logger.warning("strategy %s returned non-Series for %s: %s", getattr(strat, "name", sym), sym, type(series))
+                logger.warning(
+                    "strategy %s returned non-Series for %s: %s",
+                    getattr(strat, "name", sym),
+                    sym,
+                    type(series),
+                )
                 continue
 
             if series.empty:
@@ -821,7 +846,11 @@ class StrategyAdapter:
             except Exception:
                 # fallback to last candle timestamp
                 try:
-                    bar_ts = candles.index[-1].to_pydatetime() if isinstance(candles.index[-1], pd.Timestamp) else _parse_timestamp(candles.index[-1])
+                    bar_ts = (
+                        candles.index[-1].to_pydatetime()
+                        if isinstance(candles.index[-1], pd.Timestamp)
+                        else _parse_timestamp(candles.index[-1])
+                    )
                 except Exception:
                     bar_ts = _utcnow()
 
@@ -857,7 +886,11 @@ class StrategyAdapter:
                 generated_at=_utcnow(),
                 strategy_name=getattr(strat, "name", type(strat).__name__),
                 signal_type=signal_type,
-                direction=SignalDirection.LONG if target > ZERO else (SignalDirection.SHORT if target < ZERO else SignalDirection.FLAT),
+                direction=(
+                    SignalDirection.LONG
+                    if target > ZERO
+                    else (SignalDirection.SHORT if target < ZERO else SignalDirection.FLAT)
+                ),
             )
 
             # Store the position state that WILL exist once the emitted action
@@ -867,7 +900,9 @@ class StrategyAdapter:
             # "close first, then re-enter" semantics (pinned by
             # tests/test_strategy_adapter.py against a reference old-state
             # machine; see findings F-17).
-            if (previous_target > ZERO and target < ZERO) or (previous_target < ZERO and target > ZERO):
+            if (previous_target > ZERO and target < ZERO) or (
+                previous_target < ZERO and target > ZERO
+            ):
                 self._last_target[sym] = ZERO
             else:
                 self._last_target[sym] = target
@@ -886,7 +921,11 @@ class StrategyAdapter:
             # to True when create_orders maps this signal to an order)
             if self.db_manager is not None:
                 try:
-                    self._save_signal_to_db(signal, executed=False, skip_reason="generated" if action != SignalAction.HOLD else "hold")
+                    self._save_signal_to_db(
+                        signal,
+                        executed=False,
+                        skip_reason="generated" if action != SignalAction.HOLD else "hold",
+                    )
                 except Exception as exc:
                     logger.warning("failed to save signal to DB: %s", exc)
 
@@ -936,7 +975,11 @@ class StrategyAdapter:
 
         # long -> long with different size? Treat as HOLD for now (sizing handled elsewhere)
         # short -> short
-        return SignalAction.HOLD, SignalType.ENTRY, f"position {previous} -> {target} no order needed"
+        return (
+            SignalAction.HOLD,
+            SignalType.ENTRY,
+            f"position {previous} -> {target} no order needed",
+        )
 
     def _build_indicators_snapshot(
         self, symbol: str, candles: pd.DataFrame, strategy: Strategy, last_signal_value: Any
@@ -971,7 +1014,9 @@ class StrategyAdapter:
                 pass
 
             # if strategy exposes get_indicators method, use it
-            if hasattr(strategy, "get_indicators") and callable(getattr(strategy, "get_indicators")):
+            if hasattr(strategy, "get_indicators") and callable(
+                getattr(strategy, "get_indicators")
+            ):
                 try:
                     extra = strategy.get_indicators(candles)
                     if isinstance(extra, dict):
@@ -982,7 +1027,9 @@ class StrategyAdapter:
             return snapshot
         except Exception as exc:
             logger.debug("failed to build indicators snapshot for %s: %s", symbol, exc)
-            return {"signal_value": float(last_signal_value) if not pd.isna(last_signal_value) else 0.0}
+            return {
+                "signal_value": float(last_signal_value) if not pd.isna(last_signal_value) else 0.0
+            }
 
     # -- signal to order conversion ---------------------------------------
 
@@ -1022,7 +1069,13 @@ class StrategyAdapter:
                 continue
 
             if self.dry_run:
-                logger.info("dry_run: would %s %s qty=%s reason=%s", signal.action, signal.symbol, signal.quantity, signal.reason)
+                logger.info(
+                    "dry_run: would %s %s qty=%s reason=%s",
+                    signal.action,
+                    signal.symbol,
+                    signal.quantity,
+                    signal.reason,
+                )
                 if self.db_manager is not None:
                     try:
                         self._save_signal_to_db(signal, executed=False, skip_reason="dry_run")
@@ -1043,7 +1096,11 @@ class StrategyAdapter:
                             if isinstance(md, Mapping):
                                 current_price = md.get("close") or md.get("last") or md.get("price")
                         elif isinstance(market_data, Mapping):
-                            current_price = market_data.get("close") or market_data.get("last") or market_data.get("price")
+                            current_price = (
+                                market_data.get("close")
+                                or market_data.get("last")
+                                or market_data.get("price")
+                            )
 
                     if current_price is None:
                         # fallback to last close from candles
@@ -1056,7 +1113,9 @@ class StrategyAdapter:
                     )
                     quantity = to_price(qty, "quantity")
                 except Exception as exc:
-                    logger.warning("position sizer failed for %s: %s, using 100", signal.symbol, exc)
+                    logger.warning(
+                        "position sizer failed for %s: %s, using 100", signal.symbol, exc
+                    )
                     quantity = Decimal("100")
 
             # validate against portfolio
@@ -1066,7 +1125,11 @@ class StrategyAdapter:
                     pos = self.portfolio.get_position(signal.symbol)
                     if pos is None:
                         # opening long
-                        check = self.portfolio.can_open_position(signal.symbol, quantity, self._get_current_price(signal.symbol, market_data))
+                        check = self.portfolio.can_open_position(
+                            signal.symbol,
+                            quantity,
+                            self._get_current_price(signal.symbol, market_data),
+                        )
                         if not check:
                             reason = f"can_open_position denied: {check.code} {check.reason}"
                             logger.info("order rejected for %s: %s", signal.symbol, reason)
@@ -1075,7 +1138,8 @@ class StrategyAdapter:
                             continue
                     else:
                         # closing short or adding? For now, if pos is short, allow close
-                        # if pos is long, we would be adding - treat as HOLD unless sizing says increase
+                        # if pos is long, we would be adding - treat as HOLD unless
+                        # sizing says increase
                         if pos.quantity > ZERO:
                             # already long, skip if target already met
                             # (we already decided action, but double-check)
@@ -1092,9 +1156,15 @@ class StrategyAdapter:
                                 self._save_signal_to_db(signal, executed=False, skip_reason=reason)
                             continue
                         # check can open short (negative quantity)
-                        check = self.portfolio.can_open_position(signal.symbol, -quantity, self._get_current_price(signal.symbol, market_data))
+                        check = self.portfolio.can_open_position(
+                            signal.symbol,
+                            -quantity,
+                            self._get_current_price(signal.symbol, market_data),
+                        )
                         if not check:
-                            reason = f"can_open_position denied for short: {check.code} {check.reason}"
+                            reason = (
+                                f"can_open_position denied for short: {check.code} {check.reason}"
+                            )
                             logger.info("order rejected for %s: %s", signal.symbol, reason)
                             if self.db_manager is not None:
                                 self._save_signal_to_db(signal, executed=False, skip_reason=reason)
@@ -1103,7 +1173,8 @@ class StrategyAdapter:
                         # closing long or opening short after close handled earlier
                         # ensure quantity does not exceed position when closing
                         if pos.quantity > ZERO:
-                            # closing long, quantity should not exceed position unless we allow partial
+                            # closing long, quantity should not exceed position
+                            # unless we allow partial
                             # we will cap to position quantity for exit
                             if signal.signal_type == SignalType.EXIT:
                                 quantity = min(quantity, abs(pos.quantity))
@@ -1111,7 +1182,9 @@ class StrategyAdapter:
                 logger.warning("validation failed for %s: %s", signal.symbol, exc)
                 if self.db_manager is not None:
                     try:
-                        self._save_signal_to_db(signal, executed=False, skip_reason=f"validation error: {exc}")
+                        self._save_signal_to_db(
+                            signal, executed=False, skip_reason=f"validation error: {exc}"
+                        )
                     except Exception:
                         pass
                 continue
@@ -1164,7 +1237,9 @@ class StrategyAdapter:
                 logger.exception("failed to create order for %s: %s", signal.symbol, exc)
                 if self.db_manager is not None:
                     try:
-                        self._save_signal_to_db(signal, executed=False, skip_reason=f"order creation failed: {exc}")
+                        self._save_signal_to_db(
+                            signal, executed=False, skip_reason=f"order creation failed: {exc}"
+                        )
                     except Exception:
                         pass
                 continue
@@ -1180,9 +1255,17 @@ class StrategyAdapter:
             if isinstance(market_data, Mapping) and symbol in market_data:
                 md = market_data[symbol]
                 if isinstance(md, Mapping):
-                    price = md.get("close") or md.get("last") or md.get("price") or md.get("ask") or md.get("bid")
+                    price = (
+                        md.get("close")
+                        or md.get("last")
+                        or md.get("price")
+                        or md.get("ask")
+                        or md.get("bid")
+                    )
             elif isinstance(market_data, Mapping):
-                price = market_data.get("close") or market_data.get("last") or market_data.get("price")
+                price = (
+                    market_data.get("close") or market_data.get("last") or market_data.get("price")
+                )
 
         if price is None:
             candles = self._bars.get(symbol)
@@ -1218,8 +1301,8 @@ class StrategyAdapter:
         if self.db_manager is None:
             return ""
 
-        from backtest.db.models import Portfolio as PortfolioRow
         from backtest.db.models import Order as OrderRow
+        from backtest.db.models import Portfolio as PortfolioRow
         from backtest.db.models import StrategySignal as StrategySignalRow
 
         # map signal_type and direction to DB enums (lowercase)
@@ -1251,9 +1334,12 @@ class StrategyAdapter:
                         )
                         session.add(row)
                         session.flush()
-                        logger.debug("auto-created portfolio row %s for signal logging", portfolio_id)
+                        logger.debug(
+                            "auto-created portfolio row %s for signal logging", portfolio_id
+                        )
                     except Exception as exc:
-                        # if creation fails (e.g. name collision), try to fetch by name or clear portfolio_id
+                        # if creation fails (e.g. name collision), try to fetch
+                        # by name or clear portfolio_id
                         logger.debug("auto-create portfolio failed: %s, will try without FK", exc)
                         # try to find existing by name
                         try:
@@ -1358,7 +1444,11 @@ class StrategyAdapter:
             self._indicators = dict(state.get("indicators", {}))
             self._state = dict(state.get("state", {}))
 
-            logger.info("state restored: %s symbols, %s bars", len(self.symbols), sum(len(df) for df in self._bars.values()))
+            logger.info(
+                "state restored: %s symbols, %s bars",
+                len(self.symbols),
+                sum(len(df) for df in self._bars.values()),
+            )
         except Exception as exc:
             logger.exception("load_state failed: %s", exc)
             raise
@@ -1376,7 +1466,9 @@ class StrategyAdapter:
         **kwargs: Any,
     ) -> "StrategyAdapter":
         """Rebuild adapter from dict snapshot."""
-        adapter = cls(strategy=strategy, portfolio=portfolio, symbols=payload.get("symbols"), **kwargs)
+        adapter = cls(
+            strategy=strategy, portfolio=portfolio, symbols=payload.get("symbols"), **kwargs
+        )
         adapter.load_state(payload)
         return adapter
 
@@ -1398,4 +1490,8 @@ class StrategyAdapter:
         logger.info("adapter reset")
 
     def __repr__(self) -> str:
-        return f"<StrategyAdapter strategy={getattr(self.strategy, 'name', '?')} symbols={self.symbols} signals={len(self.signal_history)} orders={len(self.order_history)} dry_run={self.dry_run}>"
+        return (
+            f"<StrategyAdapter strategy={getattr(self.strategy, 'name', '?')} "
+            f"symbols={self.symbols} signals={len(self.signal_history)} "
+            f"orders={len(self.order_history)} dry_run={self.dry_run}>"
+        )

@@ -71,7 +71,13 @@ def _effective_config(config: BacktestConfig | None, strategy: Any) -> BacktestC
     return cfg
 
 
-def run_on_candles(candles: pd.DataFrame, strategy_name: str, strategy_params: dict[str, Any] | None = None, symbol: str = "DEMO", config: BacktestConfig | None = None):
+def run_on_candles(
+    candles: pd.DataFrame,
+    strategy_name: str,
+    strategy_params: dict[str, Any] | None = None,
+    symbol: str = "DEMO",
+    config: BacktestConfig | None = None,
+):
     strategy_cls = get_strategy(strategy_name)
     strategy_params = strategy_params or {}
     strategy = strategy_cls(**strategy_params)
@@ -81,15 +87,24 @@ def run_on_candles(candles: pd.DataFrame, strategy_name: str, strategy_params: d
     active = int((signals.fillna(0) != 0).sum())
     log.debug(
         "[run] %s on %s: %d bars, params=%s, %d/%d bars with a signal, stop=%s tp=%s",
-        strategy_name, symbol, len(candles), strategy_params, active, len(candles),
-        cfg.stop_loss, cfg.take_profit,
+        strategy_name,
+        symbol,
+        len(candles),
+        strategy_params,
+        active,
+        len(candles),
+        cfg.stop_loss,
+        cfg.take_profit,
     )
     if active == 0:
         log.warning(
             "[run] %s produced NO signals on %s (%d bars, params=%s) — the run will be "
             "flat: the indicator warmup likely exceeds the window, or the thresholds "
             "never trigger on this data",
-            strategy_name, symbol, len(candles), strategy_params,
+            strategy_name,
+            symbol,
+            len(candles),
+            strategy_params,
         )
     result = Backtester(cfg).run(candles, signals)
     result.metrics["strategy"] = strategy_name
@@ -99,8 +114,10 @@ def run_on_candles(candles: pd.DataFrame, strategy_name: str, strategy_params: d
     result.metrics["take_profit"] = cfg.take_profit
     log.debug(
         "[run] %s → return=%.4f trades=%s win_rate=%.2f exposure=%.2f",
-        strategy_name, result.metrics.get("total_return", 0.0),
-        result.metrics.get("num_trades", 0), result.metrics.get("win_rate", 0.0),
+        strategy_name,
+        result.metrics.get("total_return", 0.0),
+        result.metrics.get("num_trades", 0),
+        result.metrics.get("win_rate", 0.0),
         result.metrics.get("exposure", 0.0),
     )
     return result
@@ -112,7 +129,15 @@ def run_on_source(source, spec: RunSpec, config: BacktestConfig | None = None):
     return run_on_candles(candles, spec.strategy, spec.strategy_params, spec.symbol, config)
 
 
-def compare_strategies(source, symbol: str, start: str, end: str, strategies: list[str], interval: str = "1day", config: BacktestConfig | None = None) -> dict[str, Any]:
+def compare_strategies(
+    source,
+    symbol: str,
+    start: str,
+    end: str,
+    strategies: list[str],
+    interval: str = "1day",
+    config: BacktestConfig | None = None,
+) -> dict[str, Any]:
     candles = source.get_candles(symbol, start, end, interval)
     results = {}
     for name in strategies:
