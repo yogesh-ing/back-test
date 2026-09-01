@@ -57,6 +57,7 @@ from backtest.simulator.money import (
     to_decimal,
 )
 from backtest.simulator.fill import PositionImpact as PositionImpactResult
+from backtest.simulator.order import Order
 from backtest.simulator.position import Position
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -1021,6 +1022,11 @@ class Portfolio:
             "positions": [p.to_dict() for p in self.positions.values()],
             "closed_positions": [p.to_dict() for p in self.closed_positions],
             "equity_history": [p.to_dict() for p in self.equity_history],
+            # Ticket #7: the full order ledger (working + terminal) so a
+            # restored portfolio keeps its in-flight fills. ``Order``
+            # round-trips exactly (``to_dict``/``from_dict`` — its docstring
+            # names this JSON snapshot as the Step 20 persistence format).
+            "orders": [o.to_dict() for o in (*self.pending_orders, *self.filled_orders)],
         }
 
     @classmethod
@@ -1053,6 +1059,13 @@ class Portfolio:
             portfolio.closed_positions.append(Position.from_dict(raw))
         for raw in payload.get("equity_history", []):
             portfolio.equity_history.append(EquityPoint.from_dict(raw))
+        for raw in payload.get("orders", []):
+            order = Order.from_dict(raw)
+            order.portfolio_id = portfolio.portfolio_id
+            if order.is_terminal:
+                portfolio.filled_orders.append(order)
+            else:
+                portfolio.pending_orders.append(order)
         return portfolio
 
     # -- persistence -------------------------------------------------------

@@ -2,6 +2,11 @@
 
 ## Goal
 
+> ⚠️ **HISTORICAL (archived).** References modules deleted in the P1.4/P4.3
+> refactor — `dashboard/`, `alerts/`, `analysis/`, `config_manager/`,
+> `marketdata/`, `forward/{paper,broker,portfolio,runner,order_ledger,live_engine}.py`.
+> Kept for history only; do not use as current documentation.
+>
 Run the trading dashboard and live strategy loop as resilient long-lived services, not as one-off scripts or ad-hoc local processes.
 
 ## Current code shape

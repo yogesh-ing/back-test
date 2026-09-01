@@ -678,6 +678,8 @@ Create an adapter to run backtested strategies in forward testing environment:
    - execute_signals(signals)
    - on_order_filled(fill)
    - on_bar_close(bar)
+   (Superseded by F-01, 2026-08-31: __init__ no longer takes order_executor;
+    execute_signals → create_orders (no fill); on_order_filled removed.)
 
 2. Signal Generation:
    - Call strategy's analysis methods

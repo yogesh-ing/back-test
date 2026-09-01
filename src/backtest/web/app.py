@@ -33,6 +33,7 @@ from backtest.api import (
 from backtest.api.portfolio import list_instances
 from backtest.api.symbols import symbols_bp
 from backtest.brokers.session_manager import get_session_manager
+from backtest.data.source_tags import SOURCE_TAG_VALUES
 from backtest.logging_config import (
     bind_request_id,
     configure_logging,
@@ -40,6 +41,7 @@ from backtest.logging_config import (
     get_logger,
     reset_request_id,
 )
+from backtest.simulator.bucket_risk import BUCKET_RISK_LIMITS
 
 logger = get_logger(__name__)
 
@@ -257,12 +259,19 @@ def create_app(
 
     @app.context_processor
     def inject_globals() -> dict[str, Any]:
-        """Available to every template (base.html tags <body> with these)."""
+        """Available to every template (base.html tags <body> with these).
+
+        Ticket #10: the taxonomy vocabulary is injected here from the
+        backend-owned constants, so templates render their mode/source
+        choices from the canonical set instead of re-declaring it.
+        """
         return {
             "currency_code": app.config["CURRENCY"],
             "currency_symbol": app.config["CURRENCY_SYMBOL"],
             "currency_locale": app.config["CURRENCY_LOCALE"],
             "replay_speed": app.config["FORWARD_REPLAY_BARS_PER_SECOND"],
+            "bucket_modes": sorted(BUCKET_RISK_LIMITS),
+            "source_tags": sorted(SOURCE_TAG_VALUES),
         }
 
     _register_request_logging(app)
@@ -374,6 +383,12 @@ def create_app(
             },
             "forward_replay_bars_per_second": app.config["FORWARD_REPLAY_BARS_PER_SECOND"],
             "strategies_supported_timeframes": list(_SUPPORTED_TIMEFRAMES),
+            # Ticket #10 — the single vocabulary the UI must render its
+            # mode/source choices from (backend-owned, never re-declared).
+            "taxonomy": {
+                "modes": sorted(BUCKET_RISK_LIMITS),
+                "sources": sorted(SOURCE_TAG_VALUES),
+            },
             "log_level": logging.getLevelName(
                 logging.getLogger("backtest").getEffectiveLevel()
             ),

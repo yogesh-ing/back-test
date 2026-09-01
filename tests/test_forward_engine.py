@@ -7,18 +7,24 @@ import tempfile
 from pathlib import Path
 from decimal import Decimal
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from backtest.forward.engine import (
+    DataConfig,
     ForwardTestingEngine,
     ForwardTestingConfig,
     PortfolioConfig,
     StrategyConfig,
     RiskConfig,
+    STATE_VERSION,
     StateManager,
     load_forward_config,
 )
+from backtest.data.source_tags import SOURCE_TAG_VALUES
+from backtest.simulator import CommissionCalculator, ExecutionConfig, OrderSide, SlippageCalculator
+from backtest.simulator.execution import OrderExecutor
 from backtest.simulator.portfolio import Portfolio
 from backtest.strategy.base import Strategy
 
@@ -40,8 +46,6 @@ class MockDataSource:
         self.bars = bars
 
     def get_candles(self, symbol, start, end, interval="day"):
-        import numpy as np
-
         dates = pd.date_range(start, end, freq="D", tz="UTC")[: self.bars]
         close = 100 + np.cumsum(np.random.randn(len(dates)) * 0.5)
         df = pd.DataFrame(
@@ -55,6 +59,30 @@ class MockDataSource:
             index=dates,
         )
         return df
+
+
+class StepOpenDataSource:
+    """Deterministic bars whose opens differ from the previous closes, so a
+    fill anchored at the wrong price is provable (ticket F-01)."""
+
+    def __init__(self, rows: list[tuple[str, float, float]]):
+        # rows: (date, open, close)
+        dates = pd.date_range(rows[0][0], periods=len(rows), freq="D", tz="UTC")
+        open_ = [r[1] for r in rows]
+        close = [r[2] for r in rows]
+        self._df = pd.DataFrame(
+            {
+                "open": open_,
+                "high": [max(o, c) * 1.01 for o, c in zip(open_, close)],
+                "low": [min(o, c) * 0.99 for o, c in zip(open_, close)],
+                "close": close,
+                "volume": 1_000_000,  # never a liquidity constraint
+            },
+            index=dates,
+        )
+
+    def get_candles(self, symbol, start, end, interval="day"):
+        return self._df.copy()
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +171,123 @@ def test_state_manager_save_load():
 
         assert manager.should_save(datetime.now(timezone.utc) - timedelta(minutes=10), 5) is True
         assert manager.should_save(datetime.now(timezone.utc), 5) is False
+
+
+# ---------------------------------------------------------------------------
+# State file format v2 (ticket F-04): mode/source classification, versioning
+# ---------------------------------------------------------------------------
+
+
+def _state_engine_mock(**data_kwargs):
+    """Minimal engine mock whose config carries the REAL data classification."""
+
+    class MockPortfolio:
+        portfolio_id = "pf-f04-test"
+
+        def to_dict(self):
+            return {"name": "test", "initial_capital": "100000"}
+
+    class MockAdapter:
+        def get_state(self):
+            return {"symbols": ["INFY"], "bars": {}}
+
+    class MockPerf:
+        equity_curve = []
+
+    class MockEngine:
+        portfolio = MockPortfolio()
+        adapter = MockAdapter()
+        performance = MockPerf()
+        _loop_count = 5
+
+        def __init__(self, config):
+            self.config = config
+
+    config = ForwardTestingConfig(data=DataConfig(**data_kwargs))
+    return MockEngine(config)
+
+
+@pytest.mark.parametrize(
+    "data_kwargs, expected",
+    [
+        ({"mode": "paper", "source": "synthetic"}, ("paper", "synthetic")),
+        ({"mode": "paper", "source": "mstock"}, ("paper", "mstock")),
+        ({"mode": "live", "source": "mstock"}, ("live", "mstock")),
+        # backtest replays simulated fills -> paper bucket (ticket P1.1)
+        ({"mode": "backtest", "source": "synthetic"}, ("paper", "synthetic")),
+    ],
+)
+def test_state_payload_classification_from_real_config(data_kwargs, expected):
+    """State file carries mode/source derived from the engine's ACTUAL config."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_file = Path(tmpdir) / "state.json"
+        manager = StateManager(state_file)
+        engine = _state_engine_mock(**data_kwargs)
+
+        saved = manager.save_state(engine)
+        assert Path(saved).exists()
+
+        payload = json.loads(state_file.read_text())
+        assert payload["state_version"] == STATE_VERSION
+        assert payload["engine_id"] == "pf-f04-test"
+        assert (payload["mode"], payload["source"]) == expected
+        # Source strings come from the canonical T3/SOURCE_TAGS vocabulary
+        assert payload["source"] in SOURCE_TAG_VALUES
+        # The payload itself is reloadable and stable
+        assert manager.load_state()["mode"] == expected[0]
+        assert manager.load_state()["source"] == expected[1]
+
+
+def test_legacy_v1_state_file_loaded_and_migrated_in_memory():
+    """Pre-F-04 state (no state_version) loads, is normalized, and the file is
+    only rewritten on the next save (load stays read-only)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_file = Path(tmpdir) / "state.json"
+        state_file.write_text(json.dumps({"portfolio": {}, "loop_count": 7}))
+        manager = StateManager(state_file)
+        engine = _state_engine_mock(mode="live", source="mstock")
+
+        loaded = manager.load_state(engine=engine)
+        assert loaded is not None
+        assert loaded["state_version"] == STATE_VERSION
+        assert loaded["mode"] == "live"
+        assert loaded["source"] == "mstock"
+        assert loaded["loop_count"] == 7
+
+        # Read-only on load: disk still holds the legacy v1 shape
+        on_disk = json.loads(state_file.read_text())
+        assert "state_version" not in on_disk
+        assert "mode" not in on_disk
+
+        # Next save migrates the file to v2 with the engine's classification
+        manager.save_state(engine)
+        migrated = json.loads(state_file.read_text())
+        assert migrated["state_version"] == STATE_VERSION
+        assert migrated["mode"] == "live"
+        assert migrated["source"] == "mstock"
+
+
+def test_state_file_future_version_refused():
+    """A file written by a newer version must not be loaded silently."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_file = Path(tmpdir) / "state.json"
+        state_file.write_text(json.dumps({"state_version": STATE_VERSION + 1, "portfolio": {}}))
+        assert StateManager(state_file).load_state() is None
+
+
+def test_state_file_invalid_classification_falls_back_to_engine():
+    """Garbage mode/source in a state file warns and falls back to the
+    engine-derived values rather than propagating invalid classification."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_file = Path(tmpdir) / "state.json"
+        state_file.write_text(
+            json.dumps({"state_version": 2, "mode": "sideways", "source": "quantum", "portfolio": {}})
+        )
+        manager = StateManager(state_file)
+        engine = _state_engine_mock(mode="paper", source="synthetic")
+        loaded = manager.load_state(engine=engine)
+        assert loaded["mode"] == "paper"
+        assert loaded["source"] == "synthetic"
 
 
 # ---------------------------------------------------------------------------
@@ -395,3 +540,85 @@ def test_engine_with_all_real_strategies():
                 engine.adapter.on_bar_close(bar)
 
             assert len(engine.adapter.signal_history) >= 1
+
+
+# ---------------------------------------------------------------------------
+# F-01 acceptance — the forward engine fills at the NEXT bar's open
+# ---------------------------------------------------------------------------
+
+
+def test_forward_engine_fills_at_next_open_not_signal_bar():
+    """The strategy signals on bar ``t``; the fill must anchor to bar
+    ``t+1``'s OPEN — never bar ``t``'s close (the F-01 look-ahead leak)."""
+    #        date         open   close
+    rows = [
+        ("2024-01-01", 100.0, 100.0),   # t0: below 150, flat
+        ("2024-01-02", 105.0, 200.0),   # t1: close 200 > 150 → BUY signal HERE
+        ("2024-01-03", 210.0, 300.0),   # t2: fill MUST be 210 (open), not 200
+        ("2024-01-04", 305.0, 400.0),   # t3: still long
+        ("2024-01-05", 405.0, 90.0),    # t4: close 90 < 150 → SELL signal HERE
+        ("2024-01-06", 95.0, 100.0),    # t5: close fill MUST be 95 (open), not 90
+    ]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_file = Path(tmpdir) / "state.json"
+        portfolio = Portfolio(name="F01Accept", initial_capital=100000)
+        strategy = DummyStrategy(threshold=150)
+
+        engine = ForwardTestingEngine(
+            config_dict={
+                "portfolio": {"name": "F01Accept"},
+                "strategy": {"name": "dummy_test"},
+                "data": {
+                    "symbols": ["INFY"],
+                    "provider": "mock",
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-01-06",
+                    "timeframe": "1day",
+                },
+                "system": {
+                    "state_file": str(state_file),
+                    "loop_interval_seconds": 0,
+                    "backtest_mode": True,
+                    "save_state_interval_minutes": 0,
+                },
+            },
+            portfolio=portfolio,
+            strategy=strategy,
+            data_source=StepOpenDataSource(rows),
+        )
+        engine.initialize_system()
+
+        # Zero-cost executor for exact price assertions (same idea as
+        # tests/simulator/test_fill_timing.py).
+        engine.executor = OrderExecutor(
+            config=ExecutionConfig(seed=7, price_improvement_probability=Decimal("0")),
+            slippage=SlippageCalculator.disabled(),
+            fees=CommissionCalculator(),
+            portfolio=engine.portfolio,
+        )
+        engine.adapter.min_bars = 1
+        # Daily bars with deliberate opens ≠ prev closes trip the validator's
+        # gap checks; disable (the existing backtest-mode test does the same).
+        try:
+            engine.validator.config.gap_detection_enabled = False
+            engine.validator.config.spike_detection_enabled = False
+            engine.data_handler.validator.config.gap_detection_enabled = False
+            engine.data_handler.validator.config.spike_detection_enabled = False
+        except Exception:
+            pass
+
+        engine._running = True
+        engine._run_backtest_mode()
+
+        buys = [o for o in engine.portfolio.filled_orders if o.side is OrderSide.BUY]
+        sells = [o for o in engine.portfolio.filled_orders if o.side is OrderSide.SELL]
+
+        assert len(buys) == 1, f"expected 1 fill, got {len(buys)}"
+        assert len(sells) == 1, f"expected 1 fill, got {len(sells)}"
+        # entry anchored at bar t2's OPEN (210), NOT bar t1's close (200)
+        assert buys[0].average_fill_price == Decimal("210")
+        assert buys[0].average_fill_price != Decimal("200")
+        # exit anchored at bar t5's OPEN (95), NOT bar t4's close (90)
+        assert sells[0].average_fill_price == Decimal("95")
+        assert sells[0].average_fill_price != Decimal("90")

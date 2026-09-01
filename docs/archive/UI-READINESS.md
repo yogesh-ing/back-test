@@ -2,6 +2,11 @@
 
 ## Current state
 
+> ⚠️ **HISTORICAL (archived).** References modules deleted in the P1.4/P4.3
+> refactor — `dashboard/`, `alerts/`, `analysis/`, `config_manager/`,
+> `marketdata/`, `forward/{paper,broker,portfolio,runner,order_ledger,live_engine}.py`.
+> Kept for history only; do not use as current documentation.
+>
 The dashboard is currently serving the web shell and API scaffolding, but it is not yet fully wired to a real live trading engine.
 
 What exists today:

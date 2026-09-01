@@ -6,16 +6,20 @@
   runs :func:`run_single_backtest` in its own worker process with plain-dict
   params, so a crashed job cannot take down the web process.
 
-Two engines, one response shape (the UI is unchanged this phase):
+Both engines are built and run by the canonical entry
+:mod:`backtest.engine.backtest_runner` (single bootstrap/key-result wiring —
+ticket #6); this module is the HTTP layer only.
 
-* **canonical (default)** — :class:`~backtest.engine.backtest_driver.BacktestDriver`
-  over the simulator executor: the SAME loop the forward paper run uses,
-  next-bar-open fills, Decimal-exact portfolio accounting. The portfolio's
-  per-bar equity snapshots are mapped onto a ``BacktestResult`` so the
-  ``BacktestAdapter`` payload (metrics/equity/drawdown/trades/signals) is
-  byte-for-byte the same shape as before — computed by the same
-  ``engine/metrics`` + ``engine/trades`` code as the vectorized path.
-* ``mode='quick_screen'`` — the legacy vectorized ``Backtester`` (prev-close
+* **canonical (default)** — :func:`backtest.engine.backtest_runner.run_backtest`
+  (:class:`~backtest.engine.backtest_driver.BacktestDriver` over the simulator
+  executor): the SAME loop the forward paper run uses, next-bar-open fills,
+  Decimal-exact portfolio accounting. The portfolio's per-bar equity
+  snapshots are mapped onto a ``BacktestResult`` so the ``BacktestAdapter``
+  payload (metrics/equity/drawdown/trades/signals) is byte-for-byte the same
+  shape as before — computed by the same ``engine/metrics`` +
+  ``engine/trades`` code as the vectorized path.
+* ``mode='quick_screen'`` — the legacy vectorized ``Backtester``
+  (:func:`backtest.engine.backtest_runner.run_quick_screen`: prev-close
   fills, fractional sizing, built-in cost model), kept ONLY as an optional
   fast rough filter.
 
@@ -30,17 +34,19 @@ from __future__ import annotations
 import logging
 import traceback
 from concurrent.futures import ProcessPoolExecutor
-from datetime import datetime, timedelta
 from typing import Any
 
-import pandas as pd
 from flask import Blueprint, current_app, jsonify, request
 
 from backtest.adapters.backtest_adapter import BacktestAdapter
-from backtest.data.base import CANONICAL_TIMEFRAMES as SUPPORTED_TIMEFRAMES
-from backtest.engine.backtester import BacktestConfig
+from backtest.engine.backtest_runner import (
+    run_backtest as _run_driver,
+    run_quick_screen,
+    resolve_interval,
+    resolve_warmup_start,
+)
 from backtest.logging_config import get_logger, timed
-from backtest.runner import build_source, run_on_candles
+from backtest.runner import build_source
 from backtest.strategy.registry import get_strategy
 
 backtest_bp = Blueprint("backtest_api", __name__)
@@ -51,25 +57,6 @@ log = get_logger(__name__)
 # matches a direct run over the same candles (indicators simply ramp over
 # the first bars, as they do in a standalone backtest).
 WARMUP_BARS = 0
-
-
-def _interval(timeframe: str | None) -> str:
-    """Resolve a UI timeframe to its canonical name (unknown → ``1day``).
-
-    Case-insensitive. Kept permissive on purpose: rejecting an unsupported
-    timeframe is part of gap G6/G11. Until then, say so loudly in the log
-    instead of silently.
-    """
-    if not timeframe:
-        return "1day"
-    key = str(timeframe).strip().lower()
-    if key not in SUPPORTED_TIMEFRAMES:
-        log.warning(
-            "[timeframe] unsupported timeframe %r — falling back to '1day' (supported: %s)",
-            timeframe, ", ".join(SUPPORTED_TIMEFRAMES),
-        )
-        return "1day"
-    return key
 
 
 def _source() -> Any:
@@ -130,66 +117,6 @@ def _summarise(payload: dict, label: str, params: dict | None = None) -> None:
         )
 
 
-def _trim_to_range(result, from_date: str, to_date: str):
-    """Trim backtest result to the requested date range.
-
-    Removes warmup bars from candles, equity, returns, and position series
-    so the user only sees the date range they asked for.
-    Uses string date comparison to avoid tz-aware/tz-naive issues.
-    """
-    from backtest.engine.backtester import BacktestResult
-
-    # Use string date comparison — avoids tz mismatch entirely
-    idx = result.candles.index
-    idx_dates = idx.strftime("%Y-%m-%d")
-    mask = (idx_dates >= from_date) & (idx_dates <= to_date)
-    trimmed_candles = result.candles.loc[mask]
-
-    if trimmed_candles.empty:
-        return result
-
-    # Trim equity, returns, position to same range.
-    trimmed_returns = result.returns.loc[mask].copy()
-    trimmed_position = result.position.loc[mask].copy()
-
-    # Warmup bars exist only to give indicators history — no position may be
-    # held (and no return earned) before the visible range. Force the first
-    # in-range bar flat so a warmup-spanning position doesn't manufacture a
-    # phantom trade at the trim boundary.
-    if len(trimmed_position) > 0:
-        trimmed_position.iloc[0] = 0
-        trimmed_returns.iloc[0] = 0.0
-
-    # Renormalize equity so it starts at initial capital for a smooth ramp.
-    trimmed_equity = result.equity.loc[mask].copy()
-    if len(trimmed_equity) > 0:
-        initial = result.config.initial_capital
-        cum_returns = (1 + trimmed_returns).cumprod()
-        trimmed_equity = pd.Series(
-            initial * cum_returns.values,
-            index=trimmed_equity.index,
-        )
-
-    trimmed = BacktestResult(
-        equity=trimmed_equity,
-        returns=trimmed_returns,
-        position=trimmed_position,
-        candles=trimmed_candles,
-        config=result.config,
-        metrics={},
-    )
-    # Recompute metrics on the trimmed frames so `bars`/drawdown/etc. match
-    # the visible date range (metrics were computed over the full warmup set).
-    from backtest.engine.metrics import compute_metrics
-
-    trimmed.metrics = compute_metrics(trimmed)
-    # Preserve run metadata stamped on by run_on_candles.
-    for key in ("strategy", "strategy_params", "symbol", "stop_loss", "take_profit"):
-        if key in result.metrics:
-            trimmed.metrics[key] = result.metrics[key]
-    return trimmed
-
-
 def _resolve_strategy(name: str):
     """Return the strategy class or a (error_message) string."""
     if not name:
@@ -208,71 +135,11 @@ def _resolve_strategy(name: str):
 QUICK_SCREEN = "quick_screen"
 
 
-def _run_driver(candles: pd.DataFrame, strategy: str, params: dict,
-                symbol: str, capital: float) -> Any:
-    """Run the CANONICAL engine: ``BacktestDriver`` over simulator/.
-
-    Returns a :class:`BacktestResult` with the same shape the vectorized path
-    produces, so :class:`BacktestAdapter` (and therefore the UI) is unchanged:
-    the equity curve is the portfolio's per-bar equity snapshots and the
-    per-bar holding state is read from those snapshots' ``position_value``
-    (a true per-bar reading of the book — positions open/closed timestamps
-    are wall-clock, not bar time, so they must not be used for this).
-    Metrics and trades come from the same ``engine/metrics`` +
-    ``engine/trades`` code the vectorized path uses.
-
-    Imports are deferred so module import order can never tangle with
-    ``backtest.forward`` (the API and the forward package both import each
-    other's neighbourhood; at request time everything is fully loaded).
-    """
-    from backtest.engine.backtest_driver import BacktestDriver
-    from backtest.engine.backtester import BacktestResult
-    from backtest.engine.metrics import compute_metrics
-    from backtest.forward.paper_runner import _FrameSource, _all_in_size, free_executor
-    from backtest.simulator.portfolio import Portfolio
-
-    strategy_instance = get_strategy(strategy)(**params)
-    active = int((strategy_instance.generate_signals(candles).fillna(0) != 0).sum())
-    if active == 0:
-        log.warning(
-            "[run] %s produced NO signals on %s (%d bars, params=%s) — the run will be "
-            "flat: the indicator warmup likely exceeds the window, or the thresholds "
-            "never trigger on this data",
-            strategy, symbol, len(candles), params,
-        )
-    portfolio = Portfolio(name=f"backtest-{strategy}", initial_capital=capital)
-    driver = BacktestDriver(
-        source=_FrameSource(candles),
-        strategy=strategy_instance,
-        portfolio=portfolio,
-        executor=free_executor(portfolio, max_participation="1"),
-        symbols=[str(symbol).strip().upper()],
-        size_fn=_all_in_size,
-    )
-    driver.run()
-
-    points = portfolio.equity_history
-    index = [pd.Timestamp(p.ts) for p in points]
-    equity = pd.Series([float(p.total_equity) for p in points], index=index, dtype="float64")
-    holding = pd.Series(
-        [1.0 if float(p.position_value) > 0 else 0.0 for p in points],
-        index=index, dtype="float64",
-    )
-    result = BacktestResult(
-        equity=equity,
-        returns=equity.pct_change(),
-        position=holding,
-        candles=candles,
-        config=BacktestConfig(initial_capital=capital),
-        metrics={},
-    )
-    result.metrics = compute_metrics(result)
-    result.metrics["strategy"] = strategy
-    result.metrics["strategy_params"] = params
-    result.metrics["symbol"] = symbol
-    result.metrics["stop_loss"] = result.config.stop_loss
-    result.metrics["take_profit"] = result.config.take_profit
-    return result
+#: ``_run_driver`` is the DEFAULT engine path — the canonical entry in
+#: :mod:`backtest.engine.backtest_runner` (imported above). The alias name is
+#: kept for import compatibility (tests/e2e import it from this module).
+#: Request mode that keeps the legacy vectorized path (fast rough filter only).
+QUICK_SCREEN = "quick_screen"
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +148,7 @@ def _run_driver(candles: pd.DataFrame, strategy: str, params: dict,
 
 
 @backtest_bp.post("/api/backtest/run")
-def run_backtest() -> tuple:
+def run_backtest_endpoint() -> tuple:
     data = request.get_json(silent=True) or {}
 
     strategy = data.get("strategy")
@@ -308,7 +175,7 @@ def run_backtest() -> tuple:
 
     params = data.get("params") or {}
     timeframe = data.get("timeframe", "1D")
-    interval = _interval(timeframe)
+    interval = resolve_interval(timeframe)
     mode = str(data.get("mode", "")).strip().lower()
     log.info(
         "[run] strategy=%s symbol=%s timeframe=%s→%s range=%s..%s capital=%s mode=%s params=%s",
@@ -320,12 +187,7 @@ def run_backtest() -> tuple:
         log.warning("[run] continuing despite out-of-range params: %s", "; ".join(problems))
 
     # Calculate warmup start date (extra bars before from_date for strategy warmup)
-    try:
-        from_dt = datetime.strptime(from_date, "%Y-%m-%d")
-        warmup_start = (from_dt - timedelta(days=WARMUP_BARS * 2)).strftime("%Y-%m-%d")
-    except ValueError:
-        log.warning("[run] unparseable from_date %r — no warmup applied", from_date)
-        warmup_start = from_date
+    warmup_start = resolve_warmup_start(from_date, WARMUP_BARS, log_prefix="[run]")
 
     try:
         with timed(log, f"[data] fetch {symbol} {warmup_start}..{to_date}", logging.DEBUG) as t:
@@ -339,16 +201,9 @@ def run_backtest() -> tuple:
         if mode == QUICK_SCREEN:
             # Legacy vectorized quick filter (prev-close fills, built-in costs).
             with timed(log, f"[run] {strategy} on {symbol} (quick_screen)", logging.DEBUG):
-                result = run_on_candles(
-                    candles_full, strategy, params, symbol,
-                    BacktestConfig(initial_capital=capital),
+                result = run_quick_screen(
+                    candles_full, strategy, params, symbol, capital, from_date, to_date,
                 )
-            # Trim results to the requested date range (strip warmup period)
-            before = len(result.equity)
-            result = _trim_to_range(result, from_date, to_date)
-            if before != len(result.equity):
-                log.debug("[trim] %d → %d bars for %s..%s",
-                          before, len(result.equity), from_date, to_date)
             engine = "quick_screen"
         else:
             # Canonical: BacktestDriver over simulator/ (next-bar-open fills).
@@ -411,12 +266,9 @@ def run_many() -> tuple:
     source_name = current_app.config.get("BACKTEST_SOURCE", "synthetic")
 
     # Calculate warmup start date
-    try:
-        from_dt = datetime.strptime(from_date, "%Y-%m-%d")
-        warmup_start = (from_dt - timedelta(days=WARMUP_BARS * 2)).strftime("%Y-%m-%d")
-    except ValueError:
-        log.warning("[run-many] unparseable shared.from_date %r — no warmup applied", from_date)
-        warmup_start = from_date
+    warmup_start = resolve_warmup_start(
+        from_date, WARMUP_BARS, log_prefix="[run-many]", label="shared.from_date",
+    )
 
     # One PLAIN-DICT job per slot (P2.3): the work runs in a process pool,
     # so job params must be picklable plain data — no source objects, no
@@ -500,7 +352,7 @@ def run_single_backtest(params: dict) -> dict:
             raise ValueError(resolution)
         slot_params = params.get("params") or {}
         timeframe = params.get("timeframe", "1D")
-        interval = _interval(timeframe)
+        interval = resolve_interval(timeframe)
         mode = str(params.get("mode", "")).strip().lower()
         _check_params(resolution, slot_params, f"slot {sid}")
 
@@ -510,11 +362,9 @@ def run_single_backtest(params: dict) -> dict:
                   sid, strategy, len(candles_full), interval, mode or "driver")
 
         if mode == QUICK_SCREEN:
-            result = run_on_candles(
-                candles_full, strategy, slot_params, symbol,
-                BacktestConfig(initial_capital=capital),
+            result = run_quick_screen(
+                candles_full, strategy, slot_params, symbol, capital, from_date, to_date,
             )
-            result = _trim_to_range(result, from_date, to_date)
             engine = "quick_screen"
         else:
             result = _run_driver(candles_full, strategy, slot_params, symbol, capital)

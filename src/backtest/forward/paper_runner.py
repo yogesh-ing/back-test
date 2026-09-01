@@ -57,22 +57,15 @@ from typing import (
 import pandas as pd
 
 from backtest.data.base import CANONICAL_TIMEFRAMES, DataSource
-from backtest.data.db_source import DbSource
-from backtest.data.mstock_live_feed import MStockLiveFeed
-from backtest.data.synthetic import SyntheticSource
+from backtest.data.frame_source import FrameSource
+from backtest.data.source_tags import SOURCE_TAGS, SOURCE_TAG_VALUES, source_tag_for
 from backtest.data.universe import get_universe_symbols
 from backtest.simulator.enums import OrderSide, OrderType, TimeInForce
 from backtest.simulator.engine_loop import OrderQueue, run_engine_loop
-from backtest.simulator.execution import ExecutionConfig, OrderExecutor
-from backtest.simulator.fees import (
-    BrokerProfile,
-    CommissionCalculator,
-    NoStatutoryFees,
-    ZeroCommission,
-)
+from backtest.simulator.execution import free_executor
 from backtest.simulator.order import Order as SimOrder
 from backtest.simulator.portfolio import Portfolio, PortfolioLimits
-from backtest.simulator.slippage import SlippageCalculator
+from backtest.simulator.position_sizing import all_in_size
 from backtest.strategy.base import Strategy
 from backtest.strategy.registry import get_strategy
 
@@ -116,47 +109,19 @@ __all__ = [
 logger = logging.getLogger("backtest.forward.paper_runner")
 
 # =====================================================================
-# Zero-cost execution profile for the in-memory command center
+# Deterministic zero-cost execution (canonical, ticket #6)
 # =====================================================================
 #
-# V1 command-center buckets trade without costs (the old PaperBroker
-# filled at the supplied price, no slippage, no fees). The simulator
-# executor reproduces that exactly with a zero-cost profile so cash and
-# P&L assertions stay meaningful; realistic costing belongs to the paper
-# run / backtest paths.
-_ZERO_COST_PROFILE = BrokerProfile(
-    name="paper_free",
-    commission_model=ZeroCommission(),
-    fee_schedule=NoStatutoryFees(),
-)
-
-
-def free_executor(
-    portfolio: Portfolio | None = None,
-    max_participation: Decimal | str | None = None,
-) -> OrderExecutor:
-    """Deterministic, zero-cost :class:`OrderExecutor`.
-
-    Zero slippage, no price improvement, no market-hours gate, no fees —
-    a market order fills exactly at the supplied touch.
-
-    ``max_participation`` caps each order at a fraction of the bar's volume
-    (executor default 10%). Walk-forward passes ``"1"`` so an all-in order
-    may take the whole bar.
-    """
-    config = ExecutionConfig(
-        seed=42,
-        price_improvement_probability=Decimal("0"),
-        enforce_market_hours=False,
-    )
-    if max_participation is not None:
-        config.max_participation = Decimal(max_participation)
-    return OrderExecutor(
-        config=config,
-        slippage=SlippageCalculator.disabled(),
-        fees=CommissionCalculator(broker=_ZERO_COST_PROFILE),
-        portfolio=portfolio,
-    )
+# The zero-cost profile (:data:`backtest.simulator.fees.PAPER_FREE_PROFILE`)
+# and the deterministic executor factory
+# (:func:`backtest.simulator.execution.free_executor`) live in the simulator
+# package — the same primitives the canonical backtest entry uses. V1
+# command-center buckets traded without costs (the old PaperBroker filled at
+# the supplied price, no slippage, no fees); the executor reproduces that
+# exactly so cash and P&L assertions stay meaningful, while realistic costing
+# belongs to the live paper run / broker paths.
+#
+# ``free_executor`` is re-exported here for import compatibility.
 
 
 # =====================================================================
@@ -520,9 +485,9 @@ class RunnerConfig:
         if self.mode not in VALID_INSTANCE_MODES:
             raise ValueError(f"mode must be one of {VALID_INSTANCE_MODES}, got {self.mode!r}")
         self.source = str(self.source).strip().lower()
-        if self.source not in set(SOURCE_TAGS.values()):
+        if self.source not in SOURCE_TAG_VALUES:
             raise ValueError(
-                f"source must be one of {sorted(set(SOURCE_TAGS.values()))}, got {self.source!r}"
+                f"source must be one of {sorted(SOURCE_TAG_VALUES)}, got {self.source!r}"
             )
 
         # Resolve symbols
@@ -1281,27 +1246,12 @@ def load_state(path: str) -> StrategyPortfolio:
     return StrategyPortfolio.load_from_snapshot(payload)
 
 
-class _FrameSource:
-    """DataSource adapter over an already-fetched candle frame."""
-
-    def __init__(self, candles: pd.DataFrame) -> None:
-        self._candles = candles
-
-    def get_candles(self, symbol: str, start: str, end: str, interval: str = "1day") -> pd.DataFrame:
-        return self._candles
-
-
-def _all_in_size(symbol: str, price: float, portfolio: Portfolio) -> int:
-    """Size an entry with the whole bucket (walk-forward convention).
-
-    A 2% safety haircut keeps the next-bar-open fill funded: sizing uses
-    this bar's price but the order trades at the NEXT bar's open, and an
-    upward gap must not push the notional past the available cash.
-    """
-    if price <= 0:
-        return 0
-    equity = float(portfolio.calculate_total_equity())
-    return int(equity * 0.98 / price)
+#: Compatibility aliases (ticket #6) — the canonical homes are
+#: :class:`backtest.data.frame_source.FrameSource` and
+#: :func:`backtest.simulator.position_sizing.all_in_size`; this module and
+#: its tests historically used the private spellings.
+_FrameSource = FrameSource
+_all_in_size = all_in_size
 
 
 def run_walkforward(
@@ -1340,7 +1290,7 @@ def run_walkforward(
             name=f"walk-{name}",
             initial_capital=capital,
             mode="paper",
-            source=SOURCE_TAGS.get(type(source), "synthetic"),
+            source=source_tag_for(source),
         )
         runner = PaperRunner(
             portfolio=portfolio,
@@ -1488,7 +1438,7 @@ def run_live_papertrade(
             initial_capital=capital,
             current_cash=start_cash,
             mode="paper",
-            source=SOURCE_TAGS.get(type(source), "synthetic"),
+            source=source_tag_for(source),
         )
         runner = PaperRunner(
             portfolio=portfolio,
@@ -1569,12 +1519,11 @@ def poll_live_papertrade(
 # PaperRunner — one bar-replay paper run (ticket P1.4)
 # =====================================================================
 
-#: Which ``portfolios.source`` value each source class maps to (ticket P1.1).
-SOURCE_TAGS: dict[type, str] = {
-    SyntheticSource: "synthetic",
-    DbSource: "replay",
-    MStockLiveFeed: "mstock",
-}
+# ``SOURCE_TAGS`` (which ``portfolios.source`` value each source class maps
+# to, ticket P1.1) is imported from ``backtest.data.source_tags`` — the
+# canonical single copy, shared with ``backtest.engine.backtest_driver``
+# (ticket F-14). It is re-exported here (and by ``backtest.forward``) for
+# import compatibility.
 
 
 class PaperRunner:
@@ -1638,7 +1587,7 @@ class PaperRunner:
         self.quantity = int(quantity)
         self.size_fn = size_fn
         self.db = db
-        self.source_tag = source_tag or SOURCE_TAGS.get(type(source), "synthetic")
+        self.source_tag = source_tag or source_tag_for(source)
 
         # Run classification (ticket P1.1): a PaperRunner is, by definition,
         # a paper run; the bars' origin comes from the source class.

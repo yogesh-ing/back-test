@@ -454,10 +454,20 @@ def test_equity_endpoint_is_the_compatible_curve(client):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Ticket #10 — classification is a first-class request field (mode × source),
+# validated through the canonical bucket risk gate. Auth test requests below
+# now send mode=live + source=mstock explicitly: the endpoint's default is
+# paper (the only mode this web replay can honour honestly).
+# ---------------------------------------------------------------------------
+
+_LIVE_MSTOCK = {"mode": "live", "source": "mstock"}
+
+
 def test_start_without_auth_returns_403(client_unauthenticated):
-    """No broker session → /start must return 403."""
+    """No broker session → live /start must return 403 (auth guard first)."""
     client, _ = client_unauthenticated
-    resp = client.post("/api/forward/start", json=_CFG)
+    resp = client.post("/api/forward/start", json={**_CFG, **_LIVE_MSTOCK})
     assert resp.status_code == 403
     body = resp.get_json()
     assert body["success"] is False
@@ -466,37 +476,96 @@ def test_start_without_auth_returns_403(client_unauthenticated):
 
 
 def test_start_with_expired_session_returns_403(client_unauthenticated):
-    """Expired session → /start must return 403."""
+    """Expired session → live /start must return 403."""
     client, stub = client_unauthenticated
     stub.set_status(STATUS_EXPIRED)
-    resp = client.post("/api/forward/start", json=_CFG)
+    resp = client.post("/api/forward/start", json={**_CFG, **_LIVE_MSTOCK})
     assert resp.status_code == 403
     body = resp.get_json()
     assert body["error"] == "broker_not_authenticated"
 
 
 def test_start_with_authenticated_session_succeeds(client):
-    """Authenticated session → /start should proceed normally."""
+    """Authenticated session + paper mode → /start proceeds normally."""
     resp = client.post("/api/forward/start", json=_CFG)
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["status"] == "running"
+    # The classification the UI picked is echoed back and carried on the
+    # snapshot (ticket #10).
+    assert body["mode"] == "paper"
+    assert body["source"] == "synthetic"
+    snap = client.get("/api/forward/status").get_json()
+    assert snap["config"]["mode"] == "paper"
+    assert snap["config"]["source"] == "synthetic"
 
 
-def test_start_with_expiring_soon_session_succeeds(client_unauthenticated):
-    """Expiring-soon session is still valid → /start should proceed."""
+def test_live_is_refused_after_auth_not_silently_paper_filled(client):
+    """Authenticated live + mstock is REFUSED (live_execution_not_wired):
+    this web replay only simulates fills, so a live label must never run
+    paper quietly (ticket #8/#10 honesty)."""
+    resp = client.post("/api/forward/start", json={**_CFG, **_LIVE_MSTOCK})
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["error"] == "live_execution_not_wired"
+    assert "simulated fills" in body["message"]
+
+
+def test_expiring_soon_session_counts_as_authenticated(client_unauthenticated):
+    """Expiring-soon is still a valid session: it passes the auth guard
+    (then live is refused as not-wired — never a silent 200)."""
     client, stub = client_unauthenticated
     stub.set_status(STATUS_EXPIRING_SOON)
+    resp = client.post("/api/forward/start", json={**_CFG, **_LIVE_MSTOCK})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "live_execution_not_wired"
+
+
+def test_live_refuses_synthetic_and_replay_sources(client):
+    """The T9 source gate is enforced at the API: live + synthetic/replay is
+    a canonical bucket-risk refusal (400), before any auth check."""
+    for source in ("synthetic", "replay"):
+        resp = client.post("/api/forward/start", json={**_CFG, "mode": "live", "source": source})
+        assert resp.status_code == 400, source
+        body = resp.get_json()
+        assert "refuses source" in body["error"], body
+
+
+def test_unknown_mode_or_source_is_400(client):
+    resp = client.post("/api/forward/start", json={**_CFG, "mode": "scalping"})
+    assert resp.status_code == 400
+    assert "unknown risk bucket" in resp.get_json()["error"]
+    resp = client.post("/api/forward/start", json={**_CFG, "source": "yahoo"})
+    assert resp.status_code == 400
+    assert "refuses source" in resp.get_json()["error"]
+
+
+def test_paper_accepts_every_canonical_source(client):
+    """Paper is free play: all three taxonomy sources start fine, and each
+    session carries the source the user picked (mapping to live-data-paper-
+    risk for mstock)."""
+    for source in ("synthetic", "replay", "mstock"):
+        resp = client.post("/api/forward/start", json={**_CFG, "mode": "paper", "source": source})
+        assert resp.status_code == 200, source
+        body = resp.get_json()
+        assert body["mode"] == "paper" and body["source"] == source
+        sid = body["state_id"]
+        snap = client.get(f"/api/forward/status?state_id={sid}").get_json()
+        assert snap["config"]["source"] == source
+
+
+def test_omitted_source_defaults_from_app_config_not_hardcoded(client):
+    """No source in the body → the app's BACKTEST_SOURCE (synthetic) mapped
+    through the canonical APP_SOURCE_TAGS, never a UI-hardcoded constant."""
     resp = client.post("/api/forward/start", json=_CFG)
     assert resp.status_code == 200
-    body = resp.get_json()
-    assert body["status"] == "running"
+    assert resp.get_json()["source"] == "synthetic"
 
 
 def test_start_guard_runs_before_strategy_validation(client_unauthenticated):
     """Auth check happens first — even invalid strategy returns 403, not 400."""
     client, _ = client_unauthenticated
-    bad_cfg = {**_CFG, "strategy": "nonexistent_strategy"}
+    bad_cfg = {**_CFG, "strategy": "nonexistent_strategy", **_LIVE_MSTOCK}
     resp = client.post("/api/forward/start", json=bad_cfg)
     assert resp.status_code == 403
     body = resp.get_json()

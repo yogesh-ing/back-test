@@ -337,6 +337,57 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
 
     def get_order_book(self) -> list[BrokerOrder]:
         """Every order mStock currently knows — ``GET /openapi/typea/orders``."""
+        return [self._order_from_row(row) for row in self._fetch_order_rows()]
+
+    def poll_fill(self, broker_order_id: Any) -> dict[str, Any] | None:
+        """Poll one order's fill — for :class:`BrokerFillProvider` (ticket #8).
+
+        Queries the order book and returns a normalized **fill row** for
+        ``broker_order_id`` (the mStock TypeA keys :meth:`Fill.from_broker`
+        understands) once the order has actually executed, or ``None`` while
+        it is still open/pending. A partial fill reports the FILLED quantity
+        with the average price, never the requested quantity.
+
+        The mStock TypeA API exposes one order-book endpoint rather than a
+        per-order fill endpoint; row fields are read best-effort with the
+        same leniency as :meth:`_order_from_row` (the archived reference
+        documents the endpoints, not the exact row schema). An unknown
+        ``broker_order_id`` is treated as not-yet-filled (``None``).
+        """
+        target = str(broker_order_id)
+        for row in self._fetch_order_rows():
+            if str(row.get("order_id")) != target:
+                continue
+            status = str(row.get("status") or "").upper()
+            filled = row.get("filled_quantity")
+            try:
+                filled_qty = int(filled) if filled is not None else 0
+            except (TypeError, ValueError):
+                filled_qty = 0
+            if filled_qty <= 0 and status not in ("COMPLETE", "FILLED", "EXECUTED"):
+                # Open or otherwise not executed — no fill to report yet.
+                return None
+            # Normalize to a fill row: quantity = FILLED quantity, price =
+            # average price (fall back to the placed price), so a partial
+            # fill never over-states.
+            price = row.get("average_price")
+            if price in (None, "", 0):
+                price = row.get("price")
+            fill_row = {
+                "tradingsymbol": row.get("tradingsymbol"),
+                "transaction_type": row.get("transaction_type"),
+                "quantity": filled_qty or row.get("quantity"),
+                "filled_quantity": filled_qty or row.get("quantity"),
+                "price": price,
+                "brokerage": row.get("brokerage"),
+                "order_id": row.get("order_id"),
+            }
+            logger.info("mStock order %s polled: %s", target, status)
+            return fill_row
+        return None
+
+    def _fetch_order_rows(self) -> list[dict]:
+        """Raw mStock TypeA order-book rows (``GET /openapi/typea/orders``)."""
         token = self._require_session()
         payload = self._request("GET", _ORDER_BOOK_PATH, token)
         if isinstance(payload, dict):
@@ -345,7 +396,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             return []
         if not isinstance(payload, list):
             raise MStockOrderError("mStock order book response was not a list of orders")
-        return [self._order_from_row(row) for row in payload if isinstance(row, dict)]
+        return [row for row in payload if isinstance(row, dict)]
 
     def calculate_order_margin(self, order: BrokerOrder) -> MarginInfo:
         """Pre-trade margin check — ``POST /openapi/typea/margins/orders`` (JSON)."""

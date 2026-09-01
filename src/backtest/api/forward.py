@@ -28,7 +28,7 @@ import logging
 import threading
 import uuid
 from collections import OrderedDict
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Optional
 
 import pandas as pd
@@ -36,11 +36,18 @@ from flask import Blueprint, current_app, jsonify, request
 
 from backtest.adapters.backtest_adapter import BacktestAdapter
 from backtest.brokers.session_manager import get_session_manager
-from backtest.data.base import CANONICAL_TIMEFRAMES as SUPPORTED_TIMEFRAMES
-from backtest.engine.backtester import BacktestConfig, BacktestResult
+from backtest.data.source_tags import SOURCE_TAG_VALUES, app_source_tag
+from backtest.engine.backtester import BacktestResult
+from backtest.engine.backtest_runner import (
+    resolve_interval,
+    resolve_warmup_start,
+    run_quick_screen,
+)
 from backtest.engine.metrics import compute_metrics
 from backtest.logging_config import get_logger, timed
-from backtest.runner import build_source, run_on_candles
+from backtest.runner import build_source
+from backtest.simulator.bucket_risk import resolve_bucket_risk
+from backtest.simulator.errors import ValidationError
 
 forward_bp = Blueprint("forward_api", __name__)
 log = get_logger(__name__)
@@ -48,6 +55,42 @@ log = get_logger(__name__)
 # Extra bars before from_date for indicator warmup. 0 keeps the replay over
 # exactly the requested range (matching a standalone backtest/forward run).
 WARMUP_BARS = 0
+
+
+def _resolve_classification(data: dict) -> tuple[str, str]:
+    """Resolve ``(mode, source)`` for a /start request — ticket #10.
+
+    The client's selection is validated through the CANONICAL bucket risk
+    gate (:func:`backtest.simulator.bucket_risk.resolve_bucket_risk`) — the
+    same decision ``_classify()`` feeds in the engine — so the UI can never
+    silently start a classification the backend refuses (live/synthetic,
+    live/replay, unknown bucket or source).
+
+    ``source`` defaults to the app's configured data source mapped through
+    :func:`backtest.data.source_tags.app_source_tag` (the taxonomy tag for
+    ``BACKTEST_SOURCE``), so an omitted value is never hardcoded here.
+
+    Raises :class:`ValidationError` (→ 400) for any refused combination.
+    """
+    mode = str(data.get("mode", "paper")).strip().lower()
+    source = str(data.get("source", "")).strip().lower()
+    if not source:
+        source = app_source_tag(current_app.config.get("BACKTEST_SOURCE", "synthetic"))
+    # Canonical gate: validates mode/source AND the source-trust boundary
+    # (live refuses synthetic/replay — the T9 "fake data → real money" rule).
+    resolve_bucket_risk(mode, source)
+    return mode, source
+
+
+#: The web replay executes SIMULATED fills only (run_quick_screen over
+#: historical/synthetic bars). A ``mode=live`` selection therefore cannot be
+#: honoured without silently paper-filling a live-labelled run — ticket #8's
+#: live-never-simulated rule. Refuse loudly instead (ticket #10 UI honesty).
+LIVE_NOT_WIRED_MESSAGE = (
+    "live execution is not wired to this web replay: it runs simulated fills "
+    "(paper). Real-fill live runs use the ForwardTestingEngine path "
+    "(ticket #8) — choose run mode 'paper' here."
+)
 
 
 def _f(value: Any, ndigits: int = 4) -> float:
@@ -110,6 +153,8 @@ class ForwardSession:
         from_date: str,
         to_date: str,
         bars_per_second: float = DEFAULT_BARS_PER_SECOND,
+        mode: str = "paper",
+        source: str = "synthetic",
     ) -> None:
         self.state_id = state_id
         self.strategy = strategy
@@ -119,6 +164,14 @@ class ForwardSession:
         self.params = dict(params)
         self.from_date = from_date
         self.to_date = to_date
+        # Ticket #10 — the bucket the user picked, carried onto every
+        # snapshot so the UI can display what it is actually running.
+        self.mode = str(mode).strip().lower()
+        self.source = str(source).strip().lower()
+        if self.mode not in ("paper", "live") or self.source not in SOURCE_TAG_VALUES:
+            raise ValueError(
+                f"invalid classification {self.mode}/{self.source!r}"
+            )
 
         self.lock = threading.RLock()
         self.status: str = "running"
@@ -386,6 +439,8 @@ class ForwardSession:
                     "params": self.params,
                     "from_date": self.from_date,
                     "to_date": self.to_date,
+                    "mode": self.mode,
+                    "source": self.source,
                 },
                 # Live-feed style fields (forward.js / dashboard.js read these).
                 "total_bars": n,
@@ -410,6 +465,8 @@ class ForwardSession:
                 "total": self.total,
                 "pct": round(100.0 * self._revealed / self.total, 2) if self.total else 100.0,
                 "bars_per_second": self.bars_per_second,
+                "mode": self.mode,
+                "source": self.source,
                 "created_at": self.created_at.isoformat(timespec="seconds"),
             }
 
@@ -487,28 +544,9 @@ def _source() -> Any:
     return build_source(name)
 
 
-def _interval(timeframe: Optional[str]) -> str:
-    """Resolve to the canonical timeframe (unknown → ``1day``); ticket P4.3."""
-    if not timeframe:
-        return "1day"
-    key = str(timeframe).strip().lower()
-    if key not in SUPPORTED_TIMEFRAMES:
-        log.warning(
-            "[forward] unsupported timeframe %r — falling back to '1day' (supported: %s)",
-            timeframe, ", ".join(SUPPORTED_TIMEFRAMES),
-        )
-        return "1day"
-    return key
-
-
 def _load_candles(symbol: str, from_date: str, to_date: str, timeframe: str):
-    try:
-        from_dt = datetime.strptime(from_date, "%Y-%m-%d")
-        warmup_start = (from_dt - timedelta(days=WARMUP_BARS * 2)).strftime("%Y-%m-%d")
-    except (ValueError, TypeError):
-        log.warning("[forward] unparseable from_date %r — no warmup applied", from_date)
-        warmup_start = from_date
-    interval = _interval(timeframe)
+    warmup_start = resolve_warmup_start(from_date, WARMUP_BARS, log_prefix="[forward]")
+    interval = resolve_interval(timeframe, log_prefix="[forward]")
     candles = _source().get_candles(symbol, warmup_start, to_date, interval)
     log.debug("[forward] fetched %d bars for %s @ %s (%s..%s)", len(candles), symbol,
               interval, warmup_start, to_date)
@@ -570,37 +608,6 @@ def _resolve_dates(data: dict) -> tuple[str, str, list[str]]:
     return from_date, to_date, defaults
 
 
-def _trim_to_range(result: BacktestResult, from_date: str, to_date: str) -> BacktestResult:
-    """Trim a backtest result to the requested date range (strip warmup)."""
-    idx_dates = result.candles.index.strftime("%Y-%m-%d")
-    mask = (idx_dates >= from_date) & (idx_dates <= to_date)
-    candles = result.candles.loc[mask]
-    if candles.empty:
-        return result
-    returns = result.returns.loc[mask].copy()
-    position = result.position.loc[mask].copy()
-    # Warmup bars only seed indicators — force the first visible bar flat so
-    # a warmup-spanning position doesn't manufacture a phantom trade.
-    if len(position) > 0:
-        position.iloc[0] = 0
-        returns.iloc[0] = 0.0
-    equity = result.equity.loc[mask].copy()
-    if len(equity) > 0:
-        initial = result.config.initial_capital
-        cum_returns = (1 + returns).cumprod()
-        equity = pd.Series(initial * cum_returns.values, index=equity.index)
-    trimmed = BacktestResult(
-        equity=equity, returns=returns, position=position,
-        candles=candles, config=result.config, metrics={},
-    )
-    # Recompute metrics on the trimmed frames so counts match the visible range.
-    trimmed.metrics = compute_metrics(trimmed)
-    for key in ("strategy", "strategy_params", "symbol", "stop_loss", "take_profit"):
-        if key in result.metrics:
-            trimmed.metrics[key] = result.metrics[key]
-    return trimmed
-
-
 # ---------------------------------------------------------------------------
 # POST /api/forward/start
 # ---------------------------------------------------------------------------
@@ -638,22 +645,46 @@ def start() -> tuple:
         log.warning("[forward] /start rejected: no strategy (body keys=%s)", sorted(data))
         return jsonify({"error": "strategy is required"}), 400
 
-    mode = data.get("mode", "live")
+    # Ticket #10 — the taxonomy is now a first-class part of the request:
+    # (mode, source) is validated through the canonical bucket risk gate
+    # (unknown bucket, unknown source, and live/synthetic|replay all → 400
+    # with the backend's own message) BEFORE anything starts.
+    try:
+        mode, source = _resolve_classification(data)
+    except ValidationError as exc:
+        log.warning("[forward] /start classification refused: %s (client=%s)",
+                    exc, request.remote_addr)
+        return jsonify({"error": str(exc)}), 400
+
     symbol = (data.get("symbol") or "").strip().upper()
     if not symbol:
         log.warning("[forward] /start rejected: no symbol (body keys=%s)", sorted(data))
         return jsonify({"error": "symbol is required"}), 400
 
-    # Auth guard — only required for live mode (synthetic uses DB/API data)
+    # Auth guard — required for live mode (paper replays need no session).
     if mode == "live" and not get_session_manager().is_authenticated():
         log.warning("[forward] /start refused for %s/%s: broker session not authenticated "
-                    "(client=%s) — open the broker auth modal or use mode=synthetic",
+                    "(client=%s) — open the broker auth modal or use mode=paper",
                     strategy, symbol, request.remote_addr)
         return jsonify({
             "success": False,
             "error": "broker_not_authenticated",
             "message": "Valid broker session required to start live forward test",
         }), 403
+
+    # Live-never-simulated (ticket #8): this web replay only simulates fills.
+    # Refuse a live-labelled run loudly instead of silently paper-filling it —
+    # the exact trap ticket #10 exists to close.
+    if mode == "live":
+        log.warning(
+            "[forward] /start refused live mode for %s/%s: %s",
+            strategy, symbol, LIVE_NOT_WIRED_MESSAGE,
+        )
+        return jsonify({
+            "success": False,
+            "error": "live_execution_not_wired",
+            "message": LIVE_NOT_WIRED_MESSAGE,
+        }), 400
     timeframe = data.get("timeframe", "1D")
     try:
         from_date, to_date, date_defaults = _resolve_dates(data)
@@ -673,9 +704,9 @@ def start() -> tuple:
     params = data.get("params") or {}
     speed = _resolve_speed(data, current_app.config)
     log.info(
-        "[forward] /start strategy=%s symbol=%s mode=%s timeframe=%s range=%s..%s "
-        "capital=%s speed=%s params=%s", strategy, symbol, mode, timeframe, from_date,
-        to_date, capital, speed, params,
+        "[forward] /start strategy=%s symbol=%s mode=%s source=%s timeframe=%s "
+        "range=%s..%s capital=%s speed=%s params=%s", strategy, symbol, mode, source,
+        timeframe, from_date, to_date, capital, speed, params,
     )
 
     try:
@@ -686,8 +717,9 @@ def start() -> tuple:
         return jsonify({"error": f"data error: {exc}"}), 400
 
     try:
-        result = run_on_candles(candles_full, strategy, params, symbol,
-                                BacktestConfig(initial_capital=capital))
+        result = run_quick_screen(
+            candles_full, strategy, params, symbol, capital, from_date, to_date,
+        )
     except ValueError as exc:
         log.warning("[forward] /start rejected by strategy/engine: %s", exc)
         return jsonify({"error": str(exc)}), 400
@@ -698,12 +730,10 @@ def start() -> tuple:
         log.exception("[forward] /start failed for %s/%s", strategy, symbol)
         return jsonify({"error": f"forward test failed: {exc}"}), 500
 
-    result = _trim_to_range(result, from_date, to_date)
-
     session = ForwardSession(
         state_id=uuid.uuid4().hex, strategy=strategy, symbol=symbol, timeframe=timeframe,
         capital=capital, params=params, result=result, from_date=from_date, to_date=to_date,
-        bars_per_second=speed,
+        bars_per_second=speed, mode=mode, source=source,
     )
     _register(session)
     snap = session.snapshot()
@@ -724,6 +754,8 @@ def start() -> tuple:
         "state_id": session.state_id,
         "symbol": symbol,
         "strategy": strategy,
+        "mode": mode,
+        "source": source,
         "bars_per_second": session.bars_per_second,
         # What the replay actually runs on, including anything we filled in for
         # the caller (see _resolve_dates / gap G5).

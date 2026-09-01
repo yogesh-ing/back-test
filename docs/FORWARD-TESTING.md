@@ -1,39 +1,116 @@
 # Forward Testing
 
+## Change Log — Forward-engine fill-timing fix (F-01)
+
+> **Date:** 2026-08-31 · **Tickets:** F-01 (fix) / F-05 (API changelog) / F-15
+> (canonical-number change) / F-17 (transition-based signals)
+>
+> **Added 2026-09-01 · Ticket F-04** — state file format v2 (see below).
+>
+> **Updated 2026-09-01 · Ticket #7** — state file format **v3**: full resume
+> fidelity (executor queue + engine runtime); see State Persistence below.
+
+### State-file format v3 (F-04 + #7)
+
+`state/forward_state.json` carries `state_version: 3`, `engine_id`, the run
+classification `mode` / `source` (see → State Persistence below), and the
+`executor`/`engine_runtime` resume fields. **Old v1/v2 files still load**
+(portfolio + adapter state restored; in-flight execution state is not
+available from them) and are rewritten to v3 on the next save; files from a
+*newer* version are refused.
+
+### Removed API (breaking) — F-05
+
+Anything importing these old `StrategyAdapter` names must switch:
+
+| Removed | Replacement / note |
+|---|---|
+| `StrategyAdapter.execute_signals(...)` | `StrategyAdapter.create_orders(...)` — returns `Order` objects, **no fill side-effect** |
+| `StrategyAdapter.on_order_filled(...)` | removed — the adapter no longer owns an executor or observes fills |
+| `StrategyAdapter(executor=...)` | constructor param removed — the **engine** owns the `OrderExecutor` and drives the bar clock |
+| `ForwardTestingEngine` fill behavior | orders now **arm** and fill at the **next bar's open** (was: signal bar's close) |
+
+### Behavioral change — F-17
+
+- Persistent signals now fire **once per transition** (`0→1` / `1→0`), not every bar.
+  Signal decisions are transition-based (`_last_target`), not portfolio-position-based.
+- Unfilled **submitted** orders still retry via the executor queue (`step()` re-attempts
+  working orders at each next bar's open).
+- **Creation-time rejections** (insufficient funds, `can_open_position` denial, short
+  disabled) no longer retry — they are logged with a `skip_reason`.
+
+### Canonical-number change (F-15)
+
+> **Note:** the forward-engine look-ahead fix changes forward P&L results vs. prior
+> versions. Fills now anchor to the **next bar's OPEN** (not the signal bar's CLOSE),
+> so equity/returns will differ. This is the intended, correct behavior — see the
+> migration design docs (§P1.3 fill timing, `tests/simulator/test_fill_timing.py`) and
+> the one-line note in `docs/PORTFOLIO-CENTER.md` → Behavior changes.
+
+---
+
 ## What It Is
 
-Forward testing is **paper trading** — simulating a strategy in real-time without risking real money. The engine replays historical bars one at a time, revealing them gradually to mimic live trading.
+Forward testing is **paper trading** — simulating a strategy bar-by-bar without
+risking real money. There are **two distinct forward paths** in this repo; keep
+them straight:
+
+1. **`ForwardTestingEngine`** (`forward/engine.py`, CLI / Docker / systemd) — the
+   real bar-by-bar engine. Live loop polls market data; backtest replay mode
+   iterates historical bars. Signals are generated bar-by-bar and **executed**
+   through the simulator's order/fill machinery.
+2. **Web Forward replay** (`api/forward.py`, the `/forward` page) — **not an
+   execution path.** It runs the whole backtest up front and merely *reveals* the
+   precomputed equity/position series bar-by-bar on a server clock. No orders, no
+   fills, no DB writes.
+
+The CLI walk-forward / live-paper commands (`papertrade`) run through a third,
+canonical loop — `PaperRunner` on `simulator/engine_loop.py` — the same loop
+`BacktestDriver` uses.
 
 ## How It Differs from Backtesting
 
-| Aspect | Backtest | Forward Test |
-|--------|----------|-------------|
-| **Execution** | Vectorized (all bars at once) | Bar-by-bar (replay) |
-| **Speed** | Instant | Configurable — `bars_per_second`, default 1 bar/s |
+| Aspect | Backtest (vectorized quick-screen) | Forward engine / PaperRunner |
+|--------|-------------------------------------|------------------------------|
+| **Execution** | Vectorized, all bars at once (fill ≈ previous close) | Bar-by-bar via the simulator order/fill path |
+| **Fill anchor** | `shift(1)` position — fill at prior bar's close | signal on bar `t` → **fill at bar `t+1`'s OPEN** (F-01) |
+| **Speed** | Instant | Configurable loop interval / replay speed |
 | **Purpose** | "How would this have performed?" | "How does this feel to trade?" |
-| **State** | Stateless | Stateful per `state_id`, server-side (survives refresh, not a restart) |
-| **Auth required** | No | Yes (broker auth guard) |
+| **State** | Stateless | Stateful (portfolio, orders, fills, equity) |
+| **Cost model** | flat commission/slippage percentages | fee + slippage models through `OrderExecutor` |
 
 ## Architecture
 
 ```
-ForwardTestEngine
+ForwardTestingEngine (forward/engine.py)
     │
-    ├── StrategyAdapter (wraps Strategy for bar-by-bar)
-    ├── Portfolio (tracks positions, cash, equity)
-    ├── Simulator (execution, fills, commission)
-    └── State (saved to .live_papertrade_state.json)
+    ├── StrategyAdapter (forward/strategy_adapter.py)
+    │      signal generation + Order creation ONLY (no fills — F-01)
+    │
+    ├── OrderExecutor (simulator/execution.py)
+    │      engine drives the bar clock: submit(order) → step(next bar)
+    │      fills at the NEXT bar's open. The only fill path.
+    │
+    ├── Portfolio (simulator/portfolio.py) — cash, positions, orders, equity
+    ├── PositionSizer / RiskManager / StopManager (simulator/)
+    ├── MarketDataHandler (live/ or mock) — bar source in live mode
+    └── State (state/forward_state.json — engine snapshot, atomic write)
 ```
+
+Shared canonical loop: `simulator/engine_loop.run_engine_loop` — used by
+`PaperRunner` (papertrade CLI) and `BacktestDriver` (backtest). It hard-codes the
+same `submit → step(next-open)` rule.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `forward/engine.py` | `ForwardTestEngine` — main loop |
-| `forward/paper.py` | CLI commands (`run_walkforward`, `run_live_papertrade`) |
-| `forward/portfolio.py` | `StrategyAccount` — tracks positions |
-| `forward/strategy_adapter.py` | Wraps `Strategy` for forward-test loop |
-| `forward/broker.py` | Broker interface for live feeds |
+| `forward/engine.py` | `ForwardTestingEngine` — main loop (live + backtest replay) |
+| `forward/paper_runner.py` | `PaperRunner` (canonical loop), CLI walk-forward/live paper trade (`run_walkforward`, `run_live_papertrade`), `StrategyRunner` + `OrderLedger` + `PaperBroker` (portfolio center), `StrategyAccount`/`StrategyPortfolio` |
+| `forward/strategy_adapter.py` | wraps `Strategy` — signals + `Order` creation only (no fills) |
+| `simulator/engine_loop.py` | canonical bar-clock loop (arm on submit, fill at next bar's open) |
+| `simulator/execution.py` | `OrderExecutor` — `submit`/`step` bar-clock API + `execute` |
+| `forward/portfolio_manager.py` | multi-strategy command center (see PORTFOLIO-CENTER.md) |
 
 ## API Endpoints
 
@@ -74,6 +151,10 @@ POST /api/forward/start
   and echoed in `config`, and the page warns when it is non-empty. Malformed
   (`01-01-2024`) or inverted ranges are a `400` before any data is fetched.
 - `403` when `mode` is `live` and no broker session is authenticated.
+
+> ⚠️ **Replay, not execution.** This endpoint reveals a precomputed backtest; it
+> does **not** run the strategy per bar and does not write orders/fills. For real
+> per-bar execution use `ForwardTestingEngine` or the `papertrade` CLI.
 
 ### The clock
 
@@ -139,18 +220,79 @@ filter used to be a no-op).
 
 ## State Persistence
 
-State is saved to `.live_papertrade_state.json`:
-```json
-{
-    "processed_bars": 150,
-    "resume_count": 3,
-    "last_date": "2024-06-15",
-    "positions": [...],
-    "equity_curve": [...]
-}
-```
+- **CLI live-paper mode** (`papertrade --mode live`) saves/loads
+  `.live_papertrade_state.json` (default; `--state-file` overrides) and resumes
+  with `--resume-on-start`:
+  ```json
+  {
+      "processed_bars": 150,
+      "resume_count": 3,
+      "last_date": "2024-06-15",
+      "positions": [...],
+      "equity_curve": [...]
+  }
+  ```
+- **`ForwardTestingEngine`** snapshots full system state to
+  `state/forward_state.json` (`system.state_file`) every N minutes and on stop —
+  atomic write, restorable on restart.
+  - **Format v3 (F-04 + ticket #7, 2026-09):** the payload carries
+    `state_version: 3`, `engine_id` (the `portfolios.portfolio_id`), the run
+    classification `mode` (`paper`|`live`) + `source`
+    (`synthetic`|`replay`|`mstock`) — the same vocabulary as the `portfolios`
+    columns (migration 002), derived from the engine's **actual** `config.data`
+    (a `backtest` data mode is stored as the `paper` bucket — simulated
+    fills). Source strings come from the canonical
+    `backtest.data.source_tags.SOURCE_TAGS`.
+  - **v3 = full resume fidelity (ticket #7):** `executor` captures the
+    in-flight bar-clock queue (pending orders + which are already armed) and
+    `engine_runtime` captures `loop_count`, the last processed bar timestamp
+    per symbol, and per-symbol processed-bar counts. A restored engine
+    continues the same canonical bar clock — an order armed at teardown fills
+    at the very next bar's open, and a backtest replay resumes at the next
+    unprocessed bar instead of re-running the history.
+  - **Legacy v1/v2 files still load** — they are normalized in memory
+    (`mode`/`source` filled from the engine config; invalid values warn +
+    fall back) and rewritten to v3 on the next save. Caveat: v2 files have no
+    in-flight execution state, so a resume from one may miss an order that
+    was armed at teardown (portfolio + adapter state still restore). A file
+    whose `state_version` is *newer* than this build is refused (warn + no
+    load).
+- **Web Forward sessions** are **in-memory only** (`MAX_SESSIONS = 20`): they
+  survive a page refresh but not a process restart.
 
-Resumable on restart with `--resume-on-start` flag.
+## Risk limits (per-bucket, ticket #9)
+
+Risk limits are keyed on the run's classification (`mode` × `source` from
+`_classify()`), never on a global knob. The canonical defaults live in
+one place — `backtest/simulator/bucket_risk.py::BUCKET_RISK_LIMITS` — and
+flow through the engine at the same point classification resolves:
+
+| Bucket | Caps (canonical defaults) | Source gate |
+|---|---|---|
+| `paper` (simulated fills) | free play — all exposure caps open (None), leverage 1 | any source (`synthetic`, `replay`, `mstock`) |
+| `live` (real fills) | `max_position_value` 10 000, `max_position_pct` 0.10, `max_gross_exposure_pct` 0.50, `max_open_positions` 5, `min_trade_value` 1 000, leverage 1 | **only `mstock`** — `live`/`synthetic` and `live`/`replay` are refused before any trading (fake data must never feed real fills) |
+
+Wiring:
+
+- `initialize_system` calls `resolve_bucket_risk(mode, source, ...)` right
+  after `_classify`; an unknown bucket/source **raises** (never a soft warn).
+- The bucket becomes the portfolio's limits (`PortfolioLimits`),
+  the sizer's hard constraints (`SizingConstraints` — the size that reaches
+  the executor is already bucket-limited), and the pre-trade `RiskManager`
+  config (drawdown/daily-loss limits stay config-level).
+- Every **real-fill** order passes the bucket risk check before
+  `executor.submit`; paper stays free play (permissive caps, no order-time
+  check).
+- The T8 no-downgrade guard has risk teeth: when a restored portfolio's
+  classification had to be changed, the **open book** is checked against the
+  target bucket's caps — a violation refuses the run ("RISK REFUSAL") instead
+  of silently trading at the wrong size.
+- Explicit config overrides per bucket: `risk.buckets.<bucket>` in
+  `forward_testing.yaml` (or `config_dict["risk"]["buckets"]`) merges over
+  the canonical defaults; `None` disables a cap explicitly.
+
+The canonical backtest runner (`run_backtest`) resolves the `paper` bucket
+(permissive), so historical P&L is unchanged by this ticket.
 
 ## CLI Usage
 
@@ -163,6 +305,7 @@ PYTHONPATH=src python -m backtest papertrade \
   --symbol DEMO \
   --from 2024-01-01 \
   --to 2024-12-31 \
+  --interval 1day \
   --capital 100000
 ```
 
@@ -175,19 +318,47 @@ PYTHONPATH=src python -m backtest papertrade \
   --symbol DEMO \
   --from 2024-01-01 \
   --to 2024-12-31 \
+  --interval 1day \
   --poll-seconds 60 \
+  --state-file .live_papertrade_state.json \
   --resume-on-start
 ```
 
+Both modes run through `forward/paper_runner.py` on the shared
+`simulator/engine_loop.py` loop (fills at the next bar's open).
+
+## Forward-engine traffic rules (after F-01)
+
+1. **Signal on bar `t`** → adapter produces `Signal` + `Order` (`create_orders`),
+   engine calls `executor.submit(order)` — the order is **armed**, not filled.
+2. **`executor.step(bar t+1)`** → the order fills at **`t+1`'s OPEN**. The signal
+   bar's close is never a fill price.
+3. Only **new** bars advance the clock — repeated polls of the same bar do not
+   cause a second fill (`_last_bar_ts` dedupe in `ForwardTestingEngine`).
+4. Stops (StopManager) still create exits as orders; risk checks (`RiskManager`)
+   gate `can_open_position` at order-creation time.
+
 ## Safety Rules
 
-1. **No real orders** — all trades are simulated
-2. **Auth guard** — `mode: "live"` requires an authenticated broker session (403
-   otherwise); `mode: "synthetic"` is explicitly exempt so the loop is testable
-   without credentials
-3. **State isolation** — sessions are keyed by `state_id` in a bounded registry
-   (`MAX_SESSIONS = 20`); stopping one never touches another
-4. **No lookahead** — the strategy only ever sees the revealed prefix, and the
-   payload's signals/candles are cut at the same bar
-5. **Bounded clock** — `bars_per_second` is clamped to 0…5000 so a typo in a
-   client body cannot spin a thread
+1. **Live is never simulated (ticket #8)** — the forward engine wires the
+   executor to a real broker (`BrokerFillProvider`) whenever
+   `config.data.mode: "live"`: the portfolio, state file and DB rows all
+   classify `live`/`mstock`, and fills come from the venue (via
+   `place_order` + `poll_fill`), never from the simulated pricing engine.
+   Paper runs keep the simulated provider. An order still working after an
+   unfilled poll is POLLED again — the venue is never double-placed.
+2. **Auth guard** — `mode: "live"` on the web replay requires an authenticated
+   broker session (403 otherwise); `mode: "synthetic"` is explicitly exempt so
+   the loop is testable without credentials. Direct fills fail cleanly without
+   a session (mStock `_require_session`).
+3. **No silent downgrade, with risk teeth** — a live run restores/classifies
+   as live (a stale paper-tagged portfolio is upgraded with a warning); a
+   paper run never claims live. And per-bucket risk limits (see `Risk limits
+   (per-bucket)`): a mis-classified portfolio whose open book violates the
+   target bucket's caps is **refused**, never traded at the wrong size.
+4. **State isolation** — web sessions are keyed by `state_id` in a bounded
+   registry (`MAX_SESSIONS = 20`); stopping one never touches another.
+4. **No lookahead** — the strategy only ever sees completed bars; the engine fills
+   at the **next bar's open**, never the signal bar's close.
+5. **Bounded clock** — `bars_per_second` is clamped to 0…5000; engine loop
+   interval and replay speed are config-bounded.

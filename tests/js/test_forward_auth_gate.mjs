@@ -79,7 +79,9 @@ function makeElement(id, tag) {
 const ids = [
     "startBtn", "stopBtn", "statusBadge", "progressBar", "progressText",
     "strategy", "symbol", "timeframe", "fromDate", "toDate", "capital",
-    "params-container", "livePanel", "dataMode", "prefillBanner", "symbolList",
+    "params-container", "livePanel", "runMode", "dataSource", "prefillBanner",
+    "symbolList", "taxonomyHint", "resumeBanner", "resumedSessionId",
+    "resumeBtn", "freshStartBtn",
     // Live panel widgets touched by renderLive() — without them a successful
     // start throws inside poll() and the error toast hides the one under test.
     "liveStatusBanner", "marketDot", "marketLabel", "lastBarInfo", "barsProcessed",
@@ -138,6 +140,12 @@ sandbox.SessionState = {
     clear: () => {},
 };
 sandbox.TradeTable = { render: () => {} };
+// forward.js uses the shared Money helper in the live banner/positions; the
+// real page loads it from a separate script, so the harness provides it too.
+sandbox.Money = {
+    format: (v) => `$${Number(v).toFixed(2)}`,
+    signed: (v) => (v >= 0 ? "+" : "") + Number(v).toFixed(2),
+};
 
 // fetch stub: serves strategy list + forward status
 sandbox.fetch = async (url, opts) => {
@@ -221,43 +229,84 @@ function dispatchBrokerStatus(state) {
 
 // ------------------------------------------------------------------ scenarios
 
-await test("Start button is disabled + shows connect message when unauthenticated", async () => {
+// Ticket #10: the page now has two taxonomy controls — runMode (paper|live)
+// and dataSource (synthetic|replay|mstock). Paper is the default and needs no
+// auth; live requires the broker session.
+
+await test("paper mode (default) starts without auth — button enabled", async () => {
     dispatchBrokerStatus("unauthenticated");
+    await flush();
+    assert.equal($("runMode").value, "", "harness leaves controls unset");
+    // runSelection() defaults to paper when the control is absent, so the
+    // safe default changed from the old implicit-live to honest paper.
+    assert.equal($("startBtn").disabled, false, "paper replay needs no broker session");
+    assert.match($("startBtn").textContent, /▶ Start/);
+});
+
+await test("live mode + unauthenticated disables + shows connect message", async () => {
+    dispatchBrokerStatus("unauthenticated");
+    await flush();
+    $("runMode").value = "live";
+    $("dataSource").value = "mstock";
+    $("runMode")._fire("change");
     await flush();
     assert.equal($("startBtn").disabled, true);
     assert.match($("startBtn").textContent, /Connect mStock to Start/);
     assert.match($("startBtn").title, /Authentication required/);
+    // Risk hint goes loud for the live bucket (T9-aware).
+    assert.match($("taxonomyHint").textContent, /LIVE/);
+    $("runMode").value = "";
+    $("dataSource").value = "";
+    $("runMode")._fire("change");
+    await flush();
 });
 
-await test("Start button is disabled when expired", async () => {
+await test("live mode + expired disables + shows connect message", async () => {
     dispatchBrokerStatus("expired");
+    await flush();
+    $("runMode").value = "live";
+    $("dataSource").value = "mstock";
+    $("runMode")._fire("change");
     await flush();
     assert.equal($("startBtn").disabled, true);
     assert.match($("startBtn").textContent, /Connect mStock to Start/);
+    $("runMode").value = "";
+    $("dataSource").value = "";
+    $("runMode")._fire("change");
+    await flush();
 });
 
 await test("Start button is enabled + shows ▶ Start when authenticated", async () => {
     dispatchBrokerStatus("authenticated");
     await flush();
-    assert.equal($("startBtn").disabled, false);
-    assert.match($("startBtn").textContent, /▶ Start/);
-    assert.equal($("startBtn").title, "");
-});
-
-await test("Start button is enabled when expiring_soon", async () => {
-    dispatchBrokerStatus("expiring_soon");
+    $("runMode").value = "live";
+    $("dataSource").value = "mstock";
+    $("runMode")._fire("change");
     await flush();
     assert.equal($("startBtn").disabled, false);
     assert.match($("startBtn").textContent, /▶ Start/);
+    assert.equal($("startBtn").title, "");
+    $("runMode").value = "";
+    $("dataSource").value = "";
+    $("runMode")._fire("change");
+    await flush();
 });
 
 await test("clicking disabled Start button opens the auth modal", async () => {
     dispatchBrokerStatus("unauthenticated");
     await flush();
+    $("runMode").value = "live";
+    $("dataSource").value = "mstock";
+    $("runMode")._fire("change");
+    await flush();
     const before = authUIOpenCalls;
     $("startBtn").click();
     await flush();
     assert.ok(authUIOpenCalls > before, "BrokerAuthUI.open() should be called");
+    $("runMode").value = "";
+    $("dataSource").value = "";
+    $("runMode")._fire("change");
+    await flush();
 });
 
 await test("clicking enabled Start button does NOT open auth modal (calls startBot)", async () => {
@@ -288,9 +337,11 @@ await test("clicking enabled Start button does NOT open auth modal (calls startB
     assert.equal(body.from_date, "2024-01-01");
     assert.equal(body.to_date, "2024-12-31");
     assert.equal(body.capital, 10000);
-    // No #dataMode selection in this scenario ⇒ the safe default is live mode,
-    // which is exactly why auth was required to get here.
-    assert.equal(body.mode, "live");
+    // Taxonomy (ticket #10): the payload carries BOTH dimensions; when the
+    // controls are absent the safe default is paper/synthetic — never the old
+    // implicit "live" label that the replay could not honour.
+    assert.equal(body.mode, "paper");
+    assert.equal(body.source, "synthetic");
 });
 
 await test("missing symbol blocks the start and warns instead of posting", async () => {
@@ -307,21 +358,27 @@ await test("missing symbol blocks the start and warns instead of posting", async
     $("symbol").value = "reliance";
 });
 
-await test("synthetic mode starts without broker auth and sends mode=synthetic", async () => {
+await test("paper + mstock starts without broker auth and sends mode/source", async () => {
     dispatchBrokerStatus("unauthenticated");
     await flush();
-    $("dataMode").value = "synthetic";
-    $("dataMode")._fire("change");   // as a real <select> would
+    $("runMode").value = "paper";
+    $("dataSource").value = "mstock";
+    $("runMode")._fire("change");
+    $("dataSource")._fire("change");
     await flush();
-    assert.equal($("startBtn").disabled, false, "synthetic replay needs no broker session");
+    assert.equal($("startBtn").disabled, false, "paper replay needs no broker session");
 
     sandbox._forwardStarted = 0;
     $("startBtn").click();
     await flush();
     await flush();
-    assert.ok(sandbox._forwardStarted >= 1, "synthetic mode should start immediately");
-    assert.equal(sandbox._startBody.mode, "synthetic");
-    $("dataMode").value = "";
+    assert.ok(sandbox._forwardStarted >= 1, "paper mode should start immediately");
+    assert.equal(sandbox._startBody.mode, "paper");
+    assert.equal(sandbox._startBody.source, "mstock");
+    $("runMode").value = "";
+    $("dataSource").value = "";
+    $("runMode")._fire("change");
+    $("dataSource")._fire("change");
 });
 
 await test("server-defaulted date range is announced as a warning toast", async () => {
@@ -345,7 +402,10 @@ await test("server-defaulted date range is announced as a warning toast", async 
     sandbox._startResponse = null;
 });
 
-await test("transitioning from authenticated → unauthenticated disables the button", async () => {
+await test("live: transitioning authenticated → unauthenticated disables the button", async () => {
+    $("runMode").value = "live";
+    $("dataSource").value = "mstock";
+    $("runMode")._fire("change");
     dispatchBrokerStatus("authenticated");
     await flush();
     assert.equal($("startBtn").disabled, false);
@@ -354,9 +414,16 @@ await test("transitioning from authenticated → unauthenticated disables the bu
     await flush();
     assert.equal($("startBtn").disabled, true);
     assert.match($("startBtn").textContent, /Connect mStock to Start/);
+    $("runMode").value = "";
+    $("dataSource").value = "";
+    $("runMode")._fire("change");
+    await flush();
 });
 
-await test("btn-disabled-auth CSS class is added when unauthenticated, removed when authenticated", async () => {
+await test("live: btn-disabled-auth CSS added when unauthenticated, removed when authenticated", async () => {
+    $("runMode").value = "live";
+    $("dataSource").value = "mstock";
+    $("runMode")._fire("change");
     dispatchBrokerStatus("unauthenticated");
     await flush();
     assert.ok($("startBtn").classList.contains("btn-disabled-auth"));
@@ -364,6 +431,32 @@ await test("btn-disabled-auth CSS class is added when unauthenticated, removed w
     dispatchBrokerStatus("authenticated");
     await flush();
     assert.ok(!$("startBtn").classList.contains("btn-disabled-auth"));
+    $("runMode").value = "";
+    $("dataSource").value = "";
+    $("runMode")._fire("change");
+    await flush();
+});
+
+// Ticket #10 — resume affordance (T7-aware): init re-attaches to a running
+// session and shows the banner with its id; "Start fresh" clears it.
+await test("resume banner appears for a running session; fresh start hides it", async () => {
+    sandbox._forwardStatus = {
+        status: "running", state_id: "deadbeefcafe",
+        progress: { revealed: 3, total: 10, pct: 30 },
+        metrics: {}, equity: { dates: [], values: [], benchmark: [] },
+        drawdown: {}, trades: [], positions: [],
+        config: { mode: "paper", source: "synthetic" },
+    };
+    await sandbox.document._fire("DOMContentLoaded", {});
+    await flush();
+    await flush();
+    assert.equal($("resumeBanner").hidden, false);
+    assert.equal($("resumedSessionId").textContent, "deadbeef");
+
+    $("freshStartBtn").click();
+    await flush();
+    assert.equal($("resumeBanner").hidden, true);
+    sandbox._forwardStatus = null;
 });
 
 console.log(`\nforward.js auth gate: ${passed} tests passed`);

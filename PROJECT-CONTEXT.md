@@ -40,7 +40,8 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 ```
 
 ## Test Status
-- ✅ 1875 passed, 4 skipped (mStock credentials) — `PYTHONPATH=src pytest tests/ -q`
+- ✅ 1582 passed, 4 skipped (mStock credentials) — `PYTHONPATH=src pytest tests/ -q`
+  (as of 2026-08-31, post-F-01; the count drifts with each refactor ticket)
 - ✅ 36 JS behaviour assertions across 4 Node harnesses (`tests/js/*.mjs`)
 - ⚠ Sandbox note: rebuild the venv each session —
   `python3 -m venv /home/user/.venv && /home/user/.venv/bin/pip install -q -r requirements.txt pytest-cov flake8`
@@ -49,11 +50,14 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 
 | File | Purpose | Status |
 |------|---------|--------|
-| backtester.py | Vectorized + risk-aware engine | ✅ Fixed (lagged signals, return calc before zeroing) |
+| engine/backtester.py | Vectorized quick-screen engine | ✅ Stable (lagged signals) — canonical path is `backtest_driver` |
+| engine/backtest_driver.py | Backtest on the shared engine loop | ✅ New (P2.1) — same loop as `PaperRunner` |
 | engine/trades.py | Trade walk + stats (cards and table share it) | ✅ New (G1/G2) — equity-based, open trade excluded from win_rate |
+| simulator/engine_loop.py | Canonical bar-clock loop (submit → fill at next bar's open) | ✅ New (P2.1) |
+| simulator/execution.py | `OrderExecutor` — `submit()`/`step()` bar clock + `execute()` | ✅ New (P1.3) |
+| forward/paper_runner.py | Walk-forward / live paper CLI + `PaperRunner` (canonical loop) + command-center `StrategyRunner`/`OrderLedger`/`PaperBroker` | ✅ Re-architected (P1.4) |
+| forward/strategy_adapter.py | Strategy → Signal → Order, **no fills** | ✅ Signal-only (F-01) |
 | logging_config.py | Handlers, levels, request ids | ✅ New (U1) — see docs/LOGGING.md |
-| paper.py | Walk-forward runner | ✅ Fixed (pre-computed shifted signals) |
-| broker.py | Per-bar fills reconciliation | ✅ Working |
 | auth.py | TOTP (HMAC-SHA1) + OTP flows, session cache | ✅ Complete |
 | mstock.py | API client + data normalization | ✅ Complete |
 | preflight.py | DNS/HTTPS/auth checks | ✅ Complete |
@@ -61,17 +65,17 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 
 ## Known Limitations
 - Timeframe is cosmetic on synthetic/CSV sources (daily bars only) — see gap G6 / U2
-- Forward page live widgets still broken (gap G3)
-- Live mode not implemented (stub with instructions)
-- State persistence deferred
+- Command-center (portfolio) state is in-memory only (V1; "persistence V2")
+- **Live broker fills still open** (findings F-12): bucket UI + mode/source tags done
+  (P4.1), but `BrokerFillProvider` + `MStockLiveFeed` wiring, `poll_fill` in the broker
+  ABC, and bucket-level risk anchors remain
 - Auth tests require mStock credentials (skipped)
-- No portfolio multi-strategy allocation system yet
 
 ## Next Steps (If Continuing)
-1. Implement live polling loop (poll mStock on schedule, call strategy signals, broker.step, save state)
-2. Add state persistence across restarts
+1. Wire `mode='live'` command-center runners through `BrokerFillProvider` + `MStockLiveFeed` (F-12)
+2. Add portfolio/runner state persistence across restarts (V2)
 3. Test mStock auth with real credentials
-4. Add position sizing / portfolio allocation
+4. Finish the docs pass for `instructions/ARCHITECTURE-BLUEPRINT.md` (see its top banner)
 
 ## Build Dependencies
 Python 3.10+, pandas, numpy, requests, python-dotenv, matplotlib, pytest

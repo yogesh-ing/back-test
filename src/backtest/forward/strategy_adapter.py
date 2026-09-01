@@ -21,9 +21,17 @@ Design goals
   strategy instance can be reused per symbol (the common case) or a dict of
   strategy instances can be supplied.
 
-* **Signal → Order.** Signals are converted to ``simulator.Order`` objects,
-  validated against ``Portfolio.can_open_position``, sized by an injected
-  ``PositionSizer`` and optionally executed via ``OrderExecutor``.
+* **Signal → Order (ticket F-01).** Signals are converted to
+  ``simulator.Order`` objects, validated against
+  ``Portfolio.can_open_position`` and sized by an injected ``PositionSizer``.
+  The adapter NEVER fills: it hands the orders back to the caller via
+  :meth:`create_orders`, and the engine drives the canonical bar-clock
+  sequence (``OrderExecutor.submit`` → :meth:`OrderExecutor.step`) so a
+  fill lands at the **next bar's open**, never the signal bar's close.
+  ``Signal`` decisions are based on the **signal transition** (previous
+  target → new target), not the live portfolio — the portfolio no longer
+  knows a fill happened until the next bar, and a position-based decision
+  would re-fire the same order on every bar.
 
 * **Dry-run.** When ``dry_run=True`` signals are generated and logged but no
   orders are created.
@@ -451,10 +459,9 @@ class StrategyAdapter:
         An instance of ``backtest.strategy.base.Strategy`` (or a dict mapping
         symbol → Strategy for multi-strategy setups).
     portfolio:
-        ``simulator.Portfolio`` that holds cash and positions.
-    executor:
-        ``simulator.execution.OrderExecutor`` used to simulate fills. Optional;
-        if omitted, orders are created but not executed immediately.
+        ``simulator.Portfolio`` that holds cash and positions. Used for
+        sizing/validation of the orders the adapter creates; the adapter
+        never mutates it via fills.
     symbols:
         List of symbols to track. If None, inferred from incoming market data.
     dry_run:
@@ -478,7 +485,7 @@ class StrategyAdapter:
     signal_history:
         All signals generated so far.
     order_history:
-        All orders created so far.
+        All orders created so far (via :meth:`create_orders`).
     bars:
         Per-symbol OHLCV DataFrames (completed bars only).
     """
@@ -487,7 +494,6 @@ class StrategyAdapter:
         self,
         strategy: Union[Strategy, Dict[str, Strategy]],
         portfolio: Any,
-        executor: Any = None,
         symbols: Optional[List[str]] = None,
         dry_run: bool = False,
         position_sizer: Optional[PositionSizer] = None,
@@ -511,7 +517,6 @@ class StrategyAdapter:
             self.strategy = strategy
 
         self.portfolio = portfolio
-        self.executor = executor
         self.dry_run = bool(dry_run)
         self.db_manager = db_manager
         self.min_bars = int(min_bars)
@@ -599,10 +604,13 @@ class StrategyAdapter:
         return []
 
     def on_bar_close(self, bar: Mapping[str, Any]) -> List[Signal]:
-        """Handle a completed bar.
+        """Handle a completed bar — signal generation ONLY (ticket F-01).
 
         This is the main entry point for the forward loop. It appends the bar
-        to history, generates signals, and executes them (unless dry_run).
+        to history and generates signals. It never fills anything: the caller
+        turns the returned signals into orders via :meth:`create_orders` and
+        drives the executor's bar clock (``submit`` → ``step``) so fills land
+        at the NEXT bar's open.
 
         Parameters
         ----------
@@ -633,13 +641,7 @@ class StrategyAdapter:
             self.symbols.append(symbol)
 
         # generate signals for this symbol
-        signals = self.generate_signals(symbol=symbol)
-
-        # execute
-        if signals:
-            self.execute_signals(signals, market_data=bar)
-
-        return signals
+        return self.generate_signals(symbol=symbol)
 
     def _normalize_bar(self, bar: Mapping[str, Any]) -> Dict[str, Any]:
         """Normalize bar dict to canonical keys."""
@@ -827,9 +829,14 @@ class StrategyAdapter:
             # else include basic OHLCV + last close + signal
             indicators = self._build_indicators_snapshot(sym, candles, strat, last_value)
 
-            # determine action by comparing target to current position
-            current_target = self._current_target_position(sym)
-            action, signal_type, reason = self._decide_action(sym, current_target, target, candles)
+            # Determine the action from the SIGNAL TRANSITION (previous target
+            # → new target), not from the portfolio: fills happen one bar
+            # later (the engine's submit → step clock), so a position-based
+            # decision would re-fire the same BUY on every bar until the
+            # first fill lands. Transition semantics match the canonical
+            # run_engine_loop (ticket F-01).
+            previous_target = self._last_target.get(sym, ZERO)
+            action, signal_type, reason = self._decide_action(sym, previous_target, target, candles)
 
             # strength: use absolute target as strength for now, or 1 if binary
             strength = abs(target) if target != ZERO else ZERO
@@ -840,7 +847,7 @@ class StrategyAdapter:
             signal = Signal(
                 symbol=sym,
                 action=action,
-                quantity=None,  # filled by execute_signals via sizer
+                quantity=None,  # filled by create_orders via sizer
                 order_type=self.default_order_type,
                 reason=reason,
                 indicators=indicators,
@@ -853,20 +860,30 @@ class StrategyAdapter:
                 direction=SignalDirection.LONG if target > ZERO else (SignalDirection.SHORT if target < ZERO else SignalDirection.FLAT),
             )
 
-            # store last target
-            self._last_target[sym] = target
+            # Store the position state that WILL exist once the emitted action
+            # fills. On a direct flip (long→short / short→long) the action
+            # only CLOSES, so the intermediate state is flat; the opposite
+            # side re-opens on the NEXT bar — the old position-based logic's
+            # "close first, then re-enter" semantics (pinned by
+            # tests/test_strategy_adapter.py against a reference old-state
+            # machine; see findings F-17).
+            if (previous_target > ZERO and target < ZERO) or (previous_target < ZERO and target > ZERO):
+                self._last_target[sym] = ZERO
+            else:
+                self._last_target[sym] = target
             self._indicators[sym] = indicators
 
             # avoid duplicate HOLD signals flooding history? Keep them but log at debug
             if action == SignalAction.HOLD:
-                logger.debug("HOLD signal %s target=%s current=%s", sym, target, current_target)
+                logger.debug("HOLD signal %s target=%s previous=%s", sym, target, previous_target)
             else:
                 logger.info("signal %s %s target=%s reason=%s", sym, action, target, reason)
 
             self.signal_history.append(signal)
             all_signals.append(signal)
 
-            # persist signal to DB if manager available (executed flag false for now, updated in execute_signals)
+            # persist signal to DB if manager available (executed flag is set
+            # to True when create_orders maps this signal to an order)
             if self.db_manager is not None:
                 try:
                     self._save_signal_to_db(signal, executed=False, skip_reason="generated" if action != SignalAction.HOLD else "hold")
@@ -875,64 +892,51 @@ class StrategyAdapter:
 
         return all_signals
 
-    def _current_target_position(self, symbol: str) -> Decimal:
-        """Current position as target in [-1,1] terms (1=long, 0=flat, -1=short)."""
-        symbol = _normalize_symbol(symbol)
-        try:
-            pos = self.portfolio.get_position(symbol)
-            if pos is None:
-                return ZERO
-            qty = getattr(pos, "quantity", ZERO)
-            # qty is signed: positive long, negative short
-            if qty > ZERO:
-                return Decimal("1")
-            elif qty < ZERO:
-                return Decimal("-1")
-            else:
-                return ZERO
-        except Exception:
-            return ZERO
-
     def _decide_action(
-        self, symbol: str, current: Decimal, target: Decimal, candles: pd.DataFrame
+        self, symbol: str, previous: Decimal, target: Decimal, candles: pd.DataFrame
     ) -> tuple[str, str, str]:
-        """Decide BUY/SELL/HOLD based on current vs target."""
+        """Decide BUY/SELL/HOLD from the SIGNAL TRANSITION previous→target.
+
+        ``previous`` is the last bar's target position (not the live
+        portfolio) — fills happen one bar later, so the portfolio is
+        not yet updated when this decision runs (ticket F-01).
+        """
         symbol = _normalize_symbol(symbol)
 
         # no change
-        if current == target:
+        if previous == target:
             return SignalAction.HOLD, SignalType.ENTRY, f"already at target {target}"
 
         # flat -> long
-        if current == ZERO and target > ZERO:
+        if previous == ZERO and target > ZERO:
             return SignalAction.BUY, SignalType.ENTRY, f"enter long {symbol} target={target}"
 
         # flat -> short
-        if current == ZERO and target < ZERO:
+        if previous == ZERO and target < ZERO:
             if not self.allow_short:
                 return SignalAction.HOLD, SignalType.ENTRY, f"short not allowed for {symbol}"
             return SignalAction.SELL, SignalType.ENTRY, f"enter short {symbol} target={target}"
 
         # long -> flat
-        if current > ZERO and target == ZERO:
+        if previous > ZERO and target == ZERO:
             return SignalAction.SELL, SignalType.EXIT, f"exit long {symbol}"
 
         # short -> flat
-        if current < ZERO and target == ZERO:
+        if previous < ZERO and target == ZERO:
             return SignalAction.BUY, SignalType.EXIT, f"exit short {symbol}"
 
         # long -> short or short -> long: need to close first, then open
         # For simplicity, first close, next bar will open opposite.
         # So here we generate exit.
-        if current > ZERO and target < ZERO:
+        if previous > ZERO and target < ZERO:
             return SignalAction.SELL, SignalType.EXIT, f"close long {symbol} to prepare short"
 
-        if current < ZERO and target > ZERO:
+        if previous < ZERO and target > ZERO:
             return SignalAction.BUY, SignalType.EXIT, f"close short {symbol} to prepare long"
 
         # long -> long with different size? Treat as HOLD for now (sizing handled elsewhere)
         # short -> short
-        return SignalAction.HOLD, SignalType.ENTRY, f"position {current} -> {target} no order needed"
+        return SignalAction.HOLD, SignalType.ENTRY, f"position {previous} -> {target} no order needed"
 
     def _build_indicators_snapshot(
         self, symbol: str, candles: pd.DataFrame, strategy: Strategy, last_signal_value: Any
@@ -982,10 +986,15 @@ class StrategyAdapter:
 
     # -- signal to order conversion ---------------------------------------
 
-    def execute_signals(
+    def create_orders(
         self, signals: Iterable[Signal], market_data: Optional[Mapping[str, Any]] = None
     ) -> List[Order]:
-        """Convert signals to orders, validate, and optionally execute.
+        """Convert signals to orders — validation + sizing + Order objects ONLY.
+
+        The adapter never fills (ticket F-01): the caller owns the executor's
+        bar clock. Feed the returned orders to ``OrderExecutor.submit`` while
+        the signal bar is the latest data, then ``executor.step`` on the NEXT
+        bar — the fill lands at that next bar's OPEN.
 
         Parameters
         ----------
@@ -993,18 +1002,19 @@ class StrategyAdapter:
             List of ``Signal`` objects.
         market_data:
             Optional market snapshot dict (or dict mapping symbol→snapshot when
-            executing many symbols). Used by ``OrderExecutor`` if present.
+            sizing/validating many symbols). Used for sizing price and
+            ``can_open_position`` checks only — never as a fill price.
 
         Returns
         -------
         List[Order]
-            Orders that were created (and possibly executed).
+            Orders that were created (NOT yet filled).
         """
         created_orders: List[Order] = []
 
         for signal in signals:
             if not isinstance(signal, Signal):
-                logger.warning("execute_signals got non-Signal: %s", type(signal))
+                logger.warning("create_orders got non-Signal: %s", type(signal))
                 continue
 
             if signal.action == SignalAction.HOLD:
@@ -1142,27 +1152,13 @@ class StrategyAdapter:
                     signal.reason,
                 )
 
-                # log signal as executed
+                # log signal as mapped to an order (the fill itself happens
+                # on the executor's next-bar step, driven by the engine)
                 if self.db_manager is not None:
                     try:
                         self._save_signal_to_db(signal, executed=True, order_id=order.order_id)
                     except Exception as exc:
                         logger.warning("failed to save executed signal: %s", exc)
-
-                # optionally execute immediately via executor if market_data provided
-                if self.executor is not None and market_data is not None:
-                    try:
-                        # resolve snapshot for this symbol
-                        snapshot = market_data
-                        if isinstance(market_data, Mapping) and signal.symbol in market_data:
-                            snapshot = market_data[signal.symbol]
-                        result = self.executor.execute(order, snapshot)
-                        logger.debug("executor result for %s: %s", signal.symbol, result)
-                        # if filled, trigger on_order_filled
-                        if result.did_trade and result.fill is not None:
-                            self.on_order_filled(result.fill)
-                    except Exception as exc:
-                        logger.warning("executor failed for %s: %s", signal.symbol, exc)
 
             except Exception as exc:
                 logger.exception("failed to create order for %s: %s", signal.symbol, exc)
@@ -1200,46 +1196,6 @@ class StrategyAdapter:
             return to_price(price, "price")
         except Exception:
             return to_price(100, "price")
-
-    # -- order filled handling ---------------------------------------------
-
-    def on_order_filled(self, fill: Any) -> None:
-        """Callback when an order is filled.
-
-        Updates internal state and portfolio. Called by ``OrderExecutor`` or
-        externally when a fill is observed.
-
-        Parameters
-        ----------
-        fill:
-            ``simulator.Fill`` object.
-        """
-        try:
-            symbol = getattr(fill, "symbol", "UNKNOWN")
-            symbol = _normalize_symbol(symbol)
-            logger.info("fill received %s %s @ %s qty=%s", symbol, getattr(fill, "side", "?"), getattr(fill, "fill_price", "?"), getattr(fill, "quantity", "?"))
-
-            # portfolio.apply_fill is usually done by executor, but ensure
-            if hasattr(self.portfolio, "apply_fill"):
-                # check if position already updated by executor
-                # we can try to apply, but if executor already did, it will double count
-                # So only apply if executor is None or if we are not using executor's portfolio sync
-                if self.executor is None or getattr(self.executor, "portfolio", None) is None:
-                    try:
-                        self.portfolio.apply_fill(fill)
-                    except Exception as exc:
-                        logger.debug("portfolio.apply_fill failed (may already be applied): %s", exc)
-
-            # update state
-            self._state[f"last_fill_{symbol}"] = {
-                "fill_id": getattr(fill, "fill_id", None),
-                "price": str(getattr(fill, "fill_price", "")),
-                "quantity": str(getattr(fill, "quantity", "")),
-                "timestamp": _utcnow().isoformat(),
-            }
-
-        except Exception as exc:
-            logger.exception("on_order_filled failed: %s", exc)
 
     # -- DB persistence ----------------------------------------------------
 

@@ -263,6 +263,56 @@ def test_get_order_book_empty(live_broker, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# poll_fill (ticket #8 — the BrokerFillProvider live seam)
+# ---------------------------------------------------------------------------
+
+
+def test_poll_fill_returns_none_while_order_open(live_broker, monkeypatch):
+    """An order the venue has not executed yet must poll as None (the
+    executor keeps it working and retries the next bar)."""
+    open_row = dict(_BOOK_ROW, status="OPEN", filled_quantity=0)
+    calls = _mock_http(monkeypatch, _FakeResponse(200, [open_row]))
+
+    assert live_broker.poll_fill("550123") is None
+    method, url, _, _, headers = calls[0]
+    assert method == "GET"
+    assert url == "https://api.mstock.test/openapi/typea/orders"
+    _assert_auth_headers(headers)
+
+
+def test_poll_fill_returns_normalized_fill_row_for_complete_order(live_broker, monkeypatch):
+    """A COMPLETE order polls as a Fill.from_broker-compatible row: the
+    FILLED quantity and average price, never the requested quantity."""
+    _mock_http(monkeypatch, _FakeResponse(200, [_BOOK_ROW]))
+
+    row = live_broker.poll_fill("550123")
+
+    assert row is not None
+    assert row["tradingsymbol"] == "RELIANCE"
+    assert row["transaction_type"] == "BUY"
+    assert row["quantity"] == 10  # filled_quantity (10)
+    assert row["price"] == 1010.25  # average_price
+
+
+def test_poll_fill_uses_filled_quantity_for_partial(live_broker, monkeypatch):
+    """A partial fill reports the filled qty, not the requested 100."""
+    partial = dict(_BOOK_ROW, status="PARTIAL", quantity=100,
+                   filled_quantity=37, average_price=1005.5)
+    _mock_http(monkeypatch, _FakeResponse(200, [partial]))
+
+    row = live_broker.poll_fill("550123")
+    assert row["quantity"] == 37
+    assert row["price"] == 1005.5
+
+
+def test_poll_fill_unknown_id_is_none(live_broker, monkeypatch):
+    """An id the venue does not know is treated as not-yet-filled (None),
+    never an error — the broker id may be a stale/replaced session id."""
+    _mock_http(monkeypatch, _FakeResponse(200, [_BOOK_ROW]))
+    assert live_broker.poll_fill("nope-99") is None
+
+
+# ---------------------------------------------------------------------------
 # calculate_order_margin
 # ---------------------------------------------------------------------------
 

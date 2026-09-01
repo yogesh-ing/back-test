@@ -31,6 +31,19 @@ risk:
   daily_loss_limit_pct: 0.02
   max_leverage: 1
 
+  # Ticket #9 — per-bucket risk limits, keyed on the run classification
+  # (mode/source from _classify). Canonical defaults live in
+  # backtest/simulator/bucket_risk.py::BUCKET_RISK_LIMITS and are NOT
+  # re-declared here — this section only OVERRIDES a bucket's limit, e.g.:
+  # buckets:
+  #   live:
+  #     max_position_value: 15000
+  #     max_position_pct: 0.15
+  #     max_open_positions: 3
+  #   paper:
+  #     max_position_pct: 0.5
+  # A None value disables a bucket cap explicitly.
+
 execution:
   realism: realistic
   slippage_model: "hybrid"

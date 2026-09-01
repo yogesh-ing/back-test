@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
 from backtest.simulator.enums import OrderStatus, OrderType, TimeInForce
 from backtest.simulator.errors import ValidationError
-from backtest.simulator.fees import CommissionCalculator, TradeSegment
+from backtest.simulator.fees import PAPER_FREE_PROFILE, CommissionCalculator, TradeSegment
 from backtest.simulator.fill import Fill
 from backtest.simulator.fill_providers import (
     BrokerFillProvider,
@@ -82,6 +82,7 @@ __all__ = [
     "ExecutionConfig",
     "ExecutionResult",
     "OrderExecutor",
+    "free_executor",
     "load_execution_config",
     "DEFAULT_EXECUTION_CONFIG_PATH",
     # ticket P3.3 — the pluggable fill seam (re-exported for convenience)
@@ -356,6 +357,36 @@ class ExecutionConfig:
         }
 
 
+def free_executor(
+    portfolio: "Portfolio | None" = None,
+    max_participation: Decimal | str | None = None,
+) -> "OrderExecutor":
+    """Deterministic, zero-cost :class:`OrderExecutor`.
+
+    Zero slippage, no price improvement, no market-hours gate, no fees — a
+    market order fills exactly at the supplied touch. Canonical home for the
+    deterministic executor used by walk-forward paper buckets and canonical
+    backtests (ticket #6); ``backtest.forward.paper_runner`` re-exports it.
+
+    ``max_participation`` caps each order at a fraction of the bar's volume
+    (executor default 10%). Walk-forward passes ``"1"`` so an all-in order
+    may take the whole bar.
+    """
+    config = ExecutionConfig(
+        seed=42,
+        price_improvement_probability=Decimal("0"),
+        enforce_market_hours=False,
+    )
+    if max_participation is not None:
+        config.max_participation = Decimal(max_participation)
+    return OrderExecutor(
+        config=config,
+        slippage=SlippageCalculator.disabled(),
+        fees=CommissionCalculator(broker=PAPER_FREE_PROFILE),
+        portfolio=portfolio,
+    )
+
+
 def _parse_time(value: Any, field_name: str) -> dtime:
     if isinstance(value, dtime):
         return value
@@ -500,6 +531,48 @@ class OrderExecutor:
         self._armed.clear()
         self._queued.clear()
         self._rng = random.Random(self.config.seed)
+
+    # -- state file support (ticket #7) ------------------------------------
+
+    def get_state(self) -> dict[str, Any]:
+        """JSON-safe snapshot of the bar-clock queue.
+
+        ``pending`` orders are serialized in FIFO order (the executor
+        re-attempts them in the same order after a restore), and ``armed``
+        records which of them already survived one :meth:`step` — an armed
+        order must fill at the FIRST bar after a restart, exactly as it
+        would have without one.
+        """
+        return {
+            "pending": [o.to_dict() for o in self._pending],
+            "armed": sorted(self._armed),
+            "queued": sorted(self._queued),
+        }
+
+    def restore_state(
+        self,
+        state: Mapping[str, Any] | None,
+        *,
+        orders: Sequence["Order"] | None = None,
+    ) -> int:
+        """Restore the bar-clock queue from :meth:`get_state`.
+
+        ``orders`` may pass the SAME ``Order`` objects the portfolio holds
+        (a restored portfolio rebuilds them from its own snapshot); when
+        omitted, fresh copies are rebuilt from the serialized payload. The
+        armed set is restored verbatim so in-flight fills keep their exact
+        bar timing. Returns the number of pending orders restored.
+        """
+        state = state or {}
+        if orders is None:
+            from backtest.simulator.order import Order
+
+            orders = [Order.from_dict(raw) for raw in state.get("pending", [])]
+        self._pending = list(orders)
+        self._armed = {str(i) for i in state.get("armed", [])}
+        self._queued = set(state.get("queued", []))
+        self._queued.update(o.order_id for o in self._pending)
+        return len(self._pending)
 
     # -- availability ------------------------------------------------------
 

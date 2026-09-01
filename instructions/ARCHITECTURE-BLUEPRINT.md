@@ -1,10 +1,33 @@
 # Architecture Blueprint — `back-test`
 
-> Read-only audit blueprint. Updated to reflect current repo state.
-> **Version: 2.0** · Date: 2026-08-31 · Commit: `b68e328`
-> Previous: 1.0 (`aa2b583`, 2026-08-30)
-> Dependency edges in §2 were generated automatically with Python's `ast` module —
+> ⚠️ **STALE BODY — see Errata below.** The prose in §1–§7 was written against the
+> pre-refactor tree. The **`graph.txt` dependency map is authoritative for the
+> current structure** (it matches the code). Treat any §1/§2/§7 claim that
+> contradicts the code or `graph.txt` as historical. Do not plan new work from
+> §7's "current" descriptions without re-checking the code.
+
+> Read-only audit blueprint.
+> **Version: 2.1** · Date: 2026-09-01 · Commit baseline: `6a40756`
+> Previous: 2.0 (`b68e328`, 2026-08-31) — **body still describes pre-refactor state;**
+> 2.1 adds the Errata below instead of rewriting the prose (docs pass, Ticket #2).
+> Dependency edges in §2.10 were generated automatically with Python's `ast` module —
 > the raw output is saved next to this file as **`graph.txt`** (regenerate:
+
+## Errata — deltas vs this blueprint's prose (2026-08-31 → 2026-09-01)
+
+| What the prose says | What the code actually is |
+|---|---|
+| §1/§2 list `forward/live_engine.py`, `forward/{paper,broker,portfolio,runner,order_ledger}.py`, `marketdata/`, `alerts/`, `analysis/`, `config_manager/`, `dashboard/` | **Deleted** (P1.4/P4.3): `forward/live_engine` (phantom `forward_test_*` tables), the five duplicate forward engines, and the six orphan packages. Replaced by `forward/paper_runner.py` (`PaperRunner`, `StrategyRunner`, `OrderLedger`, `PaperBroker`, `run_walkforward`, `run_live_papertrade`), `simulator/engine_loop.py` (shared canonical loop), `engine/backtest_driver.py` |
+| New modules | `data/source_registry.py`, `data/mstock_live_feed.py`, `simulator/fill_providers.py` (P1.2/P3.3/P3.4) |
+| §2.2/§2.5/§2.6: strategy_adapter "sizes + executes via OrderExecutor"; §5.2 `execute_signals(signals, market_data=bar)`; §7.1 same-bar fill | **F-01 (2026-08-31):** adapter is signal/order-creation only — `create_orders()` (no `executor.execute`), `executor` param + `on_order_filled` removed; `ForwardTestingEngine` drives `executor.submit` (bar t) → `executor.step` (bar t+1) → fill at **next bar's OPEN**. Signal decisions transition-based (`_last_target`, flip-aware); persistent signals fire once per transition (F-17). **Forward-engine P&L numbers changed** (F-15) |
+| §7.1 "five parallel execution semantics" | Reduced: rules differ only by subsystem — canonical `run_engine_loop` (paper/backtest driver) and the engine's bar clock share the `OrderExecutor` submit→step path; vectorized `Backtester` kept as quick-screen (`mode='quick_screen'`, P2.2); command-center `PaperBroker` fills at the supplied bar close |
+| §7.4 "orphaned subsystems … tests only" | Those packages are gone; current orphans per `graph.txt` (package-level: `__main__`, `cli`, `web` etc. — entry points) |
+| Page/route prose in §2.1 | Web forward page `/api/forward/*` = **precomputed replay** (unchanged); `/portfolio` is now a landing with `/portfolio/paper` + `/portfolio/live` bucket pages (P4.1) |
+| §2.2 `api/backtest` → `runner`/`engine.backtester` | Now imports `engine.backtest_driver`, `forward.paper_runner`, `simulator.portfolio` (see `graph.txt`) |
+| §4.3 "tables referenced but NOT defined" | `forward_test_state/trades/equity` refs removed with `live_engine` — no longer referenced anywhere |
+
+> Next docs pass: rewrite §1–§7 against `graph.txt` (tracked in
+> `PROJECT-CONTEXT.md` → Next Steps).
 
 ---
 

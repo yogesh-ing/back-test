@@ -7,10 +7,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from backtest.data.source_tags import app_source_tag
 from backtest.engine.backtester import BacktestConfig
 from backtest.engine.plotting import plot_comparison, plot_result
 from backtest.logging_config import configure_logging
-from backtest.runner import RunSpec, build_source, compare_strategies, run_backtest
+from backtest.runner import RunSpec, build_source, compare_strategies, run_on_source
 from backtest.strategy.registry import get_strategy, list_strategies
 
 
@@ -54,7 +55,7 @@ def run_command(args):
         stop_loss=args.stop_loss,
         take_profit=args.take_profit,
     )
-    result = run_backtest(source, spec, cfg)
+    result = run_on_source(source, spec, cfg)
     _print_metrics(result)
     if (args.plot or not args.no_chart) and not args.json:
         default_path = f"charts/{args.strategy}_{args.symbol}_{args.interval}_{int(datetime.now().timestamp())}.png"
@@ -104,6 +105,10 @@ def papertrade_command(args):
         if not args.from_date or not args.to_date:
             raise ValueError("--from and --to required for walkforward mode")
         source = build_source(args.source, data_root=args.data_root)
+        # Ticket #10: surface the canonical taxonomy tag at the point of use
+        # (imported, never re-declared) — the CLI/UI must not hide which
+        # classification a run was started under.
+        print(f"data_source_tag={app_source_tag(args.source)} (--source={args.source})")
         names = [n.strip() for n in args.strategies.split(",") if n.strip()]
         allocations = {name: args.capital for name in names}
         result = run_walkforward(source, names, args.symbol, args.from_date, args.to_date, allocations=allocations, interval=args.interval)
@@ -116,6 +121,10 @@ def papertrade_command(args):
             raise ValueError("--from and --to required for live mode")
         state_file = args.state_file or ".live_papertrade_state.json"
         source = build_source(args.source, data_root=args.data_root)
+        # Ticket #10: surface the canonical taxonomy tag at the point of use
+        # (imported, never re-declared) — the CLI/UI must not hide which
+        # classification a run was started under.
+        print(f"data_source_tag={app_source_tag(args.source)} (--source={args.source})")
         names = [n.strip() for n in args.strategies.split(",") if n.strip()]
         allocations = {name: args.capital for name in names}
         result = run_live_papertrade(

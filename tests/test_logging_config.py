@@ -338,17 +338,21 @@ def test_forward_lifecycle_is_logged(client, caplog):
 
     fwd._reset_session()
     with caplog.at_level(logging.DEBUG, logger="backtest"):
+        # Ticket #10: mode and source are separate taxonomy dimensions now.
         client.post("/api/forward/start", json={
-            "strategy": "sma_crossover", "symbol": "DEMO", "mode": "synthetic",
+            "strategy": "sma_crossover", "symbol": "DEMO",
+            "mode": "paper", "source": "synthetic",
             "from_date": "2024-01-01", "to_date": "2024-06-30", "capital": 10000,
         })
         client.get("/api/forward/status")
         client.post("/api/forward/stop", json={})
 
+        # Live is refused (no broker session here) — loudly, never paper-filled.
         client.post("/api/forward/start",
-                    json={"strategy": "sma_crossover", "symbol": "DEMO", "mode": "live"})
+                    json={"strategy": "sma_crossover", "symbol": "DEMO",
+                          "mode": "live", "source": "mstock"})
     text = caplog.text
-    assert "[forward] /start strategy=sma_crossover symbol=DEMO mode=synthetic" in text
+    assert "[forward] /start strategy=sma_crossover symbol=DEMO mode=paper source=synthetic" in text
     # Session-scoped lines are tagged [forward:<short id>] so two replays can be
     # told apart in the log.
     assert re.search(r"\[forward:[0-9a-f]{8}\] replay running: 130 bars", text)

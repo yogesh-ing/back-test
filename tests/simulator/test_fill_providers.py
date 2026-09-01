@@ -184,6 +184,38 @@ def test_broker_no_fill_is_a_no_fill_not_an_error():
     assert len(broker.placed) == 1  # the order still went to the broker
 
 
+def test_unfilled_retry_polls_same_broker_order_never_replaces():
+    """Live retry semantics (ticket #8): an order still working after an
+    unfilled poll is POLLED again — the venue is never double-placed, and
+    the broker id rides the order so a resumed run continues the same order."""
+    class _PendingBroker:
+        def __init__(self):
+            self.placed = []
+            self.polled = []
+
+        def place_order(self, order):
+            self.placed.append(order)
+            return "BROKER-7"
+
+        def poll_fill(self, broker_order_id):
+            self.polled.append(broker_order_id)
+            return None
+
+    broker = _PendingBroker()
+    executor = OrderExecutor(config=_config(), fill_provider=BrokerFillProvider(broker))
+    order = _market_order(quantity=10, portfolio_id="pf-retry")
+    executor.submit(order)
+
+    assert executor.step(_bar(100.0)) == []  # arm (no fill attempt)
+    assert executor.step(_bar(100.0))[0].status == "no_fill"  # attempt 1
+    assert executor.step(_bar(100.0))[0].status == "no_fill"  # attempt 2
+
+    assert len(broker.placed) == 1  # placed exactly once
+    assert broker.polled == ["BROKER-7", "BROKER-7"]  # same venue order polled
+    # The broker id is stamped on the order (persisted in state v3).
+    assert order.broker_order_id == "BROKER-7"
+
+
 # ---------------------------------------------------------------------------
 # Executor honors an injected provider (any provider)
 # ---------------------------------------------------------------------------

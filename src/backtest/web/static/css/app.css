@@ -160,6 +160,10 @@ body[data-active="forward"]   .nav-link[data-key="forward"] {
     background: var(--primary); color: #fff; padding: 10px 16px; border-radius: 8px;
     margin-bottom: 16px; font-size: .9rem;
 }
+.banner button { margin-left: 8px; }
+/* Taxonomy risk hint (ticket #10) — loud when the selection is a live bucket. */
+.warn-text { color: #fcd34d; font-size: .82rem; }
+.btn-sm { padding: 3px 10px; font-size: .8rem; }
 
 /* ---------------- toast ---------------- */
 .toast-stack { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column; gap: 10px; z-index: 100; }
