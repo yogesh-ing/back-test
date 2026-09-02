@@ -4,7 +4,7 @@
 pieces fit together. Written from the code, not from the specs, so where the
 docs and the source disagree this file follows the source.*
 
-Last verified against commit `aa2b583` (2026-09-02).
+Last verified against commit `c8c078f` (2026-09-02).
 
 ---
 
@@ -45,6 +45,9 @@ sits — this is the single most important thing to understand before using it.
 | **Compare** | Run several strategies over the same data, side by side | `POST /api/backtest/run-many` |
 | **Forward test** | Paper-trade a replay — bars are revealed gradually, as if live | `POST /api/forward/start` |
 | **Portfolio** | Run many strategies at once under shared risk limits | `POST /api/portfolio/runner/create` |
+| **Portfolio (Live)** | Live-scoped command center — real money only | `GET /portfolio/live` |
+| **Portfolio (Paper)** | Paper sandbox — simulated fills only | `GET /portfolio/paper` |
+| **Portfolio (Overview)** | Combined view — Live prominent, Paper secondary | `GET /portfolio` |
 
 The distinction between **backtest** and **forward test** is the interesting
 one. A backtest computes the whole result instantly. A forward test replays the
@@ -124,7 +127,7 @@ Two subtleties worth knowing, both deliberate:
 
 ## 4. Built-in strategies
 
-Four, all in `src/backtest/strategies/`, all self-registering into a registry
+Five, all in `src/backtest/strategies/`, all self-registering into a registry
 via a `@register` decorator so the UI and CLI discover them automatically.
 
 | Name | Logic | Type |
@@ -133,6 +136,7 @@ via a `@register` decorator so the UI and CLI discover them automatically.
 | `sma_crossover` | Buy when fast moving average crosses above slow | Trend-following |
 | `rsi_reversion` | Buy oversold, sell overbought | Mean-reversion |
 | `donchian_breakout` | Buy on new N-day highs, sell on new lows | Momentum |
+| `price_move` | Buy/sell based on price movement threshold (e.g. ₹5) | Threshold-based |
 
 `buy_and_hold` exists to be beaten. If a clever strategy can't outperform
 "buy it and do nothing", the cleverness isn't paying for itself.
@@ -227,13 +231,47 @@ simultaneously**. Design properties:
   ledger, so fills can never be attributed to the wrong strategy.
 - **Tick-driven risk** — `risk_supervisor.py` runs on *every* feed tick.
 
+### Bucket separation (Live vs Paper)
+
+The portfolio is split into **two independent buckets** — Live and Paper —
+with complete isolation between them:
+
+- **Per-bucket state** — equity, peak equity, drawdown, and daily P&L are all
+  *derived* from each bucket's runners (not duplicated). A dict key like
+  `_bucket_peak["live"]` stores only the high-water mark; actual equity is
+  computed by summing `runner.equity()` for that bucket.
+- **Independent circuit breakers** — a paper breach does NOT halt live trading,
+  and vice versa. Each bucket has its own halt flag, day-anchor, and daily
+  loss tracking.
+- **Scoped bulk control** — `pause_all(mode="paper")` pauses only paper runners.
+  Without `mode=`, it acts as a master control on all buckets.
+- **Master kill** — `emergency_flatten_all()` without a mode flattens both
+  buckets. With `mode="live"`, it flattens only live positions.
+- **Capability flag** — `get_portfolio_summary()` includes a `capability`
+  dict indicating whether a broker is connected. The frontend uses this to
+  show "REAL MONEY" or "Simulated fills" on the Live page.
+
+### Three views
+
+| View | Route | Shows |
+|---|---|---|
+| **Overview** | `/portfolio` | Live command center (prominent) + Paper sandbox (compact) |
+| **Live** | `/portfolio/live` | Live runners only, scoped metrics, Emergency Flatten visible |
+| **Paper** | `/portfolio/paper` | Paper runners only, sandbox framing, no Emergency Flatten |
+
+All three views consume a **single SSE stream** (`/api/portfolio/stream`).
+The stream payload embeds per-bucket aggregates in the `buckets` field and
+the `capability` dict. Frontend filters client-side based on `PAGE_MODE`.
+
+### Risk supervisor
+
 The `RiskSupervisor` enforces portfolio-wide circuit breakers that **override
 individual strategy decisions**:
 
 | Breaker | Trigger |
 |---|---|
-| Global daily loss limit | Summed daily P&L across all runners breaches the limit |
-| Global max drawdown | Aggregate peak-to-trough equity drop exceeds a fraction |
+| Per-bucket daily loss limit | Daily P&L within one bucket breaches the limit |
+| Per-bucket max drawdown | Peak-to-trough equity drop in one bucket exceeds a fraction |
 | Concentration warning | 3+ runners hold LONG in the same correlation group |
 
 Two halt modes: `PAUSE_AND_HOLD` (stop new entries, let existing stops ride) and
@@ -329,7 +367,7 @@ src/backtest/
 └── runner.py        Orchestrates data → strategy → engine → results
 ```
 
-**Scale:** 98 Python modules, ~36,000 lines in `src/`; 61 test modules.
+**Scale:** 98 Python modules, ~36,000 lines in `src/`; 61 test modules, 1,875+ tests.
 
 ### One-result-shape rule
 
@@ -460,8 +498,8 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2
 
 ### Web pages
 
-`/` · `/backtest` · `/compare` · `/forward` · `/portfolio` · `/dashboard` ·
-`/data` · `/health`
+`/` · `/backtest` · `/compare` · `/forward` · `/portfolio` · `/portfolio/live` ·
+`/portfolio/paper` · `/dashboard` · `/data` · `/health`
 
 ### REST API
 
@@ -469,9 +507,10 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2
 - **Strategies** — `GET /api/strategies`, `/api/strategies/<name>/params`
 - **Forward** — `POST /api/forward/start`, `/stop`; `GET /status`, `/sessions`,
   `/trades`, `/equity`
-- **Portfolio** — `GET /summary`, `/universes`, `/runner/<id>`, `/stream` (SSE);
-  `POST /runner/create`, `/runner/<id>/control`, `/control/<action>`,
-  `/emergency_stop`
+- **Portfolio** — `GET /summary`, `/universes`, `/runner/<id>`, `/stream` (SSE),
+  `/buckets`; `POST /runner/create`, `/runner/<id>/control`, `/control/<action>`,
+  `/emergency_stop` — all control endpoints accept `?mode=live|paper` for
+  scoped bulk actions
 - **Broker** — `POST /api/broker/login`, `/verify-totp`, `/logout`;
   `GET /api/broker/status`
 - **Data** — `GET /api/data/status`, `/inventory`; `POST /api/data/fetch`, `/stop`
@@ -515,7 +554,9 @@ more. Persistence is tracked as V2 item #3.
 
 ## 14. Testing and quality
 
-- **1,875 tests passing**, 4 skipped (need real mStock credentials).
+- **1,875+ tests passing**, 4 skipped (need real mStock credentials).
+  Portfolio-specific: 116 tests covering bucket state, breaker independence,
+  flow semantics, scoped API endpoints, and UI views.
 - 36 JavaScript behaviour assertions across 4 Node harnesses (`tests/js/*.mjs`).
 - Coverage gate: **80% minimum**, enforced in `tox.ini`.
 - `tests/` splits into `unit/`, `integration/`, `e2e/`, `js/`, `manual/`,
@@ -587,8 +628,9 @@ Straight from the code and trackers, not aspirational:
 | What are the strategies doing? | `docs/STRATEGIES.md` |
 | How does forward testing work? | `docs/FORWARD-TESTING.md` |
 | Multi-strategy portfolios? | `docs/PORTFOLIO-CENTER.md` |
+| Live/Paper separation design | `instructions/REFACTOR-PORTFOLIO-LIVE-PAPER-SEPARATION.md` |
 | Schema and migrations? | `docs/DATABASE.md`, `db/DB-IMPLEMENTATION-GUIDE.md` |
 | Something is broken | `instructions/ENGINEERING-NOTES.md`, `docs/LOGGING.md` |
-| What is done, what is planned? | `instructions/TASK-TRACKER.md` |
+| What is done, what is planned? | `instructions/ROADMAP.md`, `instructions/BACKLOG.md` |
 | Invariants I must not break | `PROJECT-CONTEXT.md` |
 | mStock endpoints | `docs/archive/mstock-typea-api-reference.md` |

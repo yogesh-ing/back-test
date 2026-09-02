@@ -37,6 +37,9 @@ Market Data (OHLCV candles)
 | **Backtest** | Run a strategy on historical data, see results |
 | **Compare** | Run multiple strategies side-by-side on the same data |
 | **Forward Test** | Paper-trade a strategy in simulated real-time — the replay clock runs on the server, so it keeps advancing with the tab closed |
+| **Portfolio** | Run multiple strategies simultaneously under shared risk limits |
+| **Portfolio (Live)** | Live-scoped command center — only real-money positions |
+| **Portfolio (Paper)** | Paper sandbox — simulated fills, no risk |
 | **Dashboard** | Overview of all strategies and their status |
 
 ## Built-In Strategies
@@ -47,6 +50,7 @@ Market Data (OHLCV candles)
 | **SMA Crossover** | Buy when fast MA crosses above slow MA |
 | **RSI Reversion** | Buy oversold, sell overbought (mean-reversion) |
 | **Donchian Breakout** | Buy on new highs, sell on new lows (momentum) |
+| **Price Move** | Buy/sell based on price movement threshold (e.g. ₹5) |
 
 ## Data Sources
 
