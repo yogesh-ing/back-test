@@ -2,27 +2,21 @@
 {% block title %}Portfolios{% endblock %}
 
 {% block content %}
-<style>
-    .bucket-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 12px; }
-    .bucket-card { text-decoration: none; color: inherit; display: block; transition: transform .12s ease, box-shadow .12s ease; }
-    .bucket-card:hover { transform: translateY(-2px); box-shadow: 0 4px 14px rgba(0,0,0,.12); }
-    .bucket-name { font-size: 1.15rem; font-weight: 700; margin-bottom: 8px; }
-    .bucket-row { display: flex; justify-content: space-between; padding: 2px 0; }
-    .bucket-go { margin-top: 10px; font-weight: 600; }
-    .pcc-scope-banner { margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; background: rgba(64,120,255,.08); border: 1px solid rgba(64,120,255,.35); }
-</style>
+
+
+<!-- Bucket summary cards -->
 <div class="card pcc-header portfolio-landing">
     <div class="pcc-title-row">
         <div>
-            <h1 class="pcc-title">📊 Portfolios</h1>
-            <div class="muted">Two buckets, one ledger — <strong>paper</strong> (simulated fills) and <strong>live</strong> (broker execution).</div>
+            <h1 class="pcc-title">📊 Portfolio Overview</h1>
+            <div class="muted">Two buckets, one ledger — <strong>live</strong> (real money) and <strong>paper</strong> (simulated).</div>
         </div>
     </div>
     <div class="bucket-cards">
         {% for mode in bucket_modes %}
         {% set b = buckets[mode] %}
         <a class="card bucket-card" href="/portfolio/{{ mode }}">
-            <div class="bucket-name">{{ "📄 " if mode == "paper" else "🔴 " }}{{ mode | upper }}</div>
+            <div class="bucket-name">{{ "🔴 " if mode == "live" else "📄 " }}{{ mode | upper }}</div>
             <div class="bucket-row"><span>Instances</span><strong>{{ b.count }}</strong></div>
             <div class="bucket-row"><span>Allocated</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.allocated) }}</strong></div>
             <div class="bucket-row"><span>Equity</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.equity) }}</strong></div>
@@ -33,7 +27,52 @@
         {% endfor %}
     </div>
 </div>
-{% include "_portfolio_center.html" %}
+
+<!-- Live section: full command center (primary) -->
+<div class="overview-section">
+    <div class="overview-section-header">
+        <span class="section-badge badge-live-sec">🔴 LIVE</span>
+        <span class="overview-section-title">Live Command Center</span>
+        <a href="/portfolio/live" class="section-link">Full view →</a>
+    </div>
+    {% with mode = "live" %}{% include "_portfolio_center.html" %}{% endwith %}
+</div>
+
+<!-- Paper section: compact summary (secondary) -->
+<div class="overview-section">
+    <div class="overview-section-header">
+        <span class="section-badge badge-paper-sec">📄 PAPER</span>
+        <span class="overview-section-title">Paper Sandbox</span>
+        <a href="/portfolio/paper" class="section-link">Full view →</a>
+    </div>
+    <div class="card" style="padding: 12px 16px;">
+        <div class="muted" style="margin-bottom: 8px;">Simulated fills only — no real money at risk.</div>
+        <table class="paper-summary-table">
+            <thead>
+                <tr>
+                    <th>Instances</th>
+                    <th>Allocated</th>
+                    <th>Equity</th>
+                    <th>Daily P&amp;L</th>
+                    <th>Realized P&amp;L</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% set pb = buckets.get("paper", {}) %}
+                <tr>
+                    <td>{{ pb.count or 0 }}</td>
+                    <td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.allocated or 0) }}</td>
+                    <td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.equity or 0) }}</td>
+                    <td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.daily_pnl or 0) }}</td>
+                    <td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.realized_pnl or 0) }}</td>
+                    <td>{{ pb.running or 0 }} running · {{ pb.paused or 0 }} paused</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}

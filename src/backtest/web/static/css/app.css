@@ -499,3 +499,112 @@ body[data-active="portfolio"] .nav-link[data-key="portfolio"] {
 
 /* Open (marked-to-market) trade row — deliberately not green/red (gap G1 rule). */
 .tag-open { color: var(--muted); font-weight: 600; }
+
+/* =====================================================================
+ * Portfolio Overview — Live / Paper accent colors (T4.1–T4.3)
+ * ===================================================================== */
+
+/* Section headers */
+.overview-section { margin-bottom: 24px; }
+.overview-section-header {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 10px;
+}
+.overview-section-title { font-size: 1rem; font-weight: 700; }
+.section-badge {
+    font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; font-weight: 600;
+    letter-spacing: 0.03em;
+}
+
+/* T4.1: Live accent — red/orange */
+.badge-live-sec {
+    background: rgba(239,68,68,.15); color: #ef4444;
+    border: 1px solid rgba(239,68,68,.3);
+}
+.overview-live {
+    border-left: 3px solid rgba(239,68,68,.4);
+    padding-left: 12px;
+}
+.overview-live .metric-card {
+    border-color: rgba(239,68,68,.2);
+}
+.overview-live .metric-card:hover {
+    border-color: rgba(239,68,68,.4);
+}
+.overview-live .pcc-title {
+    color: #fca5a5;
+}
+
+/* T4.2: Paper accent — blue/neutral */
+.badge-paper-sec {
+    background: rgba(59,130,246,.15); color: #3b82f6;
+    border: 1px solid rgba(59,130,246,.3);
+}
+.overview-paper {
+    border-left: 3px solid rgba(59,130,246,.3);
+    padding-left: 12px;
+}
+
+/* T4.3: Overview bucket cards */
+.portfolio-landing .bucket-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+    margin-bottom: 20px;
+}
+.portfolio-landing .bucket-card {
+    text-decoration: none; color: inherit; display: block;
+    transition: transform .12s ease, box-shadow .12s ease;
+}
+.portfolio-landing .bucket-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 14px rgba(0,0,0,.12);
+}
+.portfolio-landing .bucket-name {
+    font-size: 1.15rem; font-weight: 700; margin-bottom: 8px;
+}
+.portfolio-landing .bucket-row {
+    display: flex; justify-content: space-between; padding: 2px 0;
+}
+.portfolio-landing .bucket-go {
+    margin-top: 10px; font-weight: 600;
+}
+
+/* Paper Sandbox summary table */
+.paper-summary-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.paper-summary-table th {
+    text-align: left; padding: 6px 8px; color: var(--muted);
+    border-bottom: 1px solid rgba(148,163,184,.15);
+}
+.paper-summary-table td {
+    padding: 6px 8px; border-bottom: 1px solid rgba(148,163,184,.08);
+}
+.paper-summary-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Section links */
+.section-link {
+    margin-left: auto; font-size: 0.8rem; color: #64748b; text-decoration: none;
+}
+.section-link:hover { color: #e2e8f0; }
+
+/* Capability-driven banners (C6) */
+.capability-banner {
+    margin-bottom: 10px; padding: 8px 12px; border-radius: 8px;
+    font-weight: 600; font-size: 0.9rem;
+}
+.capability-live {
+    background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.4);
+    color: #ef4444;
+}
+.capability-sim {
+    background: rgba(59,130,246,.08); border: 1px solid rgba(59,130,246,.3);
+    color: #60a5fa;
+}
+
+/* Sandbox banner (T3.3) */
+.sandbox-banner {
+    margin-bottom: 10px; padding: 8px 12px; border-radius: 8px;
+    background: rgba(59,130,246,.08); border: 1px solid rgba(59,130,246,.3);
+    color: #60a5fa; font-weight: 600; font-size: 0.9rem;
+}

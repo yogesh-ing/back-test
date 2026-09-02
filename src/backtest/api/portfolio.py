@@ -221,7 +221,7 @@ def control_runner(instance_id: str) -> Tuple[Response, int]:
     except (ValueError, RuntimeError) as exc:
         return _error(str(exc), 409)
     log.info("runner %s: action=%s → %s", instance_id, action, state.get("status", "?"))
-    return jsonify({"success": True, "action": action, "runner": state}), 200
+    return jsonify({"success": True, "action": action, "scope": state.get("mode", "paper"), "runner": state}), 200
 
 
 @portfolio_bp.delete("/api/portfolio/runner/<instance_id>")
@@ -274,6 +274,7 @@ def bulk_control(action: str) -> Tuple[Response, int]:
                 "success": True,
                 "action": action,
                 "affected": n,
+                "scope": mode or "all",
                 "portfolio": manager.get_portfolio_summary(),
             }
         ),
@@ -301,6 +302,7 @@ def emergency_stop() -> Tuple[Response, int]:
             {
                 "success": True,
                 "flattened_positions": count,
+                "scope": mode or "all",
                 "portfolio": _manager().get_portfolio_summary(),
             }
         ),

@@ -25,6 +25,34 @@
   // Bucket scope (ticket P4.1): /portfolio/paper and /portfolio/live set
   // data-mode on #portfolio-page; the combined landing leaves it empty.
   const PAGE_MODE = $("portfolio-page") ? $("portfolio-page").dataset.mode || "" : "";
+
+  // T2.1: Derive scoped metrics from embedded bucket aggregates (C4).
+  // When PAGE_MODE is set, the metric cards show THAT bucket's numbers,
+  // not the combined total.  This is the single source of truth (AC-15).
+  function bucketMetrics(p) {
+    if (!PAGE_MODE || !p.buckets || !p.buckets[PAGE_MODE]) return p;
+    const b = p.buckets[PAGE_MODE];
+    // Merge bucket aggregate into the top-level shape that renderMetrics expects.
+    return Object.assign({}, p, {
+      total_capital: b.capital,
+      total_equity: b.equity,
+      deployed_capital: b.deployed_capital,
+      deployed_pct: b.capital > 0 ? b.deployed_capital / b.capital : 0,
+      daily_pnl: b.daily_pnl,
+      daily_pnl_pct: b.daily_pnl_pct,
+      realized_pnl: b.realized_pnl,
+      open_positions: b.open_positions,
+      runner_count: b.count,
+      running: b.running,
+      paused: b.paused,
+      halted: b.halted,
+      halt_reason: b.halt_reason,
+      peak_equity: b.peak_equity,
+      drawdown_pct: b.drawdown_pct,
+      daily_loss_used: b.daily_loss_used,
+      daily_loss_pct: b.daily_loss_pct,
+    });
+  }
   const fmtMoney = (n, currency) => {
     const c = currency || "₹";
     const sign = n < 0 ? "-" : "";
@@ -226,19 +254,25 @@
     const canvas = $("portfolio-equity-chart");
     if (!canvas || typeof Chart === "undefined") return;
 
-    // Lightweight live series: total portfolio equity appended on every frame.
-    // (Per-runner equity curves are shown in the deep-dive drawer.)
+    // T2.2: Use bucket equity when scoped, combined when not.
+    const equity = (PAGE_MODE && p.buckets && p.buckets[PAGE_MODE])
+      ? p.buckets[PAGE_MODE].equity
+      : p.total_equity;
+
+    // Lightweight live series: equity appended on every frame.
     if (!window._pccEquity) window._pccEquity = [];
-    window._pccEquity.push({ t: Date.now(), equity: p.total_equity });
+    window._pccEquity.push({ t: Date.now(), equity: equity });
     if (window._pccEquity.length > 300) window._pccEquity.shift();
     const series = window._pccEquity;
 
     const labels = series.map((_, i) => i);
     const data = series.map((s) => s.equity);
+    const label = PAGE_MODE ? PAGE_MODE.charAt(0).toUpperCase() + PAGE_MODE.slice(1) + " Equity" : "Portfolio Equity";
 
     if (state.chart) {
       state.chart.data.labels = labels;
       state.chart.data.datasets[0].data = data;
+      state.chart.data.datasets[0].label = label;
       state.chart.update("none");
       return;
     }
@@ -247,10 +281,10 @@
       data: {
         labels,
         datasets: [{
-          label: "Portfolio Equity",
+          label: label,
           data,
-          borderColor: "#3b82f6",
-          backgroundColor: "rgba(59,130,246,.12)",
+          borderColor: PAGE_MODE === "live" ? "#ef4444" : PAGE_MODE === "paper" ? "#3b82f6" : "#3b82f6",
+          backgroundColor: PAGE_MODE === "live" ? "rgba(239,68,68,.12)" : "rgba(59,130,246,.12)",
           fill: true,
           borderWidth: 2,
           pointRadius: 0,
@@ -274,11 +308,27 @@
     // SSE broadcasts the combined snapshot — drop other buckets on a scoped page.
     if (PAGE_MODE) p.runners = (p.runners || []).filter((r) => (r.mode || "paper") === PAGE_MODE);
     state.portfolio = p;
-    renderMetrics(p);
+    // T2.1: Metrics use bucket-scoped data when PAGE_MODE is set.
+    renderMetrics(bucketMetrics(p));
     renderBanner(p);
     renderMatrix(p);
     renderAggregatePositions(p);
     renderChart(p);
+    // T2.5: Hide Emergency Flatten on Paper page (paper = no real money at risk).
+    const emergencyBtn = $("btn-emergency");
+    if (emergencyBtn) emergencyBtn.hidden = (PAGE_MODE === "paper");
+    // C6: Capability-driven banner on Live page.
+    const capBanner = $("capability-banner");
+    if (capBanner && PAGE_MODE === "live" && p.capability) {
+      capBanner.style.display = "block";
+      if (p.capability.broker_connected) {
+        capBanner.textContent = "🔴 " + p.capability.live_banner + " — broker connected, real fills active";
+        capBanner.className = "capability-banner capability-live";
+      } else {
+        capBanner.textContent = "📋 " + p.capability.live_banner + " — connect broker to enable real fills";
+        capBanner.className = "capability-banner capability-sim";
+      }
+    }
   }
 
   // ---------------------------------------------------------------- SSE
@@ -288,7 +338,16 @@
       try {
         const p = JSON.parse(ev.data);
         $("feed-dot").textContent = "🟢";
-        $("feed-label").textContent = "Live · " + p.runner_count + " runners · " +
+        // T2.3: Show bucket-scoped runner count when PAGE_MODE is set.
+        const runnerCount = PAGE_MODE && p.buckets && p.buckets[PAGE_MODE]
+          ? p.buckets[PAGE_MODE].count
+          : p.runner_count;
+        const runningCount = PAGE_MODE && p.buckets && p.buckets[PAGE_MODE]
+          ? p.buckets[PAGE_MODE].running
+          : p.running;
+        $("feed-label").textContent =
+          (PAGE_MODE ? PAGE_MODE.charAt(0).toUpperCase() + PAGE_MODE.slice(1) + " · " : "Live · ") +
+          runnerCount + " runners · " + runningCount + " running · " +
           (p.tick || 0) + " ticks · " + p.fill_count + " fills";
         render(p);
       } catch (e) { /* ignore malformed frame */ }
@@ -310,11 +369,14 @@
     } catch (e) { toast(e.message, "error"); }
   }
 
+  // T2.4: Bulk actions scoped to PAGE_MODE when set.
   async function bulk(action, confirmMsg) {
     if (confirmMsg && !window.confirm(confirmMsg)) return;
     try {
-      const data = await api("/api/portfolio/control/" + action, "POST", {});
-      addAudit("Bulk action " + action + " (" + (data.affected || 0) + " affected)", "action");
+      const url = "/api/portfolio/control/" + action + (PAGE_MODE ? "?mode=" + PAGE_MODE : "");
+      const data = await api(url, "POST", {});
+      addAudit("Bulk action " + action + (PAGE_MODE ? " [" + PAGE_MODE + "]" : "") +
+        " (" + (data.affected || 0) + " affected)", "action");
       toast(action + " done", "success");
     } catch (e) { toast(e.message, "error"); }
   }
@@ -437,12 +499,19 @@
     $("emergency-confirm").addEventListener("click", async () => {
       $("emergency-modal").hidden = true;
       try {
-        const data = await api("/api/portfolio/emergency_stop", "POST", { reason: "manual" });
-        addAudit("EMERGENCY FLATTEN: " + data.flattened_positions + " positions closed", "danger");
+        // T2.4: Send mode= when scoped to a bucket.
+        const body = { reason: "manual" };
+        if (PAGE_MODE) body.mode = PAGE_MODE;
+        const data = await api("/api/portfolio/emergency_stop", "POST", body);
+        addAudit("EMERGENCY FLATTEN" + (PAGE_MODE ? " [" + PAGE_MODE + "]" : "") +
+          ": " + data.flattened_positions + " positions closed", "danger");
         toast("Emergency flatten executed", "error");
       } catch (e) { toast(e.message, "error"); }
     });
-    $("cb-reset-btn").addEventListener("click", () => bulk("reset_breaker").then(() => bulk("resume_all")));
+    $("cb-reset-btn").addEventListener("click", () => {
+      // T2.4: Reset breaker scoped to PAGE_MODE, then resume scoped runners.
+      bulk("reset_breaker").then(() => bulk("resume_all"));
+    });
 
     // Modal close buttons
     document.querySelectorAll("[data-close]").forEach((b) =>

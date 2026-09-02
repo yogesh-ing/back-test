@@ -139,8 +139,9 @@ def test_landing_page_shows_both_buckets(client):
     _spawn(client, "LIVE-ONE", mode="live")
     html = client.get("/portfolio").get_data(as_text=True)
     assert "📄 PAPER" in html and "🔴 LIVE" in html
-    # The combined command center is present (both buckets visible there).
-    assert 'id="portfolio-page" data-mode=""' in html
+    # Overview now shows Live Command Center (scoped to live) + Paper Sandbox summary.
+    assert 'data-mode="live"' in html
+    assert "Paper Sandbox" in html
 
 
 # NOTE: names/ids avoid the substring "live" — CI runs `-k "not live"` to
