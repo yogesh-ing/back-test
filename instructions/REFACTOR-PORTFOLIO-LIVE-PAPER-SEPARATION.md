@@ -8,6 +8,8 @@
 **Commits:**
 - `e57a4ed` Phase 1 backend: per-bucket state, breakers, scoped API, 75 new tests
 - `9ca7025` Phase 2-4 frontend: scoped metrics, redesigned Overview, accent colors, AC-16
+- `15713e9` Design doc updated with completion status
+- `a8b144d` ← Overview back link on scoped pages
 
 ---
 
