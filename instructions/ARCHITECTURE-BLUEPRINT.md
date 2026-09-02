@@ -1,10 +1,17 @@
 # Architecture Blueprint — `back-test`
 
 > ⚠️ **STALE BODY — see Errata below.** The prose in §1–§7 was written against the
-> pre-refactor tree. The **`graph.txt` dependency map is authoritative for the
-> current structure** (it matches the code). Treat any §1/§2/§7 claim that
-> contradicts the code or `graph.txt` as historical. Do not plan new work from
-> §7's "current" descriptions without re-checking the code.
+> pre-refactor tree. The **`graph.txt` dependency map (now archived in
+> `docs/archive/instructions/graph.txt`) was authoritative as of commit b68e328**
+> but is itself outdated. Treat any §1/§2/§7 claim that contradicts the current
+> code as historical. Do not plan new work from §7's "current" descriptions
+> without re-checking the code.
+>
+> **Status (2026-09-02):** This document is retained as a historical reference.
+> The current architecture is described in `docs/project-overview.md` and the
+> dependency map is generated fresh via `python -m backtest.web.app` imports.
+> Sections §3–§6 (data flows, DB schema, execution paths) remain largely
+> accurate and useful for understanding the system's design intent.
 
 > Read-only audit blueprint.
 > **Version: 2.1** · Date: 2026-09-01 · Commit baseline: `6a40756`

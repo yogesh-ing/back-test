@@ -1,8 +1,44 @@
-# Rebuild Instruction Cards — index
+# Instructions Index
 
-A model can rebuild the entire `backtest` system (backtesting + comparison +
-forward testing) from these cards **without copying source**. Each card is
-self-contained; build them **in order** and pass the checks before moving on.
+This folder contains design documents, reference cards, and project management files for the backtest system.
+
+## Remaining reference cards
+
+These cards are still useful as **reference material** for the built system:
+
+| # | Card | Purpose |
+|---|------|---------|
+| 00 | `00-INVARIANTS.md` | The non-negotiable behavioral contract (no-lookahead, costs, SL/TP) |
+| 06 | `06-ACCEPTANCE-TESTS.md` | The 22 acceptance tests that pin behavior |
+| 07 | `07-LIVE-BRINGUP.md` | mStock live bring-up checklist (network egress gate) |
+| 08 | `08-ALLOWED-BUILDING-BLOCKS.md` | Allowed pandas/numpy primitives for strategies |
+
+> Cards 00 and 08 remain authoritative — the invariants and allowed primitives
+> are still the contract for any new strategy or module.
+
+## Archived cards (moved to `docs/archive/instructions/`)
+
+Cards 01–05 were **rebuild-from-scratch guides** written before the system was
+built. Since the system is complete, they are historical:
+
+| Card | Was | Status |
+|------|-----|--------|
+| 01 | Skeleton, env, packaging | ✅ Built — system is pip-installable |
+| 02 | Data layer (synthetic, CSV, mStock) | ✅ Built — plus DbSource, source_registry |
+| 03 | Strategy plugin system + 4 built-ins | ✅ Built — now 5 strategies |
+| 04 | Engine, metrics, plotting, runner, CLI | ✅ Built — plus backtest_driver, engine_loop |
+| 05 | Forward testing / paper trading | ✅ Built — plus portfolio manager, risk supervisor |
+
+## Other documents in this folder
+
+| File | Purpose |
+|------|---------|
+| `README.md` | This index file |
+| `ROADMAP.md` | Phased plan (Phase 0→6) |
+| `BACKLOG.md` | Tactical enhancement items |
+| `ARCHITECTURE-BLUEPRINT.md` | Historical architecture map (stale body, retained as reference) |
+| `ENGINEERING-NOTES.md` | Debugging playbook — symptom→cause→where-to-look |
+| `REFACTOR-PORTFOLIO-LIVE-PAPER-SEPARATION.md` | Live/Paper separation design + completion status |
 
 ## Read this first
 - **Language:** Python ≥ 3.10. **Run convention:** `PYTHONPATH=src`, entry
@@ -15,36 +51,13 @@ self-contained; build them **in order** and pass the checks before moving on.
   4. Only code strategies/new files as specified; don't alter shared infra to
      change results.
 
-## Cards (build order)
-| # | Card | Builds |
-|---|------|--------|
-| 00 | `00-INVARIANTS.md` | The non-negotiable behavioral contract |
-| 01 | `01-SKELETON-ENV.md` | File tree, deps, packaging, `.env`, run setup |
-| 02 | `02-DATA-LAYER.md` | `data/`: base contract, synthetic, csv, mStock |
-| 03 | `03-STRATEGY-SYSTEM.md` | `strategy/` plug-in system + 4 built-ins |
-| 04 | `04-ENGINE-CLI.md` | engine, metrics, plotting, runner, CLI |
-| 05 | `05-FORWARD-TESTING.md` | `forward/` paper trading + portfolio management |
-| 06 | `06-ACCEPTANCE-TESTS.md` | The 22 tests + final gate (pins behavior) |
-| 07 | `07-LIVE-BRINGUP.md` | mStock live bring-up + build-order checklist |
-| 08 | `08-ALLOWED-BUILDING-BLOCKS.md` | Allowed APIs/primitives (curb hallucinations) |
-
-## Dependency flow
-`00 → 01 → 02 → 03 → 04` gives a working **backtest + compare** on synthetic
-data (verify with Card 06 tests 1–19). Then `05` adds **forward testing**
-(tests 20–22). `07` is live-market bring-up, only where market access exists.
-
-> Cards 00 and 06 are the two you must not cut corners on: the invariants and
-> the acceptance tests are what make a rebuilt system trustworthy for live use.
-> Card 08 keeps lower-capability models from inventing APIs; keep it in context
-> whenever authoring strategies or new modules.
-
 ## Current System Status (as of 2026-09-02)
 
 ### Completed Modules
 | Module | Status | Tests |
 |--------|--------|-------|
 | **Backtest engine** | ✅ Done | Vectorized engine with SL/TP, trailing stop, time exit |
-| **Strategy system** | ✅ Done | Pluggable plugin system, 6 built-in strategies |
+| **Strategy system** | ✅ Done | Pluggable plugin system, 5 built-in strategies |
 | **Data layer** | ✅ Done | Synthetic, CSV, mStock (read-only), source tags |
 | **Compare command** | ✅ Done | Multi-strategy ranking, equity overlay chart |
 | **Forward testing** | ✅ Done | Event-driven runner, SimulatedBroker, state persistence |
