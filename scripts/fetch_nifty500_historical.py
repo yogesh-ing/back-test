@@ -34,38 +34,34 @@ from backtest.live.auth import login, verify_totp, get_auth_code
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-DB_URL = os.getenv(
-    "FORWARD_TEST_DB_URL",
-    "postgresql+psycopg2://postgres:postgres@localhost:5432/forward_test",
-)
+from backtest.db.config import get_db_url
+
+DB_URL = get_db_url()
 MSTOCK_BASE_URL = os.getenv("MSTOCK_BASE_URL", "https://api.mstock.trade").rstrip("/")
 EXCHANGE = "NSE"
-TIMEFRAME = "day"  # default, overridden by --timeframe flag
+TIMEFRAME = "1day"  # default, overridden by --timeframe flag
 REQUEST_DELAY = 0.5  # seconds between API calls to avoid rate limits
 
 # Chunk sizes: mStock API returns max 1000 candles per request
 MAX_CANDLES = 1000
 CHUNK_DAYS = {
-    "day": 800,       # ~3.2 years of daily data
+    "1day": 800,      # ~3.2 years of daily data
     "1min": 2,         # ~2 trading days (375 bars/day)
     "5min": 10,        # ~2 weeks
     "15min": 30,       # ~1.5 months
-    "30min": 60,       # ~3 months
-    "60min": 120,      # ~6 months
-    "1hour": 120,
+    "1hour": 120,      # ~6 months
+    "4hour": 240,      # ~1 year
 }
 
-# mStock API uses different interval names than our internal ones
-# Our internal: 1min, 5min, 15min, 30min, 60min, day
-# mStock API:   minute, 5minute, 15minute, 30minute, 60minute, day
+# mStock API uses different interval names than our canonical ones.
+# Canonical -> mStock wire format (from backtest.data.base.MSTOCK_INTERVAL_MAP).
 _MSTOCK_INTERVAL_MAP = {
     "1min": "minute",
     "5min": "5minute",
     "15min": "15minute",
-    "30min": "30minute",
-    "60min": "60minute",
     "1hour": "60minute",
-    "day": "day",
+    "1day": "day",
+    "1week": "week",
 }
 
 
@@ -316,13 +312,13 @@ def print_summary(engine):
         SELECT symbol, count(*) as bars,
                min(ts) as earliest, max(ts) as latest
         FROM market_data_cache
-        WHERE exchange IN ('NSE', 'BSE') AND timeframe = 'day'
+        WHERE exchange IN ('NSE', 'BSE') AND timeframe = '1day'
         GROUP BY symbol
         ORDER BY symbol
     """)
 
     # Get total count
-    total_sql = text("SELECT count(DISTINCT symbol) as symbols, count(*) as total_bars FROM market_data_cache WHERE exchange IN ('NSE', 'BSE') AND timeframe = 'day'")
+    total_sql = text("SELECT count(DISTINCT symbol) as symbols, count(*) as total_bars FROM market_data_cache WHERE exchange IN ('NSE', 'BSE') AND timeframe = '1day'")
     with engine.connect() as conn:
         totals = conn.execute(total_sql).mappings().first()
         rows = conn.execute(sql).mappings().all()
@@ -351,9 +347,9 @@ def main():
                         help="End date YYYY-MM-DD (default: today)")
     parser.add_argument("--limit", type=int, default=None,
                         help="Max instruments to fetch (for testing)")
-    parser.add_argument("--timeframe", type=str, default="day",
-                        choices=["day", "1min", "5min", "15min", "30min", "60min", "1hour"],
-                        help="Timeframe to fetch (default: day)")
+    parser.add_argument("--timeframe", type=str, default="1day",
+                        choices=["1day", "1min", "5min", "15min", "1hour", "4hour"],
+                        help="Timeframe to fetch (default: 1day)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be fetched without fetching")
     parser.add_argument("--skip-existing", action="store_true",

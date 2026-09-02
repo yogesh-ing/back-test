@@ -211,16 +211,17 @@ class LogLevel(StrEnum):
 
 
 class Timeframe(StrEnum):
+    #: Canonical timeframe vocabulary (migration 003). Every layer —
+    #: API, config, DB (``market_data_cache.timeframe`` CHECK), UI,
+    #: feeds — speaks these names. Aligns with
+    #: :data:`~backtest.data.base.CANONICAL_TIMEFRAMES`.
     M1 = "1min"
-    M3 = "3min"
     M5 = "5min"
     M15 = "15min"
-    M30 = "30min"
-    M60 = "60min"
     H1 = "1hour"
-    DAY = "day"
-    WEEK = "week"
-    MONTH = "month"
+    H4 = "4hour"
+    DAY = "1day"
+    WEEK = "1week"
 
 
 def _in_check(column: str, enum_cls: type[StrEnum]) -> str:

@@ -3,4 +3,5 @@ __all__ = [
     "sma_crossover",
     "rsi_reversion",
     "donchian_breakout",
+    "price_move",
 ]
