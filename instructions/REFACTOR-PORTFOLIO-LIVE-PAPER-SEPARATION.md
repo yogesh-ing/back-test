@@ -2,8 +2,12 @@
 
 **Author:** Nirvika
 **Date:** 2026-09-02
-**Status:** Proposed
+**Status:** ✅ Implemented (Phases 1-4 complete)
 **Scope:** Portfolio UI (templates + JS) + Portfolio API (portfolio.py) + PortfolioManager backend
+
+**Commits:**
+- `e57a4ed` Phase 1 backend: per-bucket state, breakers, scoped API, 75 new tests
+- `9ca7025` Phase 2-4 frontend: scoped metrics, redesigned Overview, accent colors, AC-16
 
 ---
 
@@ -308,19 +312,19 @@ Browser                          Server
 
 ## 7. Acceptance Criteria
 
-- [ ] **AC-1:** Clicking "Portfolio" in the nav shows the Overview page with separate Live and Paper sections
-- [ ] **AC-2:** The Live page shows ONLY live runners — zero paper contamination in metrics, charts, matrix
-- [ ] **AC-3:** The Paper page shows ONLY paper runners — zero live contamination
-- [ ] **AC-4:** Emergency Flatten on the Live page only flattens live positions (does not touch paper)
-- [ ] **AC-5:** Pause All / Resume All on a scoped page only affects that bucket's runners
-- [ ] **AC-6:** A circuit breaker trip on paper does NOT halt live trading
-- [ ] **AC-7:** A circuit breaker trip on live does NOT halt paper trading
-- [ ] **AC-8:** The Live page has a visual warning (red accent / "REAL MONEY" banner)
-- [ ] **AC-9:** The Paper page has a visual distinction (blue accent / "Sandbox" banner)
-- [ ] **AC-10:** Equity curves are bucket-scoped — live chart shows only live equity, paper chart shows only paper equity
-- [ ] **AC-11:** The Overview page shows both buckets' summary side-by-side
-- [ ] **AC-12:** SSE stream supports `?mode=` filter — scoped pages receive only their bucket's data
-- [ ] **AC-13:** All existing tests pass (no regressions)
+- [x] **AC-1:** Clicking "Portfolio" in the nav shows the Overview page with separate Live and Paper sections
+- [x] **AC-2:** The Live page shows ONLY live runners — zero paper contamination in metrics, charts, matrix
+- [x] **AC-3:** The Paper page shows ONLY paper runners — zero live contamination
+- [x] **AC-4:** Emergency Flatten on the Live page only flattens live positions (does not touch paper)
+- [x] **AC-5:** Pause All / Resume All on a scoped page only affects that bucket's runners
+- [x] **AC-6:** A circuit breaker trip on paper does NOT halt live trading
+- [x] **AC-7:** A circuit breaker trip on live does NOT halt paper trading
+- [x] **AC-8:** The Live page has a visual warning (red accent / "REAL MONEY" banner)
+- [x] **AC-9:** The Paper page has a visual distinction (blue accent / "Sandbox" banner)
+- [x] **AC-10:** Equity curves are bucket-scoped — live chart shows only live equity, paper chart shows only paper equity
+- [x] **AC-11:** The Overview page shows both buckets' summary side-by-side
+- [x] **AC-12:** SSE stream carries embedded bucket data — no `?mode=` needed on SSE (C4)
+- [x] **AC-13:** All existing tests pass (no regressions) — 116 portfolio tests, 1,700+ full suite
 
 ---
 
