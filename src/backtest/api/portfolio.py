@@ -109,6 +109,17 @@ def universes() -> Tuple[Response, int]:
     return jsonify({"success": True, "universes": list_universes()}), 200
 
 
+@portfolio_bp.get("/api/portfolio/buckets")
+def buckets() -> Tuple[Response, int]:
+    """Per-bucket aggregates (C4/T1.7). Thin — delegates to the manager.
+
+    The same data is also embedded in ``/api/portfolio/summary`` and the
+    SSE stream; this endpoint exists for the Overview page which needs
+    bucket data without fetching the full instance list.
+    """
+    return jsonify({"success": True, "buckets": _manager().get_bucket_aggregates()}), 200
+
+
 @portfolio_bp.get("/api/portfolio/runner/<instance_id>")
 def runner_detail(instance_id: str) -> Tuple[Response, int]:
     try:
@@ -228,25 +239,35 @@ def remove_runner(instance_id: str) -> Tuple[Response, int]:
 
 @portfolio_bp.post("/api/portfolio/control/<action>")
 def bulk_control(action: str) -> Tuple[Response, int]:
+    """Bulk control with optional ``?mode=paper|live`` scope (C5).
+
+    ``mode`` scopes the action to one bucket. Omit for master (all buckets).
+    ``reset_breaker`` also accepts ``?mode=`` for scoped reset.
+    """
     manager = _manager()
     action = action.lower()
+    mode = request.args.get("mode") or None
+    if mode is not None:
+        mode = str(mode).strip().lower()
+        if mode not in VALID_INSTANCE_MODES:
+            return _error(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
     try:
         if action == "pause_all":
-            n = manager.pause_all()
+            n = manager.pause_all(mode=mode)
         elif action == "resume_all":
-            n = manager.resume_all()
+            n = manager.resume_all(mode=mode)
         elif action == "stop_all":
-            n = manager.stop_all()
+            n = manager.stop_all(mode=mode)
         elif action == "emergency_flatten":
-            n = manager.emergency_flatten_all(reason="manual_emergency")
+            n = manager.emergency_flatten_all(reason="manual_emergency", mode=mode)
         elif action == "reset_breaker":
-            manager.reset_circuit_breaker()
+            manager.reset_circuit_breaker(mode=mode)
             n = 0
         else:
             return _error(f"unknown bulk action: {action}")
     except RuntimeError as exc:
         return _error(str(exc), 409)
-    log.info("bulk action %s affected %d runner(s)", action, n)
+    log.info("bulk action %s%s affected %d runner(s)", action, f" [{mode}]" if mode else "", n)
     return (
         jsonify(
             {
@@ -262,9 +283,19 @@ def bulk_control(action: str) -> Tuple[Response, int]:
 
 @portfolio_bp.post("/api/portfolio/emergency_stop")
 def emergency_stop() -> Tuple[Response, int]:
+    """Emergency halt/flatten with optional ``mode`` scope (C5).
+
+    ``mode=None`` (default): master kill — flatten all buckets.
+    ``mode='paper'`` or ``mode='live'``: flatten only that bucket.
+    """
     data = request.get_json(silent=True) or {}
     reason = str(data.get("reason", "manual_emergency"))
-    count = _manager().emergency_flatten_all(reason=reason)
+    mode = data.get("mode")
+    if mode is not None:
+        mode = str(mode).strip().lower()
+        if mode not in VALID_INSTANCE_MODES:
+            return _error(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
+    count = _manager().emergency_flatten_all(reason=reason, mode=mode)
     return (
         jsonify(
             {
