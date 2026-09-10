@@ -33,6 +33,7 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import requests
@@ -48,6 +49,8 @@ from backtest.brokers.base import (
     BrokerOrderId,
     MarginInfo,
 )
+from backtest.instruments.option import OptionContract
+from backtest.instruments.base import ExerciseType, InstrumentType, SettlementType
 
 __all__ = ["MStockBroker", "MStockOrderError"]
 
@@ -63,6 +66,15 @@ _ORDER_PLACEMENT_PATH = "/openapi/typea/orders/regular"
 _ORDER_PATH_TEMPLATE = "/openapi/typea/orders/regular/"
 _ORDER_BOOK_PATH = "/openapi/typea/orders"
 _ORDER_MARGIN_PATH = "/openapi/typea/margins/orders"
+
+# mStock option chain endpoints (options PRD P1.3/P1.4).
+_OPTION_CHAIN_MASTER_PATH = "/openapi/typea/getoptionchainmaster/{exchange_id}"
+_OPTION_CHAIN_DATA_PATH = "/openapi/typea/GetOptionChain/{exchange_id}/{expiry}/{token}"
+_INSTRUMENT_MASTER_PATH = "/openapi/typea/instruments/scriptmaster"
+_OPTION_QUOTE_PATH = "/openapi/typea/instruments/quote/ltp"
+
+# NFO exchange ID for mStock (derivatives segment)
+_NFO_EXCHANGE_ID = "5"
 
 _TYPEA_HEADERS = {
     "X-Mirae-Version": "1",
@@ -625,6 +637,206 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
     @staticmethod
     def _api_key() -> str:
         return os.getenv("MSTOCK_API_KEY", "").strip()
+
+    # ------------------------------------------------------------------
+    # Option chain (options PRD P1.3, P1.4)
+    # ------------------------------------------------------------------
+
+    def get_option_chain(
+        self, underlying: str, exchange_id: str | None = None
+    ) -> list[OptionContract]:
+        """Fetch the option chain for an underlying from mStock.
+
+        Calls the instrument master endpoint and filters for NFO segment
+        options matching the given underlying. Returns a list of
+        ``OptionContract`` objects ready for the registry.
+
+        Parameters
+        ----------
+        underlying:
+            Index name — ``"NIFTY"`` or ``"BANKNIFTY"``.
+        exchange_id:
+            mStock exchange ID (default ``"5"`` for NFO).
+
+        Returns
+        -------
+        list[OptionContract]
+            All valid option contracts for the underlying.
+        """
+        token = self._require_session()
+        exchange = exchange_id or _NFO_EXCHANGE_ID
+
+        try:
+            # Fetch the full instrument master (CSV format)
+            headers = self._session_token_headers(token)
+            url = f"{self._base_url()}{_INSTRUMENT_MASTER_PATH}"
+            resp = requests.get(url, headers=headers, timeout=self._http_timeout)
+            resp.raise_for_status()
+
+            # Parse CSV instrument master
+            lines = resp.text.strip().split("\n")
+            if len(lines) < 2:
+                logger.warning("mStock instrument master returned no data")
+                return []
+
+            # Header row
+            header = lines[0].split(",")
+            contracts: list[OptionContract] = []
+
+            for line in lines[1:]:
+                fields = line.split(",")
+                if len(fields) < len(header):
+                    continue
+                row = dict(zip(header, fields))
+
+                # Filter: NFO segment, matching underlying, options only
+                segment = row.get("instrument_segment", "")
+                sym = row.get("trading_symbol", "")
+                inst_type = row.get("instrument_type", "")
+
+                # Match underlying (e.g. NIFTY in NIFTY24DEC24500CE)
+                if not sym.startswith(underlying):
+                    continue
+                if "OPT" not in inst_type.upper():
+                    continue
+                if segment.upper() != "NFO":
+                    continue
+
+                contract = self._parse_option_contract(row)
+                if contract and contract.is_valid():
+                    contracts.append(contract)
+
+            logger.info(
+                "mStock option chain for %s: %d contracts", underlying, len(contracts)
+            )
+            return contracts
+
+        except requests.RequestException:
+            logger.warning("mStock instrument master request failed")
+            return []
+        except Exception:
+            logger.warning("Failed to parse mStock instrument master", exc_info=True)
+            return []
+
+    def get_option_chain_data(
+        self, underlying: str, expiry: str, token: str
+    ) -> dict[str, Any]:
+        """Fetch live option chain data (bid/ask/OI) for a specific expiry.
+
+        Calls ``GET /openapi/typea/GetOptionChain/{exchange_id}/{expiry}/{token}``.
+
+        Parameters
+        ----------
+        underlying:
+            Index name (for logging).
+        expiry:
+            Expiry date string (e.g. ``"24DEC"``).
+        token:
+            Instrument token of the underlying.
+
+        Returns
+        -------
+        dict
+            Raw API response with option chain data.
+        """
+        token_str = self._require_session()
+        path = _OPTION_CHAIN_DATA_PATH.format(
+            exchange_id=_NFO_EXCHANGE_ID, expiry=expiry, token=token
+        )
+        try:
+            return self._request("GET", path, token_str)
+        except MStockOrderError:
+            logger.warning("Failed to fetch option chain data for %s", underlying)
+            return {}
+
+    def get_option_quote(self, instrument_token: str) -> dict[str, Any]:
+        """Fetch L1 quote for an option contract.
+
+        Uses the LTP endpoint with the instrument token.
+
+        Returns
+        -------
+        dict
+            ``{"ltp": float, "bid": float, "ask": float, ...}`` or empty dict.
+        """
+        token = self._require_session()
+        try:
+            headers = self._session_token_headers(token)
+            url = f"{self._base_url()}{_OPTION_QUOTE_PATH}"
+            resp = requests.get(
+                url, headers=headers,
+                params=[("i", f"NFO:{instrument_token}")],
+                timeout=self._http_timeout,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            if isinstance(payload, dict) and "data" in payload:
+                return payload["data"] if isinstance(payload["data"], dict) else {}
+            return payload if isinstance(payload, dict) else {}
+        except requests.RequestException:
+            logger.warning("Option quote request failed for %s", instrument_token)
+            return {}
+
+    @staticmethod
+    def _parse_option_contract(row: dict[str, Any]) -> OptionContract | None:
+        """Parse one instrument-master row into an OptionContract.
+
+        Returns ``None`` if the row cannot be parsed.
+        """
+        try:
+            symbol = row.get("trading_symbol", "")
+            token = row.get("security_token", row.get("instrument_token", ""))
+
+            from datetime import date
+
+            # Pattern: UNDERLYING + YY + MON + STRIKE + CE/PE
+            match = re.match(
+                r"^(NIFTY|BANKNIFTY)(\d{2})([A-Z]{3})(\d+)(CE|PE)$", symbol
+            )
+            if not match:
+                return None
+
+            underlying = match.group(1)
+            year_suffix = match.group(2)
+            month_str = match.group(3)
+            strike = Decimal(match.group(4))
+            option_type = match.group(5)
+
+            # Parse month
+            month_map = {
+                "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4,
+                "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8,
+                "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+            }
+            month = month_map.get(month_str)
+            if month is None:
+                return None
+
+            year = 2000 + int(year_suffix)
+            # Expiry: last Thursday of the month (approximate)
+            import calendar
+            last_day = calendar.monthrange(year, month)[1]
+            expiry = date(year, month, last_day)
+
+            lot_size = int(row.get("lot_size", row.get("contract_size", 25)))
+            tick = Decimal(str(row.get("tick_size", "0.05")))
+
+            return OptionContract(
+                instrument_token=str(token),
+                trading_symbol=symbol,
+                underlying=underlying,
+                exchange="NSE",
+                segment="NFO",
+                expiry=expiry,
+                strike=strike,
+                option_type=option_type,
+                lot_size=lot_size,
+                tick_size=tick,
+                contract_type=ExerciseType.EUROPEAN,
+                settlement_type=SettlementType.CASH,
+            )
+        except Exception:
+            return None
 
     @staticmethod
     def _now() -> datetime:

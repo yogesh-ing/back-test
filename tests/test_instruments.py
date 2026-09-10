@@ -323,3 +323,97 @@ class TestOptionQuote:
         assert q.bid is None
         assert q.ask is None
         assert q.iv is None
+
+
+# ---------------------------------------------------------------------------
+# ExpiryCalendar tests
+# ---------------------------------------------------------------------------
+
+from backtest.instruments.expiry_calendar import ExpiryCalendar, last_thursday
+
+
+class TestLastThursday:
+    def test_december_2026(self):
+        # December 2026: last day is Thu 31 → last Thursday is Dec 31
+        d = last_thursday(2026, 12)
+        assert d.year == 2026
+        assert d.month == 12
+        assert d.weekday() == 3  # Thursday
+
+    def test_september_2026(self):
+        # September 2026: last day is Tue 30 → last Thursday is Sep 24
+        d = last_thursday(2026, 9)
+        assert d.month == 9
+        assert d.weekday() == 3
+        assert d.day == 24
+
+    def test_january_2026(self):
+        d = last_thursday(2026, 1)
+        assert d.month == 1
+        assert d.weekday() == 3
+        # Jan 2026: last day Thu 29 → last Thursday is Jan 29
+        assert d.day == 29
+
+    def test_february_2026(self):
+        d = last_thursday(2026, 2)
+        assert d.month == 2
+        assert d.weekday() == 3
+        # Feb 2026: last day Sat 28 → last Thursday is Feb 26
+        assert d.day == 26
+
+
+class TestExpiryCalendar:
+    def setup_method(self):
+        self.cal = ExpiryCalendar()
+
+    def test_expiries_for_month(self):
+        expiries = self.cal.expiries_for_month(2026, 9, "NIFTY")
+        assert len(expiries) == 1
+        assert expiries[0].weekday() == 3  # Thursday
+
+    def test_expiries_for_year(self):
+        expiries = self.cal.expiries_for_year(2026, "NIFTY")
+        assert len(expiries) == 12
+        # All should be Thursdays
+        assert all(d.weekday() == 3 for d in expiries)
+        # Should be in chronological order
+        assert expiries == sorted(expiries)
+
+    def test_next_expiry_from_today(self):
+        exp = self.cal.next_expiry("NIFTY")
+        assert exp is not None
+        from datetime import date
+        assert exp >= date.today()
+        assert exp.weekday() == 3
+
+    def test_next_expiry_from_specific_date(self):
+        from datetime import date
+        exp = self.cal.next_expiry("NIFTY", from_date=date(2026, 10, 1))
+        assert exp is not None
+        assert exp >= date(2026, 10, 1)
+        # Should be Oct 29, 2026 (last Thursday of Oct)
+        assert exp.month == 10
+        assert exp.year == 2026
+
+    def test_expiries_between(self):
+        from datetime import date
+        expiries = self.cal.expiries_between(
+            date(2026, 1, 1), date(2026, 6, 30), "NIFTY"
+        )
+        assert len(expiries) == 6  # Jan through Jun
+        assert all(d.weekday() == 3 for d in expiries)
+
+    def test_format_expiry(self):
+        from datetime import date
+        result = self.cal.format_expiry(date(2026, 9, 24))
+        assert result == "26SEP"
+
+    def test_invalid_underlying_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="Unknown underlying"):
+            self.cal.next_expiry("RELIANCE")
+
+    def test_banknifty(self):
+        exp = self.cal.next_expiry("BANKNIFTY")
+        assert exp is not None
+        assert exp.weekday() == 3

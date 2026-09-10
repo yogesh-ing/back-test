@@ -1,0 +1,237 @@
+"""Unit tests for mStock option chain methods (mocked HTTP).
+
+Tests cover:
+- get_option_chain() parsing instrument master CSV
+- _parse_option_contract() edge cases
+- get_option_quote() response handling
+- Error handling for API failures
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from decimal import Decimal
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from backtest.brokers.mstock import MStockBroker, MStockOrderError
+from backtest.instruments.base import ExerciseType, SettlementType
+from backtest.instruments.option import OptionContract
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+def _make_broker_with_session() -> MStockBroker:
+    """Create a broker with an active (mocked) session."""
+    broker = MStockBroker()
+    broker._session_token = "test_token_123"
+    broker._expires_at = datetime(2099, 1, 1)
+    return broker
+
+
+# Sample instrument master CSV (simplified)
+_SAMPLE_CSV = (
+    "trading_symbol,security_token,instrument_segment,instrument_type,lot_size,tick_size\n"
+    "NIFTY26SEP24500CE,NFO_NIFTY26SEP24500CE,NFO,OPTIDX,25,0.05\n"
+    "NIFTY26SEP24500PE,NFO_NIFTY26SEP24500PE,NFO,OPTIDX,25,0.05\n"
+    "NIFTY26SEP25000CE,NFO_NIFTY26SEP25000CE,NFO,OPTIDX,25,0.05\n"
+    "BANKNIFTY26SEP51000CE,NFO_BANKNIFTY26SEP51000CE,NFO,OPTIDX,15,0.05\n"
+    "RELIANCE26SEPEQ,NFO_RELIANCE26SEP,NFO,EQ,1,0.05\n"
+)
+
+
+# ---------------------------------------------------------------------------
+# _parse_option_contract tests
+# ---------------------------------------------------------------------------
+
+class TestParseOptionContract:
+    def test_parse_nifty_call(self):
+        row = {
+            "trading_symbol": "NIFTY26SEP24500CE",
+            "security_token": "NFO_NIFTY26SEP24500CE",
+            "instrument_segment": "NFO",
+            "instrument_type": "OPTIDX",
+            "lot_size": "25",
+            "tick_size": "0.05",
+        }
+        contract = MStockBroker._parse_option_contract(row)
+        assert contract is not None
+        assert contract.underlying == "NIFTY"
+        assert contract.strike == Decimal("24500")
+        assert contract.option_type == "CE"
+        assert contract.expiry.year == 2026
+        assert contract.expiry.month == 9
+        assert contract.lot_size == 25
+
+    def test_parse_nifty_put(self):
+        row = {
+            "trading_symbol": "NIFTY26SEP24500PE",
+            "security_token": "NFO_NIFTY26SEP24500PE",
+            "instrument_segment": "NFO",
+            "instrument_type": "OPTIDX",
+            "lot_size": "25",
+            "tick_size": "0.05",
+        }
+        contract = MStockBroker._parse_option_contract(row)
+        assert contract is not None
+        assert contract.option_type == "PE"
+
+    def test_parse_banknifty(self):
+        row = {
+            "trading_symbol": "BANKNIFTY26SEP51000CE",
+            "security_token": "NFO_BANKNIFTY26SEP51000CE",
+            "instrument_segment": "NFO",
+            "instrument_type": "OPTIDX",
+            "lot_size": "15",
+            "tick_size": "0.05",
+        }
+        contract = MStockBroker._parse_option_contract(row)
+        assert contract is not None
+        assert contract.underlying == "BANKNIFTY"
+        assert contract.strike == Decimal("51000")
+        assert contract.lot_size == 15
+
+    def test_parse_equity_returns_none(self):
+        row = {
+            "trading_symbol": "RELIANCE26SEPEQ",
+            "security_token": "NFO_RELIANCE26SEP",
+            "instrument_segment": "NFO",
+            "instrument_type": "EQ",
+            "lot_size": "1",
+            "tick_size": "0.05",
+        }
+        assert MStockBroker._parse_option_contract(row) is None
+
+    def test_parse_invalid_symbol_returns_none(self):
+        row = {"trading_symbol": "INVALID", "security_token": "X"}
+        assert MStockBroker._parse_option_contract(row) is None
+
+    def test_parse_contract_is_valid(self):
+        row = {
+            "trading_symbol": "NIFTY26SEP24500CE",
+            "security_token": "NFO_NIFTY26SEP24500CE",
+            "instrument_segment": "NFO",
+            "instrument_type": "OPTIDX",
+            "lot_size": "25",
+            "tick_size": "0.05",
+        }
+        contract = MStockBroker._parse_option_contract(row)
+        assert contract is not None
+        assert contract.is_valid()
+
+
+# ---------------------------------------------------------------------------
+# get_option_chain tests (mocked HTTP)
+# ---------------------------------------------------------------------------
+
+class TestGetOptionChain:
+    @patch("backtest.brokers.mstock.requests.get")
+    def test_returns_nifty_contracts(self, mock_get):
+        resp = MagicMock()
+        resp.text = _SAMPLE_CSV
+        resp.raise_for_status = MagicMock()
+        mock_get.return_value = resp
+
+        broker = _make_broker_with_session()
+        contracts = broker.get_option_chain("NIFTY")
+
+        # Should get 3 NIFTY options (24500CE, 24500PE, 25000CE), not BANKNIFTY or RELIANCE
+        assert len(contracts) == 3
+        assert all(c.underlying == "NIFTY" for c in contracts)
+
+    @patch("backtest.brokers.mstock.requests.get")
+    def test_returns_banknifty_contracts(self, mock_get):
+        resp = MagicMock()
+        resp.text = _SAMPLE_CSV
+        resp.raise_for_status = MagicMock()
+        mock_get.return_value = resp
+
+        broker = _make_broker_with_session()
+        contracts = broker.get_option_chain("BANKNIFTY")
+
+        assert len(contracts) == 1
+        assert contracts[0].underlying == "BANKNIFTY"
+
+    @patch("backtest.brokers.mstock.requests.get")
+    def test_filters_non_option_instruments(self, mock_get):
+        resp = MagicMock()
+        resp.text = _SAMPLE_CSV
+        resp.raise_for_status = MagicMock()
+        mock_get.return_value = resp
+
+        broker = _make_broker_with_session()
+        all_contracts = broker.get_option_chain("NIFTY")
+        # Should not include RELIANCE equity
+        symbols = [c.trading_symbol for c in all_contracts]
+        assert "RELIANCE24DECEQ" not in symbols
+
+    @patch("backtest.brokers.mstock.requests.get")
+    def test_empty_csv_returns_empty(self, mock_get):
+        resp = MagicMock()
+        resp.text = "header1,header2\n"
+        resp.raise_for_status = MagicMock()
+        mock_get.return_value = resp
+
+        broker = _make_broker_with_session()
+        assert broker.get_option_chain("NIFTY") == []
+
+    @patch("backtest.brokers.mstock.requests.get")
+    def test_network_error_returns_empty(self, mock_get):
+        import requests
+        mock_get.side_effect = requests.ConnectionError("timeout")
+
+        broker = _make_broker_with_session()
+        assert broker.get_option_chain("NIFTY") == []
+
+    def test_no_session_raises(self):
+        broker = MStockBroker()
+        with pytest.raises(MStockOrderError, match="no active"):
+            broker.get_option_chain("NIFTY")
+
+
+# ---------------------------------------------------------------------------
+# get_option_quote tests (mocked HTTP)
+# ---------------------------------------------------------------------------
+
+class TestGetOptionQuote:
+    @patch("backtest.brokers.mstock.requests.get")
+    def test_returns_quote_data(self, mock_get):
+        resp = MagicMock()
+        resp.json.return_value = {"data": {"ltp": 150.5, "bid": 150.0, "ask": 151.0}}
+        resp.raise_for_status = MagicMock()
+        mock_get.return_value = resp
+
+        broker = _make_broker_with_session()
+        quote = broker.get_option_quote("NFO_NIFTY26SEP24500CE")
+
+        assert quote["ltp"] == 150.5
+        assert quote["bid"] == 150.0
+
+    @patch("backtest.brokers.mstock.requests.get")
+    def test_network_error_returns_empty(self, mock_get):
+        import requests
+        mock_get.side_effect = requests.ConnectionError("timeout")
+
+        broker = _make_broker_with_session()
+        quote = broker.get_option_quote("NFO_NIFTY26SEP24500CE")
+        assert quote == {}
+
+
+# ---------------------------------------------------------------------------
+# get_option_chain_data tests (mocked HTTP)
+# ---------------------------------------------------------------------------
+
+class TestGetOptionChainData:
+    @patch("backtest.brokers.mstock.requests.get")
+    def test_returns_raw_data(self, mock_get):
+        resp = MagicMock()
+        resp.json.return_value = {"status": "success", "data": []}
+        resp.raise_for_status = MagicMock()
+        mock_get.return_value = resp
+
+        broker = _make_broker_with_session()
+        data = broker.get_option_chain_data("NIFTY", "24DEC", "token123")
+        assert data["status"] == "success"
