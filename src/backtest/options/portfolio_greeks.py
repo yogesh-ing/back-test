@@ -15,8 +15,11 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger("backtest.options.portfolio_greeks")
 
 from backtest.options.greeks import BlackScholes, OptionGreeks
 from backtest.options.paper_trading import OptionPosition
@@ -106,10 +109,16 @@ class PortfolioGreeksCalculator:
             if pos.status.value != "open":
                 continue
 
-            # Get spot price for this underlying
-            s = spot.get(pos.underlying, float(pos.current_price or pos.strike))
-            if s <= 0:
-                s = float(pos.strike)
+            # Get spot price for this underlying.  Without an explicit spot
+            # the strike is the best ATM approximation — the option's own
+            # premium (current_price) is NOT the underlying price.
+            s = spot.get(pos.underlying, float(pos.strike))
+            if s <= 0 or float(pos.strike) <= 0:
+                logger.warning(
+                    "[greeks] skipping %s: spot/strike undefined",
+                    pos.trading_symbol,
+                )
+                continue
 
             # Get volatility
             vol = vols.get(pos.underlying, self.default_volatility)

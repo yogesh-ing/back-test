@@ -413,6 +413,10 @@ def create_app(
     def data_page() -> Any:
         return render_template("data_manager.html", active="data")
 
+    # Options trading dashboard (Phase 7) — page + JSON API
+    from backtest.web.options_api import register_options_routes
+    register_options_routes(app)
+
     @app.get("/api/config")
     def config_view() -> tuple:
         """What the UI needs to know about this deployment (no secrets)."""

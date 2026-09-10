@@ -344,6 +344,11 @@ class OptionPaperBroker:
         structure_id = str(uuid.uuid4())
         positions = []
 
+        # Per-leg strike lookup: metadata may carry a single "strike" (single-leg)
+        # or a "strikes" dict keyed by trading_symbol (multi-leg spreads).
+        strikes_map = intent.metadata.get("strikes", {})
+        default_strike = intent.metadata.get("strike", "0")
+
         for leg, fill_price, commission in fills:
             position = OptionPosition(
                 structure_id=structure_id,
@@ -352,7 +357,7 @@ class OptionPaperBroker:
                 trading_symbol=leg.trading_symbol,
                 underlying=intent.view.underlying,
                 option_type=intent.metadata.get("option_type", ""),
-                strike=Decimal(intent.metadata.get("strike", "0")),
+                strike=Decimal(str(strikes_map.get(leg.trading_symbol, default_strike))),
                 expiry=intent.expiry,
                 lot_size=leg.lot_size,
                 side=leg.side,

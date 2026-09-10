@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Options Trading{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>🎯 Options Trading</h1>
+    <div class="muted">Paper trading book — multi-leg structures, portfolio Greeks, expiry alerts.</div>
+</div>
+
+<!-- Summary cards -->
+<div class="cards-row" id="options-summary-cards">
+    <div class="card metric-card">
+        <div class="metric-label">Equity</div>
+        <div class="metric-value" id="opt-equity">—</div>
+    </div>
+    <div class="card metric-card">
+        <div class="metric-label">Available Cash</div>
+        <div class="metric-value" id="opt-cash">—</div>
+    </div>
+    <div class="card metric-card">
+        <div class="metric-label">Open Positions</div>
+        <div class="metric-value" id="opt-positions">—</div>
+    </div>
+    <div class="card metric-card">
+        <div class="metric-label">Realized P&L</div>
+        <div class="metric-value" id="opt-pnl">—</div>
+    </div>
+</div>
+
+<!-- Portfolio Greeks card (T7.4) -->
+<div class="card" id="greeks-card">
+    <h2>📐 Portfolio Greeks</h2>
+    <div class="greeks-grid">
+        <div class="greek-item">
+            <div class="greek-label">Delta</div>
+            <div class="greek-value" id="gk-delta">—</div>
+        </div>
+        <div class="greek-item">
+            <div class="greek-label">Gamma</div>
+            <div class="greek-value" id="gk-gamma">—</div>
+        </div>
+        <div class="greek-item">
+            <div class="greek-label">Theta /day</div>
+            <div class="greek-value" id="gk-theta">—</div>
+        </div>
+        <div class="greek-item">
+            <div class="greek-label">Vega /1%</div>
+            <div class="greek-value" id="gk-vega">—</div>
+        </div>
+        <div class="greek-item">
+            <div class="greek-label">Rho /1%</div>
+            <div class="greek-value" id="gk-rho">—</div>
+        </div>
+    </div>
+</div>
+
+<!-- Expiry alerts (T7.7) -->
+<div class="card" id="expiry-alerts-card" style="display:none;">
+    <h2>⏰ Expiry Alerts</h2>
+    <div id="expiry-alerts"></div>
+</div>
+
+<!-- Open positions table (T7.3) -->
+<div class="card">
+    <h2>📋 Open Positions</h2>
+    <table class="opt-table" id="opt-positions-table">
+        <thead>
+            <tr>
+                <th>Symbol</th>
+                <th>Side</th>
+                <th>Qty (lots)</th>
+                <th>Strike</th>
+                <th>Type</th>
+                <th>Expiry</th>
+                <th>Entry</th>
+                <th>LTP</th>
+                <th>Unrealized P&L</th>
+            </tr>
+        </thead>
+        <tbody id="opt-positions-body">
+            <tr><td colspan="9" class="muted">Loading…</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- Structures table (T7.2) -->
+<div class="card">
+    <h2>🧩 Structures</h2>
+    <table class="opt-table" id="opt-structures-table">
+        <thead>
+            <tr>
+                <th>Structure</th>
+                <th>Type</th>
+                <th>Underlying</th>
+                <th>Expiry</th>
+                <th>Legs</th>
+                <th>Entry Cost</th>
+                <th>Unrealized P&L</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody id="opt-structures-body">
+            <tr><td colspan="8" class="muted">Loading…</td></tr>
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/options.js') }}"></script>
+{% endblock %}
