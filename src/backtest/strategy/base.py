@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC
+from decimal import Decimal
 from typing import Any
 
 import pandas as pd
@@ -288,3 +289,53 @@ class Strategy(ABC):
             else:
                 signals.loc[idx] = 1 if held else 0
         return signals
+
+    # -- market view for options (Phase 2 expression layer) ----------
+
+    def generate_market_view(self, candles: pd.DataFrame) -> MarketView | None:
+        """Emit a directional view for options expression.
+
+        Override this to enable options trading for the strategy.  The default
+        implementation derives a view from ``generate_signals()``: a ``1`` signal
+        maps to ``BULLISH``, ``0`` maps to ``NEUTRAL`` (no trade).
+
+        Returns ``None`` when the strategy has no directional conviction
+        (e.g. flat / neutral), which the expression layer interprets as
+        "no option trade this bar".
+
+        Parameters
+        ----------
+        candles:
+            The same OHLCV DataFrame passed to ``generate_signals``.
+        """
+        from backtest.strategy.intent import Direction, MarketView
+
+        try:
+            signals = self.generate_signals(candles)
+        except NotImplementedError:
+            return None
+
+        if signals is None or signals.empty:
+            return None
+
+        last_signal = signals.iloc[-1]
+        last_close = candles["close"].iloc[-1] if "close" in candles.columns else 0
+        ts = candles.index[-1] if len(candles.index) > 0 else None
+
+        # Determine underlying from metadata or default to NIFTY
+        underlying = self.params.get("underlying", {}).get("default", "NIFTY")
+        if isinstance(underlying, dict):
+            underlying = "NIFTY"
+
+        if last_signal == 1:
+            direction = Direction.BULLISH
+        else:
+            direction = Direction.NEUTRAL
+
+        return MarketView(
+            direction=direction,
+            confidence=abs(float(last_signal)),
+            underlying=underlying,
+            spot_price=Decimal(str(last_close)),
+            bar_timestamp=ts,
+        )
