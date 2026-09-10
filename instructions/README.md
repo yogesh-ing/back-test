@@ -19,14 +19,17 @@ self-contained; build them **in order** and pass the checks before moving on.
 | # | Card | Builds |
 |---|------|--------|
 | 00 | `00-INVARIANTS.md` | The non-negotiable behavioral contract |
-| 01 | `01-SKELETON-ENV.md` | File tree, deps, packaging, `.env`, run setup |
-| 02 | `02-DATA-LAYER.md` | `data/`: base contract, synthetic, csv, mStock |
-| 03 | `03-STRATEGY-SYSTEM.md` | `strategy/` plug-in system + 4 built-ins |
-| 04 | `04-ENGINE-CLI.md` | engine, metrics, plotting, runner, CLI |
-| 05 | `05-FORWARD-TESTING.md` | `forward/` paper trading + portfolio management |
+| 01 | `archive/01-SKELETON-ENV.md` | File tree, deps, packaging, `.env`, run setup (archived) |
+| 02 | `archive/02-DATA-LAYER.md` | `data/`: base contract, synthetic, csv, mStock (archived) |
+| 03 | `archive/03-STRATEGY-SYSTEM.md` | `strategy/` plug-in system + 4 built-ins (archived) |
+| 04 | `archive/04-ENGINE-CLI.md` | engine, metrics, plotting, runner, CLI (archived) |
+| 05 | `archive/05-FORWARD-TESTING.md` | `forward/` paper trading + portfolio management (archived) |
 | 06 | `06-ACCEPTANCE-TESTS.md` | The 22 tests + final gate (pins behavior) |
 | 07 | `07-LIVE-BRINGUP.md` | mStock live bring-up + build-order checklist |
 | 08 | `08-ALLOWED-BUILDING-BLOCKS.md` | Allowed APIs/primitives (curb hallucinations) |
+
+> Cards 01–05 are historical rebuild guides — the system is already built, so
+> they live in `archive/` for reference only. Cards 00, 06, 07, 08 remain active.
 
 ## Dependency flow
 `00 → 01 → 02 → 03 → 04` gives a working **backtest + compare** on synthetic

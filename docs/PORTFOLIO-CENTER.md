@@ -5,8 +5,8 @@ book of strategy instances simultaneously — up to 50+ `StrategyRunner` workers
 managed by one `PortfolioManager`, with portfolio-wide circuit breakers and an
 order-tagging ledger that keeps every fill isolated to its owning runner.
 
-> Source PRD: `instructions/forword-testing.md`
-> Full task tracker: `instructions/refactoring-task.md`, `instructions/refactoring-implementationPlan.md`
+> Source PRD: `instructions/archive/forword-testing.md`
+> Full task tracker: `instructions/archive/refactoring-task.md`, `instructions/archive/refactoring-implementationPlan.md`
 
 ## Architecture (two layers)
 

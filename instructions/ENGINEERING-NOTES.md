@@ -781,7 +781,7 @@ PYTHONPATH=src pytest tests/test_simulator_order.py -q -k trailing
 # Verbose SQL while debugging
 FORWARD_TEST_DB_LOG_QUERIES=true PYTHONPATH=src pytest tests/... -s
 
-# Apply the schema by hand (see db/DB-IMPLEMENTATION-GUIDE.md)
+# Apply the schema by hand (see db/archive/DB-IMPLEMENTATION-GUIDE.md)
 psql -d forward_test -f db/migrations/001_initial_schema.sql
 psql -d forward_test -f db/verify_schema.sql        # expect all PASS
 ```

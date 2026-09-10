@@ -629,7 +629,7 @@ Straight from the code and trackers, not aspirational:
 | How does forward testing work? | `docs/FORWARD-TESTING.md` |
 | Multi-strategy portfolios? | `docs/PORTFOLIO-CENTER.md` |
 | Live/Paper separation design | `instructions/REFACTOR-PORTFOLIO-LIVE-PAPER-SEPARATION.md` |
-| Schema and migrations? | `docs/DATABASE.md`, `db/DB-IMPLEMENTATION-GUIDE.md` |
+| Schema and migrations? | `docs/DATABASE.md`, `db/archive/DB-IMPLEMENTATION-GUIDE.md` |
 | Something is broken | `instructions/ENGINEERING-NOTES.md`, `docs/LOGGING.md` |
 | What is done, what is planned? | `instructions/ROADMAP.md`, `instructions/BACKLOG.md` |
 | Invariants I must not break | `PROJECT-CONTEXT.md` |
