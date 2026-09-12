@@ -52,6 +52,24 @@ Market Data (OHLCV candles)
 | **Donchian Breakout** | Buy on new highs, sell on new lows (momentum) |
 | **Price Move** | Buy/sell based on price movement threshold (e.g. ₹5) |
 
+## Options Trading (Paper & Live)
+
+Trade NIFTY/BANKNIFTY **index options** through the same pipeline: a
+strategy's directional view is converted into a multi-leg option structure
+(long call/put, bull call spread, bear put spread), executed **atomically**
+(all legs fill or none), tracked with portfolio Greeks, priced with the full
+Indian statutory fee stack (STT, exchange, SEBI, stamp, GST — ₹20/order
+brokerage), and auto-squared-off before expiry with cash settlement.
+
+```
+MarketView (bullish/bearish) → strike + expiry selection → TradeIntent
+    → OptionPaperBroker (paper, atomic)  or  LiveOptionTrader (mStock, rollback)
+```
+
+- **Paper:** `/options` dashboard — positions, structures, Greeks grid, expiry alerts
+- **Live:** `LiveOptionTrader(dry_run=True)` first — logs payloads, places nothing
+- **Docs:** [docs/OPTIONS-PAPER-LIVE.md](docs/OPTIONS-PAPER-LIVE.md)
+
 ## Data Sources
 
 | Source | Description |

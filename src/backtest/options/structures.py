@@ -152,7 +152,13 @@ class LongCall(OptionStructure):
             legs=(leg,),
             expiry=expiry,
             strategy_name=strategy_name,
-            metadata={"strike": str(strike), "option_type": "CE"},
+            metadata={
+                "strike": str(strike),
+                "option_type": "CE",
+                # Per-leg strike map keyed by trading symbol — the paper
+                # broker reads this to stamp strikes on each position.
+                "strikes": {leg.trading_symbol: str(strike)},
+            },
         )
 
 
@@ -194,7 +200,11 @@ class LongPut(OptionStructure):
             legs=(leg,),
             expiry=expiry,
             strategy_name=strategy_name,
-            metadata={"strike": str(strike), "option_type": "PE"},
+            metadata={
+                "strike": str(strike),
+                "option_type": "PE",
+                "strikes": {leg.trading_symbol: str(strike)},
+            },
         )
 
 
@@ -247,6 +257,10 @@ class BullCallSpread(OptionStructure):
                 "short_strike": str(short_strike),
                 "spread_width": str(short_strike - long_strike),
                 "option_type": "CE",
+                "strikes": {
+                    long_leg.trading_symbol: str(long_strike),
+                    short_leg.trading_symbol: str(short_strike),
+                },
             },
         )
 
@@ -301,6 +315,10 @@ class BearPutSpread(OptionStructure):
                 "short_strike": str(short_strike),
                 "spread_width": str(long_strike - short_strike),
                 "option_type": "PE",
+                "strikes": {
+                    long_leg.trading_symbol: str(long_strike),
+                    short_leg.trading_symbol: str(short_strike),
+                },
             },
         )
 

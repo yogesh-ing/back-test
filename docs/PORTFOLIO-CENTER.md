@@ -110,3 +110,51 @@ PYTHONPATH=src python benchmarks/benchmark_portfolio.py
 
 50-runner benchmark: ~311 ms/tick, 1,287 fills with **0** cross-contamination,
 ~130 MB RSS (2.6 MB/runner); breaker halt measured at ~15 ms (budget < 500 ms).
+
+---
+
+## Options (paper & live)
+
+The equity command center above trades stock/underlying positions. Option
+structures run through a parallel, options-aware stack with the same shape:
+expression layer (strike/expiry selection + structure builders) → atomic
+multi-leg execution → risk → expiry handling. Full guide:
+**[OPTIONS-PAPER-LIVE.md](OPTIONS-PAPER-LIVE.md)**.
+
+Equity vs options at a glance:
+
+| | Equity runners (above) | Option structures |
+|---|---|---|
+| Signal | strategy `generate_signals` (+1/0/−1) | `generate_market_view` → `TradeIntent` |
+| Execution | `PaperBroker.submit_market` (one symbol per order) | `OptionPaperBroker.execute_structure` (all legs or none) |
+| Grouping | runner bucket | `structure_id` per multi-leg trade |
+| Risk | `RiskSupervisor` (daily loss / drawdown breakers) | `PreTradeRiskCheck` (margin / position / notional caps) + spread margin |
+| Costs | `PAPER_FREE_PROFILE` (zero) | `CommissionCalculator` — full NFO statutory stack (₹20/order + STT + GST + …) |
+| End of life | manual close / stop | `ExpiryManager` auto-square-off → cash settlement at intrinsic |
+| UI | `/portfolio`, `/portfolio/paper`, `/portfolio/live` | `/options` |
+
+Example: build a bullish view into a spread and execute it atomically:
+
+```python
+from datetime import date
+from decimal import Decimal
+from backtest.options.selector import create_selector
+from backtest.options.structures import create_structure
+from backtest.options.paper_trading import OptionPaperBroker, FakeQuoteProvider
+from backtest.strategy.intent import Direction, MarketView
+
+view = MarketView(direction=Direction.BULLISH, underlying="NIFTY",
+                  spot_price=Decimal("24800"))
+strikes = create_selector("atm").pick_strikes(Decimal("24800"),
+                    [Decimal(s) for s in range(24400, 25201, 100)],
+                    Direction.BULLISH, count=2)
+intent = create_structure("bull_call_spread").build(
+    view, strikes, chain, date(2026, 9, 24), strategy_name="donchian_bull")
+
+broker = OptionPaperBroker(capital=1_000_000, commission_per_lot=20)
+positions = broker.execute_structure(intent, FakeQuoteProvider(default_price=120))
+```
+
+The options tests (`tests/test_options_*.py`) cover the whole stack,
+including the end-to-end integration suite and the ₹27.63 contract-note
+fee anchor.

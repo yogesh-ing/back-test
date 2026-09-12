@@ -526,19 +526,49 @@ class OptionPaperBroker:
         return self._structures.get(structure_id)
 
     @property
+    def total_commission_paid(self) -> Decimal:
+        """Every rupee of brokerage charged since the book opened.
+
+        Commissions leave ``available_cash`` the moment a structure fills,
+        so they must be subtracted from equity too — otherwise a paying
+        broker's book would look richer than the cash it actually holds.
+        """
+        return sum(p.commission for p in self._positions.values())
+
+    @property
     def total_equity(self) -> Decimal:
-        """Cash + unrealized P&L of open positions."""
+        """Capital + realized + unrealized P&L − commissions paid.
+
+        NOT ``available_cash + unrealized``: cash is debited the full
+        premium at open while unrealized is measured from the entry price,
+        so summing those two would make equity drop by the premium the
+        moment a long option is bought. Anchoring on starting capital keeps
+        equity flat across an at-market open and moving only with P&L —
+        matching how the equity P&L reconciliation test (and a real
+        broker's funds view) behaves.
+        """
         unrealized = sum(
             p.unrealized_pnl for p in self._positions.values()
             if p.status == PositionStatus.OPEN
         )
-        return self.available_cash + unrealized
+        return (
+            self.capital
+            + self.total_realized_pnl
+            + unrealized
+            - self.total_commission_paid
+        )
 
     @property
     def total_realized_pnl(self) -> Decimal:
+        """Realized P&L across closed AND expired positions.
+
+        Expiry settlement marks positions ``EXPIRED`` (not ``CLOSED``), so
+        filtering on ``CLOSED`` alone would drop settled P&L from the
+        summary and break the equity reconciliation.
+        """
         return sum(
             p.realized_pnl for p in self._positions.values()
-            if p.status == PositionStatus.CLOSED
+            if p.status in (PositionStatus.CLOSED, PositionStatus.EXPIRED)
         )
 
     @property
