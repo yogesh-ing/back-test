@@ -52,11 +52,12 @@ from dataclasses import dataclass, field, fields
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from backtest.simulator.commission import (
     CommissionModel,
     FlatCommission,
+    OptionsCommission,
     PaymentForOrderFlowCommission,
     PercentageCommission,
     PerShareCommission,
@@ -80,6 +81,7 @@ __all__ = [
     "NoStatutoryFees",
     "IndiaEquityFees",
     "USEquityFees",
+    "OptionsCommission",
     "BrokerProfile",
     "PAPER_FREE_PROFILE",
     "CommissionCalculator",
@@ -96,6 +98,35 @@ logger = logging.getLogger("backtest.simulator.fees")
 _PAISE = Decimal("0.01")
 
 DEFAULT_BROKER_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "brokers.yaml"
+
+
+@dataclass(frozen=True)
+class ContractNote:
+    """A transcribed broker contract note, kept with the fee model it validated.
+
+    T8.3's workflow: when a real note arrives, transcribe the per-component
+    charges into ``expected`` and pass this reference alongside. On a clean
+    comparison the stamped :class:`FeeBreakdown` records *which* note and
+    *when* validated the rates — the audit trail answers "which contract
+    note does this fee model reproduce?" without digging through email.
+    """
+
+    document_id: str
+    broker: str
+    note_date: date
+    trade_value: Decimal
+    file_path: str | None = None
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "document_id": self.document_id,
+            "broker": self.broker,
+            "note_date": self.note_date.isoformat(),
+            "trade_value": str(self.trade_value),
+            "file_path": self.file_path,
+            "notes": self.notes,
+        }
 
 
 def _round(amount: Decimal) -> Decimal:
@@ -148,6 +179,10 @@ class FeeBreakdown:
     #: Components that map to ``fills.regulatory_fees``.
     REGULATORY_KEYS = ("stt", "sebi_turnover", "stamp_duty", "gst", "sec_fee", "finra_taf")
 
+    #: Key holding the :class:`~backtest.simulator.fee_documents.ContractNote`
+    #: reference, when one is attached by :meth:`CommissionCalculator.validate_against_contract_note`.
+    DOCUMENT_KEY = "contract_note_document"
+
     def get(self, key: str) -> Decimal:
         return self.components.get(key, ZERO)
 
@@ -164,10 +199,33 @@ class FeeBreakdown:
     def regulatory_fees(self) -> Decimal:
         return _round(sum((self.get(k) for k in self.REGULATORY_KEYS), ZERO))
 
+    #: Prefix under which :meth:`CommissionCalculator.calculate_structure`
+    #: stores per-leg itemisation (``leg_0_stt``, ...). These are annotations
+    #: on a merged breakdown, not charges — the money properties skip them.
+    LEG_PREFIX = "leg_"
+
+    @staticmethod
+    def _is_leg_key(key: str) -> bool:
+        return key.startswith(FeeBreakdown.LEG_PREFIX)
+
     @property
     def total(self) -> Decimal:
-        """Every charge added together."""
-        return _round(sum(self.components.values(), ZERO))
+        """Every charge added together.
+
+        Skips per-leg annotation keys (they would double-count the merged
+        components) and non-Decimal entries (the optional contract-note
+        document reference).
+        """
+        return _round(
+            sum(
+                (
+                    v
+                    for k, v in self.components.items()
+                    if isinstance(v, Decimal) and not self._is_leg_key(k)
+                ),
+                ZERO,
+            )
+        )
 
     @property
     def taxes(self) -> Decimal:
@@ -190,11 +248,21 @@ class FeeBreakdown:
         }
 
     def to_dict(self) -> dict[str, Any]:
+        components: dict[str, Any] = {}
+        legs: dict[str, str] = {}
+        for k, v in self.components.items():
+            if k == self.DOCUMENT_KEY:
+                components[k] = v.to_dict() if isinstance(v, ContractNote) else str(v)
+            elif isinstance(v, Decimal) and self._is_leg_key(k):
+                legs[k] = str(v)
+            elif v:
+                components[k] = str(v)
         return {
             "broker": self.broker,
             "segment": self.segment,
             "currency": self.currency,
-            "components": {k: str(v) for k, v in self.components.items() if v},
+            "components": components,
+            **({"legs": legs} if legs else {}),
             "brokerage": str(self.brokerage),
             "exchange_fees": str(self.exchange_fees),
             "regulatory_fees": str(self.regulatory_fees),
@@ -206,7 +274,7 @@ class FeeBreakdown:
         lines = [f"{self.broker} · {self.segment} · {self.currency}"]
         width = max((len(k) for k in self.components), default=10)
         for key, value in self.components.items():
-            if value:
+            if isinstance(value, Decimal) and value and not self._is_leg_key(key):
                 lines.append(f"  {key:<{width}}  {value:>12}")
         lines.append(f"  {'TOTAL':<{width}}  {self.total:>12}")
         return "\n".join(lines)
@@ -543,10 +611,18 @@ class BrokerProfile:
     default_segment: str = TradeSegment.EQUITY_DELIVERY
     delivery_commission_model: CommissionModel | None = None
     """Many Indian brokers charge nothing on delivery but do on intraday."""
+    options_commission_model: CommissionModel | None = None
+    """Optional per-order option brokerage. ``None`` falls back to the
+    default model; set an :class:`OptionsCommission` (or ``{"model":
+    "options_flat", "per_order": "20"}`` in YAML) to price option orders
+    separately from equity.
+    """
 
     def __post_init__(self) -> None:
         self.commission_model = resolve_commission_model(self.commission_model)
         self.fee_schedule = resolve_fee_schedule(self.fee_schedule)
+        if self.options_commission_model is not None:
+            self.options_commission_model = resolve_commission_model(self.options_commission_model)
         if self.delivery_commission_model is not None:
             self.delivery_commission_model = resolve_commission_model(
                 self.delivery_commission_model
@@ -561,7 +637,10 @@ class BrokerProfile:
         self.default_segment = TradeSegment.validate(self.default_segment)
 
     def model_for(self, segment: str) -> CommissionModel:
-        """The brokerage model for a segment, honouring the delivery override."""
+        """The brokerage model for a segment, honouring the delivery and
+        option overrides."""
+        if segment == TradeSegment.OPTIONS and self.options_commission_model is not None:
+            return self.options_commission_model
         if segment == TradeSegment.EQUITY_DELIVERY and self.delivery_commission_model is not None:
             return self.delivery_commission_model
         return self.commission_model
@@ -571,6 +650,11 @@ class BrokerProfile:
             "name": self.name,
             "commission_model": self.commission_model.to_dict(),
             "fee_schedule": self.fee_schedule.to_dict(),
+            "options_commission_model": (
+                self.options_commission_model.to_dict()
+                if self.options_commission_model is not None
+                else None
+            ),
             "minimum_commission": (
                 str(self.minimum_commission) if self.minimum_commission is not None else None
             ),
@@ -589,6 +673,7 @@ def _india_discount(name: str, flat: Decimal = Decimal("20")) -> BrokerProfile:
         name=name,
         commission_model=PercentageCommission(rate=Decimal("0.0003"), maximum=flat),
         delivery_commission_model=ZeroCommission(),
+        options_commission_model=OptionsCommission(per_order=flat),
         fee_schedule=IndiaEquityFees(),
         currency="INR",
         default_segment=TradeSegment.EQUITY_DELIVERY,
@@ -617,6 +702,7 @@ BROKER_PRESETS: dict[str, Any] = {
         name="mstock",
         commission_model=FlatCommission(per_trade=Decimal("20")),
         delivery_commission_model=ZeroCommission(),
+        options_commission_model=OptionsCommission(per_order=Decimal("20")),
         fee_schedule=IndiaEquityFees(),
         currency="INR",
     ),
@@ -898,6 +984,175 @@ class CommissionCalculator:
         )
         return _round(sum((v for k, v in charges.items() if k in FeeBreakdown.EXCHANGE_KEYS), ZERO))
 
+    # -- multi-leg options (Phase 8) ----------------------------------------
+
+    def calculate_structure(
+        self,
+        legs: Sequence[Mapping[str, Any]],
+        *,
+        when: datetime | None = None,
+        track_volume: bool = True,
+    ) -> FeeBreakdown:
+        """Fees for a complete multi-leg option structure, itemised per leg.
+
+        Each leg is one broker order, so flat option brokerage charges once
+        per leg — a two-leg spread pays :class:`OptionsCommission` twice. The
+        returned breakdown is the merged sum (leg components combined), with
+        each leg's itemisation kept in
+        ``components[f"leg_{i}_{component}"]`` so a contract note can be
+        reconciled line by line.
+
+        Parameters
+        ----------
+        legs:
+            One mapping per leg with keys ``quantity``, ``price`` and ``side``
+            (``"BUY"`` / ``"SELL"``, anything :meth:`OrderSide.parse`
+            accepts), plus optional ``segment`` and ``symbol`` for logging.
+
+        Examples
+        --------
+        >>> calc = CommissionCalculator.for_broker("mstock")   # doctest: +SKIP
+        >>> fees = calc.calculate_structure([                  # doctest: +SKIP
+        ...     {"side": "BUY", "quantity": 75, "price": "120.50"},
+        ...     {"side": "SELL", "quantity": 75, "price": "45.20"},
+        ... ])
+        >>> fees.get("brokerage")                              # doctest: +SKIP
+        Decimal('40.00')   # Rs 20 per leg, two legs
+        """
+        if not legs:
+            raise ValidationError("a structure needs at least one leg", code="invalid_fee_config")
+
+        merged: dict[str, Decimal] = {}
+        segment: str | None = None
+        for index, leg in enumerate(legs):
+            try:
+                qty = abs(to_price(leg["quantity"], "quantity"))
+                px = to_price(leg["price"], "price")
+                side = OrderSide.parse(leg["side"])
+            except KeyError as exc:
+                raise ValidationError(
+                    f"leg {index} is missing required key {exc}", code="invalid_fee_config"
+                ) from exc
+            leg_segment = TradeSegment.validate(leg.get("segment") or TradeSegment.OPTIONS)
+            segment = segment or leg_segment
+
+            breakdown = self.calculate(
+                quantity=qty,
+                fill_price=px,
+                side=side,
+                segment=leg_segment,
+                when=when,
+                track_volume=track_volume,
+            )
+            merged["brokerage"] = merged.get("brokerage", ZERO) + breakdown.brokerage
+            for key, value in breakdown.components.items():
+                if key == "brokerage":
+                    continue
+                merged[key] = merged.get(key, ZERO) + value
+                merged[f"leg_{index}_{key}"] = value
+
+        result = FeeBreakdown(
+            components=merged,
+            currency=self.broker.currency,
+            segment=segment or self.broker.default_segment,
+            broker=self.broker.name,
+        )
+        logger.debug(
+            "structure fees %s legs=%d total=%s", self.broker.name, len(legs), result.total
+        )
+        return result
+
+    def validate_against_contract_note(
+        self,
+        trade_value: Any,
+        quantity: Any,
+        side: Any,
+        segment: str,
+        expected: Mapping[str, Any],
+        tolerance: Any = Decimal("0.05"),
+        brokerage: Any = ZERO,
+        document: "ContractNote | None" = None,
+    ) -> list[str]:
+        """Reconcile a computed breakdown against a broker contract note.
+
+        Compares every component named in ``expected`` (keys are component
+        names — ``"stt"``, ``"exchange_transaction"``, ``"gst"``, ... — and
+        values are the rupee amounts printed on the note) against this
+        calculator's output for the same trade, and returns the list of
+        mismatches. An empty list means the model reproduces the note within
+        ``tolerance`` rupees per component.
+
+        This is the T8.3 workflow: transcribe a real note, run it through
+        here, and fix any rate that drifted. When the comparison passes and a
+        ``document`` is supplied, the breakdown is stamped with it so the
+        audit trail records which note validated the rates.
+
+        Returns
+        -------
+        list[str]
+            Human-readable mismatch descriptions; empty when validated.
+        """
+        value = abs(to_decimal(trade_value, "trade_value"))
+        qty = abs(to_decimal(quantity, "quantity"))
+        tol = abs(to_decimal(tolerance, "tolerance"))
+        parsed_side = OrderSide.parse(side)
+        segment = TradeSegment.validate(segment)
+        # GST is charged ON brokerage, so statutory charges are recomputed
+        # with the note's own brokerage as the base when the note itemises
+        # one — comparing the model's GST (priced off a possibly-different
+        # model brokerage) against the note would conflate a brokerage
+        # mismatch with a rate drift. Notes that show only a total fall back
+        # to the model's brokerage, the best available base.
+        model_brokerage = self.calculate_commission(
+            quantity=qty,
+            fill_price=value / qty if qty else ZERO,
+            side=parsed_side,
+            segment=segment,
+        )
+        base = (
+            to_decimal(expected["brokerage"], "expected brokerage")
+            if "brokerage" in expected
+            else to_decimal(brokerage, "brokerage") if brokerage else model_brokerage
+        )
+        statutory = self.broker.fee_schedule.charges(value, qty, parsed_side, segment, base)
+
+        mismatches: list[str] = []
+        for key, note_value in expected.items():
+            noted = to_decimal(note_value, f"expected[{key}]")
+            if key == "brokerage":
+                actual = model_brokerage
+            elif key == "total":
+                # The note's total against the base brokerage plus the
+                # statutory stack; a brokerage-model mismatch is reported by
+                # the "brokerage" key itself.
+                actual = _round(base + sum(statutory.values(), ZERO))
+            else:
+                actual = _round(statutory.get(key, ZERO))
+            if abs(actual - noted) > tol:
+                mismatches.append(
+                    f"{key}: contract note {noted} vs computed {actual} "
+                    f"(tolerance {tol})"
+                )
+
+        if not mismatches and document is not None:
+            stamped = {
+                "brokerage": model_brokerage,
+                **{k: _round(v) for k, v in statutory.items()},
+                FeeBreakdown.DOCUMENT_KEY: document,
+            }
+            computed = FeeBreakdown(
+                components=stamped,
+                currency=self.broker.currency,
+                segment=segment,
+                broker=self.broker.name,
+            )
+            logger.info(
+                "fee model validated against contract note %s (%s)",
+                document.document_id,
+                document.broker,
+            )
+        return mismatches
+
     # -- main entry point --------------------------------------------------
 
     def calculate(
@@ -910,6 +1165,7 @@ class CommissionCalculator:
         segment: str | None = None,
         when: datetime | None = None,
         track_volume: bool = True,
+        document: "ContractNote | None" = None,
     ) -> FeeBreakdown:
         """The complete itemised cost of one execution.
 
@@ -923,6 +1179,11 @@ class CommissionCalculator:
             and intraday STT differ by roughly 8x on a round trip.
         track_volume:
             Add this trade to the monthly volume used for tiered pricing.
+        document:
+            Optional :class:`ContractNote` reference; when supplied it is
+            attached to the returned breakdown under
+            :attr:`FeeBreakdown.DOCUMENT_KEY` so the audit trail records
+            which note this execution reconciles against.
 
         Returns
         -------
@@ -980,6 +1241,16 @@ class CommissionCalculator:
         if self.record:
             self._history.append(breakdown)
 
+        if document is not None:
+            stamped = dict(breakdown.components)
+            stamped[FeeBreakdown.DOCUMENT_KEY] = document
+            breakdown = FeeBreakdown(
+                components=stamped,
+                currency=breakdown.currency,
+                segment=breakdown.segment,
+                broker=breakdown.broker,
+            )
+
         logger.debug(
             "fees %s %s %s @ %s [%s] -> %s (%s bps)",
             self.broker.name,
@@ -1014,6 +1285,8 @@ class CommissionCalculator:
         totals: dict[str, Decimal] = {}
         for breakdown in self._history:
             for key, value in breakdown.components.items():
+                if not isinstance(value, Decimal) or FeeBreakdown._is_leg_key(key):
+                    continue  # document references and per-leg detail are not run-level charges
                 totals[key] = totals.get(key, ZERO) + value
         return {
             "count": len(self._history),

@@ -290,6 +290,35 @@ class TieredCommission(CommissionModel):
         }
 
 
+@dataclass
+class OptionsCommission(CommissionModel):
+    """Flat per-order brokerage for option contracts — the Indian discount
+    standard: Rs 20 per executed order regardless of lots or premium.
+
+    Deliberately separate from :class:`FlatCommission` so a broker profile
+    can price equity and option orders differently. The unit that matters is
+    the **order** (one leg = one order): a 5-lot NIFTY order and a 1-lot order
+    cost the same brokerage, and a two-leg spread pays it twice.
+    """
+
+    per_order: Decimal = Decimal("20")
+    name: str = field(default="options_flat", init=False)
+
+    def __post_init__(self) -> None:
+        self.per_order = money(self.per_order, "per_order")
+        if self.per_order < ZERO:
+            raise ValidationError(
+                "per_order must not be negative", code="invalid_commission_config"
+            )
+
+    def calculate(self, quantity: Any, price: Any, side: Any = OrderSide.BUY) -> Decimal:
+        self._inputs(quantity, price)
+        return self.per_order
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"model": self.name, "per_order": str(self.per_order)}
+
+
 #: Name -> constructor, for building a model from configuration.
 @dataclass
 class PaymentForOrderFlowCommission(CommissionModel):
@@ -337,6 +366,7 @@ _REGISTRY: dict[str, type[CommissionModel]] = {
     "per_share": PerShareCommission,
     "percentage": PercentageCommission,
     "tiered": TieredCommission,
+    "options_flat": OptionsCommission,
 }
 
 

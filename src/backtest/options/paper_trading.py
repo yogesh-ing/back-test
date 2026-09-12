@@ -258,6 +258,13 @@ class OptionPaperBroker:
         Slippage as a percentage (e.g. 0.001 = 0.1%).
     commission_per_lot:
         Commission per lot in ₹ (flat fee).
+    fee_calculator:
+        Optional :class:`~backtest.simulator.fees.CommissionCalculator`.
+        When supplied, the complete statutory stack (STT, exchange txn,
+        SEBI, stamp duty, GST) is computed per leg via
+        ``calculate_structure()`` on every execution, alongside the legacy
+        ``commission_per_lot`` charge. Costs never block execution: a fee
+        calculation error is logged and the trade proceeds.
     """
 
     def __init__(
@@ -265,11 +272,13 @@ class OptionPaperBroker:
         capital: float = 1_000_000.0,
         slippage_pct: float = 0.001,
         commission_per_lot: float = 20.0,
+        fee_calculator: Any | None = None,
     ) -> None:
         self.capital = Decimal(str(capital))
         self.available_cash = Decimal(str(capital))
         self.slippage_pct = Decimal(str(slippage_pct))
         self.commission_per_lot = Decimal(str(commission_per_lot))
+        self.fee_calculator = fee_calculator
 
         # Position tracking
         self._positions: dict[str, OptionPosition] = {}  # position_id -> position
@@ -333,6 +342,27 @@ class OptionPaperBroker:
                 net_cost -= leg_cost - commission
 
             fills.append((leg, fill_price, commission))
+
+        # Full statutory fee stack (Phase 8) — computed per leg when a fee
+        # calculator is attached. Logging-only: it never blocks execution.
+        if self.fee_calculator is not None:
+            try:
+                self.fee_calculator.calculate_structure(
+                    [
+                        {
+                            "side": leg.side,
+                            "quantity": leg.total_quantity,
+                            "price": fill_price,
+                        }
+                        for leg, fill_price, _ in fills
+                    ],
+                    when=ts,
+                )
+            except Exception:
+                logger.exception(
+                    "[option-paper] fee calculation failed for %s — executing without statutory fees",
+                    intent.structure_type,
+                )
 
         # Check margin
         if net_cost > self.available_cash:

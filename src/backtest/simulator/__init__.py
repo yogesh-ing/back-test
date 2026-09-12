@@ -36,6 +36,7 @@ from backtest.simulator.bucket_risk import (
 from backtest.simulator.commission import (
     CommissionModel,
     FlatCommission,
+    OptionsCommission,
     PaymentForOrderFlowCommission,
     PercentageCommission,
     PerShareCommission,
@@ -84,6 +85,7 @@ from backtest.simulator.fees import (
     FeeSchedule,
     IndiaEquityFees,
     NoStatutoryFees,
+    OptionsCommission,
     TradeSegment,
     USEquityFees,
     get_broker_preset,

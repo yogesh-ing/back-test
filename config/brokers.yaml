@@ -67,8 +67,25 @@ brokers:
       per_trade: 20
     delivery_commission_model:
       model: zero
+    # Options: flat per ORDER (not per lot), FY 2024-25 rates.
+    # A spread pays brokerage once per leg. Reconcile against a real
+    # contract note with CommissionCalculator.validate_against_contract_note()
+    # before trusting cost-sensitive results — see docs/OPTIONS-PAPER-LIVE.md.
+    options_commission_model:
+      model: options_flat
+      per_order: 20
     fee_schedule:
       schedule: india_equity
+      # Options statutory rates (NFO, FY 2024-25):
+      #   STT:            0.1% on the SELL premium only
+      #   Exchange txn:   0.03503% of premium, both sides
+      #   SEBI turnover:  ₹10 per crore of premium
+      #   IPFT:           ₹10 per crore of premium
+      #   Stamp duty:     0.003% of premium, BUY side only
+      #   GST:            18% on brokerage + exchange + SEBI + IPFT (never on STT or stamp duty)
+      stt_options_sell: 0.001
+      exchange_txn_options: 0.0003503
+      stamp_duty_options: 0.00003
 
   # Traditional full-service broker: percentage brokerage, no cap, and a
   # per-order minimum. Useful for showing how much the discount model saves.
