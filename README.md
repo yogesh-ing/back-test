@@ -30,7 +30,7 @@ Market Data (OHLCV candles)
 └─────────────────┘
 ```
 
-## Four Modes
+## Five Modes
 
 | Mode | What it does |
 |------|-------------|
@@ -40,6 +40,7 @@ Market Data (OHLCV candles)
 | **Portfolio** | Run multiple strategies simultaneously under shared risk limits |
 | **Portfolio (Live)** | Live-scoped command center — only real-money positions |
 | **Portfolio (Paper)** | Paper sandbox — simulated fills, no risk |
+| **Options** | Trade multi-leg NIFTY option structures (long call/put, bull call spread, bear put spread) with Greeks, fees, and expiry handling — paper or live |
 | **Dashboard** | Overview of all strategies and their status |
 
 ## Built-In Strategies
@@ -69,6 +70,12 @@ MarketView (bullish/bearish) → strike + expiry selection → TradeIntent
 - **Paper:** `/options` dashboard — positions, structures, Greeks grid, expiry alerts
 - **Live:** `LiveOptionTrader(dry_run=True)` first — logs payloads, places nothing
 - **Docs:** [docs/OPTIONS-PAPER-LIVE.md](docs/OPTIONS-PAPER-LIVE.md)
+
+**Status:** the options PRD is complete (9/9 phases) — instrument model,
+expression layer, paper trading, live trading, Greeks & margin, the full
+statutory fee stack, expiry handling, the `/options` dashboard, and an
+end-to-end integration suite. 226 options tests across 8 modules plus 52
+instrument-model tests.
 
 ## Data Sources
 
@@ -103,7 +110,10 @@ src/backtest/
 ├── strategies/     # Built-in strategies (SMA, RSI, Donchian, Buy&Hold)
 ├── engine/         # Backtest engine (trade simulation, metrics)
 ├── forward/        # Forward testing (paper trading)
-├── simulator/      # Position sizing, order routing
+├── simulator/      # Costs, slippage, fills, risk — incl. option fee stack
+├── options/        # Options trading: selectors, structures, paper/live
+│                   #   execution, Greeks, margin, fees, expiry
+├── instruments/    # Instrument model (equity, option, expiry calendar)
 ├── db/             # SQLAlchemy models + DB manager
 ├── web/            # Flask web app (UI + API)
 ├── live/           # mStock live auth + data adapter

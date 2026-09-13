@@ -4,14 +4,14 @@
 pieces fit together. Written from the code, not from the specs, so where the
 docs and the source disagree this file follows the source.*
 
-Last verified against commit `c8c078f` (2026-09-02).
+Last verified against commit `19ea3ff` (2026-09-12).
 
 ---
 
 ## 1. What this project is
 
-**An algorithmic trading platform for testing stock-trading strategies without
-risking real money.**
+**An algorithmic trading platform for testing stock and index-option trading
+strategies without risking real money.**
 
 You give it historical price data (OHLCV candles — Open, High, Low, Close,
 Volume), pick a strategy such as "buy when the 20-day average crosses above the
@@ -19,8 +19,9 @@ Volume), pick a strategy such as "buy when the 20-day average crosses above the
 trade the strategy would have made. At the end you get an equity curve, a trade
 list, and performance metrics (Sharpe ratio, max drawdown, win rate, P&L).
 
-The focus is the **Indian equity market** — NSE symbols, INR currency, IST
-timezone, Indian broker cost models (STT, stamp duty, SEBI turnover fees, GST),
+The focus is the **Indian market** — NSE symbols, INR currency, IST timezone,
+Indian broker cost models for both equity (STT, stamp duty, SEBI turnover fees,
+GST) and index options (flat per-order brokerage, STT on the sell side only),
 and mStock as the broker integration.
 
 The core question the platform answers: *would this strategy have made money,
@@ -28,16 +29,20 @@ after realistic costs?* The "after realistic costs" part is where most of the
 code lives — a naive backtest that ignores commission and slippage will happily
 tell you a losing strategy is profitable.
 
-### It is a simulator, not a trading system
+### Paper first — with one narrow, gated path to real orders
 
-Nothing in this repository can place a real order. There is no `place_order`
-anywhere in `src/`. The broker integration handles **login and market data
-only**. Every "trade" is a row in a database. See §8 for exactly where the line
+The default and overwhelmingly exercised path is simulation: every "trade" is a
+row in a database or an in-process ledger. Real order placement exists in
+exactly one place — the mStock order client (`brokers/mstock.py`) plus the
+options multi-leg trader (`options/live_trading.py`) built on it — and it is
+gated twice: an authenticated broker session is required, and
+`LiveOptionTrader` defaults to `dry_run=True`, which logs the exact payload
+that *would* be sent and places nothing. See §8 for exactly where the line
 sits — this is the single most important thing to understand before using it.
 
 ---
 
-## 2. The four things you can do with it
+## 2. The five things you can do with it
 
 | Mode | What it does | Where it lives |
 |---|---|---|
@@ -48,6 +53,7 @@ sits — this is the single most important thing to understand before using it.
 | **Portfolio (Live)** | Live-scoped command center — real money only | `GET /portfolio/live` |
 | **Portfolio (Paper)** | Paper sandbox — simulated fills only | `GET /portfolio/paper` |
 | **Portfolio (Overview)** | Combined view — Live prominent, Paper secondary | `GET /portfolio` |
+| **Options** | Multi-leg option structures (long call/put, spreads) — paper or live | `GET /options` |
 
 The distinction between **backtest** and **forward test** is the interesting
 one. A backtest computes the whole result instantly. A forward test replays the
@@ -145,6 +151,12 @@ Adding a strategy means subclassing the base in `strategy/base.py`, setting a
 `name`, implementing `generate_signals(df) -> Series`, and applying `@register`.
 See `docs/ADDING-NEW.md`.
 
+A strategy can also express a *directional view* instead of a raw signal:
+`Strategy.generate_market_view()` returns a `MarketView` (bullish/bearish,
+conviction, spot) that the options layer converts into a `TradeIntent` —
+strike selection (ATM / delta / fixed distance), an expiry policy, and one of
+four structures (long call, long put, bull call spread, bear put spread).
+
 ---
 
 ## 5. Where the data comes from
@@ -175,8 +187,8 @@ they produce daily bars regardless of what you ask for (gap G6).
 | Module | Responsibility |
 |---|---|
 | `money.py` | Decimal arithmetic — the foundation |
-| `fees.py` | Broker cost profiles (Zerodha, IBKR, …) |
-| `commission.py` | Brokerage calculation |
+| `fees.py` | Broker cost profiles (Zerodha, IBKR, …) + options fee stack |
+| `commission.py` | Brokerage calculation (incl. flat ₹20/order options model) |
 | `slippage.py` | The gap between expected and actual fill price |
 | `execution.py` | Order matching, partial fills, liquidity limits |
 | `fill.py` / `order.py` / `lots.py` | Order lifecycle and lot tracking |
@@ -217,6 +229,17 @@ compare `backtest` vs `realistic` slippage profiles. Slippage typically dwarfs
 commission."* Execution is seeded (default `42`) so runs are reproducible, and
 orders are capped at 10% of bar volume by default (`max_participation`) because
 you can't buy more than the market traded.
+
+### Option orders cost differently — and that is modelled
+
+Options price separately from equity: `OptionsCommission` charges a flat
+**₹20 per order** (not per lot), STT applies to the sell side only, and
+`FeeCalculator.calculate_structure()` produces per-leg breakdowns that merge
+into one total — a two-leg spread pays brokerage twice, exactly like a real
+contract note. `validate_against_contract_note()` audits the model against a
+transcribed broker contract note. Reference anchor, tested: one NIFTY lot at
+₹120.50 premium costs **₹27.63** all-in on the mStock flat plan (no STT on the
+buy side).
 
 ---
 
@@ -300,36 +323,39 @@ state of the mStock broker integration:
 | Fetching historical bars | `live/mstock.py` → `get_bars()` |
 | Fetching the latest quote | `get_latest()` |
 | Connectivity preflight (DNS/HTTPS/auth) | `live/preflight.py` |
+| Order place / modify / cancel | `brokers/mstock.py` (ticket P3.2) |
+| Order book + fill polling | `get_order_book()`, `poll_fill()` |
+| Multi-leg option orders with rollback | `options/live_trading.py` → `LiveOptionTrader` |
 
-### What does not exist
+### What still does not exist
 
-There is **no order placement, modification or cancellation against any real
-broker.** Confirmed by grep: `place_order` appears zero times in `src/`.
+- **No equity order path.** The forward engine, portfolio runners and the
+  strategy loop never call the order client — they trade against
+  `OrderLedger`/`PaperBroker` simulated fills.
+- **No live-credentials exercise.** The order client and `LiveOptionTrader`
+  are tested against mocks (20 live-trading tests); the documented live
+  dry-run against a real mStock session (PRD task T9.5) is still pending.
+- **No persistence for the options book.** The `/options` dashboard serves the
+  in-process paper broker; option positions and structures are not written to
+  DB tables yet (deliberate V1 scope).
 
-`brokers/base.py` — the abstract contract every broker must satisfy — defines
-exactly four methods: `login`, `verify_totp`, `get_session_status`, `logout`.
-**There is no order surface in the base class**, so this is greenfield at the
-interface level, not merely unimplemented for mStock.
+### How the live path is gated
 
-### What is ready for it
+`brokers/base.py` composes two contracts: `BrokerAuthBase` (login / TOTP /
+session / logout) and `BrokerOrderBase` (`place_order` / `modify_order` /
+`cancel_order` / `get_order_book` / `calculate_order_margin`). A live broker
+must implement both. Two gates sit in front of any real order:
 
-The groundwork is genuinely in place, which makes the gap easy to misread:
+1. **Session guard** — `place_order()` calls `_require_session()` and fails
+   cleanly unless an authenticated mStock session is active.
+2. **Dry-run default** — `LiveOptionTrader(broker, dry_run=True)` logs the
+   exact multi-leg payload that *would* be sent and places nothing. Going
+   live means `dry_run=False` with real credentials.
 
-- `forward/order_ledger.py` — a real `OrderLedger` with `submit`/`cancel`/
-  `apply_fill`, `client_order_id` idempotency keys and thread-safe locking, plus
-  a `PaperBroker` that fills against simulated prices.
-- `db/models.py` — the `orders` table is production-shaped, with check
-  constraints for order types, limit/stop price consistency, fill consistency
-  and mandatory rejection reasons.
-- `docs/archive/mstock-typea-api-reference.md` documents every endpoint that
-  *would* be needed: `POST /openapi/typea/orders/regular`, `PUT .../{order_id}`,
-  `DELETE .../{order_id}`, `cancelall`, order book, order details, margin
-  calculator.
-
-That reference file states the position plainly: *"No order API is required for
-the first paper-trading stage."*
-
-So: **schema and ledger ready, HTTP layer entirely absent.**
+So: **the HTTP order layer is real and tested, the decision engines remain
+paper-first, and one narrow, dry-run-default path connects them.** The
+paper-side groundwork (`OrderLedger`, production-shaped `orders` table) is
+unchanged and still backs every simulated run.
 
 ### One more trap
 
@@ -350,10 +376,13 @@ src/backtest/
 ├── strategies/      The four built-in strategies
 ├── engine/          Backtester, metrics, trade walk, plotting
 ├── simulator/       Costs, fills, sizing, risk, portfolio accounting (18 files)
+├── options/         Options: selectors, structures, paper/live execution,
+│                    Greeks, margin, fees, expiry (11 files)
+├── instruments/     Instrument model: equity, option, expiry calendar (6 files)
 ├── forward/         Forward testing: engine, runners, portfolio manager,
 │                    risk supervisor, order ledger, feeds
 ├── live/            mStock auth, API client, preflight, time & data validation
-├── brokers/         Broker auth contract + mStock + session manager
+├── brokers/         Broker auth + order contract + mStock + session manager
 ├── marketdata/      Tick→bar aggregation, quality checks, time sync
 ├── db/              SQLAlchemy models, connection manager, config
 ├── api/             Flask blueprints (the REST surface)
@@ -367,7 +396,7 @@ src/backtest/
 └── runner.py        Orchestrates data → strategy → engine → results
 ```
 
-**Scale:** 98 Python modules, ~36,000 lines in `src/`; 61 test modules, 1,875+ tests.
+**Scale:** 105 Python modules, ~39,900 lines in `src/`; 82 test modules, 2,000+ tests.
 
 ### One-result-shape rule
 
@@ -499,7 +528,7 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2
 ### Web pages
 
 `/` · `/backtest` · `/compare` · `/forward` · `/portfolio` · `/portfolio/live` ·
-`/portfolio/paper` · `/dashboard` · `/data` · `/health`
+`/portfolio/paper` · `/options` · `/dashboard` · `/data` · `/health`
 
 ### REST API
 
@@ -511,6 +540,8 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2
   `/buckets`; `POST /runner/create`, `/runner/<id>/control`, `/control/<action>`,
   `/emergency_stop` — all control endpoints accept `?mode=live|paper` for
   scoped bulk actions
+- **Options** — `GET /api/options/summary`, `/positions`, `/greeks`;
+  `POST /api/options/structures/<id>/close`, `/api/options/expiry/process`
 - **Broker** — `POST /api/broker/login`, `/verify-totp`, `/logout`;
   `GET /api/broker/status`
 - **Data** — `GET /api/data/status`, `/inventory`; `POST /api/data/fetch`, `/stop`
@@ -554,9 +585,11 @@ more. Persistence is tracked as V2 item #3.
 
 ## 14. Testing and quality
 
-- **1,875+ tests passing**, 4 skipped (need real mStock credentials).
+- **2,000+ tests passing**, 4 skipped (need real mStock credentials).
   Portfolio-specific: 116 tests covering bucket state, breaker independence,
-  flow semantics, scoped API endpoints, and UI views.
+  flow semantics, scoped API endpoints, and UI views. Options-specific: 226
+  tests across 8 modules (expression, paper, live, Greeks, fees, expiry, web,
+  integration) plus 52 instrument-model tests.
 - 36 JavaScript behaviour assertions across 4 Node harnesses (`tests/js/*.mjs`).
 - Coverage gate: **80% minimum**, enforced in `tox.ini`.
 - `tests/` splits into `unit/`, `integration/`, `e2e/`, `js/`, `manual/`,
@@ -600,7 +633,10 @@ happened.
 
 Straight from the code and trackers, not aspirational:
 
-1. **No live trading.** No order placement against any broker. Paper only.
+1. **Decision engines are paper-only.** Forward testing and portfolio runners
+   never place real orders. The one live path — multi-leg options via
+   `LiveOptionTrader` — needs real mStock credentials and defaults to dry-run;
+   it has not yet been exercised against the live API (pending task T9.5).
 2. **Forward testing is a replay** of historical data, not a live market feed.
 3. **In-memory state** — forward sessions and broker auth are lost on restart.
 4. **Single-worker only** — see §13.
@@ -628,6 +664,7 @@ Straight from the code and trackers, not aspirational:
 | What are the strategies doing? | `docs/STRATEGIES.md` |
 | How does forward testing work? | `docs/FORWARD-TESTING.md` |
 | Multi-strategy portfolios? | `docs/PORTFOLIO-CENTER.md` |
+| Options paper & live trading? | `docs/OPTIONS-PAPER-LIVE.md` |
 | Live/Paper separation design | `instructions/REFACTOR-PORTFOLIO-LIVE-PAPER-SEPARATION.md` |
 | Schema and migrations? | `docs/DATABASE.md`, `db/archive/DB-IMPLEMENTATION-GUIDE.md` |
 | Something is broken | `instructions/ENGINEERING-NOTES.md`, `docs/LOGGING.md` |
