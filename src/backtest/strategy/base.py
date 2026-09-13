@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from abc import ABC
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from .intent import MarketView
 
 # ---------------------------------------------------------------------------
 # Contract error

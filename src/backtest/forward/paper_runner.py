@@ -52,6 +52,7 @@ from backtest.data.base import CANONICAL_TIMEFRAMES, DataSource
 from backtest.data.frame_source import FrameSource
 from backtest.data.source_tags import SOURCE_TAG_VALUES, SOURCE_TAGS, source_tag_for
 from backtest.data.universe import get_universe_symbols
+from backtest.forward.options_bridge import OptionsBridge
 from backtest.simulator.engine_loop import OrderQueue, run_engine_loop
 from backtest.simulator.enums import OrderSide, OrderType, TimeInForce
 from backtest.simulator.execution import OrderExecutor, free_executor
@@ -452,6 +453,10 @@ class RunnerConfig:
     mode: str = "paper"
     # Canonical P1.1 source tag: synthetic / replay / mstock.
     source: str = "synthetic"
+    # Instrument config (Gap G3.2): {"type": "equity"} keeps the classic
+    # flow; {"type": "option", "expression": {...}} routes bars through the
+    # options expression layer via an OptionsBridge.
+    instrument: Dict[str, Any] = field(default_factory=lambda: {"type": "equity"})
 
     def __post_init__(self) -> None:
         self.name = str(self.name).strip()
@@ -496,6 +501,18 @@ class RunnerConfig:
         if self.max_pool_positions < 1:
             raise ValueError("max_pool_positions must be >= 1")
 
+        # Instrument config (Gap G3.2)
+        if self.instrument is None:
+            self.instrument = {"type": "equity"}
+        if not isinstance(self.instrument, dict):
+            raise ValueError("instrument must be a dict, e.g. {'type': 'equity'|'option'}")
+        inst_type = str(self.instrument.get("type", "equity")).strip().lower()
+        if inst_type not in ("equity", "option"):
+            raise ValueError(
+                f"instrument.type must be 'equity' or 'option', got {inst_type!r}"
+            )
+        self.instrument["type"] = inst_type
+
 
 class StrategyRunner:
     """Isolated strategy execution worker (Layer 1 of the portfolio engine).
@@ -537,6 +554,16 @@ class StrategyRunner:
         )
         self.executor = free_executor(self.portfolio)
         self.closed_trades_cache: List[Dict[str, Any]] = []
+
+        # -- options bridge (Gap G3.2) --------------------------------------
+        # Runners with instrument.type == "option" route bars through the
+        # expression layer instead of the equity signal flow.
+        self.options_bridge: Optional["OptionsBridge"] = None
+        if str(config.instrument.get("type", "equity")) == "option":
+            self.options_bridge = OptionsBridge(
+                capital=config.allocated_capital,
+                expression=config.instrument.get("expression"),
+            )
 
         # -- rolling candle buffers ----------------------------------------
         self._bars: Dict[str, Deque[Dict[str, Any]]] = {
@@ -718,7 +745,11 @@ class StrategyRunner:
                 if self.config.target_type == TARGET_SINGLE:
                     # Single-symbol runners act immediately on their own bar.
                     if len(self._bars[symbol]) >= MIN_WARMUP_BARS:
-                        self._process_single(symbol, bar)
+                        if self.options_bridge is not None:
+                            # Gap G3.2: option instrument → expression layer.
+                            self._process_option_bar(symbol, bar)
+                        else:
+                            self._process_single(symbol, bar)
                         self._check_instance_risk()
                 # Pool mode defers the basket scan to :meth:`on_tick_end`
                 # (once per tick instead of once per symbol event — O(n) vs O(n^2)).
@@ -779,6 +810,64 @@ class StrategyRunner:
         if signal is None:
             return
         self._act_on_signal(symbol, signal, bar["close"], bar["ts"])
+
+    # -- options (Gap G3.2) -----------------------------------------------
+
+    def _process_option_bar(self, symbol: str, bar: Dict[str, Any]) -> None:
+        """Run the strategy's market view through the options bridge.
+
+        ``instrument.type == 'option'`` runners come through here instead of
+        :meth:`_process_single`: the strategy's ``generate_market_view()``
+        output feeds the expression layer (chain → selector → structure →
+        paper book). A ``None`` view means "no trade this bar".
+        """
+        if self.options_bridge is None:
+            return
+        df = self._bars_to_frame(self._bars[symbol])
+        try:
+            view = self.strategy.generate_market_view(df)
+        except Exception as exc:  # noqa: BLE001 — one bad bar must not kill the runner
+            logger.debug(
+                "Strategy %s market view failed for %s: %s",
+                self.config.strategy_name, symbol, exc,
+            )
+            self._log_signal(
+                symbol, "ERROR", None, self.last_price.get(symbol), f"view error: {exc}"
+            )
+            return
+        if view is None:
+            return
+
+        result = self.options_bridge.on_market_view(view, self.config.strategy_name)
+        if not result:
+            return
+        if result.get("rejected"):
+            self._log_signal(
+                symbol, "OPTION_BLOCKED", None, bar["close"], str(result.get("reason"))
+            )
+            return
+        self._log_signal(
+            symbol,
+            "OPTION_ENTRY",
+            1 if result.get("direction") == "bullish" else -1,
+            bar["close"],
+            "{} {} expiry={} legs={}".format(
+                result.get("structure_type"),
+                "/".join(result.get("strikes", [])),
+                result.get("expiry"),
+                result.get("positions"),
+            ),
+        )
+
+    def options_summary(self) -> Optional[Dict[str, Any]]:
+        """Option-book state for runners with ``instrument.type == 'option'``.
+
+        ``None`` for classic equity runners.
+        """
+        if self.options_bridge is None:
+            return None
+        with self._lock:
+            return self.options_bridge.summary()
 
     # -- pool / universe --------------------------------------------------
 
@@ -1127,6 +1216,10 @@ class StrategyRunner:
                 "bars_processed": self.bars_processed,
                 "last_bar_ts": max(self._last_bar_ts.values()) if self._last_bar_ts else None,
                 "created_ts": self.created_ts,
+                "instrument": dict(self.config.instrument or {"type": "equity"}),
+                "options": (
+                    self.options_bridge.summary() if self.options_bridge is not None else None
+                ),
             }
 
     def get_detail(self) -> Dict[str, Any]:

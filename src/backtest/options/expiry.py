@@ -337,6 +337,7 @@ class ExpiryManager:
         """
         now = as_of or datetime.utcnow()
         results: list[SettlementResult] = []
+        settled_structure_ids: set[str] = set()
 
         for pos in list(self.broker._positions.values()):
             if pos.status != PositionStatus.OPEN:
@@ -367,6 +368,7 @@ class ExpiryManager:
             pos.status = PositionStatus.EXPIRED
             pos.closed_at = now
             pos.current_price = Decimal(str(intrinsic))
+            settled_structure_ids.add(pos.structure_id)
 
             result = SettlementResult(
                 position_id=pos.position_id,
@@ -416,6 +418,11 @@ class ExpiryManager:
                 position_ids=[r.position_id for r in results],
                 timestamp=now,
             ))
+
+        # Gap G4.2: let the broker fire its closed observers (persistence
+        # stamps these rows 'expired') once a structure has no open legs.
+        for structure_id in settled_structure_ids:
+            self.broker._notify_settlement(structure_id)
 
         return results
 

@@ -27,7 +27,10 @@ from backtest.strategy.intent import (
 
 
 @pytest.fixture()
-def app():
+def app(monkeypatch):
+    # The dashboard book persists to the configured DB when available
+    # (Gap G4.2); tests run hermetically without it.
+    monkeypatch.setenv("OPTIONS_PERSISTENCE", "off")
     reset_option_state()
     app = create_app(source="synthetic")
     app.config["TESTING"] = True

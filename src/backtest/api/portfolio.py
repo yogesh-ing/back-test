@@ -175,6 +175,7 @@ def create_runner() -> Tuple[Response, int]:
             ),
             mode=data.get("mode") or "paper",
             source=data.get("source") or "synthetic",
+            instrument=data.get("instrument") or {"type": "equity"},
         )
         auto_start = bool(data.get("auto_start", True))
         instance_id = _manager().add_runner(config, start=auto_start)
@@ -221,7 +222,17 @@ def control_runner(instance_id: str) -> Tuple[Response, int]:
     except (ValueError, RuntimeError) as exc:
         return _error(str(exc), 409)
     log.info("runner %s: action=%s → %s", instance_id, action, state.get("status", "?"))
-    return jsonify({"success": True, "action": action, "scope": state.get("mode", "paper"), "runner": state}), 200
+    return (
+        jsonify(
+            {
+                "success": True,
+                "action": action,
+                "scope": state.get("mode", "paper"),
+                "runner": state,
+            }
+        ),
+        200,
+    )
 
 
 @portfolio_bp.delete("/api/portfolio/runner/<instance_id>")

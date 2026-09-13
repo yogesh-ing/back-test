@@ -318,7 +318,10 @@ class PortfolioManager:
             return n
 
     def resume_all(self, mode: Optional[str] = None) -> int:
-        """Resume runners. ``mode=None`` resumes all; mode='paper'|'live' resumes only that bucket."""
+        """Resume runners.
+
+        ``mode=None`` resumes all; mode='paper'|'live' resumes only that bucket.
+        """
         with self._lock:
             # Check halt state — scoped resume checks bucket halt, not just manager
             if mode is not None:

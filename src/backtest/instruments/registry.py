@@ -14,7 +14,6 @@ from datetime import date
 from decimal import Decimal
 from typing import Sequence
 
-from backtest.instruments.base import InstrumentType
 from backtest.instruments.equity import EquityInstrument
 from backtest.instruments.option import OptionContract
 
@@ -77,7 +76,11 @@ class InstrumentRegistry:
             if expiry is not None and inst.expiry != expiry:
                 continue
             if option_type is not None:
-                inst_ot = inst.option_type.value if hasattr(inst.option_type, 'value') else inst.option_type
+                inst_ot = (
+                    inst.option_type.value
+                    if hasattr(inst.option_type, 'value')
+                    else inst.option_type
+                )
                 if inst_ot != option_type:
                     continue
             if strike is not None and inst.strike != strike:
