@@ -19,7 +19,6 @@ V1 policies: ``NearestExpiry``, ``MonthlyExpiry``, ``FixedDaysExpiry``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Protocol, runtime_checkable
 

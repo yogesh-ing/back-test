@@ -50,7 +50,7 @@ from backtest.brokers.base import (
     MarginInfo,
 )
 from backtest.instruments.option import OptionContract
-from backtest.instruments.base import ExerciseType, InstrumentType, SettlementType
+from backtest.instruments.base import ExerciseType, SettlementType
 
 __all__ = ["MStockBroker", "MStockOrderError"]
 
@@ -664,7 +664,8 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             All valid option contracts for the underlying.
         """
         token = self._require_session()
-        exchange = exchange_id or _NFO_EXCHANGE_ID
+        # NOTE: ``exchange_id`` is accepted for API symmetry with the live
+        # chain endpoint; the instrument master filter below is NFO-only.
 
         try:
             # Fetch the full instrument master (CSV format)

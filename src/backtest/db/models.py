@@ -919,3 +919,78 @@ class SystemLog(Base):
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<SystemLog {self.log_level} {self.component}: {self.message[:40]}>"
+
+
+# ---------------------------------------------------------------------------
+# 11. Option trade structures (Gap-Analysis G4.2)
+# ---------------------------------------------------------------------------
+
+
+class TradeStructureStatus(StrEnum):
+    OPEN = "open"
+    CLOSED = "closed"
+    EXPIRED = "expired"
+
+
+class TradeStructure(Base):
+    """A persisted option structure (one row per executed structure).
+
+    Gap G4.2: the options paper book was in-process memory only, so a server
+    restart lost every open position. This table is the durable record —
+    one row per structure, with its legs serialised into ``legs`` so the
+    in-memory :class:`~backtest.options.paper_trading.StructurePosition`
+    can be rehydrated byte-for-byte on startup.
+
+    ``entry_cost`` / ``fees_paid`` capture the opening cash debit (net
+    premium, and the statutory fee stack at entry) so a rehydrated book
+    restores ``available_cash`` exactly.
+    """
+
+    __tablename__ = "trade_structures"
+
+    structure_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True)
+    strategy_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    structure_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    underlying: Mapped[str] = mapped_column(String(32), nullable=False)
+    expiry: Mapped[Optional[date]] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'open'")
+    )
+
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    #: Net premium paid to open (debit positive, credit negative).
+    entry_cost: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    #: Statutory fee stack charged at entry (STT, exchange, SEBI, stamp, GST).
+    fees_paid: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    #: Gross realized P&L across legs once closed/expired.
+    realized_pnl: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+
+    #: Serialised leg snapshots (see options.persistence for the shape).
+    legs: Mapped[dict[str, Any]] = mapped_column(
+        JSONVariant, nullable=False, server_default=text("'{}'")
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            _in_check("status", TradeStructureStatus),
+            name="ck_trade_structures_status",
+        ),
+        Index("ix_trade_structures_status", "status"),
+        Index("ix_trade_structures_underlying", "underlying"),
+        Index("ix_trade_structures_opened", text("opened_at DESC")),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<TradeStructure {self.structure_type} {self.underlying} {self.status}>"

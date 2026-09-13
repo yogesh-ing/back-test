@@ -48,6 +48,8 @@ from backtest.db.models import (  # Enums
     Timeframe,
     TimeInForce,
     Trade,
+    TradeStructure,
+    TradeStructureStatus,
 )
 
 __all__ = [
@@ -86,4 +88,7 @@ __all__ = [
     "SignalDirection",
     "LogLevel",
     "Timeframe",
+    # Options (Gap G4.2)
+    "TradeStructure",
+    "TradeStructureStatus",
 ]

@@ -85,7 +85,6 @@ from backtest.simulator.fees import (
     FeeSchedule,
     IndiaEquityFees,
     NoStatutoryFees,
-    OptionsCommission,
     TradeSegment,
     USEquityFees,
     get_broker_preset,
@@ -236,6 +235,7 @@ __all__ = [
     "PercentageCommission",
     "TieredCommission",
     "PaymentForOrderFlowCommission",
+    "OptionsCommission",
     "resolve_commission_model",
     # Slippage
     "SlippageCalculator",

@@ -28,9 +28,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from backtest.brokers.base import BrokerOrder, BrokerOrderId
 from backtest.brokers.mstock import MStockBroker, MStockOrderError

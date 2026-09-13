@@ -29,8 +29,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import Optional
 
 SQRT_TWO_PI = math.sqrt(2.0 * math.pi)
 

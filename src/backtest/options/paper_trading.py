@@ -24,11 +24,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Protocol
 
-from backtest.instruments.option import OptionContract
 from backtest.strategy.intent import (
-    MarketView,
     OptionLeg,
     TradeIntent,
 )
@@ -273,6 +271,8 @@ class OptionPaperBroker:
         slippage_pct: float = 0.001,
         commission_per_lot: float = 20.0,
         fee_calculator: Any | None = None,
+        on_structure_opened: Any | None = None,
+        on_structure_closed: Any | None = None,
     ) -> None:
         self.capital = Decimal(str(capital))
         self.available_cash = Decimal(str(capital))
@@ -280,6 +280,14 @@ class OptionPaperBroker:
         self.commission_per_lot = Decimal(str(commission_per_lot))
         self.fee_calculator = fee_calculator
         self._statutory_fees_paid = ZERO
+
+        # Gap G4.2 observers — fired after every state transition so the
+        # persistence layer (or tests) can mirror the book. Exceptions in an
+        # observer never block execution.
+        #: ``fn(structure, entry_fees: Decimal)`` after a successful open.
+        self.on_structure_opened = on_structure_opened
+        #: ``fn(structure, realized_pnl: Decimal)`` after close/settlement.
+        self.on_structure_closed = on_structure_closed
 
         # Position tracking
         self._positions: dict[str, OptionPosition] = {}  # position_id -> position
@@ -369,14 +377,16 @@ class OptionPaperBroker:
                 self._statutory_fees_paid += statutory_fees
             except Exception:
                 logger.exception(
-                    "[option-paper] fee calculation failed for %s — executing without statutory fees",
+                    "[option-paper] fee calculation failed for %s — "
+                    "executing without statutory fees",
                     intent.structure_type,
                 )
 
         # Check margin — net premium + commissions + the statutory stack.
         if net_cost + statutory_fees > self.available_cash:
             raise InsufficientMarginError(
-                f"Need ₹{net_cost + statutory_fees:,.2f} but only ₹{self.available_cash:,.2f} available"
+                f"Need ₹{net_cost + statutory_fees:,.2f} "
+                f"but only ₹{self.available_cash:,.2f} available"
             )
 
         # Atomic execution — create all positions
@@ -430,6 +440,8 @@ class OptionPaperBroker:
 
         # Log
         self._log_fill(intent, structure_id, fills, ts)
+
+        self._fire_structure_opened(structure, statutory_fees)
 
         logger.info(
             "[option-paper] Executed %s structure=%s legs=%d cost=₹%.2f cash=₹%.2f",
@@ -505,11 +517,14 @@ class OptionPaperBroker:
                 self.available_cash -= exit_fees
             except Exception:
                 logger.exception(
-                    "[option-paper] exit fee calculation failed for %s — closing without statutory fees",
+                    "[option-paper] exit fee calculation failed for %s — "
+                    "closing without statutory fees",
                     structure_id[:8],
                 )
 
         structure.closed_at = ts
+
+        self._fire_structure_closed(structure, total_pnl)
 
         logger.info(
             "[option-paper] Closed structure=%s pnl=₹%.2f fees=₹%.2f cash=₹%.2f",
@@ -529,8 +544,11 @@ class OptionPaperBroker:
         """Update MTM for all open positions.
 
         Returns total unrealized P&L across all open positions.
+
+        ``timestamp`` is accepted for interface symmetry with
+        :meth:`execute_structure` / :meth:`close_structure`; MTM updates
+        always stamp positions with wall-clock time.
         """
-        ts = timestamp or datetime.utcnow()
         total_unrealized = ZERO
 
         for position in self._positions.values():
@@ -543,6 +561,65 @@ class OptionPaperBroker:
             total_unrealized += pnl
 
         return total_unrealized
+
+    # ------------------------------------------------------------------
+    # Persistence support (Gap G4.2)
+    # ------------------------------------------------------------------
+
+    def _fire_structure_opened(self, structure: StructurePosition, entry_fees: Decimal) -> None:
+        if self.on_structure_opened is None:
+            return
+        try:
+            self.on_structure_opened(structure, entry_fees)
+        except Exception:  # noqa: BLE001 — mirroring must never block trading
+            logger.exception(
+                "[option-paper] on_structure_opened observer failed for %s",
+                structure.structure_id[:8],
+            )
+
+    def _fire_structure_closed(self, structure: StructurePosition, realized_pnl: Decimal) -> None:
+        if self.on_structure_closed is None:
+            return
+        try:
+            self.on_structure_closed(structure, realized_pnl)
+        except Exception:  # noqa: BLE001 — mirroring must never block trading
+            logger.exception(
+                "[option-paper] on_structure_closed observer failed for %s",
+                structure.structure_id[:8],
+            )
+
+    def _notify_settlement(self, structure_id: str) -> None:
+        """Post-expiry hook (called by the expiry pipeline).
+
+        ``settle_expired`` closes positions leg-by-leg; once no leg of a
+        structure remains open, fire the closed observer so persistence can
+        stamp the row ``expired``.
+        """
+        structure = self._structures.get(structure_id)
+        if structure is None or structure.is_open:
+            return
+        if structure.closed_at is None:
+            structure.closed_at = datetime.utcnow()
+        self._fire_structure_closed(structure, structure.total_realized_pnl)
+
+    def restore_structure(self, structure: StructurePosition, fees_paid: Decimal = ZERO) -> None:
+        """Rehydrate a persisted open structure after a restart (G4.2).
+
+        Registers the structure and its legs, then re-applies the opening
+        cash debit (net premium + commissions + the entry-side statutory
+        stack) so ``available_cash`` matches the pre-restart book.
+        """
+        self._structures[structure.structure_id] = structure
+        for leg in structure.legs:
+            self._positions[leg.position_id] = leg
+        debit = structure.total_entry_cost + structure.total_commission + Decimal(str(fees_paid))
+        self.available_cash -= debit
+        logger.info(
+            "[option-paper] restored structure=%s legs=%d debit=₹%.2f",
+            structure.structure_id[:8],
+            len(structure.legs),
+            float(debit),
+        )
 
     # ------------------------------------------------------------------
     # Queries
