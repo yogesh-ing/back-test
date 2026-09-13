@@ -4,4 +4,5 @@ __all__ = [
     "rsi_reversion",
     "donchian_breakout",
     "price_move",
+    "option_directional",
 ]

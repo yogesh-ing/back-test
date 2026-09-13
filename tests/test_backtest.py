@@ -28,9 +28,19 @@ def test_synthetic_source_deterministic():
 
 
 def test_all_strategies_auto_registered():
-    """Test 3: sma_crossover, rsi_reversion, buy_and_hold, donchian_breakout all auto-registered."""
+    """Test 3: every built-in strategy auto-registers on discovery.
+
+    Updated as the registry legitimately grows: price_move (earlier PRD) and
+    directional_options (Gap G3.1 — the first options-aware strategy)."""
     strategies = list_strategies()
-    expected = {"sma_crossover", "rsi_reversion", "buy_and_hold", "donchian_breakout"}
+    expected = {
+        "sma_crossover",
+        "rsi_reversion",
+        "buy_and_hold",
+        "donchian_breakout",
+        "price_move",
+        "directional_options",
+    }
     assert set(strategies) == expected
 
 

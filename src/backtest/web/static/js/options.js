@@ -25,6 +25,21 @@
     document.getElementById("opt-cash").textContent = fmtMoney(data.available_cash);
     document.getElementById("opt-positions").textContent = data.open_position_count;
     document.getElementById("opt-pnl").innerHTML = fmtPnl(data.realized_pnl);
+    renderQuoteSource(data.quote_source);
+  }
+
+  // G2.3 — honest labeling: where do the numbers come from?
+  function renderQuoteSource(source) {
+    const el = document.getElementById("opt-quote-source");
+    if (!el) return;
+    if (!source || source === "unknown") {
+      el.textContent = "quotes: unknown";
+      el.className = "opt-quote-badge opt-quote-unknown";
+      return;
+    }
+    const live = source.indexOf("live") === 0;
+    el.textContent = live ? "quotes: LIVE (mStock)" : "quotes: SYNTHETIC (Black-Scholes)";
+    el.className = "opt-quote-badge " + (live ? "opt-quote-live" : "opt-quote-synth");
   }
 
   function renderGreeks(greeks) {
@@ -155,8 +170,109 @@
     }
   }
 
+  // ---------------------------------------------------------------------
+  // Open Structure modal (Gap G1.2) + spot nudges (G2.3 demo knob)
+  // ---------------------------------------------------------------------
+
+  function openModal() {
+    document.getElementById("openTradeModal").style.display = "flex";
+    document.getElementById("ot-error").style.display = "none";
+  }
+
+  function closeModal() {
+    document.getElementById("openTradeModal").style.display = "none";
+  }
+
+  function nudgeSpot(delta) {
+    fetch("/api/options/summary")
+      .then((r) => r.json())
+      .then((data) => {
+        // Approximate current spot from the generator default when absent;
+        // the synthetic feed nudges relative to its last set spot.
+        const current = (window.__optSpot = window.__optSpot || 24800);
+        const next = Math.max(1000, current + delta);
+        window.__optSpot = next;
+        return fetch("/api/options/spot", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ underlying: "NIFTY", spot: next }),
+        });
+      })
+      .then((r) => r.json())
+      .then(() => refresh())
+      .catch(() => window.toast && window.toast("Spot nudge failed", "error"));
+  }
+
+  async function submitTrade(e) {
+    e.preventDefault();
+    const form = e.target;
+    const errBox = document.getElementById("ot-error");
+    const payload = {
+      underlying: form.underlying.value,
+      structure_type: form.structure_type.value,
+      quantity: parseInt(form.quantity.value, 10),
+      config: {
+        strike_selection: form.strike_selection.value,
+        delta_target: parseFloat(form.delta_target.value),
+      },
+    };
+    if (!payload.quantity || payload.quantity < 1) {
+      errBox.textContent = "Quantity must be at least 1";
+      errBox.style.display = "block";
+      return;
+    }
+    const btn = document.getElementById("ot-submit");
+    btn.disabled = true;
+    btn.textContent = "Submitting…";
+    try {
+      const resp = await fetch("/api/options/trade", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const out = await resp.json();
+      if (!resp.ok) {
+        errBox.textContent = out.error || "Order rejected";
+        errBox.style.display = "block";
+      } else {
+        closeModal();
+        window.toast &&
+          window.toast(
+            "Opened " +
+              payload.structure_type +
+              " @ " +
+              (out.strikes || []).join("/"),
+            "success"
+          );
+      }
+    } catch (err) {
+      errBox.textContent = "Network error";
+      errBox.style.display = "block";
+    }
+    btn.disabled = false;
+    btn.textContent = "Submit Order";
+    refresh();
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     refresh();
     setInterval(refresh, 5000); // poll every 5s
+
+    const modal = document.getElementById("openTradeModal");
+    document.getElementById("openTradeBtn").addEventListener("click", openModal);
+    document.getElementById("ot-cancel").addEventListener("click", closeModal);
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) closeModal();
+    });
+    document.getElementById("openTradeForm").addEventListener("submit", submitTrade);
+
+    // Show/hide the delta target field with the selector choice
+    document.getElementById("ot-selector").addEventListener("change", (e) => {
+      document.getElementById("ot-delta-wrap").style.display =
+        e.target.value === "delta" ? "block" : "none";
+    });
+
+    document.getElementById("nudgeUpBtn").addEventListener("click", () => nudgeSpot(100));
+    document.getElementById("nudgeDownBtn").addEventListener("click", () => nudgeSpot(-100));
   });
 })();

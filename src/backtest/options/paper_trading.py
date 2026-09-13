@@ -279,6 +279,7 @@ class OptionPaperBroker:
         self.slippage_pct = Decimal(str(slippage_pct))
         self.commission_per_lot = Decimal(str(commission_per_lot))
         self.fee_calculator = fee_calculator
+        self._statutory_fees_paid = ZERO
 
         # Position tracking
         self._positions: dict[str, OptionPosition] = {}  # position_id -> position
@@ -344,10 +345,16 @@ class OptionPaperBroker:
             fills.append((leg, fill_price, commission))
 
         # Full statutory fee stack (Phase 8) — computed per leg when a fee
-        # calculator is attached. Logging-only: it never blocks execution.
+        # calculator is attached. Cash-bearing (Gap G4.1): the total is
+        # debited from ``available_cash`` the same way a real broker's
+        # contract note hits the ledger, and is excluded from equity via the
+        # ``total_statutory_fees_paid`` term in :attr:`total_equity`. Fees
+        # never block execution: a calculation error is logged and the trade
+        # proceeds without statutory charges.
+        statutory_fees = ZERO
         if self.fee_calculator is not None:
             try:
-                self.fee_calculator.calculate_structure(
+                fee_breakdown = self.fee_calculator.calculate_structure(
                     [
                         {
                             "side": leg.side,
@@ -358,16 +365,18 @@ class OptionPaperBroker:
                     ],
                     when=ts,
                 )
+                statutory_fees = Decimal(str(fee_breakdown.total))
+                self._statutory_fees_paid += statutory_fees
             except Exception:
                 logger.exception(
                     "[option-paper] fee calculation failed for %s — executing without statutory fees",
                     intent.structure_type,
                 )
 
-        # Check margin
-        if net_cost > self.available_cash:
+        # Check margin — net premium + commissions + the statutory stack.
+        if net_cost + statutory_fees > self.available_cash:
             raise InsufficientMarginError(
-                f"Need ₹{net_cost:,.2f} but only ₹{self.available_cash:,.2f} available"
+                f"Need ₹{net_cost + statutory_fees:,.2f} but only ₹{self.available_cash:,.2f} available"
             )
 
         # Atomic execution — create all positions
@@ -416,8 +425,8 @@ class OptionPaperBroker:
         )
         self._structures[structure_id] = structure
 
-        # Update cash
-        self.available_cash -= net_cost
+        # Update cash — full cost including the statutory stack.
+        self.available_cash -= net_cost + statutory_fees
 
         # Log
         self._log_fill(intent, structure_id, fills, ts)
@@ -450,10 +459,14 @@ class OptionPaperBroker:
         ts = timestamp or datetime.utcnow()
         total_pnl = ZERO
 
-        for position in structure.legs:
-            if position.status != PositionStatus.OPEN:
-                continue
+        open_legs = [
+            position for position in structure.legs
+            if position.status == PositionStatus.OPEN
+        ]
+        exit_fees = ZERO
+        closing_fills: list[dict[str, Any]] = []
 
+        for position in open_legs:
             quote = quote_provider.get_quote(position.instrument_token)
             exit_price = Decimal(str(quote.get("ltp", 0)))
             exit_price = self._apply_slippage(exit_price, "SELL" if position.is_long else "BUY")
@@ -469,12 +482,40 @@ class OptionPaperBroker:
                 # Buying back short position → pay cash
                 self.available_cash -= exit_price * Decimal(str(position.total_quantity))
 
+            closing_fills.append(
+                {
+                    "side": "SELL" if position.is_long else "BUY",
+                    "quantity": position.total_quantity,
+                    "price": exit_price,
+                }
+            )
+
+        # Exit-side statutory stack (Gap G4.1): a real contract note charges
+        # brokerage and sell-side STT on closing orders too. Same policy as
+        # the entry side — computed when a calculator is attached, cash
+        # debited, never blocking the close.
+        if self.fee_calculator is not None and closing_fills:
+            try:
+                fee_breakdown = self.fee_calculator.calculate_structure(
+                    closing_fills,
+                    when=ts,
+                )
+                exit_fees = Decimal(str(fee_breakdown.total))
+                self._statutory_fees_paid += exit_fees
+                self.available_cash -= exit_fees
+            except Exception:
+                logger.exception(
+                    "[option-paper] exit fee calculation failed for %s — closing without statutory fees",
+                    structure_id[:8],
+                )
+
         structure.closed_at = ts
 
         logger.info(
-            "[option-paper] Closed structure=%s pnl=₹%.2f cash=₹%.2f",
+            "[option-paper] Closed structure=%s pnl=₹%.2f fees=₹%.2f cash=₹%.2f",
             structure_id[:8],
             float(total_pnl),
+            float(exit_fees),
             float(self.available_cash),
         )
 
@@ -536,8 +577,23 @@ class OptionPaperBroker:
         return sum(p.commission for p in self._positions.values())
 
     @property
+    def total_statutory_fees_paid(self) -> Decimal:
+        """Every statutory rupee (STT, exchange txn, SEBI, stamp, GST) charged.
+
+        Cash-bearing since Gap G4.1: these debits leave ``available_cash``
+        at execution, so equity must net them out too — otherwise a book
+        with real contract-note costs would overstate its own equity.
+        """
+        return self._statutory_fees_paid
+
+    @property
+    def total_costs_paid(self) -> Decimal:
+        """Brokerage + statutory stack — everything trading has cost so far."""
+        return self.total_commission_paid + self._statutory_fees_paid
+
+    @property
     def total_equity(self) -> Decimal:
-        """Capital + realized + unrealized P&L − commissions paid.
+        """Capital + realized + unrealized P&L − commissions − statutory fees.
 
         NOT ``available_cash + unrealized``: cash is debited the full
         premium at open while unrealized is measured from the entry price,
@@ -556,6 +612,7 @@ class OptionPaperBroker:
             + self.total_realized_pnl
             + unrealized
             - self.total_commission_paid
+            - self._statutory_fees_paid
         )
 
     @property
@@ -632,6 +689,7 @@ class OptionPaperBroker:
                 for leg, fill_price, commission in fills
             ],
             "cash_after": str(self.available_cash),
+            "statutory_fees": str(self._statutory_fees_paid),
         }
         self._order_history.append(record)
 

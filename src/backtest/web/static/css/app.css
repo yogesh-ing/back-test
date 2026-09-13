@@ -691,3 +691,89 @@ body[data-active="portfolio"] .nav-link[data-key="portfolio"] {
 @media (max-width: 800px) {
     .greeks-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ===========================================================================
+   Options dashboard — trade modal + quote-source badge (Gap G1.2 / G2.3)
+   =========================================================================== */
+
+.opt-quote-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.opt-quote-synth {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+.opt-quote-live {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.opt-quote-unknown {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+.opt-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 1000;
+  display: flex; /* toggled via style.display */
+  align-items: center;
+  justify-content: center;
+}
+
+.opt-modal-content {
+  background: var(--bg-card, #1e293b);
+  color: inherit;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 12px;
+  padding: 22px 24px;
+  width: min(420px, 92vw);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+
+.opt-modal-content h3 {
+  margin: 0 0 14px;
+}
+
+.opt-modal-content label {
+  display: block;
+  font-size: 0.8rem;
+  margin: 10px 0 4px;
+  opacity: 0.8;
+}
+
+.opt-modal-content select,
+.opt-modal-content input {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(15, 23, 42, 0.6);
+  color: inherit;
+  font-size: 0.9rem;
+}
+
+.opt-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.opt-form-error {
+  margin-top: 10px;
+  color: #f87171;
+  font-size: 0.85rem;
+}
