@@ -51,7 +51,7 @@ then NIFTY collapses 7,000 pts over 24 bars:
 | **B1** | Exit policy: view flip / neutral, stop, target, time stop | B · Exits | DONE | A1 |
 | **B2** | Expiry square-off + roll inside the forward loop | B · Exits | DONE | B1 |
 | **B3** | Close plumbing: `OPTION_EXIT` signals, closed-structure log, metrics | B · Exits | DONE | B1, B2 |
-| **C1** | Spawn UI: instrument / structure / strike / quantity controls | C · Reach | TODO | A2 |
+| **C1** | Spawn UI: instrument / structure / strike / quantity controls | C · Reach | DONE | A2 |
 | **C2** | Portfolio matrix + deep-dive: option columns, premium, Greeks | C · Reach | TODO | C1 |
 | **D1** | Index-scale synthetic spot for NIFTY / BANKNIFTY | D · Realism | TODO | A1 |
 | **D2** | Injectable quote provider (`synthetic` \| `live:mstock`) + badge | D · Realism | TODO | A1 |
@@ -63,14 +63,15 @@ Phases: **A** makes the numbers move, **B** makes the runner able to leave a
 trade, **C** makes it reachable from the browser, **D** makes the numbers
 honest, **E** keeps the gate green.
 
-**Progress: A1, A2, B1, B2, B3 and E1 are done** — an option runner prices
+**Progress: A1, A2, B1, B2, B3, C1 and E1 are done** — an option runner prices
 every bar, is counted by the equity/bucket/breaker maths, opens *and closes*
-on its own rules, settles at expiry and rolls, and reports what it did in the
-trade log, the metrics and the equity curve. What remains is reachability and
-realism: **C** (no UI can spawn an option runner yet — `portfolio.js` never
-sends `instrument`) and **D** (index-scale synthetic spot for a live NIFTY
-forward test, an injectable live quote provider, and persistence across
-restarts).
+on its own rules, settles at expiry and rolls, reports what it did in the trade
+log, the metrics and the equity curve, and can now be **spawned from the
+browser** with a structure, strike selection and exit plan. What remains is
+reachability in the reading direction and realism: **C2** (the matrix row and
+deep-dive panel still show an option runner through equity-shaped columns) and
+**D** (index-scale synthetic spot, so a synthetic NIFTY prices ~24,500 rather
+than ~₹392; an injectable live quote provider; persistence across restarts).
 
 ---
 
@@ -436,12 +437,78 @@ Tests: `tests/forward/test_options_trade_log.py` — 19 cases. Full gate:
 
 ## C1 — Spawn UI for option runners
 
-**Status:** TODO
+**Status:** DONE
 
-**Change.** `portfolio.js` + `_portfolio_center.html`: instrument type,
-structure (fixed vs direction-aware), strike selection (`atm`/`delta`),
-quantity, and exit policy; POST them inside `instrument`. Show the resulting
-book on the spawned card.
+**Problem.** The engine took `instrument: {"type": "option", …}` from A1
+onwards, but `portfolio.js` built its create payload from the spawn form's own
+fields and **never sent `instrument` at all** — so every runner spawned from the
+UI was an equity runner, and an option runner could only be created by
+hand-writing JSON against the API. Exactly the review finding:
+
+> Unreachable from the UI — `POST /api/portfolio/runner/create` accepts
+> `instrument`, but `portfolio.js` never sends it.
+
+**Change.** Three seams:
+
+| Seam | What changed |
+|---|---|
+| Payload translation | new pure module `web/static/js/components/option_config.js` — `buildExpression` / `buildInstrument` / `validate` / `summarize`, loaded from `base.html` so every page with the form has it |
+| The form | `_portfolio_center.html`: Instrument selector (Equity / Options), and an option panel — structure, strike selection (`atm`/`delta`) + delta target, lots per leg, stop / target, flat bars, max bars, days-to-expiry, and flip / ride-to-settlement / re-enter toggles, plus a live one-line summary of what will be deployed |
+| The API | `api/portfolio.py` parses `instrument` for **every** spawn and refuses option + `TARGET_POOL` (V1 option runners price one underlying), instead of silently discarding the block |
+
+Details that matter:
+
+- **The form mirrors the engine's defaults, it does not invent them.** Blank
+  stops/targets/flat-bars/max-bars are *omitted*, never sent as `0` (a zero stop
+  would arm on the first bar); an unchecked flip-exit sends `signal_flip: false`
+  while a checked one sends nothing (the engine default is flip-exit on).
+- **`min_days_to_expiry` is deliberately `null`-able.** `1` is the shipped
+  default, an explicit `null` means *ride into settlement* — the two states the
+  exit-policy parser distinguishes. "Ride to settlement" therefore sends
+  `null` even when a days value is still sitting in the (disabled) input.
+- **Every structure the panel offers exists in `options_bridge.STRUCTURES`**
+  (`long_call`, `long_put`, `bull_call_spread`, `bear_put_spread`,
+  `direction_aware`); a test pins the two lists together so the UI cannot drift
+  from the bridge.
+- **A synthetic chain only exists for the index underlyings** (`NIFTY`,
+  `BANKNIFTY`). Picking another symbol with `source=synthetic` is blocked with a
+  reason instead of spawning a runner that can never price a strike (a live
+  source is still allowed through).
+- **The audit line and toast use `summarize()`** — e.g.
+  `option · Bull call spread · ATM · 1 lot(s) · stop 30%, target 80%, square off 2d early`
+  — so the activity log says what was deployed, not just "runner created".
+
+**Acceptance criteria.**
+
+- [x] The form can spawn an option runner; the resulting `RunnerConfig` carries
+      the `instrument` block (structure, strike selection, quantity, exit plan).
+- [x] Equity spawning is unchanged: no `instrument` posted ⇒
+      `{"type": "equity"}`, and the classic payload still returns 201.
+- [x] Structure, strike selection, quantity and the full exit policy survive the
+      form → JSON → API trip.
+- [x] Option + pool mode is refused with an actionable error.
+- [x] Unknown `instrument.type` is still rejected.
+- [x] The payload builder is pure and unit-tested without a browser.
+
+**Result — verified over HTTP**, with the payload built by the *browser module*
+and posted verbatim (probe: `/tmp/exp/c1_api.py`):
+
+```text
+form → node: {"type":"option","expression":{"type":"bull_call_spread",
+             "strike_selection":"atm","quantity":1,
+             "exit":{"neutral_bars":2,"stop_loss_pct":0.3,
+                     "take_profit_pct":0.8,"min_days_to_expiry":2}}}
+create → 201
+exit_policy: {"min_days_to_expiry":2,"neutral_bars":2,"signal_flip":true,
+              "stop_loss_pct":0.3,"take_profit_pct":0.8,"reenter":false}
+deep_dive → 200, 4 closed structures, equity curve 44 pts (B3 log shape intact)
+trade: {"kind":"option","label":"NIFTY bull_call_spread 20450/20500 CE",
+        "exit_reason":"stop_loss","pnl":-2108.25,"expiry":"2026-09-24"}
+```
+
+Tests: `tests/js/test_option_config.mjs` (29 cases, node harness) +
+`tests/test_options_spawn_ui.py` (18 cases: harness wrapper, rendered-form
+assertions, create-API contract). Full gate: **2289 passed, 4 skipped**.
 
 ## C2 — Matrix + deep-dive option columns
 
@@ -550,6 +617,9 @@ so the dashboard tests never touch a developer's DB. Also consider pointing
 | 17 | Option records are flattened into the *existing* trade-record shape (+ a `kind` tag) | The deep-dive table, win-rate maths and any JSON consumer keep working with no branching; richer fields (`strikes`, `expiry`, `exit_reason`, `label`) are additive for C2 |
 | 18 | `pnl` stays gross of costs; `commission` is per structure, statutory fees remain per book | Consistent with the equity trade log. Statutory fees are booked per fill, not per structure, so attributing them would mean new bookkeeping in the broker — out of scope for B3 |
 | 19 | `equity_curve` records every bar rather than only on closes | A curve of closes alone is a step function that hides the drawdown path; per-bar marks are what the chart is for. Downsampling keeps a long run readable |
+| 20 | The spawn payload builder lives in a standalone JS component, not inline in `portfolio.js` | It is pure (form object in, `instrument` object out) so it can be unit-tested in node without a DOM, and the browser gets the same file — no build step, no duplicate logic |
+| 21 | Instrument-aware spawning is validated in the browser **and** re-checked by the API | The browser gives a fast, specific error; the API guard is what actually protects the engine from a hand-written (or stale-cached) payload |
+| 22 | Blank numeric exits are omitted rather than defaulted to `0` | `0` is meaningful in this engine (`stop_loss_pct: 0` arms on the first bar, `min_days_to_expiry: 0` squares off on expiry day), so "left empty" must stay distinguishable from "deliberately zero" |
 
 ## How to run the gates for this work
 

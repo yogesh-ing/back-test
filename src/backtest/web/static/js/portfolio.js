@@ -398,7 +398,14 @@
       uniSel.innerHTML = unis.universes.map((u) =>
         '<option value="' + u.id + '">' + u.label + " (" + u.size + " symbols)</option>").join("");
 
+      const structureSel = $("spawn-opt-structure");
+      if (structureSel && typeof OptionConfig !== "undefined") {
+        structureSel.innerHTML = OptionConfig.STRUCTURES.map((s) =>
+          '<option value="' + s.id + '">' + s.label + "</option>").join("");
+      }
+
       renderSpawnParams();
+      syncOptionForm();
     } catch (e) { toast("Failed to load spawn form: " + e.message, "error"); }
   }
 
@@ -417,6 +424,74 @@
           '</label><input class="input spawn-param" data-param="' + key +
           '" type="' + type + '" value="' + val + '"></div>';
       }).join("");
+  }
+
+  // ------------------------------------------------------- option spawn form
+  // The payload shape lives in components/option_config.js (pure, and covered
+  // by tests/js/test_option_config.mjs) so the browser and the harness cannot
+  // drift apart.
+
+  function readOptionForm() {
+    const val = (id) => {
+      const el = $(id);
+      return el ? el.value : "";
+    };
+    const checked = (id) => {
+      const el = $(id);
+      return el ? !!el.checked : false;
+    };
+    return {
+      instrumentType: val("spawn-instrument-type") || "equity",
+      targetType: $("spawn-target-type") ? $("spawn-target-type").value : "single",
+      source: $("spawn-source") ? $("spawn-source").value : "synthetic",
+      underlying: (val("spawn-symbol") || "").trim(),
+      structure: val("spawn-opt-structure") || "direction_aware",
+      strikeSelection: val("spawn-opt-strike") || "atm",
+      deltaTarget: val("spawn-opt-delta"),
+      quantity: val("spawn-opt-qty"),
+      stopLossPct: val("spawn-opt-stop"),
+      takeProfitPct: val("spawn-opt-target"),
+      neutralBars: val("spawn-opt-neutral"),
+      maxBars: val("spawn-opt-maxbars"),
+      minDaysToExpiry: val("spawn-opt-dte"),
+      rideToSettlement: checked("spawn-opt-settle"),
+      signalFlip: checked("spawn-opt-flip"),
+      reenter: checked("spawn-opt-reenter"),
+    };
+  }
+
+  /** Show/hide the option panel, the delta row and the pool target for options. */
+  function syncOptionForm() {
+    const cfg = readOptionForm();
+    const isOption = OptionConfig.isOption(cfg.instrumentType);
+    const box = $("spawn-option-box");
+    if (box) box.hidden = !isOption;
+
+    const hint = $("spawn-instrument-hint");
+    if (hint) {
+      hint.textContent = isOption
+        ? "Option runners trade one index and convert the strategy's view into a structure."
+        : "Equity trades the symbol directly; Options converts the strategy's directional view into a multi-leg structure.";
+    }
+
+    const deltaRow = $("spawn-opt-delta-row");
+    if (deltaRow) deltaRow.hidden = cfg.strikeSelection !== "delta";
+
+    // Options are single-underlying in V1: the engine routes views to the
+    // bridge only for single-symbol runners, so a pool would never open.
+    const targetSel = $("spawn-target-type");
+    if (targetSel) {
+      const poolOpt = targetSel.querySelector('option[value="pool"]');
+      if (poolOpt) poolOpt.disabled = isOption;
+      if (isOption && targetSel.value === "pool") targetSel.value = "single";
+    }
+
+    // Ride-into-settlement and days-to-expiry are mutually exclusive.
+    const dte = $("spawn-opt-dte");
+    if (dte) dte.disabled = cfg.rideToSettlement;
+
+    const summary = $("spawn-opt-summary");
+    if (summary) summary.textContent = isOption ? OptionConfig.summarize(cfg) : "";
   }
 
   async function submitSpawn() {
@@ -442,6 +517,18 @@
       mode: $("spawn-mode") ? $("spawn-mode").value : (PAGE_MODE || "paper"),
       source: $("spawn-source") ? $("spawn-source").value : "synthetic",
     };
+
+    // Ticket C1: option runners are spawned from this same form. The payload
+    // block is built by the shared, unit-tested module rather than inline.
+    const optionCfg = readOptionForm();
+    if (typeof OptionConfig !== "undefined" && OptionConfig.isOption(optionCfg.instrumentType)) {
+      const problems = OptionConfig.validate(optionCfg);
+      if (problems.length) {
+        toast(problems[0], "error");
+        return;
+      }
+      body.instrument = OptionConfig.buildInstrument(optionCfg);
+    }
     if (targetType === "pool") {
       body.target_type = "SYMBOL_UNIVERSE";
       body.universe_id = $("spawn-universe").value;
@@ -453,7 +540,13 @@
 
     try {
       const data = await api("/api/portfolio/runner/create", "POST", body);
-      addAudit("Spawned " + data.runner.name + " (" + data.runner.target_label + ")", "spawn");
+      const kind = body.instrument && body.instrument.type === "option"
+        ? " · " + OptionConfig.summarize(optionCfg)
+        : "";
+      addAudit(
+        "Spawned " + data.runner.name + " (" + data.runner.target_label + kind + ")",
+        "spawn"
+      );
       toast("Instance deployed: " + data.runner.name, "success");
       $("spawn-modal").hidden = true;
     } catch (e) { toast(e.message, "error"); }
@@ -524,6 +617,17 @@
       $("spawn-maxpos-row").hidden = !pool;
     });
     $("spawn-strategy").addEventListener("change", renderSpawnParams);
+    const instrumentSel = $("spawn-instrument-type");
+    if (instrumentSel) instrumentSel.addEventListener("change", syncOptionForm);
+    ["spawn-opt-structure", "spawn-opt-strike", "spawn-opt-delta", "spawn-opt-qty",
+     "spawn-opt-stop", "spawn-opt-target", "spawn-opt-neutral", "spawn-opt-maxbars",
+     "spawn-opt-dte", "spawn-opt-settle", "spawn-opt-flip", "spawn-opt-reenter"]
+      .forEach((id) => {
+        const el = $(id);
+        if (!el) return;
+        el.addEventListener("change", syncOptionForm);
+        el.addEventListener("input", syncOptionForm);
+      });
     $("spawn-submit").addEventListener("click", submitSpawn);
 
     // Tabs

@@ -159,6 +159,20 @@ def create_runner() -> Tuple[Response, int]:
         name = f"{strategy_name} · {kind}"
 
     params = data.get("params") or {}
+    instrument = data.get("instrument") or {"type": "equity"}
+    # Options forward testing (task C1): the engine routes a strategy's market
+    # view to the options bridge only for single-symbol runners, so a pool-mode
+    # option runner would sit inert (only its risk exits would ever fire).
+    # Refuse it here rather than spawning something that cannot trade.
+    if (
+        isinstance(instrument, dict)
+        and str(instrument.get("type", "equity")).lower() == "option"
+        and target_type == TARGET_POOL
+    ):
+        return _error(
+            "option runners trade a single underlying in V1 — use target_type "
+            "SINGLE_SYMBOL (pool mode would never open a structure)"
+        )
     try:
         config = RunnerConfig(
             name=name,
@@ -175,7 +189,7 @@ def create_runner() -> Tuple[Response, int]:
             ),
             mode=data.get("mode") or "paper",
             source=data.get("source") or "synthetic",
-            instrument=data.get("instrument") or {"type": "equity"},
+            instrument=instrument,
         )
         auto_start = bool(data.get("auto_start", True))
         instance_id = _manager().add_runner(config, start=auto_start)
