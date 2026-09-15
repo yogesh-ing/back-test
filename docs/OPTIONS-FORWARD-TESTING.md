@@ -47,7 +47,7 @@ then NIFTY collapses 7,000 pts over 24 bars:
 | ID | Task | Phase | Status | Depends on |
 |----|------|-------|--------|-----------|
 | **A1** | Per-bar mark-to-market for forward option books | A · Live | DONE | — |
-| **A2** | Fold option P&L into runner equity, buckets and breakers | A · Live | TODO | A1 |
+| **A2** | Fold option P&L into runner equity, buckets and breakers | A · Live | DONE | A1 |
 | **B1** | Exit policy: view flip / neutral, stop, target, time stop | B · Exits | TODO | A1 |
 | **B2** | Expiry square-off + roll inside the forward loop | B · Exits | TODO | B1 |
 | **B3** | Close plumbing: `OPTION_EXIT` signals, closed-structure log, metrics | B · Exits | TODO | B1, B2 |
@@ -131,25 +131,54 @@ Targeted gate: **221 passed** (`tests/forward`, options suite, `tests/engine`).
 
 ## A2 — Fold option P&L into runner equity, buckets and breakers
 
-**Status:** TODO
+**Status:** DONE
 
 **Problem.** `StrategyRunner.equity()` / `unrealized_pnl()` / `daily_pnl()` /
 `deployed_capital()` read the equity `Portfolio` only, so an option runner's
-card, bucket aggregate and circuit breakers are blind to its option book —
-this is Gap **P2** in the remediation PRD, still open.
+card, bucket aggregate and circuit breakers were blind to its option book —
+Gap **P2** in the remediation PRD, still open after the Gap remediation.
 
-**Change.** Make the option book a first-class contributor: `equity() +=
-bridge.equity − bridge.capital` (i.e. option realized + unrealized − costs),
-`deployed_capital() += premium at risk`, and let `_check_instance_risk()`
-compare against the combined equity. Keep `get_state()["options"]` as the
-drill-down; update `_bucket_*` only if a runner cannot be fixed at the source.
+**Change.** The book became a first-class contributor at the **runner** level
+(so every `_bucket_*` aggregate inherits it — nothing else had to change):
+
+| Surface | Now |
+|---|---|
+| `equity()` | equity portfolio + `bridge.net_pnl` (`total_equity − capital`, i.e. realized + unrealized − commission − statutory fees) |
+| `unrealized_pnl()` | portfolio mark + open option legs (`OptionPaperBroker.total_unrealized_pnl`, new) |
+| `realized_pnl` | portfolio realized + option legs' booked P&L (gross of costs — the options dashboard's convention; fees live in `option_pnl`/`equity`) |
+| `deployed_capital()` | position value + `premium_at_risk` (net debit of open structures = their max loss; credit structures report 0) |
+| `_check_instance_risk()` | unchanged code — it reads `equity()`/`daily_pnl()`, so option drawdown now trips halt/pause |
+| `get_state()` | `equity` / `deployed_capital` / `realized_pnl` combined; `options` + `option_pnl` remain the drill-down |
 
 **Acceptance criteria.**
 
-- [ ] A runner whose option book loses 10% trips the instance drawdown breaker.
-- [ ] `state["equity"]` equals `state["options"]["equity"]` for a pure option
-      runner; bucket `equity` / `deployed_capital` include option P&L.
-- [ ] Equity runners' numbers are bit-identical to pre-change values.
+- [x] An option loss trips the instance drawdown breaker (test uses a 1% limit
+      so the assertion is not boundary-flaky; the control case with a 90%
+      limit stays RUNNING).
+- [x] `state["equity"]` equals `state["options"]["equity"]` for a pure option
+      runner; bucket `equity` / `daily_pnl` / `deployed_capital` and
+      `get_portfolio_summary()["total_equity"]` all include the book.
+- [x] Equity runners' numbers are bit-identical (asserted against the raw
+      portfolio properties).
+
+**Known limit (deliberately out of scope).** A 50-point-wide spread on a ₹1M
+allocation risks ~0.2% of capital, so realistic breakers need either a tight
+limit or position sizing — the real risk control for option runners is the
+**exit policy** in B1 (a stop on structure P&L), not the drawdown breaker.
+Also: `win_rate()` / `wins` / `losses` still count equity round-trips only;
+option structures join that ledger in B3.
+
+**Result — the review reproduction, re-run after A2:**
+
+| | before A2 | after A2 |
+|---|---|---|
+| runner card equity (after ~7,000 pt collapse) | `1,000,000.00` (frozen) | `997,896.75` |
+| `state["equity"]` vs `state["options"]["equity"]` | `1,000,000.00` vs `997,896.75` | equal |
+| bucket `paper.equity` | equity portfolio only | `997,896.75` |
+| `deployed_capital` | `0.00` | `2,063.25` |
+
+Tests: `tests/forward/test_options_equity_integration.py` — 16 cases.
+Full gate: **2194 passed, 4 skipped** (only the pre-existing E1 lint task fails).
 
 ## B1 — Exit policy
 
@@ -285,6 +314,9 @@ so the dashboard tests never touch a developer's DB. Also consider pointing
 | 4 | A1 ships without touching `equity()` | Keeps the risk-visible change (A2) reviewable on its own, and keeps equity runners bit-identical while the hook is validated |
 | 5 | Entry premiums are also priced on the view's `bar_timestamp` | Otherwise entry uses the wall clock and the next bar re-prices on the replay clock — a one-bar jump that looks like instant P&L. Falling back to wall clock when the view has no timestamp keeps the old behaviour for programmatic views |
 | 6 | MTM is skipped entirely when no structure is open | Nothing to price, and the spot is already synced from the view at entry — avoids per-bar Black-Scholes work on flat books |
+| 7 | Fold option P&L at the **runner**, not in `PortfolioManager._bucket_*` | Every bucket/portfolio aggregate is derived from `runner.equity()` / `deployed_capital()` / `daily_pnl()` already, so one change makes the runner card, buckets, portfolio totals and breakers consistent — and nothing can be missed twice |
+| 8 | `realized_pnl` stays **gross of costs**; the fee stack lives in `equity()`/`option_pnl()` | Matches `OptionPaperBroker.total_equity` and the `/options` dashboard. Netting fees into `realized_pnl` would show a negative realized P&L the moment a structure opened |
+| 9 | `premium_at_risk` (net debit), not short-leg margin, is the deployed-capital analogue | For all four V1 structures the net debit **is** the maximum loss, so it is exact; the broker's margin model (sell-side notional) would overstate a defined-risk spread |
 
 ## How to run the gates for this work
 

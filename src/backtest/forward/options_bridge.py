@@ -162,6 +162,43 @@ class OptionsBridge:
         }
 
     # ------------------------------------------------------------------ #
+    # Book metrics (task A2) — the runner folds these into its own numbers
+    # ------------------------------------------------------------------ #
+
+    @property
+    def net_pnl(self) -> Decimal:
+        """Book P&L since inception: realized + unrealized − all costs.
+
+        ``total_equity − capital`` — the exact amount a runner's equity must
+        move by when this bridge's book is folded in.
+        """
+        broker = self.option_broker
+        return broker.total_equity - broker.capital
+
+    @property
+    def unrealized_pnl(self) -> Decimal:
+        """Open legs' mark-to-market P&L (as of the last bar)."""
+        return self.option_broker.total_unrealized_pnl
+
+    @property
+    def premium_at_risk(self) -> Decimal:
+        """Net premium paid for the structures still open.
+
+        For every V1 structure (long call/put, bull call spread, bear put
+        spread) the net debit **is** the maximum loss, so this is the capital
+        genuinely committed — the option analogue of an equity runner's
+        ``deployed_capital``. Credit structures (net premium received) report
+        zero here rather than a negative commitment; their risk sits with the
+        broker's margin model.
+        """
+        total = Decimal("0")
+        for structure in self.option_broker.get_open_structures():
+            debit = structure.total_entry_cost
+            if debit > 0:
+                total += debit
+        return total
+
+    # ------------------------------------------------------------------ #
     # Per-bar pricing (task A1)
     # ------------------------------------------------------------------ #
 

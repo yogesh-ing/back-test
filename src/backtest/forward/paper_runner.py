@@ -604,7 +604,7 @@ class StrategyRunner:
 
     @property
     def realized_pnl(self) -> float:
-        return float(self.portfolio.realized_pnl)
+        return float(self.portfolio.realized_pnl) + self._option_realized_pnl()
 
     @property
     def positions(self) -> Dict[str, Dict[str, Any]]:
@@ -1118,14 +1118,52 @@ class StrategyRunner:
     def _positions_value(self) -> float:
         return float(self.portfolio.calculate_position_value())
 
+    def _option_realized_pnl(self) -> float:
+        """Booked option P&L from closed/expired legs (gross of costs).
+
+        Matches the options dashboard's convention: ``realized_pnl`` is what
+        the legs booked, while the commission + statutory fee stack lives in
+        :meth:`option_pnl` / :meth:`equity` — netting fees here would make a
+        runner show a *negative* realized P&L the instant it opened anything.
+        """
+        bridge = self.options_bridge
+        if bridge is None:
+            return 0.0
+        return float(bridge.option_broker.total_realized_pnl)
+
+    def option_pnl(self) -> float:
+        """Total option-book contribution to this runner's equity (task A2).
+
+        ``realized + unrealized − commission − statutory fees``; ``0.0`` for
+        equity runners. This is the bridge's ``net_pnl`` — equity must move by
+        exactly this much for the book to be honestly reported.
+        """
+        bridge = self.options_bridge
+        if bridge is None:
+            return 0.0
+        return float(bridge.net_pnl)
+
     def unrealized_pnl(self) -> float:
-        return float(self.portfolio.unrealized_pnl)
+        unrealized = float(self.portfolio.unrealized_pnl)
+        if self.options_bridge is not None:
+            unrealized += float(self.options_bridge.unrealized_pnl)
+        return unrealized
 
     def equity(self) -> float:
-        return float(self.portfolio.calculate_total_equity())
+        """Equity portfolio + this runner's option book (task A2).
+
+        Gap P2: the option book used to be invisible here, so an option
+        runner's card, bucket aggregate and instance circuit breakers all
+        reported the untouched equity portfolio. Folding ``net_pnl`` in makes
+        an option drawdown trip the same breakers an equity drawdown does.
+        """
+        return float(self.portfolio.calculate_total_equity()) + self.option_pnl()
 
     def deployed_capital(self) -> float:
-        return sum(p["qty"] * p["entry_price"] for p in self.positions.values())
+        deployed = sum(p["qty"] * p["entry_price"] for p in self.positions.values())
+        if self.options_bridge is not None:
+            deployed += float(self.options_bridge.premium_at_risk)
+        return deployed
 
     def daily_pnl(self) -> float:
         return self.equity() - self._day_start_equity

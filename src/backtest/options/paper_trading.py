@@ -746,6 +746,18 @@ class OptionPaperBroker:
         )
 
     @property
+    def total_unrealized_pnl(self) -> Decimal:
+        """Sum of open legs' mark-to-market P&L (as of the last ``update_mtm``).
+
+        Mirrors :attr:`total_realized_pnl` — the two halves of the book's P&L
+        that :attr:`total_equity` combines.
+        """
+        return sum(
+            p.unrealized_pnl for p in self._positions.values()
+            if p.status == PositionStatus.OPEN
+        )
+
+    @property
     def total_margin_used(self) -> Decimal:
         """Approximate margin used (sum of sell-side notional values)."""
         margin = ZERO
