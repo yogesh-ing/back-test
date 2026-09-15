@@ -603,6 +603,17 @@ builds chains at strikes ~350–450 (`MOCK-NIFTY-400-CE`) — nothing like
 bands for NIFTY / BANKNIFTY, e.g. 24,500–25,500 / 51,000–53,000), so strikes,
 premiums and lot sizes line up with the real contracts.
 
+**Found while demoing C2 (worth folding into this task).** It is not only the
+strikes: `directional_options` ships index-scale parameters
+(`scale_points: 100`, `min_confidence: 0.3`), so on a ~₹392 synthetic NIFTY the
+close-to-EMA distance never reaches the confidence floor and the strategy emits
+**no views at all** — an API-created option runner sits flat forever and the new
+C2 columns have nothing to show. The live demo only traded after passing
+`params: {"ema_period": 5, "scale_points": 1.0, "min_confidence": 0.05}`
+(which then produced `NIFTY bull_call_spread 350/400`, i.e. the wrong strikes
+this task is about). Fixing the feed scale fixes both halves: with NIFTY near
+24,500 the default 100-point scale is meaningful again.
+
 **Acceptance criteria.** A synthetic NIFTY runner's chain generator reports
 ~24,800–25,500 and the strikes are 50-point steps; equity symbols keep their
 current (small-cap) band so existing tests and demos are unaffected.
