@@ -624,8 +624,9 @@ Design notes:
 
 - **One draw, one code path.** The band lookup happens *after* the seeded RNG is
   created and still consumes exactly one `uniform()` call, so every equity and
-  crypto symbol gets a **byte-identical** starting price to before (asserted in
-  the tests) — existing demos and fixtures did not move.
+  crypto symbol gets the **same starting price, to the paise** (the code rounds
+  the opening price to 2 dp; asserted in the tests) — existing demos and
+  fixtures did not move.
 - **The band brackets the generator's own spot.** `DEFAULT_SPOTS["NIFTY"]`
   (24,800) sits inside 24,500–25,500 and `BANKNIFTY`'s (52,000) inside
   51,000–53,000; a test fails if the two modules ever drift apart, because that
@@ -658,6 +659,14 @@ trade record        NIFTY bull_call_spread 24350/24400 CE · lots 3 · units 225
                     net premium 28.08 → 29.65 · pnl +353.25 · signal_flip
 signals             OPTION_ENTRY 10 · OPTION_EXIT 9 · OPTION_MTM 17
 ```
+
+Tests: `tests/forward/test_synthetic_feed_scale.py` — 18 cases covering the
+bands (per symbol, case-insensitive, deterministic), the equity draws being
+unchanged to the paise, the band ⊇ the generator's `DEFAULT_SPOTS` for **every**
+index it knows, feed subscription and emitted bar prices, the chain grid and
+life-sized premiums for both indices, `directional_options` defaults producing a
+view at index scale, and a default-param option runner opening **and closing**
+structures end to end. Full gate: **2326 passed, 4 skipped**.
 
 Before D1 the same runner needed `scale_points: 1.0` to trade **at all**, and
 produced `bull_call_spread 350/400`. Tests:
@@ -756,7 +765,7 @@ so the dashboard tests never touch a developer's DB. Also consider pointing
 | 26 | Greeks and a dedicated Options Forward view are deferred out of C2 | The forward row does not carry Greeks yet (they live in the options layer), and the matrix had no crowding emergency; inventing a view before the columns exist would be the wrong order |
 | 27 | Index scale lives in the **feed**, not in the chain generator or the strategies | The generator already knew the right levels; the feed was the one place pretending NIFTY was a small-cap. One source of spot for pricing, and index-scaled strategy defaults work untouched |
 | 28 | Index bands **bracket** `SyntheticChainGenerator.DEFAULT_SPOTS`, with a test pinning the two together | Two modules each owning "where NIFTY is" is exactly how this bug appeared; the drift test makes the next mismatch fail loudly instead of silently pricing a ₹400 index |
-| 29 | The equity band is preserved with identical RNG draws, not just a similar range | Existing tests and demos pin numbers, so "roughly the same" would have been a silent breakage hunt. One draw either way keeps every non-index symbol bit-for-bit unchanged |
+| 29 | The equity band is preserved with identical RNG draws, not just a similar range | Existing tests and demos pin numbers, so "roughly the same" would have been a silent breakage hunt. One draw either way keeps every non-index symbol's opening price identical to the paise |
 
 ## How to run the gates for this work
 

@@ -199,6 +199,43 @@ class TestChainScale:
 
 
 # ---------------------------------------------------------------------------
+# The knock-on, at the strategy level
+# ---------------------------------------------------------------------------
+
+
+def test_directional_options_defaults_are_reachable_at_index_scale():
+    """The shipped parameters, on an index-scale frame, produce a view.
+
+    ``scale_points: 100`` / ``min_confidence: 0.3`` are sized for an index: at
+    the old ₹392 spot an entire rally was a fraction of a point, so the
+    confidence floor was never reached and the strategy returned ``None`` —
+    which is *why* a default-param option runner never traded. This is the fast
+    unit-level counterpart to the manager test below.
+    """
+    import pandas as pd
+
+    from backtest.strategies.option_directional import DirectionalOptions
+
+    strategy = DirectionalOptions()  # no overrides — the shipped defaults
+    closes = [24_800 + i * 40 for i in range(30)]  # a steady index rally
+    frame = pd.DataFrame(
+        {
+            "close": closes,
+            "open": closes,
+            "high": closes,
+            "low": closes,
+            "volume": [1] * len(closes),
+        }
+    )
+
+    view = strategy.generate_market_view(frame)
+
+    assert view is not None, "index-scale defaults produced no view"
+    assert float(view.spot_price) == closes[-1]
+    assert view.confidence >= float(strategy.min_confidence)
+
+
+# ---------------------------------------------------------------------------
 # End to end: a default-param option runner now trades
 # ---------------------------------------------------------------------------
 
