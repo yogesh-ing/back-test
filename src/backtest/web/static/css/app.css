@@ -392,12 +392,16 @@ body[data-active="portfolio"] .nav-link[data-key="portfolio"] {
 .matrix-table td { padding: 9px 10px; border-bottom: 1px solid rgba(51,65,85,.5); white-space: nowrap; }
 .matrix-table tbody tr:hover { background: rgba(59,130,246,.07); }
 .matrix-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+/* Option runners hold structures, not equity tickets (C2) — mark the row. */
+.matrix-table tr.matrix-row-option td:first-child { box-shadow: inset 3px 0 0 rgba(245,158,11,.55); }
 .cell-name { font-weight: 600; }
 .cell-sub { font-size: .75rem; color: var(--muted); font-weight: 400; margin-top: 2px; }
 .cell-error { color: var(--warning); }
 .status-cell { display: inline-flex; align-items: center; gap: 4px; font-size: .82rem; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: .72rem; font-weight: 600; }
 .badge-single { background: rgba(59,130,246,.18); color: #93c5fd; }
+/* Option runners (C2): a structure badge, distinct from Single/Pool. */
+.badge-option { background: rgba(245,158,11,.18); color: #fcd34d; border: 1px solid rgba(245,158,11,.35); }
 .badge-pool { background: rgba(139,92,246,.18); color: #c4b5fd; }
 /* Mode/source badges (P4.2) — the text carries the value; colour supplements. */
 .badge-paper { background: rgba(34,197,94,.16); color: #86efac; border: 1px solid rgba(34,197,94,.4); }
@@ -468,6 +472,8 @@ body[data-active="portfolio"] .nav-link[data-key="portfolio"] {
 .drawer-head h3 { font-size: 1.05rem; }
 .drawer-body { padding: 18px 20px; overflow-y: auto; flex: 1; }
 .dd-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 18px; }
+/* The option book has more to say than three stats (C2). */
+.dd-stats-4 { grid-template-columns: repeat(4, 1fr); }
 .dd-stat { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
 .dd-stat-label { font-size: .72rem; color: var(--muted); text-transform: uppercase; }
 .dd-stat-value { font-size: 1.02rem; font-weight: 700; margin-top: 3px; }
@@ -477,6 +483,12 @@ body[data-active="portfolio"] .nav-link[data-key="portfolio"] {
 .dd-table th { text-align: left; padding: 6px 8px; color: var(--muted); border-bottom: 1px solid var(--border); }
 .dd-table td { padding: 6px 8px; border-bottom: 1px solid rgba(51,65,85,.4); }
 .dd-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+/* Option legs sit under their structure row, and the aggregate view marks the
+   net-premium row of a structure (C2). */
+.dd-table tr.opt-leg td, .dd-table tr.trade-option td { background: rgba(148,163,184,.05); }
+.dd-table tr.opt-leg td:first-child { padding-left: 18px; }
+.matrix-table tr.opt-total td { border-top: 1px dashed rgba(148,163,184,.35); font-weight: 600; }
+.matrix-table tr.opt-first-leg td { padding-top: 12px; }
 .dd-kv td { padding: 4px 8px; }
 .dd-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
 .dd-tabpanel { margin-bottom: 16px; }

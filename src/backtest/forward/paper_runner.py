@@ -1389,9 +1389,23 @@ class StrategyRunner:
         return self.config.symbols[0]
 
     def get_state(self) -> Dict[str, Any]:
-        """Compact row for the portfolio matrix table."""
+        """Compact row for the portfolio matrix table.
+
+        Task C2: the row is also the matrix's only data source, so it carries
+        what an **option** runner needs there. Options live in the bridge, not
+        in ``self.positions``, so an option runner holding a spread used to
+        report ``open_positions: 0`` (reading as "flat") while its premium was
+        genuinely at work. ``open_positions`` now counts equity positions *and*
+        open option structures; ``equity_positions`` keeps the old number for
+        anything that needs them apart, and ``options`` carries the
+        structure-level detail the matrix and deep-dive render.
+        """
         with self._lock:
             equity = self.equity()
+            options_summary = (
+                self.options_bridge.summary() if self.options_bridge is not None else None
+            )
+            open_structures = int((options_summary or {}).get("open_structures") or 0)
             return {
                 "instance_id": self.instance_id,
                 "name": self.config.name,
@@ -1409,7 +1423,8 @@ class StrategyRunner:
                 "realized_pnl": round(self.realized_pnl, 2),
                 "win_rate": round(self.win_rate(), 4),
                 "max_drawdown_pct": round(self.max_drawdown_pct, 4),
-                "open_positions": len(self.positions),
+                "open_positions": len(self.positions) + open_structures,
+                "equity_positions": len(self.positions),
                 "status": self.status,
                 "mode": self.config.mode,
                 "source": self.config.source,
@@ -1418,9 +1433,7 @@ class StrategyRunner:
                 "last_bar_ts": max(self._last_bar_ts.values()) if self._last_bar_ts else None,
                 "created_ts": self.created_ts,
                 "instrument": dict(self.config.instrument or {"type": "equity"}),
-                "options": (
-                    self.options_bridge.summary() if self.options_bridge is not None else None
-                ),
+                "options": options_summary,
                 # A1: the book's most recent MTM, mirrored onto the row so a
                 # card can show option P&L before it is folded into equity (A2).
                 "option_pnl": round(self.last_option_pnl, 2),

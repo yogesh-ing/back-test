@@ -202,19 +202,32 @@
       const typeBadge = r.target_type === "SINGLE_SYMBOL"
         ? '<span class="badge badge-single">Single</span>'
         : '<span class="badge badge-pool">Pool(' + r.symbol_count + ')</span>';
+      // C2: an option runner gets option-shaped cells — the structure it is
+      // holding, the legs, the premium tied up and the next expiry. Equity
+      // rows are untouched (every helper returns "" / null for them).
+      const option = OptionView.isOption(r);
+      const instrument = option
+        ? '<span class="badge badge-option">' + OptionView.instrumentLabel(r) + '</span>'
+        : typeBadge;
+      const posCell = OptionView.positionsCell(r);
+      const notes = OptionView.matrixNotes(r);
+      const targetCell = r.target_label +
+        notes.map((n) => '<div class="cell-sub">' + n + '</div>').join("");
       return (
-        '<tr class="matrix-row status-' + r.status.toLowerCase() + '">' +
+        '<tr class="matrix-row' + (option ? " matrix-row-option" : "") +
+          ' status-' + r.status.toLowerCase() + '">' +
         '<td>' + (i + 1) + '</td>' +
         '<td class="cell-name">' + r.name +
           '<div class="cell-sub">' + r.strategy_name + '</div></td>' +
-        '<td>' + r.target_label + '</td>' +
-        '<td>' + typeBadge + '</td>' +
+        '<td>' + targetCell + '</td>' +
+        '<td>' + instrument + '</td>' +
         '<td>' + badgeHtml(r.mode, r.source) + '</td>' +
         '<td>' + r.timeframe + '</td>' +
         '<td class="num">' + fmtMoney(r.allocated_capital) + '</td>' +
         '<td class="num ' + pnlClass(r.open_pnl) + '">' + fmtSigned(r.open_pnl) + '</td>' +
         '<td class="num ' + pnlClass(r.daily_pnl) + '">' + fmtSigned(r.daily_pnl) + '</td>' +
-        '<td class="num">' + r.open_positions + '</td>' +
+        '<td class="num">' + posCell.primary +
+          (posCell.sub ? '<div class="cell-sub">' + posCell.sub + '</div>' : "") + '</td>' +
         '<td><span class="status-cell">' + (STATUS_DOT[r.status] || "⚪") + " " + r.status + "</span>" +
           (r.error ? '<div class="cell-sub cell-error" title="' + (r.error || "") + '">⚠ risk halt</div>' : "") +
         '</td>' +
@@ -229,14 +242,56 @@
     const tbody = $("aggregate-positions");
     // Row-level aggregate: open count + open P&L per runner; per-symbol detail
     // is available via each runner's deep-dive drawer.
-    tbody.innerHTML = p.runners
-      .filter((r) => r.open_positions > 0)
-      .map((r) =>
-        '<tr><td>' + r.name + '</td><td>' + r.target_label + '</td><td>LONG</td>' +
-        '<td class="num">—</td><td class="num">—</td><td class="num">—</td>' +
-        '<td class="num ' + pnlClass(r.open_pnl) + '">' + fmtSigned(r.open_pnl) +
-        ' <span class="muted">(' + r.open_positions + ' pos)</span></td></tr>')
-      .join("") || '<tr><td colspan="7" class="muted" style="padding:16px">No open positions.</td></tr>';
+    // C2: an option runner holds whole structures, not equity tickets — show
+    // each leg (trading symbol · strike · side) rather than three dashes, and
+    // fall back to one summarising row when the leg detail is unavailable.
+    const rows = [];
+    const legPrice = (v) => (v == null ? "—" : Number(v).toFixed(2));
+    p.runners.filter((r) => r.open_positions > 0).forEach((r) => {
+      const structures = OptionView.openStructures(r);
+      if (!structures.length) {
+        rows.push(
+          '<tr><td>' + r.name + '</td><td>' + r.target_label + '</td><td>' +
+          (OptionView.isOption(r) ? "OPTION" : "LONG") + '</td>' +
+          '<td class="num">—</td><td class="num">—</td><td class="num">—</td>' +
+          '<td class="num ' + pnlClass(r.open_pnl) + '">' + fmtSigned(r.open_pnl) +
+          ' <span class="muted">(' + r.open_positions + ' pos)</span></td></tr>');
+        return;
+      }
+      structures.forEach((s) => {
+        const legs = (s.legs_detail && s.legs_detail.length) ? s.legs_detail : null;
+        if (!legs) {
+          rows.push(
+            '<tr><td>' + r.name + '</td><td>' + s.symbol + '</td><td>' + s.side + '</td>' +
+            '<td class="num">' + s.units + '</td>' +
+            '<td class="num">' + legPrice(s.entry_price) + '</td>' +
+            '<td class="num">' + legPrice(s.current_price) + '</td>' +
+            '<td class="num ' + pnlClass(s.unrealized_pnl) + '">' + fmtSigned(s.unrealized_pnl) +
+            '</td></tr>');
+          return;
+        }
+        legs.forEach((leg, idx) => {
+          rows.push(
+            '<tr' + (idx === 0 ? ' class="opt-first-leg"' : "") + '>' +
+            '<td>' + (idx === 0 ? r.name : "") + '</td>' +
+            '<td>' + (leg.trading_symbol || s.symbol) + '</td>' +
+            '<td>' + leg.side + '</td>' +
+            '<td class="num">' + leg.qty + '</td>' +
+            '<td class="num">' + legPrice(leg.entry_price) + '</td>' +
+            '<td class="num">' + legPrice(leg.current_price) + '</td>' +
+            '<td class="num ' + pnlClass(leg.pnl) + '">' + fmtSigned(leg.pnl) + '</td></tr>');
+        });
+        rows.push(
+          '<tr class="opt-total"><td></td><td>' + s.symbol + ' (net)</td><td>' + s.side +
+          '</td><td class="num">' + s.qty + ' lot' + (s.qty === 1 ? "" : "s") + '</td>' +
+          '<td class="num">' + legPrice(s.entry_price) + '</td>' +
+          '<td class="num">' + legPrice(s.current_price) + '</td>' +
+          '<td class="num ' + pnlClass(s.unrealized_pnl) + '">' + fmtSigned(s.unrealized_pnl) +
+          ' <span class="muted">exp ' + OptionView.expiryLabel(s.expiry) + '</span></td></tr>');
+      });
+    });
+    tbody.innerHTML = rows.join("") ||
+      '<tr><td colspan="7" class="muted" style="padding:16px">No open positions.</td></tr>';
   }
 
   function renderAudit() {

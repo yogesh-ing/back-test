@@ -52,7 +52,7 @@ then NIFTY collapses 7,000 pts over 24 bars:
 | **B2** | Expiry square-off + roll inside the forward loop | B · Exits | DONE | B1 |
 | **B3** | Close plumbing: `OPTION_EXIT` signals, closed-structure log, metrics | B · Exits | DONE | B1, B2 |
 | **C1** | Spawn UI: instrument / structure / strike / quantity controls | C · Reach | DONE | A2 |
-| **C2** | Portfolio matrix + deep-dive: option columns, premium, Greeks | C · Reach | TODO | C1 |
+| **C2** | Portfolio matrix + deep-dive: option columns, premium, Greeks | C · Reach | DONE | C1 |
 | **D1** | Index-scale synthetic spot for NIFTY / BANKNIFTY | D · Realism | TODO | A1 |
 | **D2** | Injectable quote provider (`synthetic` \| `live:mstock`) + badge | D · Realism | TODO | A1 |
 | **D3** | Persist forward option books across restarts | D · Realism | TODO | A2 |
@@ -63,15 +63,16 @@ Phases: **A** makes the numbers move, **B** makes the runner able to leave a
 trade, **C** makes it reachable from the browser, **D** makes the numbers
 honest, **E** keeps the gate green.
 
-**Progress: A1, A2, B1, B2, B3, C1 and E1 are done** — an option runner prices
+**Progress: A1, A2, B1, B2, B3, C1, C2 and E1 are done** — an option runner prices
 every bar, is counted by the equity/bucket/breaker maths, opens *and closes*
 on its own rules, settles at expiry and rolls, reports what it did in the trade
 log, the metrics and the equity curve, and can now be **spawned from the
 browser** with a structure, strike selection and exit plan. What remains is
-reachability in the reading direction and realism: **C2** (the matrix row and
-deep-dive panel still show an option runner through equity-shaped columns) and
-**D** (index-scale synthetic spot, so a synthetic NIFTY prices ~24,500 rather
-than ~₹392; an injectable live quote provider; persistence across restarts).
+reading **and** writing directions: an option runner can be spawned from the
+form and read back from the matrix and the deep-dive drawer. What remains is
+**D** — realism and durability: an index-scale synthetic spot (a synthetic
+NIFTY still prices at ~₹392, not ~24,500), an injectable live quote provider,
+and persistence across restarts.
 
 ---
 
@@ -512,11 +513,82 @@ assertions, create-API contract). Full gate: **2289 passed, 4 skipped**.
 
 ## C2 — Matrix + deep-dive option columns
 
-**Status:** TODO
+**Status:** DONE
 
-**Change.** Structures, net premium, option P&L and next expiry on the matrix
-row and the deep-dive panel. Consider a dedicated Options Forward view if the
-matrix gets crowded.
+**Problem.** B3 made the runner *report* its option book; nothing *rendered* it.
+The matrix row and the deep-dive drawer are equity-shaped — `symbol`, `qty`,
+`entry_price`, `unrealized_pnl` — and options live in the bridge, never in
+`runner.positions`. So a runner holding a live ₹26,667 bull call spread showed
+**Positions 0** (reading as "flat"), an empty *Active Open Positions* table (the
+one place the spread should have been), and a Trades tab whose rows were the
+string `NIFTY bull_call_spread` with no strikes, no premium and no reason for
+closing. Nothing on the page said "options" at all.
+
+**Change.**
+
+| Layer | What changed |
+|---|---|
+| `components/option_view.js` (new) | pure, DOM-free: open structures → cells, sub-lines, stat strip and table rows; exit reasons → English; trade records → labels. One vocabulary, shared by both views |
+| Matrix (`portfolio.js`) | option runners get a **Structure** badge in the Type column, the structure + strikes + lots + expiry + premium under the asset, structures (with legs) in **Positions**, and a leg-by-leg *Aggregate Open Positions* tab |
+| Deep dive (`deep_dive.js`) | an **Options Book** section: stat strip (open structures, legs, **premium at risk**, marked P&L, next expiry, closed structures + win rate), a structure table with a per-leg breakdown, option rows in Trades carrying **exit reason**, and an Instrument/Structure/Strike/Lots/**Exit policy** block in Config |
+| `paper_runner.get_state()` | `open_positions` counts equity positions **+ open structures** (was 0 for a runner with a spread on); `equity_positions` keeps the old number, `options` carries the detail |
+
+Why it looks this way:
+
+- **Net premium is the entry/exit price.** A structure's `entry_price` /
+  `current_price` are the signed net premium *per unit*, so `(current − entry) ×
+  units` is the structure's P&L and the table reads like an equity position
+  (B3's flattening, finally surfaced). P&L is also shown as a **% of premium
+  paid**, which is the number an option trader actually judges.
+- **Legs are shown, not hidden.** A spread's value is not one number: the table
+  lists each leg with its trading symbol, side, strike and mark, and the
+  aggregate tab shows the legs plus a `(net)` row per structure.
+- **"Flat" is explicit.** An option runner with nothing on says
+  *"flat · waiting for a view"* (or *"flat · N closed"*), so it cannot be
+  mistaken for an equity runner that is merely idle.
+- **Premium at risk ≠ deployed capital** in wording: it is the net premium
+  actually paid for what is open — for V1's debit structures, the maximum loss.
+
+**Acceptance criteria.**
+
+- [x] An option runner shows its structure, strikes, lots, net premium, mark,
+      P&L, next expiry and bars held — on the matrix row and in the drawer.
+- [x] Positions counts the structure (1 per spread), not 0 and not the legs;
+      open legs are visible as the sub-line and in the aggregate tab.
+- [x] Closed structures are distinguishable from equity trades and state *why*
+      they closed (stop / flip / time stop / pre-expiry square-off / settlement).
+- [x] Equity runners render byte-for-byte as before (no badge, no Options Book).
+- [x] A runner with no `options` payload (or a flat book) renders without
+      throwing — the helpers return zeros/empty and the views say "flat".
+
+**Result — the live payload rendered.** `tests/js/render_option_views.mjs` loads
+the real `portfolio.js` and `deep_dive.js` against a dependency-free DOM and
+renders what the **HTTP endpoints** return (`/api/portfolio/summary` row + the
+`deep_dive` control action) for a runner holding a bull call spread bought at
+₹29.63/unit with one structure already closed on the time stop:
+
+```text
+matrix row      badge-option · "Bull call spread" · "premium at risk" ·
+                Positions 1 / "2 legs" · 12 lots · exp 29 Oct · premium 29.63 → 38.05
+aggregate tab   NIFTY261024950CE LONG 900 545.65 625.85 ↔ NIFTY261025000CE SHORT ...
+                + "NIFTY bull_call_spread (net) 12 lots 29.63 38.05 +7,578 exp 29 Oct"
+drawer          Options Book: Open Structures 1 · Open Legs 2 · Premium at Risk
+                ₹26,667 · Book P&L (Open) +₹7,578 · Next Expiry 29 Oct
+                structure table + "↳ leg" rows + Trades row reason "Time stop"
+config tab      Instrument Options · Strike selection ATM · Lots per leg 12 ·
+                Exit policy "max 2 bars, square off 1d early"
+```
+
+Tests: `tests/js/test_option_view.mjs` (24 cases) +
+`tests/test_options_view.py` (19 cases: harness wrapper, row/book contract, the
+rendered markup, an equity-runner regression check, and the end-to-end
+API → render path). Full gate: **2308 passed, 4 skipped**.
+
+**Not in this task:** Greeks per structure and a dedicated Options Forward view.
+Greeks exist in `options/greeks.py` and `options/portfolio_greeks.py` but are not
+carried on the forward row; the matrix has room for the columns we added, so the
+separate view stays a "consider" until the columns are crowded (D3's persistence
+work is the more pressing gap).
 
 ## D1 — Index-scale synthetic spot
 
@@ -620,6 +692,10 @@ so the dashboard tests never touch a developer's DB. Also consider pointing
 | 20 | The spawn payload builder lives in a standalone JS component, not inline in `portfolio.js` | It is pure (form object in, `instrument` object out) so it can be unit-tested in node without a DOM, and the browser gets the same file — no build step, no duplicate logic |
 | 21 | Instrument-aware spawning is validated in the browser **and** re-checked by the API | The browser gives a fast, specific error; the API guard is what actually protects the engine from a hand-written (or stale-cached) payload |
 | 22 | Blank numeric exits are omitted rather than defaulted to `0` | `0` is meaningful in this engine (`stop_loss_pct: 0` arms on the first bar, `min_days_to_expiry: 0` squares off on expiry day), so "left empty" must stay distinguishable from "deliberately zero" |
+| 23 | Option rows reuse the equity-shaped keys (`entry_price`, `current_price`, `unrealized_pnl`) with the net premium in them, plus option-only keys | Every existing renderer (matrix cells, drawer tables, any JSON consumer) keeps working, and the extra keys are additive — the alternative was a second parallel shape in three views |
+| 24 | `open_positions` on a runner row counts structures; `equity_positions` and `options.open_positions` (legs) keep the other two numbers | The matrix's Positions column asked "is this runner exposed?", and 0 for a live spread answered it wrongly. The bridge's own `open_positions` contract (legs) is untouched, and B1's "one structure at a time" keeps the count honest |
+| 25 | The book renderer is a shared pure component (`option_view.js`), not helpers in each view | The matrix needs cells and sub-lines, the drawer needs tables and stats; one tested source of labels/numbers keeps them from disagreeing — and node can test it with no DOM |
+| 26 | Greeks and a dedicated Options Forward view are deferred out of C2 | The forward row does not carry Greeks yet (they live in the options layer), and the matrix had no crowding emergency; inventing a view before the columns exist would be the wrong order |
 
 ## How to run the gates for this work
 

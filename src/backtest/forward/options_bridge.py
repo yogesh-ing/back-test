@@ -34,6 +34,12 @@ the bar clock, so a structure held into expiry is cash-settled at the
 settlement spot on the expiry bar, and the next view re-enters on the next
 monthly expiry (a roll).
 
+Reporting (task C2): :meth:`OptionsBridge.open_structures_snapshot` turns the
+book's open legs into flat, JSON-safe rows (structure, strikes, net premium,
+mark, unrealized P&L, next expiry) so the portfolio matrix and the deep-dive
+drawer can render an option runner with option-shaped columns instead of the
+equity ones. ``summary()`` embeds it as ``open_structures_detail``.
+
 Per-bar pricing (task A1): the bridge is also the forward loop's **market
 clock**. :meth:`OptionsBridge.on_bar` moves the synthetic spot to each bar
 close, pins the quote provider's pricing reference to the bar timestamp (so
@@ -256,6 +262,8 @@ class OptionsBridge:
             "avg_pnl": (float(total_pnl) / len(closed)) if closed else 0.0,
             "costs_paid": float(broker.total_costs_paid),
             "exit_policy": self.exit_policy.config.to_dict(),
+            # -- open-structure detail (task C2) ----------------------------
+            "open_structures_detail": self.open_structures_snapshot(),
             "bars_in_trade": self.bars_in_trade if self.open_structure_id else 0,
         }
 
@@ -295,6 +303,115 @@ class OptionsBridge:
             if debit > 0:
                 total += debit
         return total
+
+    # ------------------------------------------------------------------ #
+    # Reporting (task C2) — the book as flat rows for the matrix/deep-dive
+    # ------------------------------------------------------------------ #
+
+    def open_structures_snapshot(self) -> list[dict[str, Any]]:
+        """Every open structure as a flat, JSON-safe row.
+
+        The portfolio matrix and the deep-dive drawer are equity-shaped: they
+        read ``symbol``/``qty``/``entry_price``/``current_price``/
+        ``unrealized_pnl``. Rather than teach three views about option legs,
+        the legs are collapsed here into one row per structure, with the same
+        keys **plus** the option-specific ones (strikes, per-leg detail, next
+        expiry, bars held). ``entry_price``/``current_price`` are the signed
+        net premium per unit — debit positive, credit negative — so
+        ``(current − entry) × units`` reads as the structure's P&L, exactly
+        like an equity position.
+
+        The next expiry is the one the **rules** will act on: the structure's
+        own expiry (B2 settles it there) or, if that is unknown, the policy's
+        nearest expiry as of the bar clock. Never raises: a calendar hiccup
+        leaves ``next_expiry`` as ``None`` rather than taking out the caller
+        (this runs inside the 1 Hz SSE snapshot).
+        """
+        rows: list[dict[str, Any]] = []
+        for structure in self.option_broker.get_open_structures():
+            legs = list(structure.legs)
+            units = max((leg.total_quantity for leg in legs), default=0)
+            lots = max((leg.quantity for leg in legs), default=0)
+
+            def _net_premium(price_attr: str) -> float:
+                """Signed premium per unit: longs pay, shorts receive."""
+                if not units:
+                    return 0.0
+                total = Decimal("0")
+                for leg in legs:
+                    price = getattr(leg, price_attr, Decimal("0")) or Decimal("0")
+                    total += price * Decimal(str(leg.total_quantity)) * (
+                        1 if leg.is_long else -1
+                    )
+                return float(total / Decimal(str(units)))
+
+            leg_rows = [
+                {
+                    "option_type": leg.option_type,
+                    "side": "LONG" if leg.is_long else "SHORT",
+                    "strike": float(leg.strike),
+                    "trading_symbol": leg.trading_symbol,
+                    "qty": leg.total_quantity,
+                    "entry_price": float(leg.entry_price),
+                    "current_price": float(leg.current_price),
+                    "pnl": float(leg.unrealized_pnl),
+                }
+                for leg in legs
+            ]
+            entry = _net_premium("entry_price")
+            current = _net_premium("current_price")
+            unrealized = float(structure.total_unrealized_pnl)
+            rows.append(
+                {
+                    # Equity-compatible shape (so existing renderers work) …
+                    "symbol": f"{structure.underlying} {structure.structure_type}",
+                    "label": f"{structure.underlying} {structure.structure_type} "
+                    + " ".join(str(leg.strike) for leg in legs),
+                    "side": "LONG" if legs and legs[0].is_long else "SHORT",
+                    "qty": lots,
+                    "units": units,
+                    "lot_size": legs[0].lot_size if legs else 0,
+                    "entry_price": round(entry, 2),
+                    "current_price": round(current, 2),
+                    "unrealized_pnl": round(unrealized, 2),
+                    "entry_cost": round(entry * units, 2),
+                    "open_pnl_pct": round(unrealized / (entry * units), 4)
+                    if entry * units
+                    else 0.0,
+                    "entry_ts": structure.opened_at.isoformat()
+                    if structure.opened_at
+                    else None,
+                    # … plus the option-specific columns (C2).
+                    "kind": "option",
+                    "structure_id": structure.structure_id,
+                    "structure_type": structure.structure_type,
+                    "underlying": structure.underlying,
+                    "strikes": [float(leg.strike) for leg in legs],
+                    "legs": len(legs),
+                    "legs_detail": leg_rows,
+                    "expiry": self._structure_expiry_iso(structure),
+                    "next_expiry": self._structure_expiry_iso(structure),
+                    "bars_held": (
+                        self._bar_index - self._entry_bar_index
+                        if self._entry_bar_index is not None
+                        else 0
+                    ),
+                }
+            )
+        return rows
+
+    def _structure_expiry_iso(self, structure: Any) -> Optional[str]:
+        """The structure's expiry as an ISO date; nearest policy expiry as a
+        fallback, and ``None`` if the calendar cannot be read."""
+        expiry = getattr(structure, "expiry", None) or self._structure_expiry
+        if expiry is None:
+            try:
+                expiry = self._select_expiry(self._generator(), self.underlying)
+            except Exception:  # noqa: BLE001 — reporting must never break the feed
+                return None
+        if expiry is None:
+            return None
+        return expiry.isoformat() if hasattr(expiry, "isoformat") else str(expiry)
 
     # ------------------------------------------------------------------ #
     # Per-bar pricing (task A1)

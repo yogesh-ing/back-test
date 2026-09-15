@@ -62,10 +62,11 @@ def test_option_config_js_behaviour():
 @pytest.mark.parametrize(
     "url", ["/", "/portfolio", "/portfolio/paper", "/portfolio/live"]
 )
-def test_option_config_module_is_loaded_on_every_page(client, url):
-    """The payload builder must be on the page wherever the form can appear."""
+def test_option_components_are_loaded_on_every_page(client, url):
+    """The payload builder and the book renderer ride along on every page."""
     html = client.get(url).get_data(as_text=True)
-    assert "js/components/option_config.js" in html, f"{url} does not load the component"
+    assert "js/components/option_config.js" in html, f"{url} does not load the builder"
+    assert "js/components/option_view.js" in html, f"{url} does not load the renderer"
 
 
 # ---------------------------------------------------------------------------
