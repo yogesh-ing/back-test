@@ -105,26 +105,35 @@ class SyntheticChainGenerator:
         return self.spots.get(underlying, self.DEFAULT_SPOTS.get(underlying, 100.0))
 
     def next_monthly_expiry(self, reference: date | None = None) -> date:
-        """Last Thursday of the current month (or next month if passed)."""
+        """Last Thursday of the month of ``reference`` (next month if passed).
+
+        Month arithmetic goes through :meth:`_first_of_month`, which rolls the
+        year over: the old ``ref.month + 2`` form raised
+        ``month must be in 1..12`` for a November reference and skipped January
+        for a December one — reachable as soon as the expiry calendar follows
+        the replay clock (forward testing task B1) instead of ``date.today()``.
+        """
         ref = reference or date.today()
-        # Advance to last Thursday of ref's month
-        if ref.month == 12:
-            first_next = date(ref.year + 1, 1, 1)
-        else:
-            first_next = date(ref.year, ref.month + 1, 1)
-        last_day = first_next - timedelta(days=1)
-        offset = (last_day.weekday() - 3) % 7  # Thursday == 3
-        expiry = last_day - timedelta(days=offset)
+        expiry = self._last_thursday_of(ref.year, ref.month)
         if expiry < ref:
-            # This month's expiry has passed — use next month's
-            if ref.month == 12:
-                first_next = date(ref.year + 1, 2, 1)
-            else:
-                first_next = date(ref.year, ref.month + 2, 1)
-            last_day = first_next - timedelta(days=1)
-            offset = (last_day.weekday() - 3) % 7
-            expiry = last_day - timedelta(days=offset)
+            # This month's expiry has passed — the nearest remaining one is
+            # NEXT month's (the old two-month jump skipped a whole expiry).
+            first_next = self._first_of_month(ref, months_ahead=1)
+            expiry = self._last_thursday_of(first_next.year, first_next.month)
         return expiry
+
+    @staticmethod
+    def _first_of_month(ref: date, months_ahead: int = 1) -> date:
+        """First day of the month ``months_ahead`` from ``ref`` (year-safe)."""
+        index = ref.year * 12 + (ref.month - 1) + months_ahead
+        return date(index // 12, index % 12 + 1, 1)
+
+    @classmethod
+    def _last_thursday_of(cls, year: int, month: int) -> date:
+        """Last Thursday of a calendar month (NSE monthly expiry convention)."""
+        last_day = cls._first_of_month(date(year, month, 1), months_ahead=1) - timedelta(days=1)
+        offset = (last_day.weekday() - 3) % 7  # Thursday == 3
+        return last_day - timedelta(days=offset)
 
     def generate_chain(
         self,
@@ -168,10 +177,22 @@ class SyntheticChainGenerator:
             )
         return chain
 
-    def available_expiries(self, underlying: str, count: int = 3) -> list[date]:
-        """The next ``count`` monthly expiries."""
+    def available_expiries(
+        self,
+        underlying: str,
+        count: int = 3,
+        reference: date | None = None,
+    ) -> list[date]:
+        """The next ``count`` monthly expiries from ``reference`` (default today).
+
+        ``reference`` matters for replay: a forward test iterating historical
+        bars must select the expiry that was current **on the bar**, not the
+        one that is current on the wall clock. Otherwise every bar after the
+        wall-clock expiry is treated as "already expired", which silently
+        blocks new entries forever.
+        """
         expiries: list[date] = []
-        ref = date.today()
+        ref = reference or date.today()
         for _ in range(count):
             expiries.append(self.next_monthly_expiry(ref))
             ref = expiries[-1] + timedelta(days=1)

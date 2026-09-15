@@ -849,11 +849,14 @@ class StrategyRunner:
                 symbol, "ERROR", None, self.last_price.get(symbol), f"view error: {exc}"
             )
             return
-        if view is None:
-            return
-
+        # A viewless bar is meaningful (B1): the bridge counts it towards the
+        # neutral exit rule and can close a position the strategy walked away
+        # from. So the call happens even when the strategy has no opinion.
         result = self.options_bridge.on_market_view(view, self.config.strategy_name)
         if not result:
+            return
+        if result.get("exited"):
+            self._log_option_exit(symbol, result, bar["close"])
             return
         if result.get("rejected"):
             self._log_signal(
@@ -899,10 +902,31 @@ class StrategyRunner:
         if pnl is None:
             return
         self.last_option_pnl = float(pnl)
+        # A stop/target/time exit fires inside the pricing hook — drain and log it.
+        while True:
+            event = bridge.pop_exit_event()
+            if event is None:
+                break
+            self._log_option_exit(symbol, event, price)
         if self.bars_processed % OPTION_MTM_LOG_EVERY == 0:
             self._log_signal(
                 symbol, "OPTION_MTM", None, price, f"option MTM {float(pnl):+,.0f}"
             )
+
+    def _log_option_exit(self, symbol: str, event: Dict[str, Any], price: float) -> None:
+        """Record a structure close in the signal log (task B1/B3)."""
+        self._log_signal(
+            symbol,
+            "OPTION_EXIT",
+            0,  # flat again — matches the equity flow's EXIT convention
+            price,
+            "{} closed after {} bars — {} — pnl {:+,.0f}".format(
+                event.get("structure_type"),
+                event.get("bars_held", 0),
+                event.get("detail") or event.get("reason"),
+                float(event.get("pnl", 0.0)),
+            ),
+        )
 
     # -- pool / universe --------------------------------------------------
 

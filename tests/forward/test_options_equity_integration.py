@@ -15,6 +15,8 @@ See ``docs/OPTIONS-FORWARD-TESTING.md`` → task A2.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pytest
 
 from backtest.forward.paper_runner import (
@@ -33,9 +35,12 @@ from backtest.forward.risk_supervisor import GlobalRiskConfig
 
 
 def _bars(closes, start_day=1):
+    """Daily bars from 2026-09-01; ``start_day`` counts days, so long series
+    roll into October rather than emitting impossible dates."""
+    base = date(2026, 9, 1) + timedelta(days=start_day - 1)
     return [
         {
-            "ts": f"2026-09-{start_day + i:02d}T09:15:00",
+            "ts": f"{(base + timedelta(days=i)).isoformat()}T09:15:00",
             "open": close - 10,
             "high": close + 30,
             "low": close - 30,
@@ -53,7 +58,11 @@ def _option_config(**overrides):
         allocated_capital=1_000_000,
         symbols=["NIFTY"],
         timeframe="1day",
-        instrument={"type": "option"},
+        # Exits are task B1; these tests isolate accounting, so hold forever.
+        instrument={
+            "type": "option",
+            "expression": {"exit": {"signal_flip": False, "min_days_to_expiry": None}},
+        },
     )
     kwargs.update(overrides)
     return RunnerConfig(**kwargs)

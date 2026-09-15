@@ -143,8 +143,27 @@ class TestOptionRunnerFlow:
         assert runner.options_summary()["executed_count"] == 0
 
     def test_one_structure_at_a_time(self):
-        """While a structure is open, further bullish bars add nothing."""
-        runner = self._runner()
+        """While a structure is open, further bullish bars add nothing.
+
+        Exits are disabled here (task B1): this test is about *pyramiding*, and
+        the default ``min_days_to_expiry=1`` rule would otherwise square the
+        spread off near the fixture expiry and let the next signal re-enter,
+        which is correct behaviour but not what this assertion measures.
+        """
+        runner = self._runner(
+            _option_config(
+                instrument={
+                    "type": "option",
+                    "expression": {
+                        "type": {
+                            "BULLISH": "bull_call_spread",
+                            "BEARISH": "bear_put_spread",
+                        },
+                        "exit": {"signal_flip": False, "min_days_to_expiry": None},
+                    },
+                }
+            )
+        )
         _feed(runner, RISING)
         _feed(runner, [RISING[-1] + i * 20 for i in range(1, 8)], start_day=21)
 

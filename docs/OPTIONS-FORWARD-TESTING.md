@@ -48,7 +48,7 @@ then NIFTY collapses 7,000 pts over 24 bars:
 |----|------|-------|--------|-----------|
 | **A1** | Per-bar mark-to-market for forward option books | A · Live | DONE | — |
 | **A2** | Fold option P&L into runner equity, buckets and breakers | A · Live | DONE | A1 |
-| **B1** | Exit policy: view flip / neutral, stop, target, time stop | B · Exits | TODO | A1 |
+| **B1** | Exit policy: view flip / neutral, stop, target, time stop | B · Exits | DONE | A1 |
 | **B2** | Expiry square-off + roll inside the forward loop | B · Exits | TODO | B1 |
 | **B3** | Close plumbing: `OPTION_EXIT` signals, closed-structure log, metrics | B · Exits | TODO | B1, B2 |
 | **C1** | Spawn UI: instrument / structure / strike / quantity controls | C · Reach | TODO | A2 |
@@ -182,20 +182,91 @@ Full gate: **2194 passed, 4 skipped** (only the pre-existing E1 lint task fails)
 
 ## B1 — Exit policy
 
-**Status:** TODO
+**Status:** DONE
 
-**Problem.** V1 ignores new views while a structure is open — it can never
-close. Exits today require a human clicking the dashboard (and the dashboard
-holds a *different* book, so it cannot even see a runner's positions).
+**Problem.** V1 ignored every view that arrived while a structure was open —
+it could never close one. Exits required a human clicking the dashboard (which
+holds a *different* book, so it cannot even see a runner's positions). A
+stop-loss that cannot stop out is not a forward test.
 
-**Change.** `expression["exit"]` policy evaluated per bar: view flip, view
-neutral for N bars, stop-loss / take-profit on structure P&L (percent or
-points), and a time stop (N bars / days before expiry). Close via
-`broker.close_structure()` with `exit_reason` set.
+**Change.** New `src/backtest/options/exit_policy.py` — a pure rule evaluator
+(`ExitConfig` / `ExitPolicy` / `ExitDecision`) plus the bridge lifecycle:
+`expression["exit"]` is parsed (tolerantly — junk keys warn, they never block a
+spawn), and every bar the bridge manages an open structure.
 
-**Acceptance criteria.** Each rule has a unit test; a flip from bullish to
-bearish closes the bull call spread on that bar and (if re-entry is enabled)
-opens the bearish structure; `exit_reason` is populated and persisted.
+| Rule | Key | Fires when |
+|---|---|---|
+| stop loss | `stop_loss_pct` / `stop_loss_points` | mark ≤ −X% of net premium, or ≤ −₹X |
+| take profit | `take_profit_pct` / `take_profit_points` | mark ≥ +X% of net premium, or ≥ +₹X |
+| days to expiry | `min_days_to_expiry` (default **1**) | `(expiry − bar_date).days ≤ N` → squares off with the established `auto_square_off` reason |
+| time stop | `max_bars` | held ≥ N bars |
+| signal flip | `signal_flip` (default on) | view turns against the structure's direction |
+| signal neutral | `neutral_bars` (default off) | N consecutive bars with no view / a NEUTRAL view |
+| reverse | `reenter` (default off) | a flip-close immediately opens the opposite structure |
+
+Precedence is risk-before-opinion (stop → target → DTE → time → flip →
+neutral), so a gap-down reports the stop, not the flip. Percent rules are
+skipped for credit structures (a percentage of a negative premium is
+meaningless).
+
+Supporting behaviour, all deliberately conservative:
+
+- **No same-bar re-entry** after a close; `reenter` bypasses it only for a
+  genuine flip. A stop-out cannot silently re-open the same trade.
+- **Entry-side DTE guard**: a fresh structure is refused if the expiry rule
+  would close it immediately, so a 1-DTE trade cannot be opened.
+- **Two call sites**: risk rules run in `on_bar` (the pricing hook, so pool
+  runners get them too) and are drained by the runner via `pop_exit_event()`;
+  signal rules run in `on_market_view`, which the runner now calls on **every**
+  bar — a viewless bar is how silence and flips are detected.
+- **`OPTION_EXIT`** signal kind in the runner log, `closed_count` /
+  `last_exit` / `exit_policy` / `bars_in_trade` in the summary.
+
+**Acceptance criteria.**
+
+- [x] Every rule has a unit test (percent, points, time, DTE, flip, neutral,
+      precedence, credit-structure skip, disabled rules).
+- [x] A bullish→bearish flip closes the bull call spread on that bar;
+      `reenter: true` opens the bear put spread on the same bar.
+- [x] `exit_reason` is set on the closed structure (`signal_flip`,
+      `stop_loss`, `take_profit`, `time_stop`, `auto_square_off`).
+- [x] A stop-out is logged as `OPTION_EXIT` with its P&L, and the runner is
+      flat and free to take the next signal.
+
+**Result — a full lifecycle, from one runner (rally → crash → sideways drift),
+stop 40% / target 150% / neutral 4 bars / DTE 2:**
+
+```
+OPTION_ENTRY    bull_call_spread 25200/25250 expiry=2026-09-24 legs=2
+OPTION_EXIT     bull_call_spread closed after 3 bars — stop -1,176 ≤ -40% of premium 2,063 — pnl -1,186
+OPTION_ENTRY    bear_put_spread 24300/24350 expiry=2026-09-24 legs=2
+OPTION_EXIT     bear_put_spread closed after 6 bars — 2d to expiry ≤ 2d — pnl +1,637
+OPTION_BLOCKED  1d to expiry 2026-09-24 ≤ 2d — new entries paused
+OPTION_BLOCKED  0d to expiry 2026-09-24 ≤ 2d — new entries paused
+OPTION_ENTRY    bear_put_spread 19800/19850 expiry=2026-10-29 legs=2   ← rolls to the next expiry
+```
+
+### Two pre-existing expiry-calendar bugs found by this work
+
+Both were unreachable while the calendar was pinned to `date.today()`; wiring
+the replay clock (above) exposed them:
+
+1. **`next_monthly_expiry(November ref)` crashed** — `date(year, month + 2, 1)`
+   raised `month must be in 1..12` (and for December it skipped January).
+   Now month arithmetic goes through `_first_of_month()` (year-safe).
+2. **The post-expiry rollover skipped a month** — when the current month's
+   expiry had passed it jumped *two* months ahead, so a reference of Nov 30
+   resolved to January's expiry instead of December's. Now it is "the nearest
+   monthly expiry on or after the reference", matching the duplicate
+   implementation in `engine/option_backtest_driver.py` and the docstring.
+
+Consequence of (1)+(2) before the fix: any forward test replaying past the next
+monthly expiry squared off correctly and then paused entries **forever**
+(`-13d to expiry … new entries paused` on every subsequent bar).
+
+Tests: `tests/forward/test_options_exit_policy.py` — 44 cases (config parsing,
+every rule, precedence, bridge lifecycle, runner wiring, expiry-calendar
+regressions). Full gate: **2238 passed, 4 skipped**.
 
 ## B2 — Expiry square-off + roll
 
@@ -317,6 +388,10 @@ so the dashboard tests never touch a developer's DB. Also consider pointing
 | 7 | Fold option P&L at the **runner**, not in `PortfolioManager._bucket_*` | Every bucket/portfolio aggregate is derived from `runner.equity()` / `deployed_capital()` / `daily_pnl()` already, so one change makes the runner card, buckets, portfolio totals and breakers consistent — and nothing can be missed twice |
 | 8 | `realized_pnl` stays **gross of costs**; the fee stack lives in `equity()`/`option_pnl()` | Matches `OptionPaperBroker.total_equity` and the `/options` dashboard. Netting fees into `realized_pnl` would show a negative realized P&L the moment a structure opened |
 | 9 | `premium_at_risk` (net debit), not short-leg margin, is the deployed-capital analogue | For all four V1 structures the net debit **is** the maximum loss, so it is exact; the broker's margin model (sell-side notional) would overstate a defined-risk spread |
+| 10 | Exit rules split by *who needs the view*: risk rules in `on_bar`, signal rules in `on_market_view` | `on_bar` runs for every runner (including pool mode, which never routes views to options), so a stop still protects a position nobody is watching; signal rules stay where the view is |
+| 11 | Exit evaluation is a pure `ExitPolicy`; the bridge owns all counters | Rules become unit-testable without a broker or a clock, and the bar-index/neutral bookkeeping lives in exactly one place |
+| 12 | Default `min_days_to_expiry = 1`; stops/targets opt-in | Matches the README's "auto-squared-off before expiry" claim and avoids settlement risk (B2 takes over real settlement). A wrong *default* stop would silently cap every trade |
+| 13 | Expiry selection now takes its reference from the **bar clock** | Same principle as A1's pricing clock: a replay of October bars must trade October's expiry. Note this partially pre-empts D1 — the spot-scale half is still open |
 
 ## How to run the gates for this work
 

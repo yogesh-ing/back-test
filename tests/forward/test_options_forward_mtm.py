@@ -20,7 +20,7 @@ See ``docs/OPTIONS-FORWARD-TESTING.md`` → task A1.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -45,10 +45,17 @@ from backtest.strategy.intent import Direction, MarketView
 
 
 def _bars(closes, start_day=1):
-    """Closed candle dicts, one per close (daily bars from 2026-09-01)."""
+    """Closed candle dicts, one per close (daily bars from 2026-09-01).
+
+    ``start_day`` is an offset in **days from 2026-09-01**, so a series longer
+    than 30 bars rolls into October instead of producing impossible dates like
+    ``2026-09-44`` (which ``datetime.fromisoformat`` rejects, silently pinning
+    the bridge's bar clock to the last valid bar).
+    """
+    base = date(2026, 9, 1) + timedelta(days=start_day - 1)
     return [
         {
-            "ts": f"2026-09-{start_day + i:02d}T09:15:00",
+            "ts": f"{(base + timedelta(days=i)).isoformat()}T09:15:00",
             "open": close - 10,
             "high": close + 30,
             "low": close - 30,
@@ -68,8 +75,10 @@ def _option_config(**overrides):
         timeframe="1day",
         instrument={
             "type": "option",
+            # Exits are task B1; these tests isolate pricing, so hold forever.
             "expression": {
-                "type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"}
+                "type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"},
+                "exit": {"signal_flip": False, "min_days_to_expiry": None},
             },
         },
     )
