@@ -208,6 +208,16 @@ class SyntheticQuoteProvider:
         self.generator = chain_generator or SyntheticChainGenerator()
         self._contracts: dict[str, OptionContract] = {}
         self.spread = 0.5  # bid/ask half-spread in ₹
+        # Pricing clock (A6 debt, pulled forward): when set, every quote is
+        # priced as of this reference instead of the wall clock. The options
+        # backtest driver sets it per bar — otherwise ``price_contract``
+        # computes NEGATIVE time-to-expiry against historical bars and every
+        # option collapses to intrinsic value.
+        self._reference: datetime | None = None
+
+    def set_reference(self, reference: datetime | None) -> None:
+        """Pin quote pricing to a reference time (``None`` = wall clock)."""
+        self._reference = reference
 
     @property
     def source_name(self) -> str:
@@ -243,7 +253,7 @@ class SyntheticQuoteProvider:
             if hasattr(contract.option_type, "value")
             else str(contract.option_type)
         )
-        ltp = self.generator.price_contract(contract, option_type)
+        ltp = self.generator.price_contract(contract, option_type, reference=self._reference)
         return {
             "ltp": round(ltp, 2),
             "bid": round(max(ltp - self.spread, 0.05), 2),

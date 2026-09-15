@@ -23,9 +23,10 @@ Usage::
 from __future__ import annotations
 
 import logging
+import hashlib
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Protocol
@@ -64,7 +65,20 @@ class ExpiryAlert:
     structure_ids: list[str] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.utcnow)
-    alert_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    alert_id: str = ""
+
+    def __post_init__(self) -> None:
+        # Deterministic id (A6): derived from type + timestamp + targets —
+        # NOT uuid4. Two alerts with identical content share an id by design;
+        # a backtest re-run reproduces the same alert ids, and alert ordering
+        # still distinguishes occurrences.
+        if not self.alert_id:
+            payload = (
+                f"{self.alert_type.value}|{self.timestamp.isoformat()}|"
+                f"{','.join(self.position_ids)}|{','.join(self.structure_ids)}"
+            )
+            digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+            self.alert_id = f"alert_{digest}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -266,7 +280,12 @@ class ExpiryManager:
                 before_pnl = sum(
                     (p.realized_pnl for p in positions), ZERO
                 )
-                self.broker.close_structure(structure_id, quote_provider, now)
+                self.broker.close_structure(
+                    structure_id,
+                    quote_provider,
+                    now,
+                    reason="auto_square_off",
+                )
                 after_pnl = sum((p.realized_pnl for p in positions), ZERO)
                 structure_pnl = after_pnl - before_pnl
 
@@ -367,6 +386,15 @@ class ExpiryManager:
             pos.status = PositionStatus.EXPIRED
             pos.closed_at = now
             pos.current_price = Decimal(str(intrinsic))
+
+            # Structure-level bookkeeping (T0.2): when the last open leg
+            # expires, stamp the parent so the trade log can report *why*
+            # it closed. Settlement bypasses ``close_structure``, so this
+            # is the only place that can do it.
+            parent = self.broker.get_structure(pos.structure_id)
+            if parent is not None and not parent.is_open:
+                parent.exit_reason = "expiry_settlement"
+                parent.closed_at = now
 
             result = SettlementResult(
                 position_id=pos.position_id,

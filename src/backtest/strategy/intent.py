@@ -146,9 +146,13 @@ class TradeIntent:
     expiry:
         The expiry date for all legs.
     estimated_premium:
-        Estimated total premium (in ₹) for the structure.
+        Model-estimated net premium (in ₹). Positive = debit (you pay),
+        negative = credit (you receive), ``0`` = not estimated.  Populated
+        by the structure builders from the pricing model — an *estimate*,
+        not the fill price the broker actually gets.
     estimated_margin:
-        Estimated margin requirement (in ₹).
+        Estimated margin requirement (in ₹).  Not yet populated by the
+        builders (V1 leaves it at ``0``).
     strategy_name:
         The strategy that generated the original view (for logging / audit).
     metadata:
@@ -183,19 +187,14 @@ class TradeIntent:
         return len(self.legs) > 1
 
     @property
-    def net_debit(self) -> Decimal:
-        """Net debit: sum of BUY premiums minus sum of SELL premiums.
+    def is_debit(self) -> bool:
+        """True when the structure costs money to open (a net debit).
 
-        Positive = net debit (you pay), negative = net credit (you receive).
+        Derived from :attr:`estimated_premium`, which structure builders
+        populate from the pricing model.  A structure built without an
+        estimate reads as a debit (the default of ``0`` is not a credit).
         """
-        from decimal import Decimal as D
-        net = D("0")
-        for leg in self.legs:
-            if leg.side == "BUY":
-                net += D(str(leg.lot_size))  # placeholder — real premium from quote
-            else:
-                net -= D(str(leg.lot_size))
-        return net
+        return self.estimated_premium >= Decimal("0")
 
 
 # Valid structure types (V1 scope)

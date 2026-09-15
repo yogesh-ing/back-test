@@ -28,6 +28,7 @@ from decimal import Decimal
 from typing import Any
 
 from backtest.instruments.option import OptionContract
+from backtest.options.quote_providers import bs_price
 from backtest.strategy.intent import (
     Direction,
     MarketView,
@@ -113,6 +114,57 @@ class OptionStructure(ABC):
             lot_size=contract.lot_size,
         )
 
+    def _estimate_net_premium(
+        self,
+        priced_legs: list[tuple[OptionContract, OptionLeg]],
+        view: MarketView,
+        expiry: date,
+    ) -> Decimal:
+        """Model-estimate the structure's net premium (T0.1).
+
+        Prices each leg with the same Black-Scholes kernel the synthetic
+        quote provider uses, so :attr:`TradeIntent.estimated_premium` is a
+        sensible pre-trade number instead of a hard ``0``.
+
+        Positive = net debit (you pay), negative = net credit.
+
+        Returns ``Decimal("0")`` — "not estimated" — when the estimate is
+        impossible, rather than guessing: no spot on the view, no bar
+        timestamp (dates stay deterministic — this never falls back to
+        ``date.today()``), a non-positive time to expiry, or a contract
+        carrying no modelled vol (e.g. a real vendor chain).
+        """
+        spot = float(view.spot_price or 0)
+        if spot <= 0 or view.bar_timestamp is None:
+            return Decimal("0")
+
+        as_of_date = getattr(view.bar_timestamp, "date", lambda: view.bar_timestamp)()
+        try:
+            dte = (expiry - as_of_date).days
+        except TypeError:
+            return Decimal("0")
+        if dte <= 0:
+            return Decimal("0")
+        years = dte / 365.0
+
+        net = Decimal("0")
+        for contract, leg in priced_legs:
+            vol = contract.metadata.get("vol")
+            if not vol:
+                continue
+            option_type = (
+                contract.option_type.value
+                if hasattr(contract.option_type, "value")
+                else str(contract.option_type)
+            )
+            premium = bs_price(
+                spot, float(contract.strike), years, float(vol), option_type
+            )
+            value = Decimal(str(premium)) * Decimal(str(leg.total_quantity))
+            net += value if leg.side == "BUY" else -value
+
+        return net.quantize(Decimal("0.01"))
+
 
 # ---------------------------------------------------------------------------
 # Long Call
@@ -149,6 +201,9 @@ class LongCall(OptionStructure):
         return TradeIntent(
             view=view,
             structure_type="long_call",
+            estimated_premium=self._estimate_net_premium(
+                [(contract, leg)], view, expiry
+            ),
             legs=(leg,),
             expiry=expiry,
             strategy_name=strategy_name,
@@ -197,6 +252,9 @@ class LongPut(OptionStructure):
         return TradeIntent(
             view=view,
             structure_type="long_put",
+            estimated_premium=self._estimate_net_premium(
+                [(contract, leg)], view, expiry
+            ),
             legs=(leg,),
             expiry=expiry,
             strategy_name=strategy_name,
@@ -249,6 +307,11 @@ class BullCallSpread(OptionStructure):
         return TradeIntent(
             view=view,
             structure_type="bull_call_spread",
+            estimated_premium=self._estimate_net_premium(
+                [(long_contract, long_leg), (short_contract, short_leg)],
+                view,
+                expiry,
+            ),
             legs=(long_leg, short_leg),
             expiry=expiry,
             strategy_name=strategy_name,
@@ -307,6 +370,11 @@ class BearPutSpread(OptionStructure):
         return TradeIntent(
             view=view,
             structure_type="bear_put_spread",
+            estimated_premium=self._estimate_net_premium(
+                [(long_contract, long_leg), (short_contract, short_leg)],
+                view,
+                expiry,
+            ),
             legs=(long_leg, short_leg),
             expiry=expiry,
             strategy_name=strategy_name,

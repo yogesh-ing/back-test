@@ -182,6 +182,10 @@ class StructurePosition:
     legs: list[OptionPosition] = field(default_factory=list)
     opened_at: datetime = field(default_factory=datetime.utcnow)
     closed_at: datetime | None = None
+    #: Why the structure closed (T0.2). One of ``"manual"``,
+    #: ``"auto_square_off"``, ``"expiry_settlement"`` — or ``None`` while
+    #: the structure is still open.
+    exit_reason: str | None = None
 
     @property
     def is_open(self) -> bool:
@@ -286,6 +290,12 @@ class OptionPaperBroker:
         self._structures: dict[str, StructurePosition] = {}  # structure_id -> structure
         self._order_history: list[dict[str, Any]] = []
 
+        # Deterministic ID sequences (A6): counters instead of uuid4 so a
+        # backtest run is reproducible. Uniqueness holds within one broker
+        # instance — which is the only scope a broker's ids need.
+        self._structure_seq = 0
+        self._position_seq = 0
+
     # ------------------------------------------------------------------
     # Core execution
     # ------------------------------------------------------------------
@@ -379,8 +389,12 @@ class OptionPaperBroker:
                 f"Need ₹{net_cost + statutory_fees:,.2f} but only ₹{self.available_cash:,.2f} available"
             )
 
-        # Atomic execution — create all positions
-        structure_id = str(uuid.uuid4())
+        # Atomic execution — create all positions.
+        # Deterministic ids: timestamp prefix (the injected bar time) plus a
+        # per-broker monotonic counter — NOT hash(intent): TradeIntent is a
+        # frozen dataclass carrying a dict field, so hash() raises TypeError.
+        self._structure_seq += 1
+        structure_id = f"struct_{ts:%Y%m%d%H%M%S}_{self._structure_seq:04d}"
         positions = []
 
         # Per-leg strike lookup: metadata may carry a single "strike" (single-leg)
@@ -389,7 +403,9 @@ class OptionPaperBroker:
         default_strike = intent.metadata.get("strike", "0")
 
         for leg, fill_price, commission in fills:
+            self._position_seq += 1
             position = OptionPosition(
+                position_id=f"pos_{ts:%Y%m%d%H%M%S}_{self._position_seq:04d}",
                 structure_id=structure_id,
                 strategy_name=intent.strategy_name,
                 instrument_token=leg.instrument_token,
@@ -447,10 +463,17 @@ class OptionPaperBroker:
         structure_id: str,
         quote_provider: QuoteProvider,
         timestamp: datetime | None = None,
+        reason: str = "manual",
     ) -> Decimal:
         """Close all legs of a structure atomically.
 
         Returns the total realized P&L (gross of commission).
+
+        ``reason`` is recorded on the structure's ``exit_reason`` so a
+        trade log can say *why* a structure closed — ``"manual"`` (the
+        default, e.g. a strategy signal or a UI button),
+        ``"auto_square_off"`` (pre-expiry DTE exit) or
+        ``"expiry_settlement"`` (cash settlement at expiry).
         """
         structure = self._structures.get(structure_id)
         if structure is None:
@@ -510,6 +533,7 @@ class OptionPaperBroker:
                 )
 
         structure.closed_at = ts
+        structure.exit_reason = reason
 
         logger.info(
             "[option-paper] Closed structure=%s pnl=₹%.2f fees=₹%.2f cash=₹%.2f",
@@ -562,6 +586,22 @@ class OptionPaperBroker:
     def get_open_structures(self) -> list[StructurePosition]:
         """Return all structures that have at least one open leg."""
         return [s for s in self._structures.values() if s.is_open]
+
+    def get_closed_structures(self) -> list[StructurePosition]:
+        """Return every structure with no open legs left (T0.2/A2).
+
+        The mirror of :meth:`get_open_structures`.  Without it there is no
+        way to enumerate closed structures at all, so a trade log has
+        nothing to read.
+
+        A structure counts as closed whether it was closed explicitly
+        (:meth:`close_structure`) or cash-settled at expiry — settlement
+        sets its legs to ``EXPIRED``, so ``is_open`` is ``False`` either
+        way.  Check :attr:`StructurePosition.exit_reason` for which.
+
+        Ordered by insertion, i.e. the order the structures were opened.
+        """
+        return [s for s in self._structures.values() if not s.is_open]
 
     def get_structure(self, structure_id: str) -> StructurePosition | None:
         return self._structures.get(structure_id)
