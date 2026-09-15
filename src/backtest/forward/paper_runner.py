@@ -427,6 +427,10 @@ MAX_SIGNAL_LOG = 200
 MAX_TRADE_LOG = 200
 MAX_EQUITY_POINTS = 500
 MIN_WARMUP_BARS = 12  # strategies need history to compute
+#: Every Nth bar while an option structure is open, the runner records an
+#: ``OPTION_MTM`` heartbeat (task A1) — a chartable mark of the book's
+#: unrealized P&L without flooding the signal log.
+OPTION_MTM_LOG_EVERY = 5
 
 
 @dataclass
@@ -578,6 +582,8 @@ class StrategyRunner:
         self._day_start_equity: float = float(config.allocated_capital)
         self._current_day: Optional[str] = None
         self.last_price: Dict[str, float] = {}
+        #: Most recent option-book MTM (0.0 for equity runners) — task A1.
+        self.last_option_pnl: float = 0.0
         self.signal_log: Deque[Dict[str, Any]] = deque(maxlen=MAX_SIGNAL_LOG)
 
         # -- state -----------------------------------------------------------
@@ -740,6 +746,10 @@ class StrategyRunner:
 
                 self._roll_trading_day(ts)
                 self.portfolio.update_prices({symbol: price})
+                if self.options_bridge is not None:
+                    # A1: re-price the option book before equity is marked,
+                    # so the curve and the breakers see fresh premiums.
+                    self._mark_option_book(symbol, price, ts)
                 self._mark_to_market()
 
                 if self.config.target_type == TARGET_SINGLE:
@@ -784,6 +794,10 @@ class StrategyRunner:
                 self._bars[symbol].append(new_bar)
             self.last_price[symbol] = float(price)
             self.portfolio.update_prices({symbol: price})
+            if self.options_bridge is not None:
+                # A1: a stress markdown is still a market move — re-price the
+                # option book so a breaker halt reflects it.
+                self._mark_option_book(symbol, float(price), ts or new_bar["ts"])
             self._mark_to_market()
 
     def on_tick_end(self, tick_ts: str) -> None:
@@ -868,6 +882,27 @@ class StrategyRunner:
             return None
         with self._lock:
             return self.options_bridge.summary()
+
+    def _mark_option_book(self, symbol: str, price: float, ts: Optional[str]) -> None:
+        """Mark the option book to market for one bar (task A1).
+
+        Called for every closed bar before equity is marked, so an option
+        runner's curve, daily P&L and instance breakers are built from fresh
+        premiums instead of the entry price. While a structure is open the
+        book also emits a throttled ``OPTION_MTM`` heartbeat the deep-dive can
+        chart.
+        """
+        bridge = self.options_bridge
+        if bridge is None:
+            return
+        pnl = bridge.on_bar(symbol, price, ts)
+        if pnl is None:
+            return
+        self.last_option_pnl = float(pnl)
+        if self.bars_processed % OPTION_MTM_LOG_EVERY == 0:
+            self._log_signal(
+                symbol, "OPTION_MTM", None, price, f"option MTM {float(pnl):+,.0f}"
+            )
 
     # -- pool / universe --------------------------------------------------
 
@@ -1220,6 +1255,9 @@ class StrategyRunner:
                 "options": (
                     self.options_bridge.summary() if self.options_bridge is not None else None
                 ),
+                # A1: the book's most recent MTM, mirrored onto the row so a
+                # card can show option P&L before it is folded into equity (A2).
+                "option_pnl": round(self.last_option_pnl, 2),
             }
 
     def get_detail(self) -> Dict[str, Any]:

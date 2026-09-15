@@ -24,13 +24,22 @@ Expression config (``RunnerConfig.instrument["expression"]``)::
 
 V1 policy: one open structure per bridge — while a structure is open the
 bridge ignores new views (no pyramiding, no flip-to-opposite). Exits come
-from the dashboard / expiry pipeline, keeping the runner loop side-effect
-light.
+from the exit policy / expiry pipeline (see
+``docs/OPTIONS-FORWARD-TESTING.md`` tasks B1–B2), keeping the runner loop
+side-effect light.
+
+Per-bar pricing (task A1): the bridge is also the forward loop's **market
+clock**. :meth:`OptionsBridge.on_bar` moves the synthetic spot to each bar
+close, pins the quote provider's pricing reference to the bar timestamp (so
+theta follows the replay clock instead of the wall clock) and marks the book
+to market. Without it a runner's legs keep their entry premium forever and
+``unrealized_pnl`` stays pinned at zero.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -99,6 +108,13 @@ class OptionsBridge:
             self.quote_provider.generator = SyntheticChainGenerator()
         self.open_structure_id: Optional[str] = None
         self.executed_count: int = 0
+        #: Underlying of the most recent structure — the symbol whose spot
+        #: drives pricing (set at entry, defaulted for the first bar).
+        self.underlying: str = "NIFTY"
+        #: Last mark-to-market book value, for runner heartbeats/UI.
+        self.last_unrealized_pnl: Decimal = Decimal("0")
+        self.last_spot: Optional[float] = None
+        self.last_mtm_ts: Optional[str] = None
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -139,7 +155,93 @@ class OptionsBridge:
             "capital": float(broker.capital),
             "equity": float(broker.total_equity),
             "realized_pnl": float(broker.total_realized_pnl),
+            "unrealized_pnl": float(self.last_unrealized_pnl),
+            "last_spot": self.last_spot,
+            "last_mtm_ts": self.last_mtm_ts,
+            "quote_source": str(getattr(self.quote_provider, "source_name", "unknown")),
         }
+
+    # ------------------------------------------------------------------ #
+    # Per-bar pricing (task A1)
+    # ------------------------------------------------------------------ #
+
+    def on_bar(
+        self, symbol: str, price: float, ts: Any = None
+    ) -> Optional[Decimal]:
+        """Mark the option book to market at one bar close.
+
+        Called by :class:`~backtest.forward.paper_runner.StrategyRunner` for
+        every closed bar (single **and** pool runners). Three things happen:
+
+        1. the synthetic spot moves to ``price`` so premiums track the
+           underlying the strategy just saw;
+        2. the quote provider's pricing reference is pinned to ``ts`` — the
+           bar's timestamp, not ``datetime.now()`` — so time decay advances at
+           replay speed;
+        3. every open leg is re-priced and its unrealized P&L recomputed.
+
+        Returns the book's total unrealized P&L, or ``None`` when there is
+        nothing open (or the book is empty). Pricing failures are logged and
+        swallowed: a bad bar must never kill the runner.
+        """
+        if not self._has_open_structure():
+            return None
+
+        try:
+            underlying = str(symbol or self.underlying or "NIFTY").upper()
+            self.underlying = underlying
+            self._sync_market(underlying, price, ts)
+            unrealized = self.option_broker.update_mtm(
+                self.quote_provider, self._bar_datetime(ts)
+            )
+            self.last_unrealized_pnl = Decimal(str(unrealized))
+            self.last_spot = float(price)
+            self.last_mtm_ts = str(ts) if ts else None
+            return self.last_unrealized_pnl
+        except Exception as exc:  # noqa: BLE001 — pricing must never kill the runner
+            logger.warning(
+                "[options-bridge] MTM failed for %s @ %s: %s", symbol, price, exc
+            )
+            return None
+
+    def _sync_market(self, underlying: str, spot: float, ts: Any = None) -> None:
+        """Point the quote feed at a new spot / bar clock.
+
+        ``set_reference`` exists on :class:`SyntheticQuoteProvider` (and wraps
+        through ``CachedQuoteProvider.inner``); live providers have no clock
+        to pin, so the call is skipped for them.
+        """
+        generator = self._generator()
+        generator.set_spot(underlying, float(spot))
+        provider = self.quote_provider
+        set_reference = getattr(provider, "set_reference", None)
+        if set_reference is None:
+            set_reference = getattr(getattr(provider, "inner", None), "set_reference", None)
+        if set_reference is not None:
+            set_reference(self._bar_datetime(ts))
+
+    @staticmethod
+    def _bar_datetime(ts: Any) -> Optional[datetime]:
+        """Parse a bar timestamp into a **naive UTC** datetime.
+
+        Naive because ``SyntheticChainGenerator.price_contract`` builds its
+        expiry as ``datetime.combine(expiry_date, midnight)`` — mixing a
+        tz-aware reference with that would raise. ``None`` (unparseable or
+        missing) tells the provider to fall back to the wall clock.
+        """
+        if not ts:
+            return None
+        text = str(ts).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            logger.debug("[options-bridge] unparseable bar timestamp %r", ts)
+            return None
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
 
     # ------------------------------------------------------------------ #
     # Internals
@@ -179,11 +281,14 @@ class OptionsBridge:
         structure, option_type = STRUCTURES[structure_type]
         underlying = str(view.underlying or "NIFTY")
         generator = self._generator()
+        self.underlying = underlying
 
         # Sync the synthetic market to the view's spot so premiums and
-        # strikes line up with what the strategy saw.
+        # strikes line up with what the strategy saw. The entry is priced on
+        # the view's own bar clock (when it carries one) so the premium is
+        # consistent with the MTM that follows on the next bar (A1).
         if view.spot_price is not None:
-            generator.set_spot(underlying, float(view.spot_price))
+            self._sync_market(underlying, float(view.spot_price), view.bar_timestamp)
         spot = Decimal(str(generator.get_spot(underlying)))
 
         expiry = NearestExpiryPolicy().select_expiry(generator.available_expiries(underlying))
