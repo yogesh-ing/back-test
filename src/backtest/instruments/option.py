@@ -11,7 +11,7 @@ it never mutates, which keeps it safe as a dict key / set member.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -149,8 +149,13 @@ class OptionContract(BaseInstrument):
         return errors
 
     def __str__(self) -> str:
+        option_type = (
+            self.option_type
+            if isinstance(self.option_type, str)
+            else self.option_type.value
+        )
         return (
-            f"{self.underlying} {self.strike}{self.option_type if isinstance(self.option_type, str) else self.option_type.value} "
+            f"{self.underlying} {self.strike}{option_type} "
             f"exp={self.expiry}"
         )
 

@@ -1,17 +1,16 @@
-"""Price-move strategy — enter on upward momentum, exit on fixed price target/stop.
+"""Price-move threshold strategy — signal when price moves more than a
+fixed number of points within a lookback window.
 
-Logic
------
-* **Entry**: when the bar's close is at least ``move_amount`` above the
-  previous bar's close (upward price movement).
-* **Take-profit**: when the close is at least ``take_profit`` above the
-  entry price.
-* **Stop-loss**: when the close is at least ``stop_loss`` below the
-  entry price.
+The earliest built-in directional signal (referenced by the options Gap PRD,
+which borrowed its ``threshold`` / ``lookback`` vocabulary for
+``directional_options``). Emits the classic equity signal series:
 
-Entry and exit prices are absolute (₹/$), not percentages, so the
-strategy works across instruments with very different price levels.
+* ``+1`` when ``close - close[lookback] >  threshold``  (bullish breakout)
+* ``-1`` when ``close - close[lookback] < -threshold``  (bearish breakdown)
+* ``0``  otherwise (no view)
 """
+
+from __future__ import annotations
 
 import pandas as pd
 
@@ -19,74 +18,42 @@ from backtest.strategy.base import Strategy
 
 
 class PriceMove(Strategy):
-    """Enter on upward price movement; exit on fixed price target or stop."""
+    """Threshold-based price movement signal."""
 
     name = "price_move"
     description = (
-        "Price-move momentum — enter long when the close rises by at least "
-        "'Move Amount' from the previous bar. Exit on a fixed take-profit or "
-        "stop-loss (absolute price, not percentage)."
+        "Price-move threshold — long when the close rises more than `threshold` "
+        "points over `lookback` bars, flat (or short, if allowed) when it falls "
+        "by the same amount."
     )
     version = "1.0"
     author = "Trading Bot"
     params = {
-        "move_amount": {
-            "default": 5.0,
-            "min": 0.1,
-            "max": 10000.0,
+        "threshold": {
+            "default": 100.0,
+            "min": 1.0,
+            "max": 100000.0,
             "type": "float",
-            "label": "Move Amount",
-            "tooltip": (
-                "Minimum upward price move (close vs previous close) to trigger an entry."
-            ),
+            "label": "Move Threshold (pts)",
+            "tooltip": "Price change in points that triggers a signal.",
         },
-        "take_profit": {
-            "default": 5.0,
-            "min": 0.1,
-            "max": 10000.0,
-            "type": "float",
-            "label": "Take Profit",
-            "tooltip": (
-                "Exit when the price is at least this much above the entry price."
-            ),
-        },
-        "stop_loss": {
-            "default": 5.0,
-            "min": 0.1,
-            "max": 10000.0,
-            "type": "float",
-            "label": "Stop Loss",
-            "tooltip": (
-                "Exit when the price is at least this much below the entry price."
-            ),
+        "lookback": {
+            "default": 5,
+            "min": 1,
+            "max": 50,
+            "type": "int",
+            "label": "Lookback (bars)",
+            "tooltip": "Bars to look back for the price change.",
         },
     }
 
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
-        """Return 1 while in position, 0 otherwise."""
-        closes = candles["close"]
-        signals = pd.Series(0, index=candles.index, dtype=int)
+        threshold = float(self.threshold)
+        lookback = int(self.lookback)
 
-        entry_price: float | None = None
+        price_change = candles["close"] - candles["close"].shift(lookback)
 
-        for i in range(1, len(closes)):
-            current = float(closes.iloc[i])
-            prev = float(closes.iloc[i - 1])
-
-            if entry_price is None:
-                # --- not in a position: look for entry -------------------
-                if current - prev >= self.move_amount:
-                    entry_price = current
-                    signals.iloc[i] = 1
-            else:
-                # --- in a position: check take-profit / stop-loss --------
-                if current - entry_price >= self.take_profit:
-                    # take-profit hit — exit (signal stays 0)
-                    entry_price = None
-                elif entry_price - current >= self.stop_loss:
-                    # stop-loss hit — exit (signal stays 0)
-                    entry_price = None
-                else:
-                    signals.iloc[i] = 1
-
+        signals = pd.Series(0, index=candles.index)
+        signals[price_change > threshold] = 1    # Bullish breakout
+        signals[price_change < -threshold] = -1  # Bearish breakdown
         return signals

@@ -180,7 +180,8 @@ class FeeBreakdown:
     REGULATORY_KEYS = ("stt", "sebi_turnover", "stamp_duty", "gst", "sec_fee", "finra_taf")
 
     #: Key holding the :class:`~backtest.simulator.fee_documents.ContractNote`
-    #: reference, when one is attached by :meth:`CommissionCalculator.validate_against_contract_note`.
+    #: reference, when one is attached by
+    #: :meth:`CommissionCalculator.validate_against_contract_note`.
     DOCUMENT_KEY = "contract_note_document"
 
     def get(self, key: str) -> Decimal:
@@ -1135,17 +1136,6 @@ class CommissionCalculator:
                 )
 
         if not mismatches and document is not None:
-            stamped = {
-                "brokerage": model_brokerage,
-                **{k: _round(v) for k, v in statutory.items()},
-                FeeBreakdown.DOCUMENT_KEY: document,
-            }
-            computed = FeeBreakdown(
-                components=stamped,
-                currency=self.broker.currency,
-                segment=segment,
-                broker=self.broker.name,
-            )
             logger.info(
                 "fee model validated against contract note %s (%s)",
                 document.document_id,

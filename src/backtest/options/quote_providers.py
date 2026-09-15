@@ -66,7 +66,8 @@ def bs_price(
         intrinsic = max(0.0, spot - strike) if option_type == "CE" else max(0.0, strike - spot)
         return intrinsic
     sqrt_t = math.sqrt(years_to_expiry)
-    d1 = (math.log(spot / strike) + (risk_free + vol * vol / 2.0) * years_to_expiry) / (vol * sqrt_t)
+    drift = (risk_free + vol * vol / 2.0) * years_to_expiry
+    d1 = (math.log(spot / strike) + drift) / (vol * sqrt_t)
     d2 = d1 - vol * sqrt_t
     disc = math.exp(-risk_free * years_to_expiry)
     if option_type == "CE":

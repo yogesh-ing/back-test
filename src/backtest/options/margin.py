@@ -24,7 +24,6 @@ Usage::
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import Any
 
 from backtest.strategy.intent import TradeIntent
@@ -317,7 +316,10 @@ class PreTradeRiskCheck:
             return RiskCheckResult(
                 allowed=False,
                 reason=f"Margin limit exceeded: ₹{total_after:,.0f} > ₹{self.max_margin:,.0f}",
-                details={"requested": margin_required, "available": self.max_margin - current_margin_used},
+                details={
+                    "requested": margin_required,
+                    "available": self.max_margin - current_margin_used,
+                },
             )
 
         # Check 2: Position count
@@ -332,7 +334,10 @@ class PreTradeRiskCheck:
         if trade_notional > max_notional:
             return RiskCheckResult(
                 allowed=False,
-                reason=f"Position too large: ₹{trade_notional:,.0f} > ₹{max_notional:,.0f} ({self.max_single_position_pct}% of capital)",
+                reason=(
+                    f"Position too large: ₹{trade_notional:,.0f} > "
+                    f"₹{max_notional:,.0f} ({self.max_single_position_pct}% of capital)"
+                ),
             )
 
         # Check 4: Loss limit (margin as proxy for max loss)
@@ -340,7 +345,10 @@ class PreTradeRiskCheck:
         if margin_required > max_loss:
             return RiskCheckResult(
                 allowed=False,
-                reason=f"Potential loss exceeds limit: ₹{margin_required:,.0f} > ₹{max_loss:,.0f} ({self.max_loss_per_trade_pct}% of capital)",
+                reason=(
+                    f"Potential loss exceeds limit: ₹{margin_required:,.0f} > "
+                    f"₹{max_loss:,.0f} ({self.max_loss_per_trade_pct}% of capital)"
+                ),
             )
 
         return RiskCheckResult(allowed=True)

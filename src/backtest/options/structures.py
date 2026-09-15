@@ -22,15 +22,12 @@ V1 scope: ``LongCall``, ``LongPut``, ``BullCallSpread``, ``BearPutSpread``.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Any
 
 from backtest.instruments.option import OptionContract
 from backtest.options.quote_providers import bs_price
 from backtest.strategy.intent import (
-    Direction,
     MarketView,
     OptionLeg,
     TradeIntent,

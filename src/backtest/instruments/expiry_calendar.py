@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import calendar
 from datetime import date, timedelta
-from typing import Literal
 
 # Underlyings that follow the last-Thursday expiry rule
 _INDEX_UNDERLYINGS: frozenset[str] = frozenset({"NIFTY", "BANKNIFTY"})

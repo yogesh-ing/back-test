@@ -19,10 +19,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-logger = logging.getLogger("backtest.options.portfolio_greeks")
-
-from backtest.options.greeks import BlackScholes, OptionGreeks
+from backtest.options.greeks import BlackScholes
 from backtest.options.paper_trading import OptionPosition
+
+logger = logging.getLogger("backtest.options.portfolio_greeks")
 
 
 @dataclass
