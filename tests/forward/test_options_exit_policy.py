@@ -137,6 +137,11 @@ class TestExitConfig:
         assert cfg.min_days_to_expiry == 2
         assert cfg.reenter is True
 
+    def test_omitting_min_days_keeps_the_default(self):
+        """Adding *any* exit key must not silently disable the square-off."""
+        assert ExitConfig.from_expression({"signal_flip": False}).min_days_to_expiry == 1
+        assert ExitConfig.from_expression({"stop_loss_pct": 0.5}).min_days_to_expiry == 1
+
     def test_zero_min_days_means_square_off_on_expiry_day(self):
         """0 is a real setting (close on expiry day), not "disabled"."""
         assert ExitConfig.from_expression({"min_days_to_expiry": 0}).min_days_to_expiry == 0
@@ -533,18 +538,24 @@ class TestRunnerExits:
         assert exit_signal is not None and "stop" in exit_signal["reason"]
 
     def test_runner_can_take_the_next_signal_after_an_exit(self):
-        """An exit frees the runner — the opposite view opens the reverse trade."""
+        """An exit frees the runner — the opposite view opens the reverse trade.
+
+        The slide stays inside the expiry cycle: a series that reaches the
+        expiry would (correctly) settle the reverse structure too, and this
+        test is about the hand-off, not about settlement.
+        """
         runner = _runner({"min_days_to_expiry": None})
         for bar in _bars(RALLY):
             runner.process_candle_event("NIFTY", bar)
 
-        for bar in _bars([25_400 - i * 120 for i in range(1, 14)], start_day=15):
+        for bar in _bars([25_400 - i * 120 for i in range(1, 10)], start_day=15):
             runner.process_candle_event("NIFTY", bar)
 
         summary = runner.options_summary()
         assert summary["closed_count"] == 1
         assert summary["executed_count"] == 2  # bull closed, bear opened
         assert summary["open_structures"] == 1
+        assert summary["settled_count"] == 0
         entries = [s for s in runner.signal_log if s["kind"] == "OPTION_ENTRY"]
         assert "bear_put_spread" in entries[-1]["reason"]
 

@@ -218,6 +218,7 @@ class TestCashSettlement:
             _PAST_EXPIRY, side="BUY", option_type="CE", strike=24800, price=100.0
         )
         provider = StaticSettlementProvider({"NIFTY": 25000.0})  # 200 pts ITM
+        cash_before = broker.available_cash
 
         manager = ExpiryManager(broker)
         results = manager.settle_expired(provider, as_of=_NOW)
@@ -226,8 +227,17 @@ class TestCashSettlement:
         r = results[0]
         assert r.was_itm is True
         assert r.intrinsic_value == 200.0
-        # Long ITM: receives 200 × 25 = 5000 (premium already debited at entry)
-        assert r.realized_pnl == Decimal("5000")
+        # Realized P&L is net of the entry premium (slippage-adjusted to
+        # ₹100.10 per unit here), the same definition `OptionPosition.close`
+        # uses. Booking the gross 200 × 25 = 5,000 double-counted the premium
+        # and made book equity (capital + realized P&L) overstate by a full
+        # premium on every settled leg.
+        entry = broker._positions[r.position_id].entry_price
+        assert entry == Decimal("100.10")
+        assert r.realized_pnl == (Decimal("200") - entry) * 25
+        # Cash still moves by the gross intrinsic received (the premium and
+        # the entry commission left cash at entry).
+        assert broker.available_cash == cash_before + Decimal("200") * 25
         assert broker.get_open_positions() == []
 
     def test_long_call_otm_expires_worthless(self):
@@ -243,7 +253,9 @@ class TestCashSettlement:
         r = results[0]
         assert r.was_itm is False
         assert r.intrinsic_value == 0.0
-        assert r.realized_pnl == Decimal("0")
+        # Expiring worthless means losing exactly the premium that was paid.
+        entry = broker._positions[r.position_id].entry_price
+        assert r.realized_pnl == -entry * 25
 
     def test_short_call_itm_pays_intrinsic(self):
         broker, _ = _broker_with_position(
@@ -257,8 +269,9 @@ class TestCashSettlement:
         assert len(results) == 1
         r = results[0]
         assert r.was_itm is True
-        # Short ITM: pays 200 × 25 = 5000
-        assert r.realized_pnl == Decimal("-5000")
+        # Short ITM: keeps the premium received and pays the 200 intrinsic.
+        entry = broker._positions[r.position_id].entry_price
+        assert r.realized_pnl == (entry - Decimal("200")) * 25
 
     def test_long_put_itm(self):
         broker, _ = _broker_with_position(
@@ -271,7 +284,9 @@ class TestCashSettlement:
 
         assert len(results) == 1
         assert results[0].intrinsic_value == 500.0
-        assert results[0].realized_pnl == Decimal("12500")  # 500 × 25
+        # (intrinsic − entry premium) × 25 units
+        entry = broker._positions[results[0].position_id].entry_price
+        assert results[0].realized_pnl == (Decimal("500") - entry) * 25
 
     def test_position_marked_expired(self):
         broker, _ = _broker_with_position(_PAST_EXPIRY)
@@ -439,7 +454,8 @@ class TestIntegrationThroughExpiry:
         quotes = FakeQuoteProvider(default_price=100.0)
 
         intent = _make_intent(strike=24800, side="BUY", expiry=expiry)
-        broker.execute_structure(intent, quotes)
+        positions = broker.execute_structure(intent, quotes)
+        entry = positions[0].entry_price
 
         # Square-off disabled (0 minutes) → 15:10 is before 15:30 cutoff
         manager = ExpiryManager(broker, squareoff_minutes_before=0)
@@ -447,7 +463,9 @@ class TestIntegrationThroughExpiry:
         summary = manager.process_expiries(
             quotes, StaticSettlementProvider({"NIFTY": 25000.0}), as_of=expiry_day
         )
-        # Not squared off (before cutoff), not yet settled (expiry == today, not past)
+        # Not squared off (before cutoff) and not settled: on expiry day the
+        # default stays out of the way (a caller that wants the expiry-day
+        # close must ask for include_today=True — see the forward bridge).
         assert summary["squared_off_count"] == 0
         assert summary["settled_count"] == 0
 
@@ -457,7 +475,30 @@ class TestIntegrationThroughExpiry:
             quotes, StaticSettlementProvider({"NIFTY": 25000.0}), as_of=day_after
         )
         assert summary["settled_count"] == 1
-        assert summary["total_pnl"] == Decimal("5000")  # 200 pts ITM × 25
+        # Net of the (slippage-adjusted) entry premium — not the gross 5,000.
+        assert summary["total_pnl"] == (Decimal("200") - entry) * 25
+
+    def test_include_today_settles_on_the_expiry_bar(self):
+        """`include_today=True` settles the expiry-day close itself."""
+        expiry = date(2026, 9, 24)
+        broker = OptionPaperBroker(capital=1_000_000.0)
+        quotes = FakeQuoteProvider(default_price=100.0)
+        positions = broker.execute_structure(
+            _make_intent(strike=24800, side="BUY", expiry=expiry), quotes
+        )
+        entry = positions[0].entry_price
+        manager = ExpiryManager(broker, squareoff_minutes_before=0)
+
+        summary = manager.process_expiries(
+            quotes,
+            StaticSettlementProvider({"NIFTY": 25000.0}),
+            as_of=datetime(2026, 9, 24, 9, 15),
+            include_today=True,
+        )
+
+        assert summary["settled_count"] == 1
+        assert summary["total_pnl"] == (Decimal("200") - entry) * 25
+        assert broker.get_open_positions() == []
 
     def test_spread_squared_off_together(self):
         """Both legs of a spread square off in the same pass."""

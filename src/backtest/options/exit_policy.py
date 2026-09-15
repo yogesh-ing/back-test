@@ -212,8 +212,14 @@ class ExitConfig:
                 expression.get("take_profit_points"), "take_profit_points"
             ),
             max_bars=_count(expression.get("max_bars"), "max_bars", 1),
-            min_days_to_expiry=_count(
-                expression.get("min_days_to_expiry"), "min_days_to_expiry", 0
+            # ``min_days_to_expiry`` has a non-None default, so an *omitted*
+            # key must keep it (1 day). Only an explicit ``null`` means "ride
+            # into settlement" — otherwise adding any other exit key would
+            # silently disable the square-off.
+            min_days_to_expiry=(
+                defaults.min_days_to_expiry
+                if "min_days_to_expiry" not in expression
+                else _count(expression.get("min_days_to_expiry"), "min_days_to_expiry", 0)
             ),
             reenter=_as_bool(expression.get("reenter"), defaults.reenter),
         )

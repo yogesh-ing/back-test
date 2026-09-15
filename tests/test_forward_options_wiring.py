@@ -165,11 +165,15 @@ class TestOptionRunnerFlow:
             )
         )
         _feed(runner, RISING)
-        _feed(runner, [RISING[-1] + i * 20 for i in range(1, 8)], start_day=21)
+        # Three more bars, still short of the fixture expiry: crossing it would
+        # (correctly) settle the spread and let the next signal re-enter, which
+        # is what B2 does — not what this test measures.
+        _feed(runner, [RISING[-1] + i * 20 for i in range(1, 4)], start_day=21)
 
         summary = runner.options_summary()
         assert summary["open_structures"] == 1
         assert summary["executed_count"] == 1
+        assert summary["settled_count"] == 0
 
     def test_state_exposes_instrument_and_options(self):
         runner = self._runner()

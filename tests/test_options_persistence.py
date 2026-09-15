@@ -149,7 +149,11 @@ class TestWritePath:
         row = persistence.get_row(structure_id)
         assert row.status == TradeStructureStatus.EXPIRED.value
         assert row.closed_at is not None
-        assert D(str(row.realized_pnl)) == D("7500.00")  # intrinsic 100 x 75
+        # Realized P&L is net of the entry premium (120.50), like
+        # `OptionPosition.close`: (100 intrinsic − 120.50) x 75. The gross
+        # 100 x 75 = 7,500 double-counted the premium the buyer had paid.
+        entry_price = broker._positions[positions[0].position_id].entry_price
+        assert D(str(row.realized_pnl)) == (D("100") - entry_price) * 75
 
 
 # ---------------------------------------------------------------------------

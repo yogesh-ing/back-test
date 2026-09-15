@@ -28,7 +28,11 @@ views do not pyramid — they are **exit signals**. Every bar the bridge asks
 target, days-to-expiry, time stop, signal flip, signal neutral) and closes
 through the broker, recording ``exit_reason``. ``expression["exit"]``
 configures the rules; ``reenter`` optionally reverses into the opposite
-structure on a flip. Expiry settlement itself is task B2.
+structure on a flip. Expiry settlement is B2: :meth:`OptionsBridge.on_bar`
+drives the canonical :class:`~backtest.options.expiry.ExpiryManager` against
+the bar clock, so a structure held into expiry is cash-settled at the
+settlement spot on the expiry bar, and the next view re-enters on the next
+monthly expiry (a roll).
 
 Per-bar pricing (task A1): the bridge is also the forward loop's **market
 clock**. :meth:`OptionsBridge.on_bar` moves the synthetic spot to each bar
@@ -47,12 +51,14 @@ from decimal import Decimal
 from typing import Any, Deque, Optional
 
 from backtest.options.exit_policy import (
+    EXIT_DTE,
     EXIT_SIGNAL_FLIP,
     RISK_REASONS,
     ExitConfig,
     ExitPolicy,
     _label,
 )
+from backtest.options.expiry import EXIT_REASON_SETTLEMENT, ExpiryManager
 from backtest.options.expiry_policy import NearestExpiryPolicy
 from backtest.options.paper_trading import OptionPaperBroker
 from backtest.options.quote_providers import (
@@ -118,6 +124,13 @@ class OptionsBridge:
             self.quote_provider.generator = SyntheticChainGenerator()
         # -- exit policy (task B1) ------------------------------------------
         self.exit_policy = ExitPolicy(ExitConfig.from_expression(self.expression.get("exit")))
+        #: Minutes before the close at which the canonical expiry pipeline
+        #: squares a *same-day* expiry off at market (B2). 0 = never (ride to
+        #: cash settlement). Daily forward bars land at 09:15, so this only
+        #: fires for intraday bar cycles.
+        self.squareoff_minutes_before: int = int(
+            self.expression.get("squareoff_minutes_before", 30) or 0
+        )
 
         self.open_structure_id: Optional[str] = None
         self.executed_count: int = 0
@@ -144,6 +157,8 @@ class OptionsBridge:
         self._structure_direction: Optional[Any] = None
         self._structure_expiry: Optional[Any] = None
         self._entry_premium: Decimal = Decimal("0")
+        self._settlement_count: int = 0
+        self._expiry_manager: Optional[ExpiryManager] = None
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -228,6 +243,7 @@ class OptionsBridge:
             "last_mtm_ts": self.last_mtm_ts,
             "quote_source": str(getattr(self.quote_provider, "source_name", "unknown")),
             "last_exit": dict(self.last_exit) if self.last_exit else None,
+            "settled_count": self._settlement_count,
             "exit_policy": self.exit_policy.config.to_dict(),
             "bars_in_trade": self.bars_in_trade if self.open_structure_id else 0,
         }
@@ -322,7 +338,105 @@ class OptionsBridge:
             return None
 
         self._maybe_risk_exit(strategy_name="")
+        self._maybe_expiry_settlement()
         return self.last_unrealized_pnl
+
+    # ------------------------------------------------------------------ #
+    # Expiry settlement (task B2)
+    # ------------------------------------------------------------------ #
+
+    def _expiry(self) -> ExpiryManager:
+        """The canonical expiry pipeline, bound to this bridge's own book.
+
+        Reused rather than reimplemented so the forward loop settles exactly
+        like the backtest driver and the dashboard: cash settlement at the
+        spot settlement price, ``expiry_settlement`` stamped on the structure,
+        and the broker's close observers fired (persistence).
+        """
+        if self._expiry_manager is None:
+            self._expiry_manager = ExpiryManager(
+                self.option_broker,
+                squareoff_minutes_before=self.squareoff_minutes_before,
+            )
+        return self._expiry_manager
+
+    def _maybe_expiry_settlement(self) -> Optional[dict[str, Any]]:
+        """Cash-settle a structure whose expiry the bar clock has reached.
+
+        Runs on every bar after the mark-to-market, and settles **on** the
+        expiry bar (``include_today=True``): index options settle on the
+        expiry-day close, which is exactly the price the bar carries. Only
+        relevant when the exit policy rides into settlement
+        (``min_days_to_expiry: null``) — otherwise the DTE rule has already
+        squared the position off the day before.
+        """
+        if self._bar_dt is None or not self._has_open_structure():
+            return None
+        structure = self.option_broker.get_structure(self.open_structure_id or "")
+        if structure is None or structure.expiry is None:
+            return None
+
+        try:
+            report = self._expiry().process_expiries(
+                self.quote_provider,
+                _GeneratorSettlementProvider(self._generator(), self.underlying),
+                as_of=self._bar_dt,
+                include_today=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — a settlement failure must not kill the runner
+            logger.warning("[options-bridge] expiry settlement failed: %s", exc)
+            return None
+
+        if not report.get("settled_count") and not report.get("squared_off_count"):
+            return None
+        return self._record_settlement(structure, report)
+
+    def _record_settlement(
+        self, structure: Any, report: dict[str, Any]
+    ) -> Optional[dict[str, Any]]:
+        """Turn a settlement report into the same event shape as a close."""
+        settled = bool(report.get("settled_count"))
+        realized = structure.total_realized_pnl
+        event = {
+            "exited": True,
+            "structure_id": structure.structure_id,
+            "structure_type": structure.structure_type,
+            "underlying": structure.underlying,
+            "direction": _label(self._structure_direction),
+            "reason": EXIT_REASON_SETTLEMENT if settled else EXIT_DTE,
+            "detail": (
+                f"cash settled at expiry {structure.expiry}"
+                if settled
+                else "squared off into expiry"
+            ),
+            "pnl": float(realized),
+            "bars_held": self.bars_in_trade,
+            "strategy_name": "",
+            "settled": settled,
+        }
+
+        self.open_structure_id = None
+        self.closed_count += 1
+        self._settlement_count += 1
+        self.last_exit = event
+        self._exit_bar_index = self._bar_index
+        self._entry_bar_index = None
+        self._bars_without_view = 0
+        self._structure_direction = None
+        self._structure_expiry = None
+        self._entry_premium = Decimal("0")
+        self.last_unrealized_pnl = self.option_broker.total_unrealized_pnl
+        self._exit_events.append(event)
+
+        logger.info(
+            "[options-bridge] %s %s — pnl ₹%.2f (%d settled, %d squared off)",
+            "settled" if settled else "squared off",
+            structure.structure_id[:8],
+            float(realized),
+            report.get("settled_count", 0),
+            report.get("squared_off_count", 0),
+        )
+        return event
 
     def _maybe_risk_exit(self, strategy_name: str) -> Optional[dict[str, Any]]:
         """Apply the view-independent exit rules to the freshly marked book."""
@@ -706,3 +820,19 @@ class OptionsBridge:
             strategy_name=intent.strategy_name,
             metadata=intent.metadata,
         )
+
+
+class _GeneratorSettlementProvider:
+    """Settlement price = the quote generator's current spot (B2).
+
+    Mirrors ``engine/option_backtest_driver.py``'s provider of the same name:
+    both replay loops settle against the spot the synthetic market is standing
+    at on the expiry bar.
+    """
+
+    def __init__(self, generator: Any, underlying: str = "NIFTY") -> None:
+        self.generator = generator
+        self.underlying = underlying
+
+    def get_settlement_price(self, underlying: str) -> float:
+        return float(self.generator.get_spot(underlying or self.underlying))

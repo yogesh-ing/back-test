@@ -49,14 +49,14 @@ then NIFTY collapses 7,000 pts over 24 bars:
 | **A1** | Per-bar mark-to-market for forward option books | A · Live | DONE | — |
 | **A2** | Fold option P&L into runner equity, buckets and breakers | A · Live | DONE | A1 |
 | **B1** | Exit policy: view flip / neutral, stop, target, time stop | B · Exits | DONE | A1 |
-| **B2** | Expiry square-off + roll inside the forward loop | B · Exits | TODO | B1 |
+| **B2** | Expiry square-off + roll inside the forward loop | B · Exits | DONE | B1 |
 | **B3** | Close plumbing: `OPTION_EXIT` signals, closed-structure log, metrics | B · Exits | TODO | B1, B2 |
 | **C1** | Spawn UI: instrument / structure / strike / quantity controls | C · Reach | TODO | A2 |
 | **C2** | Portfolio matrix + deep-dive: option columns, premium, Greeks | C · Reach | TODO | C1 |
 | **D1** | Index-scale synthetic spot for NIFTY / BANKNIFTY | D · Realism | TODO | A1 |
 | **D2** | Injectable quote provider (`synthetic` \| `live:mstock`) + badge | D · Realism | TODO | A1 |
 | **D3** | Persist forward option books across restarts | D · Realism | TODO | A2 |
-| **E1** | Fix lint baseline (`options/expiry.py` unused imports) | E · Hygiene | TODO | — |
+| **E1** | Fix lint baseline (`options/expiry.py` unused imports) | E · Hygiene | DONE | — |
 | **E2** | Stop options tests leaking state through the dev SQLite DB | E · Hygiene | TODO | — |
 
 Phases: **A** makes the numbers move, **B** makes the runner able to leave a
@@ -178,7 +178,7 @@ option structures join that ledger in B3.
 | `deployed_capital` | `0.00` | `2,063.25` |
 
 Tests: `tests/forward/test_options_equity_integration.py` — 16 cases.
-Full gate: **2194 passed, 4 skipped** (only the pre-existing E1 lint task fails).
+Full gate: **2194 passed, 4 skipped** (at the time; E1's lint failure was still open — closed by B2).
 
 ## B1 — Exit policy
 
@@ -270,16 +270,90 @@ regressions). Full gate: **2238 passed, 4 skipped**.
 
 ## B2 — Expiry square-off + roll
 
-**Status:** TODO
+**Status:** DONE
 
-**Change.** Drive `ExpiryManager.process_expiries()` from the runner's bar
-clock (with a synthetic settlement price off the generator spot), so a
-structure reaching expiry is settled inside the forward loop; optional roll to
-the next expiry via `NearestExpiryPolicy`.
+**Problem.** Nothing in the forward path could **settle** a contract at expiry:
+`ExpiryManager.process_expiries` was called only by the backtest driver and the
+dashboard. B1's DTE rule squared positions off a day early (a proxy), but a
+runner configured to ride into settlement held a position whose only mark was a
+Black-Scholes price — cash settlement never happened and the book never booked
+the result.
 
-**Acceptance criteria.** A structure held past expiry settles exactly once,
-realized P&L lands in the book, `status="expired"`, and a roll produces a new
-structure id on the next expiry.
+**Change.** The bridge now drives the canonical pipeline from its bar clock:
+
+- `_maybe_expiry_settlement()` runs every bar after MTM and calls
+  `ExpiryManager.process_expiries(..., as_of=bar_time, include_today=True)`;
+- **settles on the expiry bar** — index options settle on the expiry-day close,
+  which is exactly the price the bar carries (new `include_today` parameter;
+  `False` keeps the old strict "after expiry" behaviour);
+- settlement spot = the synthetic market's spot for that bar
+  (`_GeneratorSettlementProvider`, mirroring the backtest driver's);
+- the result reuses the B1 event shape: `exit_reason = "expiry_settlement"`
+  (new shared constant `EXIT_REASON_SETTLEMENT`), `EXPIRED` legs, cash moved by
+  intrinsic, `settled_count` in the summary;
+- **roll** is the natural next entry: the calendar already follows the bar
+  clock (B1), so the next view opens the next monthly expiry with a new
+  structure id. No new config.
+- `expression["squareoff_minutes_before"]` (default 30) passes through to the
+  manager for intraday bar cycles.
+
+### Settlement P&L bug fixed (found by wiring this in)
+
+`settle_expired` booked **gross intrinsic** as `realized_pnl`:
+
+| case | old | now |
+|---|---|---|
+| long, 100 premium, 200 intrinsic, 25 lots | `+5,000` | `+2,500` = (200 − 100) × 25 |
+| long OTM (expires worthless) | `0` | `−2,500` = the premium lost |
+| short ITM (100 premium, 200 intrinsic) | `−5,000` | `−2,500` |
+
+`total_equity` anchors on starting capital + realized P&L, so the gross figure
+overstated book equity by a full premium **per settled leg** — verified on a
+book that should have ended at `₹107,237.50` but reported `₹122,500`. Cash
+movements were always correct and are unchanged; only the P&L attribution was
+wrong. It now matches `OptionPosition.close()`, which the close path always
+used.
+
+**Acceptance criteria.**
+
+- [x] A structure held to expiry settles exactly once, `status="expired"`,
+      `exit_reason="expiry_settlement"`, realized P&L in the book.
+- [x] Settlement happens on the expiry bar (and still settles if the runner
+      only reaches that date later).
+- [x] Works with no view at all (pool runners never route views to options).
+- [x] Book reconciles after settlement: `capital + realized − fees == cash`.
+- [x] A roll produces a new structure id on a later expiry and the runner keeps
+      trading.
+- [x] The default `min_days_to_expiry=1` path still squares off early, so the
+      shipped default never rides into settlement by accident.
+
+**Result — one runner riding to settlement:**
+
+```
+rally   -> equity 1,001,176.50   open=1
+through -> equity 1,003,112.00   open=1  closed=1  settled=1
+           realized 1,686.75  unrealized 1,505.25
+
+OPTION_ENTRY bull_call_spread 25200/25250 expiry=2026-09-24 legs=2
+OPTION_EXIT  bull_call_spread closed after 12 bars — cash settled at expiry 2026-09-24 — pnl +1,687
+OPTION_ENTRY bull_call_spread 26100/26150 expiry=2026-10-29 legs=2   <- roll
+```
+
+Tests: `tests/forward/test_options_expiry_settlement.py` (11 cases) plus the
+`include_today` case in `tests/test_options_expiry.py`. Five pre-existing
+settlement assertions moved to net-of-premium semantics, and five forward
+fixtures were re-anchored inside a single expiry cycle (they implicitly assumed
+an immortal position — B2 correctly settles one that reaches expiry).
+
+Full gate: **2252 passed, 4 skipped** — including `tests/test_lint_baseline.py`,
+so E1 is genuinely closed.
+
+### Config bug found while testing this
+
+`ExitConfig.from_expression` treated an **omitted** `min_days_to_expiry` as
+`None`, so passing any other exit key (e.g. `{"signal_flip": false}`) silently
+disabled the default square-off. An omitted key now keeps its default; only an
+explicit `null` means "ride into settlement".
 
 ## B3 — Close plumbing
 
@@ -342,12 +416,19 @@ real fills.
 
 ## E1 — Lint baseline
 
-**Status:** TODO
+**Status:** DONE
 
-**Problem.** `tests/test_lint_baseline.py` fails on `main`: F401 `uuid`, F401 +
-F811 `datetime.timedelta` in `src/backtest/options/expiry.py`.
+**Problem.** `tests/test_lint_baseline.py` failed on `main`: F401 `uuid`, F401 +
+F811 `datetime.timedelta` in `src/backtest/options/expiry.py`. The gate had been
+red since before this work started, which is exactly the "gate that quietly
+stops running is not a gate" failure mode the test's own docstring warns about.
 
-**Change.** Delete the unused imports / the shadowing re-import. Three lines.
+**Change.** Dropped the unused `uuid` import and the shadowing re-import of
+`timedelta` inside `_timedelta_minutes` (the module already imports it at the
+top). Done while editing that file for B2.
+
+**Verified.** `.venv/bin/python -m flake8 src/` → exit 0, and
+`tests/test_lint_baseline.py` passes inside the normal pytest gate.
 
 ## E2 — Options tests leak state through the dev SQLite DB
 
@@ -392,6 +473,9 @@ so the dashboard tests never touch a developer's DB. Also consider pointing
 | 11 | Exit evaluation is a pure `ExitPolicy`; the bridge owns all counters | Rules become unit-testable without a broker or a clock, and the bar-index/neutral bookkeeping lives in exactly one place |
 | 12 | Default `min_days_to_expiry = 1`; stops/targets opt-in | Matches the README's "auto-squared-off before expiry" claim and avoids settlement risk (B2 takes over real settlement). A wrong *default* stop would silently cap every trade |
 | 13 | Expiry selection now takes its reference from the **bar clock** | Same principle as A1's pricing clock: a replay of October bars must trade October's expiry. Note this partially pre-empts D1 — the spot-scale half is still open |
+| 14 | Settlement settles **on** the expiry bar (`include_today=True`), opt-in | Index options are cash-settled on the expiry-day close — exactly the price the bar carries. Opt-in keeps the strict "after expiry" behaviour for existing callers (the dashboard rides the wall clock) |
+| 15 | Settlement reuses `ExpiryManager` rather than a forward-only implementation | One settlement code path for backtest, dashboard and forward: same cash movements, same `expiry_settlement` stamp, same broker observers (which persistence depends on) |
+| 16 | Exit-config keys: omitted keeps the default, explicit `null` disables | Otherwise the default policy changes meaning depending on which *other* keys a user set — the bug in the section above |
 
 ## How to run the gates for this work
 

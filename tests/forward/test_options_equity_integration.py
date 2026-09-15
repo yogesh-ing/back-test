@@ -27,6 +27,7 @@ from backtest.forward.paper_runner import (
 )
 from backtest.forward.portfolio_manager import PortfolioManager
 from backtest.forward.risk_supervisor import GlobalRiskConfig
+from backtest.options.quote_providers import SyntheticChainGenerator
 
 
 # ---------------------------------------------------------------------------
@@ -34,10 +35,17 @@ from backtest.forward.risk_supervisor import GlobalRiskConfig
 # ---------------------------------------------------------------------------
 
 
+#: The September 2026 expiry cycle (Aug 28 → Sep 24). These tests need the
+#: structure they open to stay open for the whole series, and B2 now *settles*
+#: anything held to an expiry (correctly). So the bars are anchored to finish
+#: before the cycle's expiry, and the series are kept shorter than the cycle.
+_CYCLE_EXPIRY = SyntheticChainGenerator().next_monthly_expiry(date(2026, 9, 1))
+_CYCLE_START = _CYCLE_EXPIRY - timedelta(days=27)
+
+
 def _bars(closes, start_day=1):
-    """Daily bars from 2026-09-01; ``start_day`` counts days, so long series
-    roll into October rather than emitting impossible dates."""
-    base = date(2026, 9, 1) + timedelta(days=start_day - 1)
+    """Daily bars inside one expiry cycle (see ``_CYCLE_START``)."""
+    base = _CYCLE_START + timedelta(days=start_day - 1)
     return [
         {
             "ts": f"{(base + timedelta(days=i)).isoformat()}T09:15:00",
@@ -86,7 +94,8 @@ def _feed(runner, bars):
 
 
 RISING = [24800 + i * 40 for i in range(20)]
-CRASH = [RISING[-1] - i * 300 for i in range(1, 25)]
+#: Short and brutal — must stay inside the expiry cycle (see ``_CYCLE_START``).
+CRASH = [RISING[-1] - i * 1200 for i in range(1, 7)]
 
 
 @pytest.fixture()

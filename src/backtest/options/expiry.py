@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import logging
 import hashlib
-import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -40,6 +39,9 @@ from backtest.options.paper_trading import (
 logger = logging.getLogger("backtest.options.expiry")
 
 ZERO = Decimal("0")
+
+#: ``StructurePosition.exit_reason`` for a cash-settled expiry (T0.2).
+EXIT_REASON_SETTLEMENT = "expiry_settlement"
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +344,7 @@ class ExpiryManager:
         self,
         settlement_provider: SettlementPriceProvider,
         as_of: datetime | None = None,
+        include_today: bool = False,
     ) -> list[SettlementResult]:
         """Cash-settle all positions whose expiry date has passed.
 
@@ -352,6 +355,16 @@ class ExpiryManager:
         - short ITM position: pays intrinsic × units
         - OTM positions: expire worthless (P&L = premium already paid/received)
 
+        Each leg's ``realized_pnl`` is measured **net of its entry premium**,
+        matching :meth:`OptionPosition.close`; cash still moves by the gross
+        intrinsic (the premium was debited at entry).
+
+        ``include_today`` also settles positions whose expiry **is** the
+        ``as_of`` date. Index options are cash-settled on the expiry-day close,
+        so a forward test replaying daily bars wants that settlement on the
+        expiry bar itself rather than on the first bar after it. The default
+        (``False``) preserves the strict "expiry already passed" behaviour.
+
         Emits ``EXPIRED_ITM`` / ``EXPIRED_OTM`` / ``SETTLED`` alerts.
         """
         now = as_of or datetime.utcnow()
@@ -361,8 +374,12 @@ class ExpiryManager:
         for pos in list(self.broker._positions.values()):
             if pos.status != PositionStatus.OPEN:
                 continue
-            if pos.expiry is None or pos.expiry >= now.date():
+            if pos.expiry is None:
+                continue
+            if pos.expiry > now.date():
                 continue  # not expired yet
+            if pos.expiry == now.date() and not include_today:
+                continue  # expiry day, but this caller rides to settlement
 
             spot = settlement_provider.get_settlement_price(pos.underlying)
             intrinsic = self._intrinsic_value(
@@ -370,18 +387,28 @@ class ExpiryManager:
             )
             units = pos.total_quantity
             was_itm = intrinsic > 0
+            intrinsic_per_unit = Decimal(str(intrinsic))
 
+            # Cash settlement moves the intrinsic value in/out of cash...
             if was_itm:
+                cash = intrinsic_per_unit * Decimal(str(units))
                 if pos.is_long:
-                    cash = Decimal(str(intrinsic)) * Decimal(str(units))
                     self.broker.available_cash += cash
-                    pnl = cash  # long ITM receives intrinsic (premium was already debited)
                 else:
-                    cash = Decimal(str(intrinsic)) * Decimal(str(units))
                     self.broker.available_cash -= cash
-                    pnl = -cash  # short ITM pays intrinsic
+
+            # ...but *realized P&L* is measured against the entry premium,
+            # exactly like ``OptionPosition.close()`` does. Booking the gross
+            # intrinsic here was inconsistent with the close path, and it made
+            # equity jump by a full premium per settled leg: ``total_equity``
+            # is anchored on starting capital + realized P&L (see its
+            # docstring), so a long bought at ₹100 premium and settled at ₹200
+            # intrinsic reported ₹5,000 instead of ₹2,500 on a 25-lot.
+            entry = pos.entry_price
+            if pos.is_long:
+                pnl = (intrinsic_per_unit - entry) * Decimal(str(units))
             else:
-                pnl = ZERO  # OTM — expires worthless
+                pnl = (entry - intrinsic_per_unit) * Decimal(str(units))
 
             pos.realized_pnl = pnl
             pos.status = PositionStatus.EXPIRED
@@ -472,6 +499,7 @@ class ExpiryManager:
         quote_provider: Any,
         settlement_provider: SettlementPriceProvider,
         as_of: datetime | None = None,
+        include_today: bool = False,
     ) -> dict[str, Any]:
         """Run the full expiry pipeline: square-off first, then settle.
 
@@ -483,13 +511,16 @@ class ExpiryManager:
             For cash settlement spot prices.
         as_of:
             Current timestamp (defaults to now).
+        include_today:
+            Settle positions expiring on ``as_of``'s date too (see
+            :meth:`settle_expired`) — what a bar-driven forward test wants.
 
         Returns
         -------
         Summary dict with counts and P&L.
         """
         squared_off = self.auto_square_off(quote_provider, as_of)
-        settled = self.settle_expired(settlement_provider, as_of)
+        settled = self.settle_expired(settlement_provider, as_of, include_today=include_today)
 
         total_pnl = sum(
             (r.realized_pnl for r in squared_off + settled), ZERO
@@ -515,7 +546,6 @@ class ExpiryManager:
         self.alerts.clear()
 
 
-def _timedelta_minutes(minutes: int) -> Any:
-    """Small helper to avoid importing timedelta at module top twice."""
-    from datetime import timedelta
+def _timedelta_minutes(minutes: int) -> timedelta:
+    """Minutes as a timedelta (kept small so callers read declaratively)."""
     return timedelta(minutes=minutes)

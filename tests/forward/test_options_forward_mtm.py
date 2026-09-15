@@ -44,15 +44,17 @@ from backtest.strategy.intent import Direction, MarketView
 # ---------------------------------------------------------------------------
 
 
-def _bars(closes, start_day=1):
-    """Closed candle dicts, one per close (daily bars from 2026-09-01).
+#: The September 2026 expiry cycle (Aug 28 → Sep 24). These tests need the
+#: structure they open to stay open for the whole series, and B2 now *settles*
+#: anything held to an expiry (correctly). So the bars are anchored to finish
+#: before the cycle's expiry, and the series are kept shorter than the cycle.
+_CYCLE_EXPIRY = SyntheticChainGenerator().next_monthly_expiry(date(2026, 9, 1))
+_CYCLE_START = _CYCLE_EXPIRY - timedelta(days=27)
 
-    ``start_day`` is an offset in **days from 2026-09-01**, so a series longer
-    than 30 bars rolls into October instead of producing impossible dates like
-    ``2026-09-44`` (which ``datetime.fromisoformat`` rejects, silently pinning
-    the bridge's bar clock to the last valid bar).
-    """
-    base = date(2026, 9, 1) + timedelta(days=start_day - 1)
+
+def _bars(closes, start_day=1):
+    """Daily bars inside one expiry cycle (see ``_CYCLE_START``)."""
+    base = _CYCLE_START + timedelta(days=start_day - 1)
     return [
         {
             "ts": f"{(base + timedelta(days=i)).isoformat()}T09:15:00",
@@ -93,7 +95,8 @@ def _running_option_runner(**overrides):
 
 
 RISING = [24800 + i * 40 for i in range(20)]  # steady rally -> bull call spread
-CRASH = [RISING[-1] - i * 300 for i in range(1, 25)]  # then a ~7,000 pt collapse
+#: A short, brutal collapse (6 bars, −1,200 each) that stays inside the cycle.
+CRASH = [RISING[-1] - i * 1200 for i in range(1, 7)]
 
 
 @pytest.fixture()
@@ -147,7 +150,7 @@ class TestBridgeOnBar:
 
     def test_rally_helps_a_long_call_spread(self, open_structure_runner):
         bridge = open_structure_runner.options_bridge
-        for bar in _bars([RISING[-1] + i * 60 for i in range(1, 10)], start_day=21):
+        for bar in _bars([RISING[-1] + i * 60 for i in range(1, 7)], start_day=21):
             open_structure_runner.process_candle_event("NIFTY", bar)
         structure = bridge.option_broker.get_open_structures()[0]
         assert structure.total_unrealized_pnl > 0
@@ -186,7 +189,7 @@ class TestBridgeOnBar:
         summary = open_structure_runner.options_summary()
         assert summary["unrealized_pnl"] > 0  # rally kept helping the spread
         assert summary["last_spot"] == pytest.approx(float(RISING[-1]))
-        assert summary["last_mtm_ts"] == f"2026-09-{len(RISING):02d}T09:15:00"
+        assert summary["last_mtm_ts"] == _bars(RISING)[-1]["ts"]
         assert summary["quote_source"] == "synthetic:bs"
 
     def test_unparseable_timestamp_still_marks(self, open_structure_runner):
@@ -199,7 +202,7 @@ class TestBridgeOnBar:
         bridge.quote_provider = _ExplodingQuoteProvider()
         assert bridge.on_bar("NIFTY", 24_000.0, "2026-09-25T09:15:00") is None
         open_structure_runner.process_candle_event(
-            "NIFTY", _bars([24_000.0], start_day=25)[0]
+            "NIFTY", _bars([24_000.0], start_day=21)[0]
         )
         assert open_structure_runner.status == "RUNNING"
         assert open_structure_runner.error is None
@@ -323,10 +326,16 @@ class TestRunnerWiring:
         assert bridge.last_unrealized_pnl < 0
 
     def test_stress_markdown_reprices_the_book(self, open_structure_runner):
+        """The breaker stress path must re-price too — and stay inside the cycle.
+
+        A timestamp past the cycle expiry would trip B2's (correct) settlement
+        first, so the markdown is dated on a bar the structure is still live.
+        """
         runner = open_structure_runner
-        runner.apply_markdown("NIFTY", 18_000.0, "2026-09-25T09:15:00")
+        runner.apply_markdown("NIFTY", 18_000.0, _bars([18_000.0], start_day=21)[0]["ts"])
         assert runner.options_bridge.last_unrealized_pnl < 0
         assert runner.last_option_pnl < 0
+        assert runner.options_summary()["open_structures"] == 1
 
     def test_state_exposes_option_pnl(self, open_structure_runner):
         state = open_structure_runner.get_state()
