@@ -298,9 +298,11 @@ class TestRoll:
         assert summary["settled_count"] >= 1, "a ridden position must settle"
         assert summary["closed_count"] >= 1
 
-        exits = [s for s in runner.signal_log if s["kind"] == "OPTION_EXIT"]
-        assert exits
-        assert any("settled" in e["reason"] for e in exits)
+        # Settlements carry their own signal kind (B3) so a log reader can tell
+        # "we chose to close" from "it expired on us".
+        settled = [s for s in runner.signal_log if s["kind"] == "OPTION_SETTLED"]
+        assert settled
+        assert "cash settled at expiry" in settled[0]["reason"]
 
         entries = [s for s in runner.signal_log if s["kind"] == "OPTION_ENTRY"]
         expiries = [e["reason"].split("expiry=")[1].split(" ")[0] for e in entries]

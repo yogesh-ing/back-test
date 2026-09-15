@@ -50,7 +50,7 @@ then NIFTY collapses 7,000 pts over 24 bars:
 | **A2** | Fold option P&L into runner equity, buckets and breakers | A · Live | DONE | A1 |
 | **B1** | Exit policy: view flip / neutral, stop, target, time stop | B · Exits | DONE | A1 |
 | **B2** | Expiry square-off + roll inside the forward loop | B · Exits | DONE | B1 |
-| **B3** | Close plumbing: `OPTION_EXIT` signals, closed-structure log, metrics | B · Exits | TODO | B1, B2 |
+| **B3** | Close plumbing: `OPTION_EXIT` signals, closed-structure log, metrics | B · Exits | DONE | B1, B2 |
 | **C1** | Spawn UI: instrument / structure / strike / quantity controls | C · Reach | TODO | A2 |
 | **C2** | Portfolio matrix + deep-dive: option columns, premium, Greeks | C · Reach | TODO | C1 |
 | **D1** | Index-scale synthetic spot for NIFTY / BANKNIFTY | D · Realism | TODO | A1 |
@@ -62,6 +62,15 @@ then NIFTY collapses 7,000 pts over 24 bars:
 Phases: **A** makes the numbers move, **B** makes the runner able to leave a
 trade, **C** makes it reachable from the browser, **D** makes the numbers
 honest, **E** keeps the gate green.
+
+**Progress: A1, A2, B1, B2, B3 and E1 are done** — an option runner prices
+every bar, is counted by the equity/bucket/breaker maths, opens *and closes*
+on its own rules, settles at expiry and rolls, and reports what it did in the
+trade log, the metrics and the equity curve. What remains is reachability and
+realism: **C** (no UI can spawn an option runner yet — `portfolio.js` never
+sends `instrument`) and **D** (index-scale synthetic spot for a live NIFTY
+forward test, an injectable live quote provider, and persistence across
+restarts).
 
 ---
 
@@ -357,11 +366,73 @@ explicit `null` means "ride into settlement".
 
 ## B3 — Close plumbing
 
-**Status:** TODO
+**Status:** DONE
 
-**Change.** `OPTION_EXIT` / `OPTION_EXPIRY` signal kinds, closed-structure
-records in `get_detail()["trades"]`, option win-rate / total P&L in the
-summary, and one equity-curve point per structure close.
+**Problem.** B1/B2 taught the runner to close and settle; nothing reported it.
+`closed_trades` / `get_detail()["trades"]` listed equity round-trips only (a
+full option lifecycle showed an empty Trades tab), `win_rate()` counted equity
+trades only, the option book's own win rate was not exposed anywhere, and
+**`equity_curve` was always empty** — nothing in production code ever called
+`_mark_to_market(record=True)`, so the deep-dive Equity chart had no data for
+*any* runner, equity or option.
+
+**Change.**
+
+| Surface | Now |
+|---|---|
+| `closed_trades` | equity positions **+ closed option structures**, merged and sorted by exit time; equity records only gain `kind: "equity"` |
+| `closed_option_trades` | one record per structure: symbol/label, `structure_type`, strikes, expiry, legs, `qty` (lots), `units` (contracts), **net premium per unit** entry/exit, pnl, commission, `win`, `exit_reason` |
+| `get_detail()["trades"]` | both kinds, so the deep-dive Trades tab shows option structures |
+| `win_rate()` / `wins` / `losses` | count option structures too |
+| `state["options"]` | `closed_structures`, `wins`, `losses`, `win_rate`, `total_pnl`, `avg_pnl`, `costs_paid` |
+| `equity_curve` | recorded **every bar** (equity *and* option runners) plus one point per option close |
+| signal kinds | `OPTION_SETTLED` for settlements, `OPTION_EXIT` for decisions (stop/target/time/flip/neutral), so a reader can tell "we chose to close" from "it expired on us" |
+
+Two details worth knowing:
+
+- **Net premium is signed by side.** A debit spread's `entry_price` is positive,
+  a credit structure's negative — so `exit_price − entry_price` reads in the
+  same direction as P&L, like an equity trade.
+- **The curve downsamples instead of freezing.** `MAX_EQUITY_POINTS` used to be
+  a hard stop, so past 500 bars the chart silently showed only the start of the
+  run. It now keeps every other point and continues (progressively coarser, full
+  history).
+
+### Bug found: the deep-dive equity chart was dead for every runner
+
+`_mark_to_market(record: bool = False)` defaulted to *not* recording, and no
+caller ever passed `True`. `get_detail()["equity_curve"]` was therefore always
+`[]`, and `deep_dive.js` skips the chart entirely when the array is empty — so
+the "Equity" panel rendered nothing for equity and option runners alike. Fixed
+by recording on every bar.
+
+**Acceptance criteria.**
+
+- [x] A closed structure appears in `closed_trades` **and**
+      `get_detail()["trades"]`, with its `exit_reason`.
+- [x] `win_rate` / `wins` / `losses` include option structures.
+- [x] Book metrics reconcile with the broker's closed structures
+      (`total_pnl == Σ structure P&L`).
+- [x] Equity runners get a curve too, and their trade records keep their shape.
+- [x] The curve moves with option P&L, ends at live equity, and survives
+      `3 × MAX_EQUITY_POINTS` of bars (`test_curve_downsamples_instead_of_freezing`).
+- [x] Settlements are `OPTION_SETTLED`; stops/targets/flips are `OPTION_EXIT`.
+
+**Result — verified over HTTP** (`deep_dive` on a running option runner):
+
+```json
+{"kind": "option", "symbol": "NIFTY bull_call_spread",
+ "label": "NIFTY bull_call_spread 20450/20500 CE", "legs": 2, "qty": 1, "units": 75,
+ "entry_price": 28.12, "exit_price": 0.0, "exit_reason": "stop_loss",
+ "pnl": -2109.0, "win": false, "expiry": "2026-09-24"}
+options: {"closed_structures": 4, "wins": 0, "losses": 4, "win_rate": 0.0,
+          "total_pnl": -8051.25, "avg_pnl": -2012.81}
+equity_curve: 44 points, last = current equity
+signal kinds: OPTION_ENTRY, OPTION_EXIT, OPTION_BLOCKED
+```
+
+Tests: `tests/forward/test_options_trade_log.py` — 19 cases. Full gate:
+**2271 passed, 4 skipped**.
 
 ## C1 — Spawn UI for option runners
 
@@ -476,6 +547,9 @@ so the dashboard tests never touch a developer's DB. Also consider pointing
 | 14 | Settlement settles **on** the expiry bar (`include_today=True`), opt-in | Index options are cash-settled on the expiry-day close — exactly the price the bar carries. Opt-in keeps the strict "after expiry" behaviour for existing callers (the dashboard rides the wall clock) |
 | 15 | Settlement reuses `ExpiryManager` rather than a forward-only implementation | One settlement code path for backtest, dashboard and forward: same cash movements, same `expiry_settlement` stamp, same broker observers (which persistence depends on) |
 | 16 | Exit-config keys: omitted keeps the default, explicit `null` disables | Otherwise the default policy changes meaning depending on which *other* keys a user set — the bug in the section above |
+| 17 | Option records are flattened into the *existing* trade-record shape (+ a `kind` tag) | The deep-dive table, win-rate maths and any JSON consumer keep working with no branching; richer fields (`strikes`, `expiry`, `exit_reason`, `label`) are additive for C2 |
+| 18 | `pnl` stays gross of costs; `commission` is per structure, statutory fees remain per book | Consistent with the equity trade log. Statutory fees are booked per fill, not per structure, so attributing them would mean new bookkeeping in the broker — out of scope for B3 |
+| 19 | `equity_curve` records every bar rather than only on closes | A curve of closes alone is a step function that hides the drawdown path; per-bar marks are what the chart is for. Downsampling keeps a long run readable |
 
 ## How to run the gates for this work
 

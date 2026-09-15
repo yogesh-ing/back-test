@@ -230,6 +230,9 @@ class OptionsBridge:
     def summary(self) -> dict[str, Any]:
         """Compact book state for runner state payloads and tests."""
         broker = self.option_broker
+        closed = broker.get_closed_structures()
+        wins = sum(1 for s in closed if s.total_realized_pnl >= 0)
+        total_pnl = sum((s.total_realized_pnl for s in closed), Decimal("0"))
         return {
             "open_positions": len(broker.get_open_positions()),
             "open_structures": len(broker.get_open_structures()),
@@ -244,6 +247,14 @@ class OptionsBridge:
             "quote_source": str(getattr(self.quote_provider, "source_name", "unknown")),
             "last_exit": dict(self.last_exit) if self.last_exit else None,
             "settled_count": self._settlement_count,
+            # -- closed-structure metrics (task B3) -------------------------
+            "closed_structures": len(closed),
+            "wins": wins,
+            "losses": len(closed) - wins,
+            "win_rate": (wins / len(closed)) if closed else 0.0,
+            "total_pnl": float(total_pnl),
+            "avg_pnl": (float(total_pnl) / len(closed)) if closed else 0.0,
+            "costs_paid": float(broker.total_costs_paid),
             "exit_policy": self.exit_policy.config.to_dict(),
             "bars_in_trade": self.bars_in_trade if self.open_structure_id else 0,
         }

@@ -43,6 +43,7 @@ import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
 
@@ -622,13 +623,90 @@ class StrategyRunner:
         return out
 
     @property
+    def closed_option_trades(self) -> List[Dict[str, Any]]:
+        """Closed option structures as trade records (task B3).
+
+        One record per structure, shaped like the equity trade records so the
+        deep-dive table and the win-rate metrics can consume both without
+        branching on instrument type:
+
+        * ``symbol`` — underlying + structure (e.g. ``NIFTY bull_call_spread``)
+        * ``qty`` — lots per leg, ``units`` — contracts per leg
+        * ``entry_price`` / ``exit_price`` — **net premium per unit** (a
+          positive entry is a debit spread, negative a credit structure)
+        * ``pnl`` (gross of costs) / ``commission`` (the fee stack's
+          per-structure part; statutory fees are tracked per book, not per
+          structure), ``win``, ``exit_reason``, ``kind="option"``
+        """
+        bridge = self.options_bridge
+        if bridge is None:
+            return []
+        records: List[Dict[str, Any]] = []
+        for structure in bridge.option_broker.get_closed_structures():
+            records.append(self._option_trade_record(structure))
+        return records
+
+    @staticmethod
+    def _option_trade_record(structure: Any) -> Dict[str, Any]:
+        """Flatten a closed ``StructurePosition`` into a trade-log row."""
+        legs = list(structure.legs)
+        units = max((leg.total_quantity for leg in legs), default=0)
+        lots = max((leg.quantity for leg in legs), default=0)
+
+        def _net_premium(price_attr: str) -> float:
+            """Signed premium per unit: longs pay, shorts receive."""
+            total = Decimal("0")
+            for leg in legs:
+                price = getattr(leg, price_attr, Decimal("0")) or Decimal("0")
+                total += price * Decimal(str(leg.total_quantity)) * (
+                    1 if leg.is_long else -1
+                )
+            return float(total / Decimal(str(units))) if units else 0.0
+
+        strikes = sorted({str(leg.strike) for leg in legs})
+        pnl = float(structure.total_realized_pnl)
+        return {
+            "symbol": f"{structure.underlying} {structure.structure_type}",
+            "label": (
+                f"{structure.underlying} {structure.structure_type} "
+                f"{'/'.join(strikes)} {legs[0].option_type if legs else ''}".strip()
+            ),
+            "kind": "option",
+            "structure_type": structure.structure_type,
+            "underlying": structure.underlying,
+            "strikes": strikes,
+            "expiry": structure.expiry.isoformat() if structure.expiry else None,
+            "legs": len(legs),
+            "side": "LONG" if legs and legs[0].is_long else "SHORT",
+            "qty": lots,
+            "units": units,
+            "entry_price": round(_net_premium("entry_price"), 2),
+            "exit_price": round(_net_premium("current_price"), 2),
+            "entry_ts": structure.opened_at.isoformat() if structure.opened_at else None,
+            "exit_ts": structure.closed_at.isoformat() if structure.closed_at else None,
+            "pnl": round(pnl, 2),
+            "commission": round(float(structure.total_commission), 2),
+            "win": pnl >= 0,
+            "exit_reason": structure.exit_reason,
+            "coid": None,
+            "exit_coid": None,
+        }
+
+    @property
     def closed_trades(self) -> List[Dict[str, Any]]:
+        """Closed round-trips: equity positions **and** option structures (B3).
+
+        Sorted by exit time so a mixed book reads chronologically. Records
+        from the classic equity flow are unchanged except for the added
+        ``kind: "equity"`` tag.
+        """
         trades: List[Dict[str, Any]] = []
         for pos in self.portfolio.closed_positions:
             pnl = float(pos.realized_pnl)
             trades.append(
                 {
                     "symbol": pos.symbol,
+                    "kind": "equity",
                     "side": "LONG" if pos.quantity >= 0 else "SHORT",
                     "qty": abs(float(pos.quantity)),
                     "entry_price": float(pos.average_entry_price),
@@ -645,6 +723,8 @@ class StrategyRunner:
                     "exit_coid": None,
                 }
             )
+        trades.extend(self.closed_option_trades)
+        trades.sort(key=lambda t: (t.get("exit_ts") or "", t.get("symbol") or ""))
         return trades[-MAX_TRADE_LOG:]
 
     @property
@@ -750,7 +830,9 @@ class StrategyRunner:
                     # A1: re-price the option book before equity is marked,
                     # so the curve and the breakers see fresh premiums.
                     self._mark_option_book(symbol, price, ts)
-                self._mark_to_market()
+                # B3: record the curve every bar — the deep-dive chart had no
+                # data because nothing called this with record=True.
+                self._mark_to_market(record=True)
 
                 if self.config.target_type == TARGET_SINGLE:
                     # Single-symbol runners act immediately on their own bar.
@@ -798,7 +880,7 @@ class StrategyRunner:
                 # A1: a stress markdown is still a market move — re-price the
                 # option book so a breaker halt reflects it.
                 self._mark_option_book(symbol, float(price), ts or new_bar["ts"])
-            self._mark_to_market()
+            self._mark_to_market(record=True)
 
     def on_tick_end(self, tick_ts: str) -> None:
         """Hook fired by the feed after every symbol's bar for this tick.
@@ -914,10 +996,18 @@ class StrategyRunner:
             )
 
     def _log_option_exit(self, symbol: str, event: Dict[str, Any], price: float) -> None:
-        """Record a structure close in the signal log (task B1/B3)."""
+        """Record a structure close in the signal log (task B1/B3).
+
+        Settlements get their own kind (``OPTION_SETTLED``) so a log reader or
+        the UI can tell "we chose to close" from "it expired on us"; both are
+        closes for every other purpose.
+        """
+        # A close always deserves a curve point (B3), so the equity chart lines
+        # up with the trade log instead of only showing bar marks.
+        self._record_equity_point(self.equity())
         self._log_signal(
             symbol,
-            "OPTION_EXIT",
+            "OPTION_SETTLED" if event.get("settled") else "OPTION_EXIT",
             0,  # flat again — matches the equity flow's EXIT convention
             price,
             "{} closed after {} bars — {} — pnl {:+,.0f}".format(
@@ -1204,13 +1294,27 @@ class StrategyRunner:
             dd = (self.peak_equity - equity) / self.peak_equity
             if dd > self.max_drawdown_pct:
                 self.max_drawdown_pct = dd
-        if record and len(self.equity_curve) < MAX_EQUITY_POINTS:
-            self.equity_curve.append(
-                {
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "equity": round(equity, 2),
-                }
-            )
+        if record:
+            self._record_equity_point(equity)
+
+    def _record_equity_point(self, equity: float) -> None:
+        """Append one equity-curve point, downsampling when the buffer is full.
+
+        ``MAX_EQUITY_POINTS`` used to be a hard stop: once the buffer filled,
+        the curve froze and the deep-dive chart silently showed only the start
+        of the run. Decimating (keep every other point, then continue) keeps
+        the whole history visible at progressively coarser resolution instead.
+        A close/stop-out is also always worth a point, so the curve can be read
+        against the trade log.
+        """
+        if len(self.equity_curve) >= MAX_EQUITY_POINTS:
+            self.equity_curve = self.equity_curve[::2]
+        self.equity_curve.append(
+            {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "equity": round(equity, 2),
+            }
+        )
 
     def _roll_trading_day(self, ts: str) -> None:
         # Daily PnL is session-anchored: the baseline is fixed at the first
