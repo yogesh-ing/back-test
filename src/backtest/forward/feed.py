@@ -9,6 +9,13 @@ is a single callback change.
 Determinism: each symbol's walk is seeded from the symbol name, so reruns are
 reproducible. The first warmup batch of bars is replayed quickly so strategies
 have history immediately (the demo doesn't wait 60 ticks for signals).
+
+Scale (task D1): index symbols start at index levels (see :data:`INDEX_BANDS`)
+so an option chain priced off these bars is a real one — 50/100-point strikes,
+index-sized lots, premiums in hundreds of rupees, and the index-scaled strategy
+defaults (e.g. ``directional_options``' 100-point confidence scale) actually
+reachable. Equity and crypto symbols keep the original ₹80–450 band, so nothing
+that existed before moved.
 """
 
 from __future__ import annotations
@@ -27,6 +34,41 @@ def _seed_for(symbol: str) -> int:
     for ch in symbol:
         total = (total * 31 + ord(ch)) & 0xFFFFFFFF
     return total or 1
+
+
+#: Realistic starting bands for index symbols (task D1).
+#:
+#: The feed's equity band (₹80–450) made a synthetic "NIFTY forward test"
+#: meaningless: the option chain is priced off the bar close, so the
+#: generator built strikes at ~₹400 (`NIFTY2609 400 CE`) with a ₹75 lot —
+#: nothing like a real NIFTY contract. Index symbols therefore start inside
+#: their real band, so option strikes land on the 50/100-point grid the
+#: generator knows, premiums and lot sizes are life-sized, and the
+#: index-scaled strategy defaults (e.g. ``directional_options``' 100-point
+#: confidence scale) become meaningful instead of unreachable.
+#:
+#: Kept in sync with ``SyntheticChainGenerator.DEFAULT_SPOTS`` by
+#: ``tests/forward/test_synthetic_feed_scale.py``: the band must contain the
+#: generator's own default spot for every index underlying.
+INDEX_BANDS: Dict[str, tuple] = {
+    "NIFTY": (24_500.0, 25_500.0),
+    "BANKNIFTY": (51_000.0, 53_000.0),
+}
+
+#: Everything else keeps the original small-cap band — byte-for-byte the same
+#: draws as before, so existing tests and demos are unaffected.
+EQUITY_BAND = (80.0, 450.0)
+
+
+def base_price_for(symbol: str, rng: random.Random) -> float:
+    """Opening price for one symbol's random walk.
+
+    Index symbols (see :data:`INDEX_BANDS`) start at index levels; everything
+    else keeps the historic equity band. The draw is the RNG's first value
+    either way, so a symbol's walk is still reproducible from its name alone.
+    """
+    band = INDEX_BANDS.get(symbol.upper(), EQUITY_BAND)
+    return round(rng.uniform(*band), 2)
 
 
 class SyntheticFeed:
@@ -66,7 +108,7 @@ class SyntheticFeed:
                 if symbol in self._state:
                     continue
                 rng = random.Random(_seed_for(symbol))
-                base = rng.uniform(80, 450)
+                base = base_price_for(symbol, rng)
                 self._state[symbol] = {"rng": rng, "close": base}
                 self._symbols.append(symbol)
                 logger.debug("Feed subscribed %s (base=%.2f)", symbol, base)

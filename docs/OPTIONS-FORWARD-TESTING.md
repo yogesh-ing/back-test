@@ -53,7 +53,7 @@ then NIFTY collapses 7,000 pts over 24 bars:
 | **B3** | Close plumbing: `OPTION_EXIT` signals, closed-structure log, metrics | B · Exits | DONE | B1, B2 |
 | **C1** | Spawn UI: instrument / structure / strike / quantity controls | C · Reach | DONE | A2 |
 | **C2** | Portfolio matrix + deep-dive: option columns, premium, Greeks | C · Reach | DONE | C1 |
-| **D1** | Index-scale synthetic spot for NIFTY / BANKNIFTY | D · Realism | TODO | A1 |
+| **D1** | Index-scale synthetic spot for NIFTY / BANKNIFTY | D · Realism | DONE | A1 |
 | **D2** | Injectable quote provider (`synthetic` \| `live:mstock`) + badge | D · Realism | TODO | A1 |
 | **D3** | Persist forward option books across restarts | D · Realism | TODO | A2 |
 | **E1** | Fix lint baseline (`options/expiry.py` unused imports) | E · Hygiene | DONE | — |
@@ -63,16 +63,16 @@ Phases: **A** makes the numbers move, **B** makes the runner able to leave a
 trade, **C** makes it reachable from the browser, **D** makes the numbers
 honest, **E** keeps the gate green.
 
-**Progress: A1, A2, B1, B2, B3, C1, C2 and E1 are done** — an option runner prices
-every bar, is counted by the equity/bucket/breaker maths, opens *and closes*
-on its own rules, settles at expiry and rolls, reports what it did in the trade
-log, the metrics and the equity curve, and can now be **spawned from the
-browser** with a structure, strike selection and exit plan. What remains is
-reading **and** writing directions: an option runner can be spawned from the
-form and read back from the matrix and the deep-dive drawer. What remains is
-**D** — realism and durability: an index-scale synthetic spot (a synthetic
-NIFTY still prices at ~₹392, not ~24,500), an injectable live quote provider,
-and persistence across restarts.
+**Progress: A1, A2, B1, B2, B3, C1, C2, D1 and E1 are done** — an option runner
+prices every bar, is counted by the equity/bucket/breaker maths, opens *and
+closes* on its own rules, settles at expiry and rolls, reports what it did in the
+trade log, the metrics and the equity curve, can be **spawned** from the browser
+with a structure / strike selection / exit plan, is **read back** in the matrix
+and the deep-dive drawer with option-shaped columns, and now runs on an
+**index-scale** synthetic spot (NIFTY ~24,500, 50-point strikes, 75-lot
+contracts) instead of a ₹392 small-cap. What remains is **D2/D3** — an injectable
+live quote provider, and option books that survive a restart — plus **E2**, which
+is waiting on D3's persistence work.
 
 ---
 
@@ -592,31 +592,78 @@ work is the more pressing gap).
 
 ## D1 — Index-scale synthetic spot
 
-**Status:** TODO
+**Status:** DONE
 
-**Problem.** `SyntheticFeed` seeds NIFTY at ~₹392, so an "option forward test"
-builds chains at strikes ~350–450 (`MOCK-NIFTY-400-CE`) — nothing like
-`NIFTY26SEP25200CE`. `SyntheticChainGenerator` already knows the right levels
-(`DEFAULT_SPOTS`, `STRIKE_STEPS`, `LOT_SIZES`).
+**Problem.** `SyntheticFeed` seeded **every** symbol at `rng.uniform(80, 450)`.
+A "NIFTY forward test" therefore ran at ~₹392: the chain came out as
+`NIFTY2609 400 CE` on a 50-point grid with only a couple of usable strikes —
+nothing like `NIFTY26SEP25200CE`. `SyntheticChainGenerator` already knew the
+right levels (`DEFAULT_SPOTS = {"NIFTY": 24800, "BANKNIFTY": 52000}`,
+`STRIKE_STEPS`, `LOT_SIZES`); the feed just never handed it index prices.
 
-**Change.** Give the feed an index-aware scale (per-symbol seed with sane
-bands for NIFTY / BANKNIFTY, e.g. 24,500–25,500 / 51,000–53,000), so strikes,
-premiums and lot sizes line up with the real contracts.
+**The knock-on was worse than the strikes.** `directional_options` ships
+index-scale parameters — `scale_points: 100`, `min_confidence: 0.3` — so on a
+₹392 spot the close-to-EMA distance never reached the confidence floor and the
+strategy emitted **no views at all**: an API-created option runner sat flat
+forever, with nothing for the B3 trade log or the C2 columns to show. (Found
+while demoing C2, where the only way to make the runner trade was to hand-pass
+`params: {"scale_points": 1.0, "min_confidence": 0.05}` — and that produced
+`bull_call_spread 350/400`.)
 
-**Found while demoing C2 (worth folding into this task).** It is not only the
-strikes: `directional_options` ships index-scale parameters
-(`scale_points: 100`, `min_confidence: 0.3`), so on a ~₹392 synthetic NIFTY the
-close-to-EMA distance never reaches the confidence floor and the strategy emits
-**no views at all** — an API-created option runner sits flat forever and the new
-C2 columns have nothing to show. The live demo only traded after passing
-`params: {"ema_period": 5, "scale_points": 1.0, "min_confidence": 0.05}`
-(which then produced `NIFTY bull_call_spread 350/400`, i.e. the wrong strikes
-this task is about). Fixing the feed scale fixes both halves: with NIFTY near
-24,500 the default 100-point scale is meaningful again.
+**Change.** The feed now seeds per-symbol scale:
 
-**Acceptance criteria.** A synthetic NIFTY runner's chain generator reports
-~24,800–25,500 and the strikes are 50-point steps; equity symbols keep their
-current (small-cap) band so existing tests and demos are unaffected.
+```python
+INDEX_BANDS = {"NIFTY": (24_500, 25_500), "BANKNIFTY": (51_000, 53_000)}
+EQUITY_BAND = (80.0, 450.0)          # unchanged, for everything else
+
+def base_price_for(symbol, rng):
+    return round(rng.uniform(*INDEX_BANDS.get(symbol.upper(), EQUITY_BAND)), 2)
+```
+
+Design notes:
+
+- **One draw, one code path.** The band lookup happens *after* the seeded RNG is
+  created and still consumes exactly one `uniform()` call, so every equity and
+  crypto symbol gets a **byte-identical** starting price to before (asserted in
+  the tests) — existing demos and fixtures did not move.
+- **The band brackets the generator's own spot.** `DEFAULT_SPOTS["NIFTY"]`
+  (24,800) sits inside 24,500–25,500 and `BANKNIFTY`'s (52,000) inside
+  51,000–53,000; a test fails if the two modules ever drift apart, because that
+  drift *is* the bug.
+- **Nothing else needed changing.** The bridge already pushes each bar close into
+  `generator.set_spot()` (A1), so the chain, premiums, lot sizes and MTM follow
+  the feed automatically once the feed is index-scale.
+
+**Acceptance criteria.**
+
+- [x] A synthetic NIFTY runner prices at index scale (24,500–25,500) and its
+      strikes are 50-point steps; BANKNIFTY uses its 100-point grid.
+- [x] Lot sizes and premiums are life-sized (NIFTY = 75/contract, ATM premium in
+      the hundreds).
+- [x] Equity/crypto symbols keep the ₹80–450 band — verified as the *same
+      numbers*, not merely a similar range.
+- [x] An option runner created with **default** strategy params now opens and
+      closes structures on its own (the knock-on is fixed by the same change).
+
+**Result — verified over HTTP** (fresh app, default params, no overrides;
+probe: `/tmp/exp/d1_trades.py`, live server on `/portfolio/paper`):
+
+```text
+feed bases          NIFTY ₹25,344.75 · BANKNIFTY ₹52,859.91
+                    (RELIANCE ₹208 · TCS ₹289 · INFY ₹260 · BTC/USD ₹390 — unchanged)
+chain off the bars  spot ₹25,255 → strikes 25,200/25,250/25,300 … on 50-pt steps,
+                    lot 75, "NIFTY260925300CE"
+runner (≤150 bars)  executed 10 · closed 9 · wins 5 / losses 4 · spot ₹24,630
+trade record        NIFTY bull_call_spread 24350/24400 CE · lots 3 · units 225
+                    net premium 28.08 → 29.65 · pnl +353.25 · signal_flip
+signals             OPTION_ENTRY 10 · OPTION_EXIT 9 · OPTION_MTM 17
+```
+
+Before D1 the same runner needed `scale_points: 1.0` to trade **at all**, and
+produced `bull_call_spread 350/400`. Tests:
+`tests/forward/test_synthetic_feed_scale.py` — 17 cases (bands, unchanged equity
+draws, grid/lot/premium scale, and both end-to-end runners). Full gate:
+**2325 passed, 4 skipped**.
 
 ## D2 — Injectable quote provider
 
@@ -707,6 +754,9 @@ so the dashboard tests never touch a developer's DB. Also consider pointing
 | 24 | `open_positions` on a runner row counts structures; `equity_positions` and `options.open_positions` (legs) keep the other two numbers | The matrix's Positions column asked "is this runner exposed?", and 0 for a live spread answered it wrongly. The bridge's own `open_positions` contract (legs) is untouched, and B1's "one structure at a time" keeps the count honest |
 | 25 | The book renderer is a shared pure component (`option_view.js`), not helpers in each view | The matrix needs cells and sub-lines, the drawer needs tables and stats; one tested source of labels/numbers keeps them from disagreeing — and node can test it with no DOM |
 | 26 | Greeks and a dedicated Options Forward view are deferred out of C2 | The forward row does not carry Greeks yet (they live in the options layer), and the matrix had no crowding emergency; inventing a view before the columns exist would be the wrong order |
+| 27 | Index scale lives in the **feed**, not in the chain generator or the strategies | The generator already knew the right levels; the feed was the one place pretending NIFTY was a small-cap. One source of spot for pricing, and index-scaled strategy defaults work untouched |
+| 28 | Index bands **bracket** `SyntheticChainGenerator.DEFAULT_SPOTS`, with a test pinning the two together | Two modules each owning "where NIFTY is" is exactly how this bug appeared; the drift test makes the next mismatch fail loudly instead of silently pricing a ₹400 index |
+| 29 | The equity band is preserved with identical RNG draws, not just a similar range | Existing tests and demos pin numbers, so "roughly the same" would have been a silent breakage hunt. One draw either way keeps every non-index symbol bit-for-bit unchanged |
 
 ## How to run the gates for this work
 
