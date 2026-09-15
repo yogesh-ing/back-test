@@ -43,6 +43,7 @@ import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
 
@@ -427,6 +428,10 @@ MAX_SIGNAL_LOG = 200
 MAX_TRADE_LOG = 200
 MAX_EQUITY_POINTS = 500
 MIN_WARMUP_BARS = 12  # strategies need history to compute
+#: Every Nth bar while an option structure is open, the runner records an
+#: ``OPTION_MTM`` heartbeat (task A1) — a chartable mark of the book's
+#: unrealized P&L without flooding the signal log.
+OPTION_MTM_LOG_EVERY = 5
 
 
 @dataclass
@@ -578,6 +583,8 @@ class StrategyRunner:
         self._day_start_equity: float = float(config.allocated_capital)
         self._current_day: Optional[str] = None
         self.last_price: Dict[str, float] = {}
+        #: Most recent option-book MTM (0.0 for equity runners) — task A1.
+        self.last_option_pnl: float = 0.0
         self.signal_log: Deque[Dict[str, Any]] = deque(maxlen=MAX_SIGNAL_LOG)
 
         # -- state -----------------------------------------------------------
@@ -598,7 +605,7 @@ class StrategyRunner:
 
     @property
     def realized_pnl(self) -> float:
-        return float(self.portfolio.realized_pnl)
+        return float(self.portfolio.realized_pnl) + self._option_realized_pnl()
 
     @property
     def positions(self) -> Dict[str, Dict[str, Any]]:
@@ -616,13 +623,90 @@ class StrategyRunner:
         return out
 
     @property
+    def closed_option_trades(self) -> List[Dict[str, Any]]:
+        """Closed option structures as trade records (task B3).
+
+        One record per structure, shaped like the equity trade records so the
+        deep-dive table and the win-rate metrics can consume both without
+        branching on instrument type:
+
+        * ``symbol`` — underlying + structure (e.g. ``NIFTY bull_call_spread``)
+        * ``qty`` — lots per leg, ``units`` — contracts per leg
+        * ``entry_price`` / ``exit_price`` — **net premium per unit** (a
+          positive entry is a debit spread, negative a credit structure)
+        * ``pnl`` (gross of costs) / ``commission`` (the fee stack's
+          per-structure part; statutory fees are tracked per book, not per
+          structure), ``win``, ``exit_reason``, ``kind="option"``
+        """
+        bridge = self.options_bridge
+        if bridge is None:
+            return []
+        records: List[Dict[str, Any]] = []
+        for structure in bridge.option_broker.get_closed_structures():
+            records.append(self._option_trade_record(structure))
+        return records
+
+    @staticmethod
+    def _option_trade_record(structure: Any) -> Dict[str, Any]:
+        """Flatten a closed ``StructurePosition`` into a trade-log row."""
+        legs = list(structure.legs)
+        units = max((leg.total_quantity for leg in legs), default=0)
+        lots = max((leg.quantity for leg in legs), default=0)
+
+        def _net_premium(price_attr: str) -> float:
+            """Signed premium per unit: longs pay, shorts receive."""
+            total = Decimal("0")
+            for leg in legs:
+                price = getattr(leg, price_attr, Decimal("0")) or Decimal("0")
+                total += price * Decimal(str(leg.total_quantity)) * (
+                    1 if leg.is_long else -1
+                )
+            return float(total / Decimal(str(units))) if units else 0.0
+
+        strikes = sorted({str(leg.strike) for leg in legs})
+        pnl = float(structure.total_realized_pnl)
+        return {
+            "symbol": f"{structure.underlying} {structure.structure_type}",
+            "label": (
+                f"{structure.underlying} {structure.structure_type} "
+                f"{'/'.join(strikes)} {legs[0].option_type if legs else ''}".strip()
+            ),
+            "kind": "option",
+            "structure_type": structure.structure_type,
+            "underlying": structure.underlying,
+            "strikes": strikes,
+            "expiry": structure.expiry.isoformat() if structure.expiry else None,
+            "legs": len(legs),
+            "side": "LONG" if legs and legs[0].is_long else "SHORT",
+            "qty": lots,
+            "units": units,
+            "entry_price": round(_net_premium("entry_price"), 2),
+            "exit_price": round(_net_premium("current_price"), 2),
+            "entry_ts": structure.opened_at.isoformat() if structure.opened_at else None,
+            "exit_ts": structure.closed_at.isoformat() if structure.closed_at else None,
+            "pnl": round(pnl, 2),
+            "commission": round(float(structure.total_commission), 2),
+            "win": pnl >= 0,
+            "exit_reason": structure.exit_reason,
+            "coid": None,
+            "exit_coid": None,
+        }
+
+    @property
     def closed_trades(self) -> List[Dict[str, Any]]:
+        """Closed round-trips: equity positions **and** option structures (B3).
+
+        Sorted by exit time so a mixed book reads chronologically. Records
+        from the classic equity flow are unchanged except for the added
+        ``kind: "equity"`` tag.
+        """
         trades: List[Dict[str, Any]] = []
         for pos in self.portfolio.closed_positions:
             pnl = float(pos.realized_pnl)
             trades.append(
                 {
                     "symbol": pos.symbol,
+                    "kind": "equity",
                     "side": "LONG" if pos.quantity >= 0 else "SHORT",
                     "qty": abs(float(pos.quantity)),
                     "entry_price": float(pos.average_entry_price),
@@ -639,6 +723,8 @@ class StrategyRunner:
                     "exit_coid": None,
                 }
             )
+        trades.extend(self.closed_option_trades)
+        trades.sort(key=lambda t: (t.get("exit_ts") or "", t.get("symbol") or ""))
         return trades[-MAX_TRADE_LOG:]
 
     @property
@@ -740,7 +826,13 @@ class StrategyRunner:
 
                 self._roll_trading_day(ts)
                 self.portfolio.update_prices({symbol: price})
-                self._mark_to_market()
+                if self.options_bridge is not None:
+                    # A1: re-price the option book before equity is marked,
+                    # so the curve and the breakers see fresh premiums.
+                    self._mark_option_book(symbol, price, ts)
+                # B3: record the curve every bar — the deep-dive chart had no
+                # data because nothing called this with record=True.
+                self._mark_to_market(record=True)
 
                 if self.config.target_type == TARGET_SINGLE:
                     # Single-symbol runners act immediately on their own bar.
@@ -784,7 +876,11 @@ class StrategyRunner:
                 self._bars[symbol].append(new_bar)
             self.last_price[symbol] = float(price)
             self.portfolio.update_prices({symbol: price})
-            self._mark_to_market()
+            if self.options_bridge is not None:
+                # A1: a stress markdown is still a market move — re-price the
+                # option book so a breaker halt reflects it.
+                self._mark_option_book(symbol, float(price), ts or new_bar["ts"])
+            self._mark_to_market(record=True)
 
     def on_tick_end(self, tick_ts: str) -> None:
         """Hook fired by the feed after every symbol's bar for this tick.
@@ -835,11 +931,14 @@ class StrategyRunner:
                 symbol, "ERROR", None, self.last_price.get(symbol), f"view error: {exc}"
             )
             return
-        if view is None:
-            return
-
+        # A viewless bar is meaningful (B1): the bridge counts it towards the
+        # neutral exit rule and can close a position the strategy walked away
+        # from. So the call happens even when the strategy has no opinion.
         result = self.options_bridge.on_market_view(view, self.config.strategy_name)
         if not result:
+            return
+        if result.get("exited"):
+            self._log_option_exit(symbol, result, bar["close"])
             return
         if result.get("rejected"):
             self._log_signal(
@@ -868,6 +967,56 @@ class StrategyRunner:
             return None
         with self._lock:
             return self.options_bridge.summary()
+
+    def _mark_option_book(self, symbol: str, price: float, ts: Optional[str]) -> None:
+        """Mark the option book to market for one bar (task A1).
+
+        Called for every closed bar before equity is marked, so an option
+        runner's curve, daily P&L and instance breakers are built from fresh
+        premiums instead of the entry price. While a structure is open the
+        book also emits a throttled ``OPTION_MTM`` heartbeat the deep-dive can
+        chart.
+        """
+        bridge = self.options_bridge
+        if bridge is None:
+            return
+        pnl = bridge.on_bar(symbol, price, ts)
+        if pnl is None:
+            return
+        self.last_option_pnl = float(pnl)
+        # A stop/target/time exit fires inside the pricing hook — drain and log it.
+        while True:
+            event = bridge.pop_exit_event()
+            if event is None:
+                break
+            self._log_option_exit(symbol, event, price)
+        if self.bars_processed % OPTION_MTM_LOG_EVERY == 0:
+            self._log_signal(
+                symbol, "OPTION_MTM", None, price, f"option MTM {float(pnl):+,.0f}"
+            )
+
+    def _log_option_exit(self, symbol: str, event: Dict[str, Any], price: float) -> None:
+        """Record a structure close in the signal log (task B1/B3).
+
+        Settlements get their own kind (``OPTION_SETTLED``) so a log reader or
+        the UI can tell "we chose to close" from "it expired on us"; both are
+        closes for every other purpose.
+        """
+        # A close always deserves a curve point (B3), so the equity chart lines
+        # up with the trade log instead of only showing bar marks.
+        self._record_equity_point(self.equity())
+        self._log_signal(
+            symbol,
+            "OPTION_SETTLED" if event.get("settled") else "OPTION_EXIT",
+            0,  # flat again — matches the equity flow's EXIT convention
+            price,
+            "{} closed after {} bars — {} — pnl {:+,.0f}".format(
+                event.get("structure_type"),
+                event.get("bars_held", 0),
+                event.get("detail") or event.get("reason"),
+                float(event.get("pnl", 0.0)),
+            ),
+        )
 
     # -- pool / universe --------------------------------------------------
 
@@ -1083,14 +1232,52 @@ class StrategyRunner:
     def _positions_value(self) -> float:
         return float(self.portfolio.calculate_position_value())
 
+    def _option_realized_pnl(self) -> float:
+        """Booked option P&L from closed/expired legs (gross of costs).
+
+        Matches the options dashboard's convention: ``realized_pnl`` is what
+        the legs booked, while the commission + statutory fee stack lives in
+        :meth:`option_pnl` / :meth:`equity` — netting fees here would make a
+        runner show a *negative* realized P&L the instant it opened anything.
+        """
+        bridge = self.options_bridge
+        if bridge is None:
+            return 0.0
+        return float(bridge.option_broker.total_realized_pnl)
+
+    def option_pnl(self) -> float:
+        """Total option-book contribution to this runner's equity (task A2).
+
+        ``realized + unrealized − commission − statutory fees``; ``0.0`` for
+        equity runners. This is the bridge's ``net_pnl`` — equity must move by
+        exactly this much for the book to be honestly reported.
+        """
+        bridge = self.options_bridge
+        if bridge is None:
+            return 0.0
+        return float(bridge.net_pnl)
+
     def unrealized_pnl(self) -> float:
-        return float(self.portfolio.unrealized_pnl)
+        unrealized = float(self.portfolio.unrealized_pnl)
+        if self.options_bridge is not None:
+            unrealized += float(self.options_bridge.unrealized_pnl)
+        return unrealized
 
     def equity(self) -> float:
-        return float(self.portfolio.calculate_total_equity())
+        """Equity portfolio + this runner's option book (task A2).
+
+        Gap P2: the option book used to be invisible here, so an option
+        runner's card, bucket aggregate and instance circuit breakers all
+        reported the untouched equity portfolio. Folding ``net_pnl`` in makes
+        an option drawdown trip the same breakers an equity drawdown does.
+        """
+        return float(self.portfolio.calculate_total_equity()) + self.option_pnl()
 
     def deployed_capital(self) -> float:
-        return sum(p["qty"] * p["entry_price"] for p in self.positions.values())
+        deployed = sum(p["qty"] * p["entry_price"] for p in self.positions.values())
+        if self.options_bridge is not None:
+            deployed += float(self.options_bridge.premium_at_risk)
+        return deployed
 
     def daily_pnl(self) -> float:
         return self.equity() - self._day_start_equity
@@ -1107,13 +1294,27 @@ class StrategyRunner:
             dd = (self.peak_equity - equity) / self.peak_equity
             if dd > self.max_drawdown_pct:
                 self.max_drawdown_pct = dd
-        if record and len(self.equity_curve) < MAX_EQUITY_POINTS:
-            self.equity_curve.append(
-                {
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "equity": round(equity, 2),
-                }
-            )
+        if record:
+            self._record_equity_point(equity)
+
+    def _record_equity_point(self, equity: float) -> None:
+        """Append one equity-curve point, downsampling when the buffer is full.
+
+        ``MAX_EQUITY_POINTS`` used to be a hard stop: once the buffer filled,
+        the curve froze and the deep-dive chart silently showed only the start
+        of the run. Decimating (keep every other point, then continue) keeps
+        the whole history visible at progressively coarser resolution instead.
+        A close/stop-out is also always worth a point, so the curve can be read
+        against the trade log.
+        """
+        if len(self.equity_curve) >= MAX_EQUITY_POINTS:
+            self.equity_curve = self.equity_curve[::2]
+        self.equity_curve.append(
+            {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "equity": round(equity, 2),
+            }
+        )
 
     def _roll_trading_day(self, ts: str) -> None:
         # Daily PnL is session-anchored: the baseline is fixed at the first
@@ -1188,9 +1389,23 @@ class StrategyRunner:
         return self.config.symbols[0]
 
     def get_state(self) -> Dict[str, Any]:
-        """Compact row for the portfolio matrix table."""
+        """Compact row for the portfolio matrix table.
+
+        Task C2: the row is also the matrix's only data source, so it carries
+        what an **option** runner needs there. Options live in the bridge, not
+        in ``self.positions``, so an option runner holding a spread used to
+        report ``open_positions: 0`` (reading as "flat") while its premium was
+        genuinely at work. ``open_positions`` now counts equity positions *and*
+        open option structures; ``equity_positions`` keeps the old number for
+        anything that needs them apart, and ``options`` carries the
+        structure-level detail the matrix and deep-dive render.
+        """
         with self._lock:
             equity = self.equity()
+            options_summary = (
+                self.options_bridge.summary() if self.options_bridge is not None else None
+            )
+            open_structures = int((options_summary or {}).get("open_structures") or 0)
             return {
                 "instance_id": self.instance_id,
                 "name": self.config.name,
@@ -1208,7 +1423,8 @@ class StrategyRunner:
                 "realized_pnl": round(self.realized_pnl, 2),
                 "win_rate": round(self.win_rate(), 4),
                 "max_drawdown_pct": round(self.max_drawdown_pct, 4),
-                "open_positions": len(self.positions),
+                "open_positions": len(self.positions) + open_structures,
+                "equity_positions": len(self.positions),
                 "status": self.status,
                 "mode": self.config.mode,
                 "source": self.config.source,
@@ -1217,9 +1433,10 @@ class StrategyRunner:
                 "last_bar_ts": max(self._last_bar_ts.values()) if self._last_bar_ts else None,
                 "created_ts": self.created_ts,
                 "instrument": dict(self.config.instrument or {"type": "equity"}),
-                "options": (
-                    self.options_bridge.summary() if self.options_bridge is not None else None
-                ),
+                "options": options_summary,
+                # A1: the book's most recent MTM, mirrored onto the row so a
+                # card can show option P&L before it is folded into equity (A2).
+                "option_pnl": round(self.last_option_pnl, 2),
             }
 
     def get_detail(self) -> Dict[str, Any]:

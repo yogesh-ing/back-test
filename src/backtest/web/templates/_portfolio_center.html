@@ -171,13 +171,119 @@
             </div>
             <div class="two-col">
                 <div class="form-row">
+                    <label>Instrument</label>
+                    <select id="spawn-instrument-type" class="input input-select">
+                        <option value="equity" selected>Equity</option>
+                        <option value="option">Options (index)</option>
+                    </select>
+                </div>
+                <div class="form-row">
                     <label>Target type</label>
                     <select id="spawn-target-type" class="input input-select">
                         <option value="single">Single Symbol</option>
                         <option value="pool">Symbol Universe (Pool)</option>
                     </select>
                 </div>
+            </div>
+            <div class="two-col">
                 <div class="form-row">
+                    <label>Timeframe</label>
+                    <select id="spawn-timeframe" class="input input-select">
+                        <option>1min</option><option>5min</option><option>15min</option>
+                        <option selected>1hour</option><option>4hour</option>
+                        <option>1day</option><option>1week</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>&nbsp;</label>
+                    <small id="spawn-instrument-hint" class="muted">
+                        Equity trades the symbol directly; Options converts the
+                        strategy's directional view into a multi-leg structure.
+                    </small>
+                </div>
+            </div>
+            <div id="spawn-option-box" hidden>
+                <div class="spawn-params-title">Option structure</div>
+                <div class="two-col">
+                    <div class="form-row">
+                        <label>Structure</label>
+                        <select id="spawn-opt-structure" class="input input-select"></select>
+                    </div>
+                    <div class="form-row">
+                        <label>Strike selection</label>
+                        <select id="spawn-opt-strike" class="input input-select">
+                            <option value="atm" selected>At the money</option>
+                            <option value="delta">By delta</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="two-col">
+                    <div class="form-row" id="spawn-opt-delta-row" hidden>
+                        <label>Delta target</label>
+                        <input id="spawn-opt-delta" class="input" type="number"
+                               step="0.05" min="0.05" max="1" value="0.35">
+                    </div>
+                    <div class="form-row">
+                        <label>Lots per leg</label>
+                        <input id="spawn-opt-qty" class="input" type="number"
+                               min="1" step="1" value="1">
+                    </div>
+                </div>
+
+                <div class="spawn-params-title">Exit rules</div>
+                <small class="muted">
+                    Risk rules are checked before the strategy's opinion: stop,
+                    target, days-to-expiry, then time, then a view flip.
+                </small>
+                <div class="two-col">
+                    <div class="form-row">
+                        <label>Stop loss (% of premium)</label>
+                        <input id="spawn-opt-stop" class="input" type="number"
+                               min="1" step="1" placeholder="blank = no stop">
+                    </div>
+                    <div class="form-row">
+                        <label>Take profit (% of premium)</label>
+                        <input id="spawn-opt-target" class="input" type="number"
+                               min="1" step="1" placeholder="blank = no target">
+                    </div>
+                </div>
+                <div class="two-col">
+                    <div class="form-row">
+                        <label>Close after N flat bars</label>
+                        <input id="spawn-opt-neutral" class="input" type="number"
+                               min="0" step="1" placeholder="0 = hold">
+                    </div>
+                    <div class="form-row">
+                        <label>Time stop (bars)</label>
+                        <input id="spawn-opt-maxbars" class="input" type="number"
+                               min="1" step="1" placeholder="blank = none">
+                    </div>
+                </div>
+                <div class="two-col">
+                    <div class="form-row">
+                        <label>Square off (days before expiry)</label>
+                        <input id="spawn-opt-dte" class="input" type="number"
+                               min="0" step="1" value="1">
+                    </div>
+                    <div class="form-row">
+                        <label>Behaviour</label>
+                        <label class="muted" style="display:block">
+                            <input id="spawn-opt-flip" type="checkbox" checked>
+                            Close when the view flips
+                        </label>
+                        <label class="muted" style="display:block">
+                            <input id="spawn-opt-settle" type="checkbox">
+                            Ride into settlement (ignore days-to-expiry)
+                        </label>
+                        <label class="muted" style="display:block">
+                            <input id="spawn-opt-reenter" type="checkbox">
+                            Reverse into the opposite structure on a flip
+                        </label>
+                    </div>
+                </div>
+                <small id="spawn-opt-summary" class="muted"></small>
+            </div>
+            <div class="form-row">
                     <label>Timeframe</label>
                     <select id="spawn-timeframe" class="input input-select">
                         <option>1min</option><option>5min</option><option>15min</option>
