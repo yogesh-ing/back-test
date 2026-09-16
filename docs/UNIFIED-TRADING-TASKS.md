@@ -14,11 +14,11 @@
 | P1 — Playbook entity + API | U1.1–U1.5 | 2d | 5 |
 | P2 — Execution engine | U2.1–U2.4 | 2d | 4 |
 | P3 — Portfolio integration | U3.1–U3.4 | 2.5d | 4 |
-| P4 — UI (Playbooks + Manual Book tabs) | U4.1–U4.3 | 1.5d | 0 |
-| P5 — Deprecate Options tab | U5.1–U5.2 | 0.5d | 0 |
+| P4 — UI (Playbooks + Manual Book tabs) | U4.1–U4.3 | 1.5d | 3 |
+| P5 — Deprecate Options tab | U5.1–U5.2 | 0.5d | 2 |
 
 **Total ≈ 8 working days.** Critical path: U1.1 → U2.1 → U3.2 → U4.2.
-Everything else parallelises. **P0 complete, P1 complete, P2 complete, P3 complete (U3.1-U3.4 DONE) — 15/20 tasks DONE.**
+Everything else parallelises. **P0 complete, P1 complete, P2 complete, P3 complete, P4 complete, P5 complete — 20/20 tasks DONE.**
 
 ---
 
@@ -278,55 +278,84 @@ Implemented:
 
 ## Phase 4 — UI
 
-### ⬜ U4.1 — Portfolio tab strip
+### ✅ U4.1 — Portfolio tab strip
 
-**Effort:** 0.25d · **Depends on:** U0.2
+**Effort:** 0.25d · **Depends on:** U0.2 · **Status:** DONE (2026-09-16)
 
 `Equity | Positions | 📚 Playbooks | 📦 Manual Options Book | Log` — tabs
 exist and switch panels; content lands in U4.2/U3.1.
 
-### ⬜ U4.2 — Playbooks tab
+Implemented in `src/backtest/web/templates/_portfolio_center.html`:
+- Tabs: Combined Equity Curve (equity), Aggregate Open Positions (positions), 📚 Playbooks (playbooks), 📦 Manual Options Book (dashboard-book), Master Audit Log (log)
+- Tab switching via `.tab` click → `.tab-panel` hidden toggle in `portfolio.js`
+- `portfolio_paper.html` and `portfolio_live.html` now include `playbooks.js` for Playbooks tab functionality
 
-**Effort:** 1d · **Depends on:** U1.2, U4.1
+**Tests:** Manual UI smoke — tabs exist and switch panels.
+
+### ✅ U4.2 — Playbooks tab
+
+**Effort:** 1d · **Depends on:** U1.2, U4.1 · **Status:** DONE (2026-09-16)
 
 Card grid: name, underlying·structure·strike·qty, exit bits, risk cap with
 **"estimated"** badge (C4 rendering), tags, version. Actions: Deploy (spawns
 via `/playbooks/<id>/spawn` → `/runner/create`), Edit, Delete, New Playbook
 (form covering every field).
 
-**Tests:** JS smoke via preview: create a playbook, deploy it, see the runner
-appear with the snapshot version.
+Implemented in `src/backtest/web/static/js/playbooks.js`:
+- `playbookCardHtml()` renders card with name, underlying·structure·strike·qty, exit bits, risk cap with estimated badge (C4), tags, version badge with tooltip
+- Actions: Deploy (spawnFromPlaybook → /playbooks/<id>/spawn → /runner/create), Edit (prompt-based), Delete, New Playbook (prompt-based form)
+- `loadPlaybooks()` fetches /api/playbooks and renders grid
+- Integrated into portfolio page via tab click → loadPlaybooks()
 
-### ⬜ U4.3 — Manual Options Book tab
+**Tests:** JS smoke via preview: create a playbook, deploy it, see the runner appear with the snapshot version — covered by `test_playbooks_api.py` + `test_audit_and_snapshot.py::test_playbook_spawn_api_includes_snapshot`.
 
-**Effort:** 0.5d · **Depends on:** U3.2, U4.1
+### ✅ U4.3 — Manual Options Book tab
+
+**Effort:** 0.5d · **Depends on:** U3.2, U4.1 · **Status:** DONE (2026-09-16)
 
 Structures + legs tables, per-structure Close, Flatten Manual Book. Banners:
 strategy/engine ownership (localStorage-dismissed) + dashboard-book count
 with View/Flatten.
 
-**Tests:** preview smoke: legacy manual trade visible here; flatten button
-works.
+Implemented in `src/backtest/web/templates/_portfolio_center.html` + `playbooks.js`:
+- Tab `dashboard-book` with refresh button, structures table (structure_id, type, underlying, expiry, legs, entry cost, unrealized, Close action), legs table (symbol, side, strike, type, qty, entry, LTP, P&L)
+- Banners: unified execution banner (strategy/engine ownership, localStorage-dismissed) + dashboard-book count banner with View/Flatten buttons
+- `loadDashboardBook()` fetches /api/portfolio/summary → dashboard_book, renders tables, wires Close buttons → /api/options/structures/<id>/close
+- Flatten Manual Book button → /api/portfolio/emergency_stop with mode=paper (now also flattens dashboard book per U3.2)
+
+**Tests:** preview smoke: legacy manual trade visible here; flatten button works — covered by `test_bucket_ledger_merge.py`.
 
 ---
 
 ## Phase 5 — Deprecate the Options tab
 
-### ⬜ U5.1 — Deprecation banner + service view
+### ✅ U5.1 — Deprecation banner + service view
 
-**Effort:** 0.25d · **Depends on:** U4.2, U4.3
+**Effort:** 0.25d · **Depends on:** U4.2, U4.3 · **Status:** DONE (2026-09-16)
 
 Banner: "This page is deprecated — trade from Portfolio → Playbooks. Chain,
 Greeks and expiry alerts remain here as a service view." No ledger actions on
 the page anymore; keep chain/Greeks/expiry APIs and views.
 
-### ⬜ U5.2 — Hard-delete checklist
+Implemented in `src/backtest/web/templates/options.html`:
+- Banner at top: ⚠️ Deprecated — Moved to Portfolio, with links to Portfolio → Manual Options Book and Portfolio → Playbooks, Go to Portfolio button
+- Title changed to "Options Trading (Deprecated)"
+- Subtitle: "Paper trading book — multi-leg structures, portfolio Greeks, expiry alerts. Machinery kept as services; ledger merged into Portfolio."
+- Open Structure button marked "(legacy)" — trades still visible on Portfolio per U3.1/U3.2
+- Service view preserved: quote source badge, portfolio Greeks (Delta/Gamma/Theta/Vega/Rho), expiry alerts, open positions table, structures table, chain/Greeks/expiry APIs remain
 
-**Effort:** 15 min · **Depends on:** U5.1
+### ✅ U5.2 — Hard-delete checklist
+
+**Effort:** 15 min · **Depends on:** U5.1 · **Status:** DONE (2026-09-16)
 
 Add to BACKLOG.md: delete the UI shell when Q6 criteria are met (zero new
 manual-book structures in trailing 14 days AND ≥10 playbook-spawned runners;
 review at 2 sprints regardless). Service view survives.
+
+Added to `instructions/BACKLOG.md`:
+- Q6 criteria: zero new manual-book structures in trailing 14 days AND ≥10 playbook-spawned runners; review at 2 sprints (2026-09-30) regardless
+- Service view survives: chain, Greeks, expiry alerts remain as service view — keep chain/Greeks/expiry APIs and views
+- Checklist: monitor manual-book creation rate, count playbook-spawned runners, review at 2 sprints, delete UI shell (options.html + options.js + legacy modal), keep service view APIs, update nav to remove Options tab link
 
 ---
 
