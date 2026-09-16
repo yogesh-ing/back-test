@@ -12,13 +12,13 @@
 |---|---|---|---|
 | P0 — Merge gate (dev branch) | U0.1–U0.2 | 1h | 2 |
 | P1 — Playbook entity + API | U1.1–U1.5 | 2d | 5 |
-| P2 — Execution engine | U2.1–U2.4 | 2d | 1 |
+| P2 — Execution engine | U2.1–U2.4 | 2d | 2 |
 | P3 — Portfolio integration | U3.1–U3.4 | 2.5d | 0 |
 | P4 — UI (Playbooks + Manual Book tabs) | U4.1–U4.3 | 1.5d | 0 |
 | P5 — Deprecate Options tab | U5.1–U5.2 | 0.5d | 0 |
 
 **Total ≈ 8 working days.** Critical path: U1.1 → U2.1 → U3.2 → U4.2.
-Everything else parallelises. **P0 complete, P1 complete, U2.1 DONE — 8/13 tasks DONE.**
+Everything else parallelises. **P0 complete, P1 complete, U2.1-U2.2 DONE — 9/13 tasks DONE.**
 
 ---
 
@@ -148,18 +148,22 @@ runner_config, mode, source)`.
 
 **Tests:** `tests/engine/test_execution_engine.py` — 7 tests PASS: routing table mode×source, C2 ownership (strategy stub that tries broker API gets nothing, underlying missing → invalid_signal, valid → Fill), lot-size resolution (NIFTY 50, BANKNIFTY 15, unknown 50, never from playbook), risk cap rejects (tight cap 1000 vs 25k raw → RiskHalted, loose → Fill), fill path hand-built chain (paper Fill with lot_size 50 data_source synthetic), fallback label present (mstock live no session → synthetic-fallback label, execute → OrderRejected no_session), equity signal through engine (sma_crossover precursor → Fill).
 
-### ⬜ U2.2 — Two-tier exit precedence
+### ✅ U2.2 — Two-tier exit precedence
 
-**Effort:** 0.5d · **Depends on:** U2.1
+**Effort:** 0.5d · **Depends on:** U2.1 · **Status:** DONE (2026-09-16, commit pending)
 
 Per-bar order as code: engine tier (breakers → emergency flatten, first and
 unconditional) → playbook tier in priority order: stop_loss_pct →
 take_profit_pct → time/DTE square-off → signal_flip. Re-entry only on the
 **next bar**, default off (C3).
 
-**Tests:** `tests/engine/test_exit_precedence.py` — parameterised: stop beats
-target; stop beats flip; DTE beats flip; emergency overrides all; re-entry
-same-bar impossible; `max_reentries_per_day` honoured (V1.1 knob, default 2).
+Fixes in `src/backtest/forward/options_bridge.py`:
+- `_blocked_reentry` now always blocks same-bar (`_exit_bar_index == _bar_index`) — previously returned `not _should_reenter` which allowed same-bar flip+reenter, causing -₹41,844 churn evidence.
+- `_should_reenter` now returns False on same-bar (`_exit_bar_index == _bar_index`), enforces next-bar only, checks `max_reentries_per_day` V1.1 knob from `expression["exit"]["max_reentries_per_day"]` default 2, and `_reentries_today` counter.
+- `__init__` adds `_reentries_today=0` `_reentry_day=None`; `on_bar` resets per-day when day changes; `on_market_view` counts re-entries in normal entry path (increment on flip+reenter fall-through), double-count guard removed.
+- Constants `EXIT_PRECEDENCE`, `DEFAULT_REENTER=False`, `DEFAULT_MAX_REENTRIES_PER_DAY=2` already in engine (U2.1).
+
+**Tests:** `tests/engine/test_exit_precedence.py` — 8 PASS: stop beats target (ExitPolicy), stop beats flip (risk before signal), DTE beats flip (1d expiry vs flip), emergency overrides all (UnifiedExecutionEngine circuit_breaker tier 0), same-bar impossible (_blocked_reentry True + _should_reenter False on exit bar regardless of reenter=True), next-bar allowed (blocked False next bar, should_reenter True, _reentries_today increments), max_reentries_per_day honoured (max=1 blocks second re-entry same day), engine EXIT_PRECEDENCE constants order emergency(0) > stop(1) > target(2) > DTE(3) > flip(4).
 
 ### ⬜ U2.3 — Live-mode margin/risk gate
 

@@ -165,6 +165,9 @@ class OptionsBridge:
         self._entry_premium: Decimal = Decimal("0")
         self._settlement_count: int = 0
         self._expiry_manager: Optional[ExpiryManager] = None
+        # U2.2: re-entry tracking — max_reentries_per_day knob, default 2, next-bar only
+        self._reentries_today: int = 0
+        self._reentry_day: Optional[Any] = None
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -191,9 +194,17 @@ class OptionsBridge:
                 # Still holding: a view against the position is an exit signal,
                 # never an entry one (V1 does not pyramid).
                 return None
+            # U2.2: same-bar re-entry impossible — even flip+reenter must wait to next bar
+            # should_reenter() now returns False on same-bar, so we always return closed here
+            # Re-entry will happen on next bar via normal entry path, counted via _reentries_today
             if not self._should_reenter(view):
                 return closed
-            # Flip + reenter → fall through and open the reverse structure.
+            # If we reach here, it's next-bar re-entry (should_reenter true and not same-bar)
+            # For safety, still check blocked_reentry
+            if self._blocked_reentry(view):
+                return closed
+            # Flip + reenter → fall through and open the reverse structure (next-bar only).
+            # Counting happens in the entry path below via is_reentry check.
         elif view is None:
             # Nothing open and no conviction — nothing to do.
             return None
@@ -206,6 +217,20 @@ class OptionsBridge:
         if self._blocked_reentry(view):
             logger.debug("[options-bridge] entry suppressed on the exit bar")
             return None
+
+        # U2.2: detect re-entry on next bar (last exit flip + reenter true) and enforce max_reentries_per_day
+        is_reentry = False
+        try:
+            is_reentry = self._should_reenter(view)
+        except Exception:
+            is_reentry = False
+        if is_reentry:
+            # Already checked max in _should_reenter, but double-check and count
+            try:
+                self._reentries_today += 1
+            except Exception:
+                self._reentries_today = 1
+
         dte_block = self._entry_dte_block()
         if dte_block is not None:
             return dte_block
@@ -446,6 +471,14 @@ class OptionsBridge:
         bar_dt = self._bar_datetime(ts)
         if bar_dt is not None or self._bar_dt is None:
             self._bar_dt = bar_dt
+        # U2.2: reset re-entries per day when day changes
+        try:
+            current_day = self._bar_dt.date() if self._bar_dt else None
+            if current_day and self._reentry_day != current_day:
+                self._reentries_today = 0
+                self._reentry_day = current_day
+        except Exception:
+            pass
         if not self._has_open_structure():
             return None
 
@@ -793,10 +826,17 @@ class OptionsBridge:
         }
 
     def _should_reenter(self, view: MarketView | None) -> bool:
-        """Flip-close + ``reenter`` → open the reverse structure this bar."""
+        """Flip-close + ``reenter`` → open reverse NEXT bar only (never same-bar) — U2.2."""
         if view is None or self.last_exit is None:
             return False
         if self.last_exit.get("reason") != EXIT_SIGNAL_FLIP:
+            return False
+        # Next-bar only: same-bar re-entry impossible even if reenter=true
+        if self._exit_bar_index is not None and self._exit_bar_index == self._bar_index:
+            return False
+        # V1.1 knob: max_reentries_per_day default 2
+        max_per_day = self.expression.get("exit", {}).get("max_reentries_per_day", 2)
+        if hasattr(self, "_reentries_today") and self._reentries_today >= max_per_day:
             return False
         return self.exit_policy.should_reenter(self.last_exit.get("direction"), view)
 
@@ -807,9 +847,10 @@ class OptionsBridge:
         while the strategy is still bullish, which reads as "the stop did
         nothing". ``reenter`` only bypasses it for a genuine flip.
         """
-        if self._exit_bar_index is None or self._exit_bar_index != self._bar_index:
+        if self._exit_bar_index is None:
             return False
-        return not self._should_reenter(view)
+        # U2.2: same-bar re-entry impossible, ever — even flip+reenter must wait to next bar
+        return self._exit_bar_index == self._bar_index
 
     def _structure_type_for(self, view: MarketView) -> str:
         type_cfg = self.expression.get("type", DEFAULT_EXPRESSION["type"])
