@@ -3,6 +3,142 @@
 Date: 2026-09-16 (branch arena/01a0a901-back-test)
 Codebase commit base: d206881
 
+> **SHORT ANSWER FOR DEV MOVE-FORWARD (No code change in this update):**
+> **No conflict with your 3-point analysis. Decisions are aligned, with 2 intentional refinements for safety:**
+> 1. **Plug-and-play = Declarative Entity, not Python script file** — avoids code-exec risk; same UX, safer. If consultant insisted on script file, we can add `playbook.to_python()` exporter later — no architecture break.
+> 2. **Options tab = Soft-deprecated to service view, not hard-deleted** — keeps chain/Greeks/expiry services (machinery) while ledger merges into Portfolio. Hard delete can happen after 1 sprint of Playbooks usage — reversible decision.
+> **Result: No blocking conflict. Architecture below is ready for Quant consultant sign-off to proceed.**
+
+## 0. Conflict Analysis & Decision Log (Added for Sign-off)
+
+### 0.1 Is there any conflict with the 3-point analysis?
+
+| Point from your analysis | Our implementation | Conflict? |
+|---|---|---|
+| **1) No plug-and-play, need mechanism embedded in portfolio** | Playbook entity + registry embedded in Portfolio tab (`playbooks` tab), no new page. `Playbook.to_runner_config()` → runner create. | **No conflict — aligned.** Refinement: Entity vs Script file (see 0.2). |
+| **2) Options tab unnecessary, trades not visible = bad UX** | Dashboard book merged into `get_portfolio_summary()` totals, banner + Manual Book tab inside Portfolio, Options page banner says deprecated → Portfolio. Emergency flatten closes both. | **No conflict — aligned.** Refinement: Soft deprecation not hard delete. |
+| **3) Plug-and-play strategy arch: strategy triggers signal, engine checks live/paper** | `Signal` (WHAT) + `ExecutionEngine` (HOW, checks mode/source). Existing spawn form already did this, now formalized. | **No conflict — aligned.** |
+
+### 0.2 Decision changes from literal reading (intentional, reversible)
+
+**D1: Script file → Declarative config entity**
+- Literal: "plug-and-play script" could mean `.py` file drop-in.
+- Decision: Implemented as JSON-serializable dataclass (`Playbook`), not arbitrary Python. Reason: Quant consultant earlier flagged execution safety — arbitrary script = RCE risk in live bucket. Entity can be exported to script if needed via `to_python()` — no loss.
+- **Action for consultant:** Confirm entity approach, or request script exporter as V1.1.
+
+**D2: Hard delete Options tab → Soft deprecate to service view**
+- Literal: "options tab unnecessary" could mean delete file.
+- Decision: Kept `options.html` as service view (chain, Greeks, expiry, quote-source) — machinery reused by Portfolio. Ledger merged, UI redirects. Reason: Chain/Greeks logic is 200+ lines, used by risk; deleting breaks `OptionsBridge`.
+- **Action for consultant:** Confirm soft-deprecation OK, hard delete scheduled after Playbooks adoption metric >80%.
+
+**D3: Risk envelope — estimated % vs BS+SPAN**
+- V1 uses 2% ATM estimate for `risk_envelope()`. Quant consultant will want BS with live IV + SPAN margin.
+- Decision: V1 placeholder is intentional to unblock UI; V2 will inject `IVProvider` + `SPANCalculator`. Interface already has `spot_price, lot_size` — IV can be added without breaking API.
+- **No conflict — phased.**
+
+### 0.3 No-go conflicts checked (all clear)
+
+- **Storage:** PlaybookRegistry in-memory V1 matches PortfolioManager V1 pattern — consistent, no DB migration conflict.
+- **API taxonomy:** `mode` (paper/live) + `source` (synthetic/live) vocabulary reused from `BUCKET_RISK_LIMITS` / `SOURCE_TAG_VALUES` — no re-declaration conflict (Ticket #10).
+- **Ledger honesty:** Totals include dashboard book, so `daily_loss_limit` circuit breaker now sees real at-risk — fixes previous under-reporting, no conflict with risk manager.
+- **Execution path:** `Runner.tick() → ExecutionEngine.execute() → Simulator.fill() or Broker.order()` — does not duplicate `Simulator` logic, only wraps it.
+
+**Conclusion: Zero blocking conflicts. Two refinements improve safety and reversibility. Ready to proceed.**
+
+---
+
+## 0.4 Complete Architecture for Quant Consultant Sign-off (No code change)
+
+This is the architecture you can forward to Quant consultant for final sign-off.
+
+### Layer Diagram (Text)
+
+```
+[Strategy Layer]  WHAT to trade
+   |
+   | emits Signal {direction, instrument_hint, confidence}
+   v
+[Playbook Layer]  Declarative reusable config (NEW)
+   - Playbook: underlying, structure_type, strike_selection, qty, exit_config, max_loss_per_trade
+   - Registry: list/get/save/delete, seeded defaults
+   - to_expression() → instrument.expression
+   - to_runner_config() → Runner create payload
+   |
+   v
+[Execution Engine] HOW to trade (NEW)
+   - Input: Signal + Playbook + RunnerConfig + mode + source
+   - Checks: mode=paper→simulator, live→broker+margin; source=synthetic→BS, live→mStock LTP
+   - Calls: OptionsBridge (for option) or EquitySizer (for equity)
+   - Output: Fill / OrderRejected / RiskHalted
+   |
+   v
+[Portfolio Layer]  Aggregation + Risk (EXISTING, patched)
+   - PortfolioManager: runners + dashboard_book merged
+   - get_portfolio_summary(): totals honest (runners + manual book)
+   - emergency_flatten_all(): closes both books
+   - Buckets: paper/live isolation, capability banner (REAL MONEY vs Simulated)
+   |
+   v
+[Service Layer]  Chain/Greeks/Expiry/Quote-source (EXISTING, kept)
+   - options.html now service view only, no ledger
+   - APIs: /api/options/chain, /api/options/greeks, /api/options/expiry_alerts, /api/options/quote_source
+   - Used by ExecutionEngine for pricing
+```
+
+### Data Flow: Playbook Spawn
+
+1. User: Portfolio → Playbooks tab → Deploy on `pb_default_bull_spread`
+2. UI: `playbooks.js` fetches `GET /api/playbooks/pb_default_bull_spread`, opens spawn modal, pre-fills `instrument-type=option`, `underlying=NIFTY`, `structure=bull_call_spread`, `strike=atm`, `qty=1`, `exit={stop 50%, target 100%, DTE 1}`
+3. User edits capital/strategy, clicks Deploy Instance
+4. API: `POST /api/portfolio/runner/create` with `instrument: {type: "option", expression: Playbook.to_expression()}`
+5. PortfolioManager: creates Runner with `OptionConfig.buildInstrument(expression)`
+6. Tick loop: Strategy emits BULLISH → ExecutionEngine checks mode/source → OptionsBridge builds spread → Simulator fills → ledger → summary includes in totals
+
+### Risk Model (Instrument-Agnostic, Normalized in ₹)
+
+- **V1 (now):** `risk_envelope(spot, lot_size)` → `estimated_premium = spot * pct` (2% ATM, 1% OTM, 4% ITM) × qty × lot_size, capped by `max_loss_per_trade`
+- **V2 (Quant to confirm):** `BS(spot, strike, TTE, IV_live, r)` → premium + `SPAN(margin)` → max loss = max(premium, SPAN) × qty, still capped by `max_loss_per_trade`
+- **Enforcement point:** ExecutionEngine before order, and PortfolioManager daily_loss_limit breaker
+- **Consultant input needed:** Confirm V2 formula, lot_size source (NSE master vs config), and whether `max_loss_per_trade` should be per-signal or per-day.
+
+### Storage & Persistence
+
+- **V1:** In-memory singleton `_REGISTRY`, 3 defaults, file persistence optional via `PLAYBOOKS_PATH` env → JSON
+- **V2:** DB table `playbooks` (id, name, underlying, expression JSONB, exit JSONB, max_loss, tags, version, created_at) — matches existing `option_positions` pattern
+- **No conflict** with existing DB migrations.
+
+### API Contract (for frontend + Quant)
+
+- `GET /api/playbooks?tag=conservative&underlying=NIFTY` → list
+- `GET /api/playbooks/<id>` → single
+- `POST /api/playbooks` → create (body = Playbook dict)
+- `PUT /api/playbooks/<id>` → update
+- `DELETE /api/playbooks/<id>` → delete (blocks `pb_default_*`)
+- `POST /api/playbooks/<id>/spawn` → returns runner config (does not create runner, caller creates)
+- Existing portfolio APIs unchanged, but `GET /api/portfolio/summary` now includes `dashboard_book: {exists, equity, positions, structures, quote_source}`
+
+### UI Contract
+
+- Portfolio → Tabs: `Equity | Positions | 📚 Playbooks (Option Plug-and-Play) | 📦 Manual Options Book | Log`
+- Playbooks tab: grid of cards, each: name, underlying·structure·strike·qty, description, exit bits, risk cap, tags, Deploy/Edit/Delete, New Playbook button
+- Manual Book tab: structures table + legs table, Close per structure, Refresh, Flatten Manual Book (calls emergency_stop)
+- Banners: Unified (Strategy owns WHAT / Engine owns HOW, dismissible via localStorage), Dashboard-book (count + View/Flatten)
+
+### Open Questions for Quant Consultant (to unblock next sprint)
+
+1. **Playbook scope:** Option-only V1 or equity-inclusive V1? Our `structure_type` currently option-only, but `to_runner_config` supports `symbol` — should equity playbooks be allowed now?
+2. **Risk envelope V2:** Confirm BS inputs: IV source (mStock live or historical?), risk-free rate source, SPAN calculation — NSE SPAN file or estimated 20% of notional?
+3. **Exit precedence:** When both `signal_flip` and `stop_loss_pct` trigger same bar, which wins? Current: stop first, then flip.
+4. **Re-enter policy:** `reenter=true` means immediate re-entry on flip after exit, or wait 1 bar?
+5. **Playbook versioning:** Need version field for backtest reproducibility? V1 has `version: "1.0"` — should bump on edit?
+6. **Hard delete Options tab:** After what metric? Proposal: 80% of new option runners from Playbooks for 2 weeks.
+
+**If consultant answers these 6, dev can proceed to V2 without rework.**
+
+---
+
+## 1. What the code audit found (no docs, only code)
+
 ## 1. What the code audit found (no docs, only code)
 
 ### Current architecture before this fix:
