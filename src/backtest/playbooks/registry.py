@@ -168,16 +168,30 @@ _REGISTRY: Optional[PlaybookRegistry] = None
 _REGISTRY_LOCK = threading.Lock()
 
 
+def _resolve_storage_path(explicit: Optional[Path] = None) -> Optional[Path]:
+    """U1.4: Load registry from PLAYBOOKS_PATH at startup; skip silently when unset."""
+    import os
+
+    if explicit is not None:
+        return Path(explicit)
+    env_path = os.getenv("PLAYBOOKS_PATH")
+    if env_path:
+        return Path(env_path)
+    return None
+
+
 def get_playbook_registry(storage_path: Optional[Path] = None) -> PlaybookRegistry:
     global _REGISTRY
     with _REGISTRY_LOCK:
         if _REGISTRY is None:
-            _REGISTRY = PlaybookRegistry(storage_path=storage_path)
+            resolved = _resolve_storage_path(storage_path)
+            _REGISTRY = PlaybookRegistry(storage_path=resolved)
         return _REGISTRY
 
 
 def reset_playbook_registry(storage_path: Optional[Path] = None) -> PlaybookRegistry:
     global _REGISTRY
     with _REGISTRY_LOCK:
-        _REGISTRY = PlaybookRegistry(storage_path=storage_path)
+        resolved = _resolve_storage_path(storage_path)
+        _REGISTRY = PlaybookRegistry(storage_path=resolved)
         return _REGISTRY

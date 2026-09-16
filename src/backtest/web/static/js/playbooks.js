@@ -205,20 +205,34 @@
 
         if (window.showToast) window.showToast(`Loaded playbook ${pb.name} — adjust and Deploy`, "info");
       } else {
-        // Fallback: direct spawn via API
+        // Fallback: direct spawn via API — new spec: spawn returns config, caller creates (no side effects)
         const strategy = prompt("Strategy name for this playbook (e.g. directional_options):", "directional_options");
         if (!strategy) return;
         const capital = prompt("Allocated capital:", "100000");
         if (!capital) return;
 
-        const result = await api(`/api/playbooks/${playbookId}/spawn`, "POST", {
+        const spawnResult = await api(`/api/playbooks/${playbookId}/spawn`, "POST", {
           strategy: strategy,
           allocated_capital: parseFloat(capital) || 100000,
           mode: "paper",
           source: "synthetic",
         });
 
-        if (window.showToast) window.showToast(`Deployed ${result.runner.name} from playbook`, "success");
+        // New API returns runner_config, old returned runner — handle both
+        const runnerConfig = spawnResult.runner_config || spawnResult.config;
+        if (!runnerConfig) {
+          // Old API fallback
+          if (spawnResult.runner) {
+            if (window.showToast) window.showToast(`Deployed ${spawnResult.runner.name} from playbook`, "success");
+            return;
+          }
+          throw new Error("Spawn did not return runner_config");
+        }
+
+        // One creation path: POST /api/portfolio/runner/create
+        const createResult = await api("/api/portfolio/runner/create", "POST", runnerConfig);
+        const runnerName = (createResult.runner && createResult.runner.name) || runnerConfig.name || playbookId;
+        if (window.showToast) window.showToast(`Deployed ${runnerName} from playbook (v${spawnResult.runner_config ? "" : ""})`, "success");
       }
     } catch (e) {
       if (window.showToast) window.showToast(e.message, "error");

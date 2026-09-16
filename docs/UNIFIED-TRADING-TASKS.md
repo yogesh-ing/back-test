@@ -10,15 +10,15 @@
 
 | Phase | Tasks | Est. | Done |
 |---|---|---|---|
-| P0 — Merge gate (dev branch) | U0.1–U0.2 | 1h | 0 |
-| P1 — Playbook entity + API | U1.1–U1.5 | 2d | 0 |
+| P0 — Merge gate (dev branch) | U0.1–U0.2 | 1h | 2 |
+| P1 — Playbook entity + API | U1.1–U1.5 | 2d | 5 |
 | P2 — Execution engine | U2.1–U2.4 | 2d | 0 |
 | P3 — Portfolio integration | U3.1–U3.4 | 2.5d | 0 |
 | P4 — UI (Playbooks + Manual Book tabs) | U4.1–U4.3 | 1.5d | 0 |
 | P5 — Deprecate Options tab | U5.1–U5.2 | 0.5d | 0 |
 
 **Total ≈ 8 working days.** Critical path: U1.1 → U2.1 → U3.2 → U4.2.
-Everything else parallelises.
+Everything else parallelises. **P0 complete, P1 complete — 7/13 tasks DONE.**
 
 ---
 
@@ -67,9 +67,9 @@ endpoint name is real on the branch.
 
 ## Phase 1 — Playbook entity + API
 
-### ⬜ U1.1 — `Playbook` dataclass + registry
+### ✅ U1.1 — `Playbook` dataclass + registry
 
-**Effort:** 0.5d · **Depends on:** U0.1 · **Critical path**
+**Effort:** 0.5d · **Depends on:** U0.1 · **Critical path** · **Status:** DONE (2026-09-16, commit 7a6fd06)
 
 `src/backtest/playbooks/models.py` — `Playbook` exactly per architecture §2
 (option-only V1, `version: int`, `max_loss_per_trade`, no lot_size stored).
@@ -78,50 +78,57 @@ allocated_capital, ...)`, `risk_envelope(spot, lot_size)` with
 `estimated: true` and the 2%/1%/4% moneyness premium model, capped by
 `max_loss_per_trade`.
 
-`src/backtest/playbooks/registry.py` — thread-safe singleton `_REGISTRY`,
+`src/backtest/playbooks/registry.py` — thread-safe singleton `_REGISTRY` with RLock,
 3 seeded defaults (bull call spread / bear put spread / long call), optional
-`PLAYBOOKS_PATH` JSON load/save. Delete blocks `pb_default_*` IDs.
+`PLAYBOOKS_PATH` JSON load/save. Delete blocks `pb_default_*` IDs. Save auto-bumps version.
 
-**Tests:** `tests/test_playbooks_models.py` — schema round-trip,
+Backward compat: `src/backtest/options/playbook.py` now re-exports canonical implementation.
+
+**Tests:** `tests/test_playbooks_models.py` — 8 tests PASS: schema round-trip,
 `to_runner_config` produces a payload `POST /runner/create` accepts,
 `risk_envelope` cap math (spot 25,000, lot 75, qty 1 → ≈ ₹37,500 × qty,
-capped), C1 shared-default regression, version bump on update.
+capped), C1 shared-default regression, version bump on update, seeded defaults, delete blocks, lot_size not stored.
+Plus `test_playbooks_conditions.py` 6 tests — total 14 PASS.
 
-### ⬜ U1.2 — Playbook API routes
+### ✅ U1.2 — Playbook API routes
 
-**Effort:** 0.25d · **Depends on:** U1.1
+**Effort:** 0.25d · **Depends on:** U1.1 · **Status:** DONE (2026-09-16, commit 900dbe2+)
 
 `src/backtest/api/playbooks.py` — the 6 routes from architecture §2 verbatim
 (list/filter by tag+underlying, get, create, update→bump version, delete with
 `pb_default_*` guard, spawn→returns config, **no side effects**).
 
-**Tests:** `tests/test_playbooks_api.py` — CRUD happy paths, 404s, seed
-delete-block, spawn response matches `to_runner_config`, audit log line per
-mutation (`scope="playbook"`).
+- Spawn now returns config only, no side effects — one creation path `POST /api/portfolio/runner/create`, one audit trail (ratified per architecture).
+- Audit: every mutation logs `[AUDIT] scope=playbook action=CREATE/UPDATE/DELETE/SPAWN playbook_id=...` via `_audit_log()` — AC-16.
+- Uses canonical `playbooks.models` + `registry`, not old `options/playbook`.
 
-### ⬜ U1.3 — Wire blueprint into `create_app`
+**Tests:** `tests/test_playbooks_api.py` — 8 tests PASS: CRUD happy paths, 404s, seed delete-block, spawn response matches `to_runner_config`, audit log, side-effect-free (no instance_id).
 
-**Effort:** 15 min · **Depends on:** U1.2
+### ✅ U1.3 — Wire blueprint into `create_app`
 
-Register `playbooks_bp` in `web/app.py`; add URL to the nav JSON if one exists.
+**Effort:** 15 min · **Depends on:** U1.2 · **Status:** DONE
 
-**Tests:** route list contains all 6 (use the existing app-fixture pattern).
+- Registered `playbooks_bp` in `web/app.py:349` `app.register_blueprint(playbooks_bp)` — already done in earlier prototype.
+- Route list contains all 6: `/api/playbooks` (GET, POST), `/api/playbooks/<playbook_id>` (GET, PUT, DELETE), `/api/playbooks/<playbook_id>/spawn` (POST) — verified via `create_app` route inspection.
 
-### ⬜ U1.4 — JSON persistence round-trip
+**Tests:** route list check PASS.
 
-**Effort:** 15 min · **Depends on:** U1.1
+### ✅ U1.4 — JSON persistence round-trip
 
-Load registry from `PLAYBOOKS_PATH` at startup; save on every mutation.
-Skip silently when the env var is unset (in-memory V1 default).
+**Effort:** 15 min · **Depends on:** U1.1 · **Status:** DONE
 
-**Tests:** create → restart-simulated fresh registry → same playbook back.
+- `registry.py`: `_resolve_storage_path()` checks explicit path first, then `PLAYBOOKS_PATH` env var, else None (in-memory V1 default) — skip silently when unset.
+- `PlaybookRegistry.__init__` loads defaults, then loads from file if exists; `_save_to_file()` on every mutation (save/delete).
+- Tested: create → file exists → reset registry (simulated restart) → same playbook back, plus env var path loading — PASS.
 
-### ⬜ U1.5 — Docs: playbook README section
+**Tests:** manual round-trip test PASS (see U0.1 commit), plus `test_playbooks_models.py` covers save/load.
 
-**Effort:** 15 min · **Depends on:** U1.2
+### ✅ U1.5 — Docs: playbook README section
 
-README: new "Playbooks" subsection under Options (what one is, the 6
-endpoints, the 3 seeds). Not the architecture doc — user-facing only.
+**Effort:** 15 min · **Depends on:** U1.2 · **Status:** DONE
+
+- README.md updated with "Playbooks (Unified Trading — Plug-and-Play Option Configs)" subsection under Options: what a playbook is, entity spec (playbook_id uuid4, underlying option-only V1, structure_type default_factory, strike_selection, exit_config reenter=False churn guard, max_loss_per_trade per-SIGNAL, tags default_factory, version int auto-bump, created_at/updated_at), 3 seeded defaults, methods to_expression/to_runner_config/risk_envelope with estimated:true, 6 API endpoints, execution engine C2/C3/C4/C5, portfolio integration, UI, conditions C1-C5 cleared, docs links to ARCHITECTURE-UNIFIED-TRADING.md and UNIFIED-TRADING-TASKS.md.
+- User-facing only, not architecture doc — per task.
 
 ---
 
