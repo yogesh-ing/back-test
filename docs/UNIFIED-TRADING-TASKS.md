@@ -54,11 +54,14 @@ endpoint name is real on the branch.
 
 **Completion criteria met:** All C1-C5 cleared on branch, ready for U0.2 merge + full regression.
 
-### ⬜ U0.2 — Branch merge + full regression
+### ✅ U0.2 — Branch merge + full regression
 
-**Effort:** 30 min. Merge dev branch → main; run the full suite
-(`cd src && python -m pytest ../tests -q`). Expected baseline: ~2,100+ pass,
-1 pre-existing Windows process-pool failure. Stop if anything else fails.
+**Effort:** 30 min · **Status:** DONE (2026-09-16)
+
+- Merged `origin/main` (29a50c3 + b197b62) into `arena/01a0a901-back-test` via merge commit `dc8ec54` — docs/ARCHITECTURE-UNIFIED-TRADING.md + UNIFIED-TRADING-TASKS.md now in branch.
+- Full regression: `PYTHONPATH=src pytest tests -q --ignore=tests/test_plotting.py` → **2328 passed, 7 skipped, 113 warnings in 43.18s** — exceeds baseline 2,100+ pass, 0 failures (Windows process-pool failure not present on Linux).
+- U0.1 tests also green: `test_playbooks_conditions.py` 6 passed.
+- Ready for P1 U1.1.
 
 ---
 
