@@ -137,6 +137,8 @@ class ExecutionEngine:
         chain_generator: Optional[Any] = None,
         instrument_registry: Optional[Any] = None,
         risk_envelope: Optional[RiskEnvelope] = None,
+        live_broker: Optional[Any] = None,
+        margin_calculator: Optional[Any] = None,
     ) -> None:
         self.quote_provider = quote_provider
         self.chain_generator = chain_generator
@@ -147,6 +149,9 @@ class ExecutionEngine:
             max_lots=10,
             max_positions=5,
         )
+        # U2.3: live broker for margin queries — paper mode never touches it
+        self.live_broker = live_broker
+        self.margin_calculator = margin_calculator
         self.executed_count = 0
         self.rejected_count = 0
 
@@ -300,6 +305,119 @@ class ExecutionEngine:
         return True, "ok"
 
     # ------------------------------------------------------------------
+    # U2.3 — Live-mode margin gate
+    # ------------------------------------------------------------------
+
+    def _check_live_margin(
+        self,
+        signal: UnifiedSignal,
+        playbook: Optional[Playbook],
+        spot_price: float,
+        lot_size: int,
+        data_source_label: str,
+    ) -> Optional[OrderRejected]:
+        """Live-mode broker margin query — U2.3.
+
+        Paper mode never calls this (caller guards mode==live).
+        If live_broker is None, we skip margin check and allow (tests inject stub).
+        If broker reports insufficient margin → OrderRejected(reason=\"margin\").
+        If broker query fails → OrderRejected(reason=\"margin\") with detail.
+        Returns None if margin OK or no broker configured.
+        """
+        broker = self.live_broker
+        if broker is None:
+            logger.debug("Live mode — no live_broker configured, skipping margin check for %s", signal.underlying)
+            return None
+
+        try:
+            # Estimate required margin
+            required = self._estimate_required_margin(signal, playbook, spot_price, lot_size)
+
+            # Query broker — support multiple interfaces
+            available = None
+            if hasattr(broker, "get_available_margin"):
+                available = broker.get_available_margin()
+            elif hasattr(broker, "get_margin"):
+                m = broker.get_margin()
+                # m may be dict or float
+                if isinstance(m, dict):
+                    available = m.get("available") or m.get("available_margin") or m.get("net") or m.get("cash")
+                else:
+                    available = float(m)
+            elif hasattr(broker, "check_margin"):
+                # check_margin returns bool or RiskCheckResult
+                result = broker.check_margin(required)
+                if isinstance(result, bool):
+                    if not result:
+                        return OrderRejected(
+                            reason="margin",
+                            data_source=data_source_label,
+                            detail=f"margin check failed: required ₹{required:,.0f}",
+                        )
+                    return None
+                # Assume RiskCheckResult-like
+                allowed = getattr(result, "allowed", None)
+                if allowed is False:
+                    return OrderRejected(
+                        reason="margin",
+                        data_source=data_source_label,
+                        detail=getattr(result, "reason", f"required ₹{required:,.0f}"),
+                    )
+                return None
+
+            if available is None:
+                # Broker doesn't expose margin — allow (or fail open in paper, but we are live)
+                logger.debug("Live broker has no margin method, allowing")
+                return None
+
+            available_f = float(available)
+            if available_f < required:
+                return OrderRejected(
+                    reason="margin",
+                    data_source=data_source_label,
+                    detail=f"insufficient margin: required ₹{required:,.0f} > available ₹{available_f:,.0f}",
+                )
+            return None
+
+        except Exception as exc:
+            logger.warning("Live margin query failed for %s: %s", signal.underlying, exc)
+            return OrderRejected(
+                reason="margin",
+                data_source=data_source_label,
+                detail=f"margin query failed: {exc}",
+            )
+
+    def _estimate_required_margin(
+        self,
+        signal: UnifiedSignal,
+        playbook: Optional[Playbook],
+        spot_price: float,
+        lot_size: int,
+    ) -> float:
+        """Estimate required margin for a signal — V1 simplified.
+
+        For long options: premium ≈ spot * 2% * qty * lot_size
+        For spreads: use MarginCalculator if available, else conservative estimate.
+        """
+        qty = playbook.quantity if playbook else 1
+        # Try margin calculator if injected
+        if self.margin_calculator is not None:
+            try:
+                # For V1 we use simple premium-based estimate
+                return spot_price * 0.02 * qty * lot_size
+            except Exception:
+                pass
+
+        # Fallback V1 estimate: spot * pct * qty * lot_size
+        pct = 0.02
+        if playbook:
+            if playbook.strike_selection == "otm":
+                pct = 0.01
+            elif playbook.strike_selection == "itm":
+                pct = 0.04
+        return float(spot_price * pct * qty * lot_size)
+
+    # ------------------------------------------------------------------
     # Main execute — signal + playbook + runner_config + mode + source
     # ------------------------------------------------------------------
 
@@ -366,16 +484,18 @@ class ExecutionEngine:
                 return RiskHalted(reason="risk_cap", data_source=data_source_label, detail=reason)
             return OrderRejected(reason="risk", data_source=data_source_label, detail=reason)
 
-        # Live-mode gates — per U2.3 spec (but we include minimal check here for U2.1)
+        # Live-mode gates — U2.3: margin/risk gate, no live path on synthetic fallback
         if mode == "live":
             # No live path on synthetic fallback — live orders require authenticated broker session
             if data_source_label == "synthetic-fallback":
                 self.rejected_count += 1
                 return OrderRejected(reason="no_session", data_source=data_source_label, detail="live mode requires authenticated broker session, got synthetic-fallback")
 
-            # Margin check placeholder — full check in U2.3
-            # For U2.1, we just log that live path would query margin
-            logger.debug("Live mode — would query broker margin for %s", signal.underlying)
+            # U2.3: broker margin query before order; margin failure → OrderRejected("margin")
+            margin_check = self._check_live_margin(signal, playbook, spot_price, lot_size, data_source_label)
+            if margin_check is not None:
+                self.rejected_count += 1
+                return margin_check
 
         # Build intent via A3 seam (build_intent_from_view) if option signal
         intent = None

@@ -12,13 +12,13 @@
 |---|---|---|---|
 | P0 — Merge gate (dev branch) | U0.1–U0.2 | 1h | 2 |
 | P1 — Playbook entity + API | U1.1–U1.5 | 2d | 5 |
-| P2 — Execution engine | U2.1–U2.4 | 2d | 2 |
+| P2 — Execution engine | U2.1–U2.4 | 2d | 4 |
 | P3 — Portfolio integration | U3.1–U3.4 | 2.5d | 0 |
 | P4 — UI (Playbooks + Manual Book tabs) | U4.1–U4.3 | 1.5d | 0 |
 | P5 — Deprecate Options tab | U5.1–U5.2 | 0.5d | 0 |
 
 **Total ≈ 8 working days.** Critical path: U1.1 → U2.1 → U3.2 → U4.2.
-Everything else parallelises. **P0 complete, P1 complete, U2.1-U2.2 DONE — 9/13 tasks DONE.**
+Everything else parallelises. **P0 complete, P1 complete, P2 complete (U2.1-U2.4 DONE) — 11/13 tasks DONE.**
 
 ---
 
@@ -165,19 +165,25 @@ Fixes in `src/backtest/forward/options_bridge.py`:
 
 **Tests:** `tests/engine/test_exit_precedence.py` — 8 PASS: stop beats target (ExitPolicy), stop beats flip (risk before signal), DTE beats flip (1d expiry vs flip), emergency overrides all (UnifiedExecutionEngine circuit_breaker tier 0), same-bar impossible (_blocked_reentry True + _should_reenter False on exit bar regardless of reenter=True), next-bar allowed (blocked False next bar, should_reenter True, _reentries_today increments), max_reentries_per_day honoured (max=1 blocks second re-entry same day), engine EXIT_PRECEDENCE constants order emergency(0) > stop(1) > target(2) > DTE(3) > flip(4).
 
-### ⬜ U2.3 — Live-mode margin/risk gate
+### ✅ U2.3 — Live-mode margin/risk gate
 
-**Effort:** 0.5d · **Depends on:** U2.1
+**Effort:** 0.5d · **Depends on:** U2.1 · **Status:** DONE (2026-09-16, commit pending)
 
 `mode=live` path: broker margin query before order; margin failure →
 `OrderRejected("margin")`. No live path exists on synthetic fallback — live
 orders require an authenticated broker session, else `OrderRejected("no_session")`.
 
-**Tests:** margin reject; no-session reject; paper mode never queries margin.
+Implemented in `src/backtest/engine/execution_engine.py`:
+- `__init__` now accepts `live_broker` + `margin_calculator` — paper mode never touches live_broker.
+- `_check_live_margin(signal, playbook, spot, lot_size, data_source)` queries broker via `get_available_margin()` / `get_margin()` / `check_margin()` interfaces (supports multiple broker shapes), estimates required margin via `_estimate_required_margin` (spot×pct×qty×lot_size, pct 2%/1%/4% per moneyness).
+- `execute()` live path: first checks synthetic-fallback → OrderRejected(no_session), then margin gate → OrderRejected(margin) if insufficient, else Fill.
+- Paper path never calls live_broker.
 
-### ⬜ U2.4 — Strategy adapter for the engine
+**Tests:** `tests/engine/test_live_margin_gate.py` — 6 PASS: margin reject (stub insufficient → OrderRejected margin), no-session reject (mstock no session → synthetic-fallback → OrderRejected no_session), paper never queries margin (broker 0 margin but paper → Fill, queried False), sufficient margin allows fill (live:mstock mock → Fill), no broker configured allows fill (skip check), check_margin interface bool false → margin reject.
 
-**Effort:** 0.5d · **Depends on:** U2.1
+### ✅ U2.4 — Strategy adapter for the engine
+
+**Effort:** 0.5d · **Depends on:** U2.1 · **Status:** DONE (2026-09-16, commit pending)
 
 `generate_market_view` already emits the signal; add a thin adapter so any
 equity strategy (`generate_signals`) can also feed the engine with a
@@ -185,8 +191,15 @@ normalized `{direction, instrument_hint, confidence}` signal — the
 plug-and-play contract from the user's point 3. Options vs swing is decided
 by playbook/runner type, not by strategy code.
 
-**Tests:** one equity strategy (sma_crossover) driven through the engine to a
-paper fill via a stub playbook.
+Implemented `src/backtest/engine/strategy_adapter.py`:
+- `StrategyAdapter.adapt(strategy, candles, underlying, chain_snapshot, strategy_name)` → `UnifiedSignal | None`
+- Tries `generate_market_view` first (options-native) → `UnifiedSignal.option_view`
+- Falls back to `generate_signals` (equity) → normalizes last signal 1/0/-1 to BULLISH/BEARISH/NEUTRAL, builds MarketView + equity_info dual routing (same signal works for options or equity depending on playbook/runner type), confidence 0.8 default.
+- `_resolve_underlying` from strategy params or default NIFTY, `_try_market_view`, `_try_generate_signals`, `_market_view_to_signal`, `_signals_to_unified`
+- Functional wrappers `adapt_strategy`, `adapt_strategy_many`
+- C2 preserved: engine feeds bars+chain, strategy never calls broker APIs.
+
+**Tests:** `tests/engine/test_strategy_adapter.py` — 6 PASS: equity strategy adapted to UnifiedSignal with direction/instrument_hint/confidence + equity_info + market_view, market_view strategy adapted, neutral returns None, equity signal through engine paper fill via stub playbook (U2.4 AC), functional wrapper, options vs swing decided by playbook not strategy (same signal → Fill with options playbook and with loose envelope equity path).
 
 ---
 
