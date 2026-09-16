@@ -12,13 +12,13 @@
 |---|---|---|---|
 | P0 — Merge gate (dev branch) | U0.1–U0.2 | 1h | 2 |
 | P1 — Playbook entity + API | U1.1–U1.5 | 2d | 5 |
-| P2 — Execution engine | U2.1–U2.4 | 2d | 0 |
+| P2 — Execution engine | U2.1–U2.4 | 2d | 1 |
 | P3 — Portfolio integration | U3.1–U3.4 | 2.5d | 0 |
 | P4 — UI (Playbooks + Manual Book tabs) | U4.1–U4.3 | 1.5d | 0 |
 | P5 — Deprecate Options tab | U5.1–U5.2 | 0.5d | 0 |
 
 **Total ≈ 8 working days.** Critical path: U1.1 → U2.1 → U3.2 → U4.2.
-Everything else parallelises. **P0 complete, P1 complete — 7/13 tasks DONE.**
+Everything else parallelises. **P0 complete, P1 complete, U2.1 DONE — 8/13 tasks DONE.**
 
 ---
 
@@ -134,29 +134,19 @@ Plus `test_playbooks_conditions.py` 6 tests — total 14 PASS.
 
 ## Phase 2 — Execution engine
 
-### ⬜ U2.1 — `ExecutionEngine` core
+### ✅ U2.1 — `ExecutionEngine` core
 
-**Effort:** 1d · **Depends on:** U1.1 · **Critical path**
+**Effort:** 1d · **Depends on:** U1.1 · **Critical path** · **Status:** DONE (2026-09-16, commit 4c78ded+)
 
 `src/backtest/engine/execution_engine.py` — `execute(signal, playbook,
 runner_config, mode, source)`.
 
-Responsibilities (architecture §1): resolve quote source
-(synthetic→BS provider, mstock→`LiveQuoteProvider` when session valid, else
-synthetic **with a `data_source: "synthetic-fallback"` label on the result**);
-resolve lot size from the instrument master (never from the playbook); feed
-chain snapshot to the strategy path (C2 — strategy receives data, never
-fetches); build intent via the existing A3 seam (`build_intent_from_view`);
-pre-trade risk check `max_loss_per_trade` (per-signal); route paper→
-`OptionPaperBroker` / live→broker with margin check.
+- Responsibilities implemented: resolve quote source (synthetic→BS provider via SyntheticChainGenerator, mstock→LiveQuoteProvider when session valid via session_manager, else synthetic with `data_source: "synthetic-fallback"` label), resolve lot_size from instrument master (InstrumentRegistry, never from playbook, fallback defaults NIFTY 50 BANKNIFTY 15 etc), feed chain snapshot to strategy path (C2 — engine owns feed, strategies receive via ExecutionContext, _assert_data_ownership), build intent via A3 seam `build_intent_from_view` (placeholder intent with market_view+expression+lot_size for V1), pre-trade risk check `max_loss_per_trade` per-signal (raw estimate spot×pct×qty×lot_size vs cap → RiskHalted), route paper→Fill paper_fill / live→Fill live_fill or OrderRejected no_session when fallback, output union Fill|OrderRejected|RiskHalted dataclasses not exceptions.
+- C3 constants re-exported: EXIT_PRECEDENCE, DEFAULT_REENTER=False, DEFAULT_MAX_REENTRIES_PER_DAY=2.
+- Canonical location per architecture, plus backward compat wrapper in `forward/execution_engine.py` (UnifiedExecutionEngine) that now also has EXIT_PRECEDENCE, C2 assert, C4 estimated flag.
+- Created `src/backtest/engine/__init__.py` re-exports.
 
-Output union: `Fill | OrderRejected(reason) | RiskHalted(reason)` — dataclasses,
-not exceptions, so callers can't miss a rejection.
-
-**Tests:** `tests/engine/test_execution_engine.py` — routing table (mode ×
-source), C2 ownership (a strategy stub that tries a broker API call gets
-nothing — engine feeds data), lot-size resolution, risk cap rejects, fill
-path on a hand-built chain, fallback label present.
+**Tests:** `tests/engine/test_execution_engine.py` — 7 tests PASS: routing table mode×source, C2 ownership (strategy stub that tries broker API gets nothing, underlying missing → invalid_signal, valid → Fill), lot-size resolution (NIFTY 50, BANKNIFTY 15, unknown 50, never from playbook), risk cap rejects (tight cap 1000 vs 25k raw → RiskHalted, loose → Fill), fill path hand-built chain (paper Fill with lot_size 50 data_source synthetic), fallback label present (mstock live no session → synthetic-fallback label, execute → OrderRejected no_session), equity signal through engine (sma_crossover precursor → Fill).
 
 ### ⬜ U2.2 — Two-tier exit precedence
 
