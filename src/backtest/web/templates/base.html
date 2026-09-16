@@ -19,7 +19,7 @@
             <a href="/compare"    class="nav-link" data-key="compare">Compare</a>
             <a href="/forward"    class="nav-link" data-key="forward">Forward Test</a>
             <a href="/portfolio"  class="nav-link" data-key="portfolio">Portfolio</a>
-            <a href="/options"    class="nav-link" data-key="options">Options</a>
+            <a href="/options"    class="nav-link" data-key="options" title="Deprecated — use Portfolio → Playbooks. Kept for chain/Greeks services">Options (deprecated)</a>
             <a href="/data"       class="nav-link" data-key="data">Data</a>
         </div>
         <button id="broker-status" class="broker-status" type="button"
@@ -45,6 +45,7 @@
     <script src="{{ url_for('static', filename='js/components/loader.js') }}"></script>
     <script src="{{ url_for('static', filename='js/broker_status.js') }}"></script>
     <script src="{{ url_for('static', filename='js/broker_auth_modal.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/playbooks.js') }}"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

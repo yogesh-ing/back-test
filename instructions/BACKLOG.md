@@ -220,3 +220,14 @@ Verified by latency tests — 20-runner evaluation completes in <500ms.
 - Halt events are now logged; formal documentation still needed.
 
 > See [`ROADMAP.md`](./ROADMAP.md) for the full phased plan and dependency map.
+### U5.2 — Hard-delete checklist for Options tab  `done` (2026-09-16) — checklist added, deletion pending Q6
+- **When to hard-delete the UI shell:** when Q6 criteria are met — zero new manual-book structures in trailing 14 days AND ≥10 playbook-spawned runners; review at 2 sprints regardless.
+- **Service view survives:** Chain, Greeks, expiry alerts remain as a service view even after UI shell removal — keep chain/Greeks/expiry APIs and views.
+- **Current status:** Deprecated banner added (U5.1 DONE), ledger actions still present as legacy but trades visible on Portfolio. Manual book merged into bucket ledger (U3.2). Flatten closes both books.
+- **Checklist:**
+  - [ ] Monitor manual-book creation rate for 14 days — should be 0 new structures
+  - [ ] Count playbook-spawned runners — need ≥10
+  - [ ] Review at 2 sprints (2026-09-30) regardless of metrics
+  - [ ] Delete UI shell: `src/backtest/web/templates/options.html` + `src/backtest/web/static/js/options.js` + legacy Open Structure modal
+  - [ ] Keep service view: chain, Greeks, expiry APIs (`/api/options/*`) and views
+  - [ ] Update nav to remove Options tab link

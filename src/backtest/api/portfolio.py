@@ -120,6 +120,25 @@ def buckets() -> Tuple[Response, int]:
     return jsonify({"success": True, "buckets": _manager().get_bucket_aggregates()}), 200
 
 
+@portfolio_bp.get("/api/portfolio/audit")
+def audit_log() -> Tuple[Response, int]:
+    """U3.3: audit log with scope filter — paper|live|playbook|dashboard|all.
+
+    Query params: ?scope=paper&limit=100
+    """
+    scope = request.args.get("scope") or None
+    try:
+        limit = int(request.args.get("limit", 100))
+    except (TypeError, ValueError):
+        limit = 100
+    limit = max(1, min(limit, 1000))
+    try:
+        entries = _manager().get_audit_log(scope=scope, limit=limit)
+    except Exception:
+        entries = []
+    return jsonify({"success": True, "audit": entries, "scope": scope or "all"}), 200
+
+
 @portfolio_bp.get("/api/portfolio/runner/<instance_id>")
 def runner_detail(instance_id: str) -> Tuple[Response, int]:
     try:
@@ -190,6 +209,9 @@ def create_runner() -> Tuple[Response, int]:
             mode=data.get("mode") or "paper",
             source=data.get("source") or "synthetic",
             instrument=instrument,
+            playbook_id=data.get("playbook_id"),
+            playbook_version=int(data["playbook_version"]) if data.get("playbook_version") is not None else None,
+            playbook_snapshot=data.get("playbook_snapshot") or data.get("instrument", {}).get("expression"),
         )
         auto_start = bool(data.get("auto_start", True))
         instance_id = _manager().add_runner(config, start=auto_start)

@@ -30,6 +30,7 @@ from backtest.api import (
     portfolio_bp,
     strategies_bp,
 )
+from backtest.api.playbooks import playbooks_bp
 from backtest.api.portfolio import list_instances
 from backtest.api.symbols import symbols_bp
 from backtest.brokers.session_manager import get_session_manager
@@ -345,6 +346,7 @@ def create_app(
     app.register_blueprint(broker_auth_bp)
     app.register_blueprint(data_bp)
     app.register_blueprint(portfolio_bp)
+    app.register_blueprint(playbooks_bp)
 
     # SSE broadcast cadence for the portfolio command center.
     app.config.setdefault("PORTFOLIO_SSE_INTERVAL", 1.0)
