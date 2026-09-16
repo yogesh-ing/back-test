@@ -74,12 +74,16 @@ class Playbook:
     The execution engine (OptionsBridge) owns *how* to execute;
     the Playbook owns *what* to execute.
 
+    Data-ownership rule (C2): strategies never call broker/quote APIs.
+    All bars + chain snapshots flow engine → strategy. Playbook is data,
+    not code — it never fetches market data itself.
+
     Parameters
     ----------
     name:
         Human-readable name (e.g. "NIFTY ATM Bull Spread")
     underlying:
-        Index (NIFTY, BANKNIFTY, etc.)
+        Index (NIFTY, BANKNIFTY, etc.) — option-only V1
     structure_type:
         Either a single structure name, or a dict mapping direction to structure
         (e.g. {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"})
@@ -92,13 +96,18 @@ class Playbook:
         Lots per leg
     exit_config:
         Exit rules (stop_loss_pct, take_profit_pct, neutral_bars, max_bars,
-        min_days_to_expiry, signal_flip, reenter, etc.)
+        min_days_to_expiry, signal_flip, reenter, etc.) — default reenter False
+        is a churn guard (same-bar re-enter churned -₹41,844 on 2026-09-16).
     max_loss_per_trade:
         Max loss in ₹ per signal (risk envelope — normalized across equity/options)
+        — per-SIGNAL envelope, not per-day (per-day is daily_loss_limit breaker).
     description:
         Free-text description
     tags:
         Tags for filtering (e.g. ["conservative", "intraday"])
+    version:
+        Integer version, auto-bumps on PUT — runner snapshots expression at spawn,
+        editing playbook never mutates running runner.
     """
 
     name: str
@@ -112,14 +121,18 @@ class Playbook:
     quantity: int = 1
     exit_config: Dict[str, Any] = field(default_factory=lambda: {
         "signal_flip": True,
+        "stop_loss_pct": 0.5,
+        "take_profit_pct": 1.0,
         "min_days_to_expiry": 1,
+        "reenter": False,
     })
     max_loss_per_trade: Optional[float] = None
     description: str = ""
     tags: List[str] = field(default_factory=list)
     playbook_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    version: str = "1.0"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    version: int = 1
 
     def __post_init__(self) -> None:
         self.name = str(self.name).strip()
@@ -136,6 +149,23 @@ class Playbook:
             raise ValueError(f"delta_target must be in [0.05, 0.95], got {self.delta_target}")
         if self.quantity < 1:
             raise ValueError(f"quantity must be >= 1, got {self.quantity}")
+        # C1: ensure mutable defaults are not shared — default_factory already guarantees,
+        # but we defensively copy if caller passed a list/dict literal that might be shared
+        # (regression test C1 checks two playbooks don't share a list).
+        if self.tags is None:
+            self.tags = []
+        # Ensure version is int (final spec)
+        if isinstance(self.version, str):
+            try:
+                self.version = int(float(self.version))
+            except Exception:
+                self.version = 1
+        # Timestamps — set at creation (user action, not engine path)
+        now = datetime.now(timezone.utc).isoformat()
+        if self.created_at is None:
+            self.created_at = now
+        if self.updated_at is None:
+            self.updated_at = self.created_at
         # Validate structure_type
         if isinstance(self.structure_type, dict):
             for direction, struct in self.structure_type.items():
@@ -163,7 +193,8 @@ class Playbook:
             "description": self.description,
             "tags": list(self.tags),
             "created_at": self.created_at,
-            "version": self.version,
+            "updated_at": self.updated_at,
+            "version": int(self.version),
         }
 
     @classmethod
@@ -177,12 +208,13 @@ class Playbook:
             strike_selection=data.get("strike_selection", "atm"),
             delta_target=float(data.get("delta_target", 0.35)),
             quantity=int(data.get("quantity", 1)),
-            exit_config=dict(data.get("exit_config") or {"signal_flip": True, "min_days_to_expiry": 1}),
+            exit_config=dict(data.get("exit_config") or {"signal_flip": True, "stop_loss_pct": 0.5, "take_profit_pct": 1.0, "min_days_to_expiry": 1, "reenter": False}),
             max_loss_per_trade=data.get("max_loss_per_trade"),
             description=data.get("description", ""),
             tags=list(data.get("tags") or []),
-            created_at=data.get("created_at") or datetime.now(timezone.utc).isoformat(),
-            version=data.get("version", "1.0"),
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
+            version=int(data.get("version", 1)),
         )
 
     def to_expression(self) -> Dict[str, Any]:
@@ -255,7 +287,7 @@ class Playbook:
             "params": {},  # strategy params — caller can override
         }
 
-    def risk_envelope(self, spot_price: float, lot_size: int = 50) -> Dict[str, float]:
+    def risk_envelope(self, spot_price: float, lot_size: int = 50) -> Dict[str, Any]:
         """Calculate the risk envelope for this playbook.
 
         Returns max loss per signal in ₹, normalized across instrument types.
@@ -265,12 +297,17 @@ class Playbook:
         This is the instrument-agnostic risk normalization the consultant
         identified as missing.
 
+        C4: output carries an `estimated: true` flag, rendered in UI next to ₹.
+        V1 uses 2%/1%/4% moneyness model, capped by max_loss_per_trade.
+        Lot size is resolved from instrument master at call time — never stored
+        in playbook (NSE revises lot sizes).
+
         Parameters
         ----------
         spot_price:
             Current underlying spot
         lot_size:
-            Lot size for the underlying
+            Lot size for the underlying (from instrument master, not playbook)
         """
         # For V1: estimate premium as ~2-5% of spot for ATM, less for OTM
         # In production, this would use Black-Scholes with IV.
@@ -295,6 +332,7 @@ class Playbook:
             "lot_size": lot_size,
             "underlying": self.underlying,
             "spot": spot_price,
+            "estimated": True,  # C4: every UI surface labels it "estimated"
         }
 
 

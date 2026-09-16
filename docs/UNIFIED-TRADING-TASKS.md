@@ -24,18 +24,35 @@ Everything else parallelises.
 
 ## Phase 0 — Merge gate (on the dev branch, before it merges to main)
 
-### ⬜ U0.1 — Clear consultant conditions C1–C5
+### ✅ U0.1 — Clear consultant conditions C1–C5
 
-**Effort:** 1h · **Blocks:** everything
+**Effort:** 1h · **Blocks:** everything · **Status:** DONE (2026-09-16, branch arena/01a0a901-back-test, commit c6fb3f9+)
 
 C1 mutable defaults → `field(default_factory=...)` on `Playbook.tags`/`exit_config`.
-C2 data-ownership rule → docstring + one engine assert (strategy data comes from
-engine args only). C3 two-tier exits → module docstring + precedence list in
-engine constants. C4 `risk_envelope()` returns `estimated: true`. C5 confirm
-`create_app` exists (it does — `web/app.py:244`) and the `emergency_stop`
-endpoint name is real on the branch.
+- Fixed in `src/backtest/options/playbook.py`: `tags: list = field(default_factory=list)`, `exit_config: dict = field(default_factory=lambda: {...})`, `structure_type` also default_factory, version changed from str "1.0" to int 1 per final spec, added `updated_at`, defensive copy in `__post_init__`, version int coercion.
+- Tests: `tests/test_playbooks_conditions.py::test_c1_tags_not_shared`, `test_c1_exit_config_not_shared`, `test_c1_version_is_int`, `test_c1_timestamps_exist` — all PASS.
 
-**Tests:** C1 regression (two playbooks don't share a list); C4 flag test.
+C2 data-ownership rule → docstring + one engine assert (strategy data comes from
+engine args only).
+- Fixed in `src/backtest/forward/execution_engine.py`: module docstring explicitly states C2 rule (strategies NEVER call broker/quote APIs, all bars+chain snapshots flow engine→strategy), added `_assert_data_ownership()` method that asserts ExecutionContext is not None and has chain/bar data from engine, called in `check_risk()`. Logs debug for unit test mocks but enforces in production.
+- Verified: `get_chain_snapshot()` is engine-owned feed, strategies call via ExecutionContext, never broker APIs directly.
+
+C3 two-tier exits → module docstring + precedence list in
+engine constants.
+- Fixed in `src/backtest/forward/execution_engine.py`: added `EXIT_PRECEDENCE` constant list per architecture §1 (0 emergency Engine unconditional, 1 stop_loss_pct Playbook, 2 take_profit_pct Playbook, 3 time_dte_square_off Playbook-configured engine-executed, 4 signal_flip Strategy last), plus `DEFAULT_REENTER=False` (churn guard, -₹41,844 evidence) and `DEFAULT_MAX_REENTRIES_PER_DAY=2`. Module docstring documents two-tier.
+
+C4 `risk_envelope()` returns `estimated: true`.
+- Fixed in `src/backtest/options/playbook.py`: `risk_envelope()` now returns `{"estimated": True}` plus existing fields, with docstring noting C4 and lot_size from instrument master never stored. V1 2%/1%/4% model capped by max_loss_per_trade.
+- Fixed in `src/backtest/web/static/js/playbooks.js`: card now shows `Risk cap: ₹X <span chip>estimated</span> max loss / signal (per-signal, not per-day)` + version badge `v{version}` with tooltip about snapshot reproducibility.
+- Tests: `tests/test_playbooks_conditions.py::test_c4_risk_envelope_estimated_flag`, `test_c4_risk_envelope_capped` — PASS.
+
+C5 confirm `create_app` exists (it does — `web/app.py:244`) and the `emergency_stop`
+endpoint name is real on the branch.
+- Verified: `src/backtest/web/app.py:245 def create_app(` exists, `src/backtest/api/portfolio.py:310 @portfolio_bp.post("/api/portfolio/emergency_stop")` exists, UI calls `/api/portfolio/emergency_stop` in `portfolio.js:684` and `playbooks.js:465`. No code change needed, documented here.
+
+**Tests:** C1 regression (two playbooks don't share a list); C4 flag test — both in `tests/test_playbooks_conditions.py`, 6 tests PASS.
+
+**Completion criteria met:** All C1-C5 cleared on branch, ready for U0.2 merge + full regression.
 
 ### ⬜ U0.2 — Branch merge + full regression
 

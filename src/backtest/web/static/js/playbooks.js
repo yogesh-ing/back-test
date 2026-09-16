@@ -57,16 +57,19 @@
     if (exit.reenter) exitBits.push("re-enter on flip");
 
     const tags = (pb.tags || []).map(t => `<span class="chip">${esc(t)}</span>`).join("");
+    // C4: risk_envelope estimated flag — UI must show "estimated" badge next to ₹
+    const riskCap = pb.max_loss_per_trade ? `${fmtMoney(pb.max_loss_per_trade)} <span class="chip" style="background:rgba(245,158,11,0.15); border-color:rgba(245,158,11,0.3); color:#fcd34d;">estimated</span>` : "";
+    const versionBadge = pb.version != null ? `<span class="chip" title="Playbook version — runner snapshots expression at spawn">v${esc(pb.version)}</span>` : "";
 
     return `
       <div class="card playbook-card" data-id="${esc(pb.playbook_id)}">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
           <div>
-            <div style="font-weight:600; font-size:14px;">${esc(pb.name)}</div>
+            <div style="font-weight:600; font-size:14px;">${esc(pb.name)} ${versionBadge}</div>
             <div class="muted" style="font-size:12px;">${esc(pb.underlying)} · ${esc(structLabel)} · ${esc(pb.strike_selection)}${pb.strike_selection === "delta" ? ` Δ${pb.delta_target}` : ""} · ${pb.quantity} lot(s)</div>
             <div class="muted" style="font-size:11px; margin-top:4px;">${esc(pb.description || "")}</div>
             <div class="muted" style="font-size:11px; margin-top:4px;">Exit: ${esc(exitBits.join(", ") || "flip only")}</div>
-            ${pb.max_loss_per_trade ? `<div class="muted" style="font-size:11px;">Risk cap: ${fmtMoney(pb.max_loss_per_trade)} max loss / signal</div>` : ""}
+            ${riskCap ? `<div class="muted" style="font-size:11px;">Risk cap: ${riskCap} max loss / signal (per-signal, not per-day)</div>` : ""}
           </div>
           <div style="display:flex; flex-direction:column; gap:4px;">
             <button class="btn btn-primary btn-small btn-spawn-playbook" data-id="${esc(pb.playbook_id)}" type="button">Deploy</button>
