@@ -462,6 +462,10 @@ class RunnerConfig:
     # flow; {"type": "option", "expression": {...}} routes bars through the
     # options expression layer via an OptionsBridge.
     instrument: Dict[str, Any] = field(default_factory=lambda: {"type": "equity"})
+    # U3.4: playbook snapshot — running runners never mutate on playbook edit
+    playbook_id: Optional[str] = None
+    playbook_version: Optional[int] = None
+    playbook_snapshot: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         self.name = str(self.name).strip()
@@ -1437,6 +1441,10 @@ class StrategyRunner:
                 # A1: the book's most recent MTM, mirrored onto the row so a
                 # card can show option P&L before it is folded into equity (A2).
                 "option_pnl": round(self.last_option_pnl, 2),
+                # U3.4: playbook snapshot version for display
+                "playbook_id": self.config.playbook_id,
+                "playbook_version": self.config.playbook_version,
+                "playbook_snapshot": self.config.playbook_snapshot,
             }
 
     def get_detail(self) -> Dict[str, Any]:

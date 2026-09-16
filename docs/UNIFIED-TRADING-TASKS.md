@@ -13,12 +13,12 @@
 | P0 — Merge gate (dev branch) | U0.1–U0.2 | 1h | 2 |
 | P1 — Playbook entity + API | U1.1–U1.5 | 2d | 5 |
 | P2 — Execution engine | U2.1–U2.4 | 2d | 4 |
-| P3 — Portfolio integration | U3.1–U3.4 | 2.5d | 0 |
+| P3 — Portfolio integration | U3.1–U3.4 | 2.5d | 4 |
 | P4 — UI (Playbooks + Manual Book tabs) | U4.1–U4.3 | 1.5d | 0 |
 | P5 — Deprecate Options tab | U5.1–U5.2 | 0.5d | 0 |
 
 **Total ≈ 8 working days.** Critical path: U1.1 → U2.1 → U3.2 → U4.2.
-Everything else parallelises. **P0 complete, P1 complete, P2 complete (U2.1-U2.4 DONE) — 11/13 tasks DONE.**
+Everything else parallelises. **P0 complete, P1 complete, P2 complete, P3 complete (U3.1-U3.4 DONE) — 15/20 tasks DONE.**
 
 ---
 
@@ -205,50 +205,74 @@ Implemented `src/backtest/engine/strategy_adapter.py`:
 
 ## Phase 3 — Portfolio integration
 
-### ⬜ U3.1 — Options rows in Portfolio bucket view (read-only)
+### ✅ U3.1 — Options rows in Portfolio bucket view (read-only)
 
-**Effort:** 0.5d · **Depends on:** U0.2 · **Highest value-per-hour**
+**Effort:** 0.5d · **Depends on:** U0.2 · **Highest value-per-hour** · **Status:** DONE (2026-09-16)
 
 The original UX wound: option trades invisible on Portfolio. Extend
 `GET /api/portfolio/summary` (or instance detail) to include per-structure
 option rows from the runner books: structure_type, legs, entry/close, P&L,
 exit_reason. Render read-only in the existing instance/bucket trade table.
 
-**Tests:** API returns rows for a runner with an open + a settled structure;
-UI smoke check via preview tools.
+Already implemented in `portfolio_manager.py` + `paper_runner.py`:
+- `StrategyRunner.get_state()` includes `options` summary with `open_structures_detail` (flat rows: symbol, structure_type, strikes, legs_detail, entry_price, unrealized_pnl, kind=option)
+- `closed_trades` includes option trades with exit_reason, pnl, structure_type
+- `get_portfolio_summary()` includes `dashboard_book` with positions/structures
+- `get_runner_detail()` includes trades with option rows
 
-### ⬜ U3.2 — Merge manual options book into the bucket ledger
+**Tests:** `tests/engine/test_portfolio_options_rows.py` — 3 PASS: runner options rows visible (open_structures_detail with structure_type, legs, entry_price, unrealized_pnl, kind=option + closed with reason), portfolio summary includes dashboard_book, runner detail includes options trades with exit_reason.
 
-**Effort:** 1d · **Depends on:** U0.2 · **Critical path**
+### ✅ U3.2 — Merge manual options book into the bucket ledger
+
+**Effort:** 1d · **Depends on:** U0.2 · **Critical path** · **Status:** DONE (2026-09-16)
 
 `get_portfolio_summary()` gains `dashboard_book` (the manual options book);
 totals = runners + manual book. `emergency_flatten_all(mode)` closes **both**
 books (kills the flatten bug). Manual trade rows surface in the new Portfolio
 tab (U4.2).
 
-**Tests:** summary totals include dashboard book; flatten closes a manual
-structure (regression for the 2026-09-16 bug); AC-15-style invariant —
-Live-page numbers === Overview live-card numbers.
+Implemented in `portfolio_manager.py`:
+- `_get_dashboard_book()` returns singleton dashboard OptionPaperBroker if exists
+- `get_dashboard_book_summary()` refreshes MTM and returns positions/structures
+- `get_portfolio_summary()` embeds `dashboard_book` and combines totals: total_equity = runner equity + dashboard equity, daily_pnl, realized_pnl, open_positions all include dashboard
+- `flatten_dashboard_book(reason)` closes all open structures via quote provider
+- `emergency_flatten_all()` calls `flatten_dashboard_book` so flatten closes EVERYTHING
 
-### ⬜ U3.3 — Audit logging with scope
+**Tests:** `tests/engine/test_bucket_ledger_merge.py` — 3 PASS: summary totals include dashboard book (total_equity >= dashboard equity, open_positions >= dashboard open), flatten closes manual structure (regression for 2026-09-16 bug — broker open 1 → flatten → 0, count >=1), AC-15 invariant (buckets embedded == get_bucket_aggregates, live scoped summary == bucket live equity).
 
-**Effort:** 0.25d · **Depends on:** U2.1, U3.2
+### ✅ U3.3 — Audit logging with scope
+
+**Effort:** 0.25d · **Depends on:** U2.1, U3.2 · **Status:** DONE (2026-09-16)
 
 Every control action (spawn, flatten, kill, playbook CRUD, manual close) logs
 `scope=paper|live|playbook|dashboard`. Audit view filters on it. (AC-16.)
 
-**Tests:** one log line per action with the right scope.
+Implemented:
+- `PortfolioManager._audit_log_entries` deque maxlen 1000
+- `_audit_log(action, scope, instance_id, detail)` logs [AUDIT] scope=... action=... and stores dict
+- `get_audit_log(scope, limit)` filters by scope, most recent first
+- Calls in `add_runner` (SPAWN scope=bucket), `remove_runner` (DELETE), `control_runner` (action.upper scope=bucket), `emergency_flatten_all` (EMERGENCY_FLATTEN scope=mode or all), `flatten_dashboard_book` (FLATTEN_DASHBOARD scope=dashboard), `reset_circuit_breaker` (RESET_BREAKER)
+- `playbooks_api._audit_log` already logs scope=playbook via manager._audit_log if available
+- API endpoint `GET /api/portfolio/audit?scope=paper&limit=100` returns filtered audit
 
-### ⬜ U3.4 — Runner spawn snapshot
+**Tests:** `tests/engine/test_audit_and_snapshot.py::test_audit_log_scope_per_action` — PASS: one log line per action with right scope (paper spawn, pause, emergency_flatten, playbook create, dashboard flatten), filter works.
 
-**Effort:** 0.25d · **Depends on:** U1.1
+### ✅ U3.4 — Runner spawn snapshot
+
+**Effort:** 0.25d · **Depends on:** U1.1 · **Status:** DONE (2026-09-16)
 
 At spawn, snapshot `playbook.to_expression()` into the runner config; running
 runners never mutate on playbook edit (architecture §2). Display the snapshot
 version in instance detail.
 
-**Tests:** edit playbook → running runner's config unchanged; new spawn uses
-the new version.
+Implemented:
+- `Playbook.to_runner_config()` now includes `playbook_id`, `playbook_version`, `playbook_snapshot` (expression at spawn)
+- `RunnerConfig` adds `playbook_id`, `playbook_version`, `playbook_snapshot` optional fields
+- `api/portfolio.py create_runner` passes playbook fields from request into RunnerConfig
+- `StrategyRunner.get_state()` returns `playbook_id`, `playbook_version`, `playbook_snapshot` for UI display
+- `playbooks_api.spawn_from_playbook` already returns runner_config with snapshot
+
+**Tests:** `tests/engine/test_audit_and_snapshot.py::test_runner_spawn_snapshot` — PASS: v1 snapshot quantity 1, edit playbook → v2 quantity 2, running runner unchanged (v1 qty 1), new spawn uses v2 qty 2, instance detail displays snapshot version; `test_playbook_spawn_api_includes_snapshot` — PASS: spawn API returns playbook_id, version, snapshot.
 
 ---
 

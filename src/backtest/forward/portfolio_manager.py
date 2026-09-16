@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from backtest.forward.feed import SyntheticFeed
 from backtest.forward.paper_runner import (
@@ -97,6 +98,9 @@ class PortfolioManager:
             on_tick_end=self._on_tick_end,
         )
         self._auto_start_feed = auto_start_feed
+
+        # U3.3: audit log with scope — every control action logs scope=paper|live|playbook|dashboard
+        self._audit_log_entries: Deque[Dict[str, Any]] = deque(maxlen=1000)
 
     # ------------------------------------------------------------------ #
     # Bucket helpers (C2: derived-not-duplicated)
@@ -202,6 +206,36 @@ class PortfolioManager:
                 **counts,
             }
         return buckets
+
+    # ------------------------------------------------------------------
+    # U3.3 — Audit logging with scope (AC-16)
+    # ------------------------------------------------------------------
+
+    def _audit_log(self, action: str, scope: str = "paper", instance_id: Optional[str] = None, detail: str = "") -> None:
+        """Log audit entry with scope — paper|live|playbook|dashboard.
+
+        Every control action (spawn, flatten, kill, playbook CRUD, manual close)
+        logs scope. Audit view filters on it.
+        """
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "action": action,
+            "scope": scope,
+            "instance_id": instance_id,
+            "detail": detail,
+        }
+        self._audit_log_entries.append(entry)
+        logger.info("[AUDIT] scope=%s action=%s instance_id=%s detail=%s", scope, action, instance_id or "-", detail)
+
+    def get_audit_log(self, scope: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return audit log entries, optionally filtered by scope."""
+        entries = list(self._audit_log_entries)
+        if scope:
+            scope = scope.lower()
+            entries = [e for e in entries if e.get("scope") == scope]
+        # Most recent first
+        entries = entries[::-1]
+        return entries[:limit]
 
     def _check_broker_connected(self) -> bool:
         """C6: Check if the broker session is authenticated.
@@ -351,6 +385,10 @@ class PortfolioManager:
 
         if count:
             logger.critical("Dashboard book flattened: %d structures (%s)", count, reason)
+            try:
+                self._audit_log(f"FLATTEN_DASHBOARD {reason}", scope="dashboard", detail=f"closed={count}")
+            except Exception:
+                pass
         return count
 
     # ------------------------------------------------------------------ #
@@ -391,6 +429,11 @@ class PortfolioManager:
                 config.allocated_capital,
                 len(self._runners),
             )
+            # U3.3 audit
+            try:
+                self._audit_log(f"SPAWN {runner.config.name}", scope=bucket, instance_id=runner.instance_id, detail=f"strategy={config.strategy_name} capital={config.allocated_capital}")
+            except Exception:
+                pass
             return runner.instance_id
 
     def remove_runner(self, instance_id: str) -> bool:
@@ -414,6 +457,10 @@ class PortfolioManager:
                 self._bucket_day_start[bucket] = 0.0
                 self._bucket_day[bucket] = None
             logger.info("Runner removed: %s (bucket=%s)", runner.config.name, bucket)
+            try:
+                self._audit_log(f"DELETE {runner.config.name}", scope=bucket, instance_id=instance_id, detail=f"bucket={bucket}")
+            except Exception:
+                pass
             return True
 
     def get_runner(self, instance_id: str) -> Optional[StrategyRunner]:
@@ -439,7 +486,13 @@ class PortfolioManager:
     def control_runner(self, instance_id: str, action: str) -> Dict[str, Any]:
         with self._lock:
             runner = self._control(instance_id, action)
-            return runner.get_state()
+            state = runner.get_state()
+            try:
+                bucket = self._runner_bucket(runner)
+                self._audit_log(f"{action.upper()} {runner.config.name}", scope=bucket, instance_id=instance_id, detail=f"action={action}")
+            except Exception:
+                pass
+            return state
 
     def pause_all(self, mode: Optional[str] = None) -> int:
         """Pause runners. ``mode=None`` pauses all; mode='paper'|'live' pauses only that bucket."""
@@ -561,6 +614,11 @@ class PortfolioManager:
                 count,
                 len(targets),
             )
+            try:
+                scope = mode or "all"
+                self._audit_log(f"EMERGENCY_FLATTEN {reason}", scope=scope, detail=f"closed={count} mode={scope}")
+            except Exception:
+                pass
             self._evaluate_risk()
             return count
 
@@ -597,6 +655,10 @@ class PortfolioManager:
                     self._bucket_halt_mode[m] = None
                     self._bucket_halted_ts[m] = None
                 logger.info("Circuit breaker reset (all buckets)")
+                try:
+                    self._audit_log("RESET_BREAKER all", scope="all", detail="master reset")
+                except Exception:
+                    pass
             else:
                 # Scoped reset: only one bucket
                 mode = str(mode).strip().lower()
@@ -613,6 +675,10 @@ class PortfolioManager:
                     self.halt_mode = None
                     self.halted_ts = None
                 logger.info("Circuit breaker reset (bucket=%s)", mode)
+                try:
+                    self._audit_log(f"RESET_BREAKER {mode}", scope=mode, detail=f"bucket={mode}")
+                except Exception:
+                    pass
             self._refresh_anchors()
 
     # ------------------------------------------------------------------ #

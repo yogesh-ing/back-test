@@ -175,7 +175,12 @@ class Playbook:
         symbols: Optional[List[str]] = None,
         name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Full spawn payload — POST /api/portfolio/runner/create accepts this."""
+        """Full spawn payload — POST /api/portfolio/runner/create accepts this.
+
+        U3.4: snapshot playbook.to_expression() into runner config; running runners
+        never mutate on playbook edit. Snapshot version displayed in instance detail.
+        """
+        expression = self.to_expression()
         return {
             "name": name or self.name,
             "strategy": strategy_name,
@@ -188,8 +193,12 @@ class Playbook:
             "source": source,
             "instrument": {
                 "type": "option",
-                "expression": self.to_expression(),
+                "expression": expression,
             },
+            # U3.4: snapshot — playbook_id, version, expression at spawn time
+            "playbook_id": self.playbook_id,
+            "playbook_version": self.version,
+            "playbook_snapshot": expression,
             "params": {},
         }
 
