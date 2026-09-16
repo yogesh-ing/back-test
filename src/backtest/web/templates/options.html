@@ -1,13 +1,23 @@
 {% extends "base.html" %}
-{% block title %}Options Trading{% endblock %}
+{% block title %}Options Trading (Deprecated){% endblock %}
 
 {% block content %}
+<div class="card" style="padding:16px; margin-bottom:16px; border-left:4px solid #f59e0b; background: rgba(245,158,11,0.08);">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
+        <div>
+            <strong>⚠️ Deprecated — Moved to Portfolio</strong><br>
+            <span class="muted">This page is now a <strong>service view</strong> (chain, Greeks, expiry). Manual trades here are visible on <a href="/portfolio">Portfolio → Manual Options Book</a> and flattened by Emergency Flatten. For reusable configs, use <a href="/portfolio">Portfolio → Playbooks</a>. This tab will be removed once Playbooks cover all use cases.</span>
+        </div>
+        <a href="/portfolio" class="btn btn-primary btn-small">Go to Portfolio →</a>
+    </div>
+</div>
+
 <div class="page-header">
-    <h1>🎯 Options Trading</h1>
-    <div class="muted">Paper trading book — multi-leg structures, portfolio Greeks, expiry alerts.</div>
+    <h1>🎯 Options Trading — Service View (Chain / Greeks / Expiry)</h1>
+    <div class="muted">Paper trading book — multi-leg structures, portfolio Greeks, expiry alerts. <strong>Machinery kept as services; ledger merged into Portfolio.</strong></div>
     <div style="display:flex; align-items:center; gap:12px; margin-top:8px;">
         <span id="opt-quote-source" class="opt-quote-badge" title="Where option quotes come from — synthetic Black-Scholes or live mStock LTP">—</span>
-        <button id="openTradeBtn" class="btn btn-primary">＋ Open Structure</button>
+        <button id="openTradeBtn" class="btn btn-primary">＋ Open Structure (legacy)</button>
         <button id="nudgeUpBtn" class="btn btn-small" title="Nudge NIFTY spot up 100 pts">▲ Spot +100</button>
         <button id="nudgeDownBtn" class="btn btn-small" title="Nudge NIFTY spot down 100 pts">▼ Spot −100</button>
     </div>

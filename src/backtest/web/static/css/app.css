@@ -789,3 +789,46 @@ body[data-active="portfolio"] .nav-link[data-key="portfolio"] {
   color: #f87171;
   font-size: 0.85rem;
 }
+
+/* ===========================================================================
+   Playbooks — Plug-and-Play Option Configs (Options Tab Redesign Fix)
+   =========================================================================== */
+
+.playbooks-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.playbook-card {
+  border-left: 3px solid var(--accent, #8b5cf6);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.playbook-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.15);
+}
+
+.playbook-card .chip {
+  background: rgba(139,92,246,0.12);
+  border: 1px solid rgba(139,92,246,0.25);
+  color: #a78bfa;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+}
+
+.btn-small {
+  padding: 4px 10px;
+  font-size: 0.78rem;
+}
+
+.pcc-scope-banner {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(59,130,246,0.08);
+  border: 1px solid rgba(59,130,246,0.2);
+  font-size: 0.85rem;
+}

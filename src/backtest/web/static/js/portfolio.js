@@ -245,8 +245,24 @@
     // C2: an option runner holds whole structures, not equity tickets — show
     // each leg (trading symbol · strike · side) rather than three dashes, and
     // fall back to one summarising row when the leg detail is unavailable.
+    // Also include dashboard book (second book) — fix for invisible trades.
     const rows = [];
     const legPrice = (v) => (v == null ? "—" : Number(v).toFixed(2));
+
+    // Dashboard book (manual options tab) — now visible in portfolio
+    if (p.dashboard_book && p.dashboard_book.exists && p.dashboard_book.positions && p.dashboard_book.positions.length) {
+      const db = p.dashboard_book;
+      (db.positions || []).forEach((pos) => {
+        rows.push(
+          '<tr class="matrix-row-option"><td>Manual Book</td><td>' + (pos.trading_symbol || "") + '</td><td>' + (pos.side || "") + '</td>' +
+          '<td class="num">' + (pos.quantity || 0) + ' × ' + (pos.lot_size || 0) + '</td>' +
+          '<td class="num">' + legPrice(pos.entry_price) + '</td>' +
+          '<td class="num">' + legPrice(pos.current_price) + '</td>' +
+          '<td class="num ' + (pos.unrealized_pnl >= 0 ? "pnl-pos" : "pnl-neg") + '">' + (pos.unrealized_pnl ? "₹" + Math.round(pos.unrealized_pnl).toLocaleString("en-IN") : "—") +
+          ' <span class="muted">(' + (pos.underlying || "") + ' ' + (pos.strike || "") + ' ' + (pos.option_type || "") + ')</span></td></tr>');
+      });
+    }
+
     p.runners.filter((r) => r.open_positions > 0).forEach((r) => {
       const structures = OptionView.openStructures(r);
       if (!structures.length) {
@@ -358,6 +374,20 @@
     });
   }
 
+  // ---------------------------------------------------------------- dashboard book banner
+  function renderDashboardBookBanner(p) {
+    const banner = $("dashboard-book-banner");
+    const countEl = $("db-book-count");
+    if (!banner || !countEl) return;
+    const db = p.dashboard_book;
+    if (db && db.exists && db.open_structures > 0) {
+      banner.hidden = false;
+      countEl.textContent = `${db.open_structures} structure(s), ${db.open_positions} leg(s) — Equity ₹${Math.round(db.equity).toLocaleString("en-IN")} (from Options tab)`;
+    } else {
+      banner.hidden = true;
+    }
+  }
+
   // ---------------------------------------------------------------- render
   function render(p) {
     // SSE broadcasts the combined snapshot — drop other buckets on a scoped page.
@@ -369,6 +399,7 @@
     renderMatrix(p);
     renderAggregatePositions(p);
     renderChart(p);
+    renderDashboardBookBanner(p);
     // T2.5: Hide Emergency Flatten on Paper page (paper = no real money at risk).
     const emergencyBtn = $("btn-emergency");
     if (emergencyBtn) emergencyBtn.hidden = (PAGE_MODE === "paper");
@@ -684,6 +715,16 @@
         el.addEventListener("input", syncOptionForm);
       });
     $("spawn-submit").addEventListener("click", submitSpawn);
+
+    // Expose for Playbooks UI — allows playbook spawn to pre-fill modal
+    window.PortfolioSpawn = {
+      loadSpawnForm,
+      syncOptionForm,
+      renderSpawnParams,
+      submitSpawn,
+    };
+    // Backward compat: some playbooks.js checks for loadSpawnForm globally
+    window.loadSpawnForm = loadSpawnForm;
 
     // Tabs
     document.querySelectorAll(".tab").forEach((t) =>

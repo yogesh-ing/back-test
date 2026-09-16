@@ -1,6 +1,17 @@
 {% set center_mode = mode or "" %}
 <div class="portfolio-page" id="portfolio-page" data-mode="{{ center_mode }}">
 
+    <!-- Unified model banner — explains new architecture -->
+    <div id="unified-banner" class="card" style="padding: 12px 16px; margin-bottom: 12px; border-left: 4px solid #8b5cf6; background: rgba(139,92,246,0.08);">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
+            <div>
+                <strong>🔗 Unified Execution</strong> — Strategy owns <em>WHAT</em>, Engine owns <em>HOW</em> + paper/live routing.
+                <span class="muted">Option trades from any source (runners or manual) now appear here. Use <strong>Playbooks</strong> tab below for plug-and-play option configs.</span>
+            </div>
+            <button id="btn-dismiss-unified" class="btn btn-ghost btn-small" type="button">Dismiss</button>
+        </div>
+    </div>
+
     <!-- Circuit breaker / alert banner -->
     <div id="cb-banner" class="cb-banner" hidden>
         <span class="cb-icon">🚨</span>
@@ -13,6 +24,20 @@
 
     <!-- Concentration warnings -->
     <div id="warning-banner" class="warning-banner" hidden></div>
+
+    <!-- Dashboard book alert — shows when manual option trades exist -->
+    <div id="dashboard-book-banner" class="card" hidden style="padding: 12px 16px; margin-bottom: 12px; border-left: 4px solid #f59e0b; background: rgba(245,158,11,0.08);">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+                <strong>📦 Manual Options Book</strong> — <span id="db-book-count">0 structures</span> from Options tab (legacy).
+                <span class="muted">These are now visible here and will be flattened by Emergency Flatten. Migrate to Playbooks for reusable configs.</span>
+            </div>
+            <div style="display:flex; gap:8px;">
+                <button id="btn-view-dashboard-book" class="btn btn-small" type="button">View</button>
+                <button id="btn-flatten-dashboard-book" class="btn btn-small btn-warn" type="button">Flatten Manual Book</button>
+            </div>
+        </div>
+    </div>
 
     <!-- Header / global metrics -->
     <div class="card pcc-header">
@@ -126,6 +151,8 @@
         <div class="tabs">
             <button class="tab active" data-tab="equity" type="button">Combined Equity Curve</button>
             <button class="tab" data-tab="positions" type="button">Aggregate Open Positions</button>
+            <button class="tab" data-tab="playbooks" type="button">📚 Playbooks (Option Plug-and-Play)</button>
+            <button class="tab" data-tab="dashboard-book" type="button">📦 Manual Options Book</button>
             <button class="tab" data-tab="log" type="button">Master Audit Log</button>
         </div>
         <div class="tab-panel" id="tab-equity">
@@ -139,6 +166,26 @@
                     <tbody id="aggregate-positions"></tbody>
                 </table>
             </div>
+        </div>
+        <div class="tab-panel" id="tab-playbooks" hidden>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <div>
+                    <h3 style="margin:0;">Playbooks — Plug-and-Play Option Configs</h3>
+                    <div class="muted">Declarative configs: structure, strikes policy, exits, sizing. Spawn runners FROM playbooks. No new page — embedded.</div>
+                </div>
+                <button id="btn-create-playbook" class="btn btn-primary btn-small" type="button">＋ New Playbook</button>
+            </div>
+            <div id="playbooks-list" class="playbooks-grid">Loading playbooks…</div>
+        </div>
+        <div class="tab-panel" id="tab-dashboard-book" hidden>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <div>
+                    <h3 style="margin:0;">Manual Options Book (Legacy — from Options tab)</h3>
+                    <div class="muted">This is the second book that was invisible before. Now merged — visible here, flattened by Emergency Flatten.</div>
+                </div>
+                <button id="btn-refresh-dashboard-book" class="btn btn-small" type="button">Refresh</button>
+            </div>
+            <div id="dashboard-book-content">Loading…</div>
         </div>
         <div class="tab-panel" id="tab-log" hidden>
             <div id="audit-log" class="audit-log"></div>
