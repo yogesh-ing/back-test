@@ -30,17 +30,18 @@ Market Data (OHLCV candles)
 └─────────────────┘
 ```
 
-## Five Modes
+## Modes
 
 | Mode | What it does |
 |------|-------------|
 | **Backtest** | Run a strategy on historical data, see results |
 | **Compare** | Run multiple strategies side-by-side on the same data |
-| **Forward Test** | Paper-trade a strategy in simulated real-time — the replay clock runs on the server, so it keeps advancing with the tab closed |
+| **Forward Test** | Paper-trade a strategy in simulated real-time — the replay clock runs on the server, so it keeps advancing with the tab closed. Equity *and* options: the forward engine's options bridge converts a strategy's directional view into multi-leg option structures on an isolated paper book |
 | **Portfolio** | Run multiple strategies simultaneously under shared risk limits |
 | **Portfolio (Live)** | Live-scoped command center — only real-money positions |
 | **Portfolio (Paper)** | Paper sandbox — simulated fills, no risk |
 | **Options** | Trade multi-leg NIFTY option structures (long call/put, bull call spread, bear put spread) with Greeks, fees, and expiry handling — paper or live |
+| **Options Backtest** | *(Python API)* Model-driven options backtesting: the same expression layer (view → selector → structure → intent) run bar-by-bar over a candle frame with synthetic Black-Scholes pricing — no UI tab yet |
 | **Dashboard** | Overview of all strategies and their status |
 
 ## Built-In Strategies
@@ -52,8 +53,9 @@ Market Data (OHLCV candles)
 | **RSI Reversion** | Buy oversold, sell overbought (mean-reversion) |
 | **Donchian Breakout** | Buy on new highs, sell on new lows (momentum) |
 | **Price Move** | Buy/sell based on price movement threshold (e.g. ₹5) |
+| **Directional Options** | EMA momentum → bullish/bearish `MarketView` — feeds the options expression layer (long call/put, spreads) |
 
-## Options Trading (Paper & Live)
+## Options Trading (Paper, Live & Backtest)
 
 Trade NIFTY/BANKNIFTY **index options** through the same pipeline: a
 strategy's directional view is converted into a multi-leg option structure
@@ -68,14 +70,37 @@ MarketView (bullish/bearish) → strike + expiry selection → TradeIntent
 ```
 
 - **Paper:** `/options` dashboard — positions, structures, Greeks grid, expiry alerts
+- **Forward (automated):** the forward engine's options bridge trades
+  structures on an isolated paper book, one open structure at a time;
+  open structures persist across server restarts and are rehydrated on
+  startup
 - **Live:** `LiveOptionTrader(dry_run=True)` first — logs payloads, places nothing
-- **Docs:** [docs/OPTIONS-PAPER-LIVE.md](docs/OPTIONS-PAPER-LIVE.md)
+- **Docs:** [docs/OPTIONS-PAPER-LIVE.md](docs/OPTIONS-PAPER-LIVE.md),
+  [docs/OPTIONS-BACKTEST-PRD.md](docs/OPTIONS-BACKTEST-PRD.md)
 
 **Status:** the options PRD is complete (9/9 phases) — instrument model,
 expression layer, paper trading, live trading, Greeks & margin, the full
-statutory fee stack, expiry handling, the `/options` dashboard, and an
-end-to-end integration suite. 226 options tests across 8 modules plus 52
-instrument-model tests.
+statutory fee stack, expiry handling, the `/options` dashboard, persistence,
+forward-test wiring, and an end-to-end integration suite.
+
+### Options Backtesting (model-driven)
+
+The options expression layer now has a production backtest driver — the
+same view → selector → structure path the paper/live books use, run
+bar-by-bar over historical candles with deterministic synthetic pricing:
+
+- **Deterministic by construction**: quotes are pinned to bar time
+  (`set_reference`), structure/position IDs are monotonic counters, and
+  identical runs produce byte-identical trade logs and equity curves
+- **4 Phase-A structures**: long call, long put, bull call spread,
+  bear put spread (the other four need a chain-shape refactor — Phase B)
+- **Exits are labelled**: `auto_square_off`, `expiry_settlement`,
+  `strategy_signal` — so trade logs explain *why* every position closed
+- **All results are model results**: outputs carry the disclaimer that
+  they price synthetic Black-Scholes, not historical market premiums
+
+See [docs/OPTIONS-BACKTEST-PRD.md](docs/OPTIONS-BACKTEST-PRD.md) and the
+task tracker [docs/OPTIONS-BACKTEST-TASKS.md](docs/OPTIONS-BACKTEST-TASKS.md).
 
 ## Data Sources
 
@@ -100,6 +125,7 @@ Real market data for **201 NIFTY 200 stocks** (467K+ daily bars, Jan 2020 – Au
 | `trades` | Matched round-trip trades |
 | `equity_curve` | Mark-to-market equity snapshots |
 | `strategy_signals` | Audit log of every signal generated |
+| `trade_structures` | Durable options book — open/closed multi-leg structures with leg snapshots (survives restarts) |
 
 ## Project Structure
 
@@ -107,12 +133,12 @@ Real market data for **201 NIFTY 200 stocks** (467K+ daily bars, Jan 2020 – Au
 src/backtest/
 ├── data/           # Data sources (synthetic, csv, mstock)
 ├── strategy/       # Strategy base class + registry
-├── strategies/     # Built-in strategies (SMA, RSI, Donchian, Buy&Hold)
-├── engine/         # Backtest engine (trade simulation, metrics)
+├── strategies/     # Built-in strategies (SMA, RSI, Donchian, Buy&Hold, PriceMove, DirectionalOptions)
+├── engine/         # Backtest engine (trade simulation, metrics, options backtest driver)
 ├── forward/        # Forward testing (paper trading)
 ├── simulator/      # Costs, slippage, fills, risk — incl. option fee stack
 ├── options/        # Options trading: selectors, structures, paper/live
-│                   #   execution, Greeks, margin, fees, expiry
+│                   #   execution, Greeks, margin, fees, expiry, persistence
 ├── instruments/    # Instrument model (equity, option, expiry calendar)
 ├── db/             # SQLAlchemy models + DB manager
 ├── web/            # Flask web app (UI + API)
@@ -141,6 +167,17 @@ PYTHONPATH=src python -m backtest.web.app --host 0.0.0.0 --port 5000 --source db
 ```
 
 Open `http://localhost:5000` → Backtest tab → Pick a strategy → Hit **Run Backtest**.
+
+## Tests
+
+```bash
+cd src && python -m pytest ../tests/ -q          # full suite (2,100+ tests)
+cd src && python -m pytest ../tests/ -q -k options   # options slice only
+```
+
+The options layer is Decimal-exact throughout, and the options backtest
+path is deterministic by construction — the suite asserts byte-identical
+results across identical runs.
 
 ## Debugging
 
