@@ -4,6 +4,8 @@
 
 **Sources:** user 3-point redesign analysis · `docs/consultant quest review.md` (dev prototype) · this document = final architecture after consultant answers.
 
+**Task PRD:** [`docs/UNIFIED-TRADING-TASKS.md`](UNIFIED-TRADING-TASKS.md) — decomposed tasks, hours, tests, acceptance criteria.
+
 ---
 
 ## 0. Consultant Sign-off Summary
