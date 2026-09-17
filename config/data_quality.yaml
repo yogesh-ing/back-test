@@ -76,3 +76,27 @@ profiles:
     check_bid_ask: false
     check_last_between_bid_ask: false
     on_failure: warn
+
+# =============================================================================
+# Daily-bar policy (review §3.3 / gap 12c — corporate actions & split gate)
+# =============================================================================
+# Loaded by backtest.data.corporate_actions.calendar_from_config().
+#
+#   * Storage stays RAW; back-adjustment happens at READ time via
+#     AdjustedSource (wired in SourceRegistry for mode='backtest').
+#   * split_suspect_return_pct: |1-day close-to-close return| beyond this is
+#     flagged as a SUSPECTED unadjusted split/bonus for manual confirm.
+#     (NSE price bands make anything over ±20% rare; ±40% is near-certain.)
+# =============================================================================
+
+daily_bar:
+  split_suspect_return_pct: 40.0
+
+  corporate_actions:
+    # Off by default — flip on once data/corporate_actions.csv has rows.
+    # Off ⇒ byte-identical legacy behaviour (no wrapper, no warnings).
+    enabled: false
+    # CSV columns: symbol,ex_date,kind,adjustment_factor[,amount,note]
+    #   split ₹10→₹1: adjustment_factor 0.1   |  bonus 1:1: 0.5
+    #   dividend rows: record amount, keep adjustment_factor 1.0
+    actions_csv: data/corporate_actions.csv

@@ -498,8 +498,16 @@ class TestMarginThroughPipeline:
 
 
 class TestDashboardEndToEnd:
-    def test_summary_endpoint_serves_full_session(self):
-        """Reset the singleton, trade through the pipeline, then hit the API."""
+    def test_summary_endpoint_serves_full_session(self, monkeypatch):
+        """Reset the singleton, trade through the pipeline, then hit the API.
+
+        ``OPTIONS_PERSISTENCE=off`` isolates the run from whatever open
+        structures a previous run left in the database — without it the
+        broker rehydrates them (Gap G4.2 restart survival) and
+        ``open_position_count`` reflects stale rows, not this session.
+        The DB round-trip itself is covered by tests/test_options_persistence.py.
+        """
+        monkeypatch.setenv("OPTIONS_PERSISTENCE", "off")
         from backtest.web.app import create_app
         from backtest.web.options_api import get_option_broker, reset_option_state
 

@@ -218,7 +218,8 @@ class OptionsBridge:
             logger.debug("[options-bridge] entry suppressed on the exit bar")
             return None
 
-        # U2.2: detect re-entry on next bar (last exit flip + reenter true) and enforce max_reentries_per_day
+        # U2.2: detect re-entry on next bar (last exit flip + reenter true)
+        # and enforce max_reentries_per_day
         is_reentry = False
         try:
             is_reentry = self._should_reenter(view)
@@ -238,9 +239,7 @@ class OptionsBridge:
         try:
             return self._execute(view, structure_type, strategy_name)
         except Exception as exc:  # noqa: BLE001 — a bad bar must not kill the runner
-            logger.warning(
-                "[options-bridge] %s execution failed: %s", structure_type, exc
-            )
+            logger.warning("[options-bridge] %s execution failed: %s", structure_type, exc)
             return {"rejected": True, "reason": str(exc)}
 
     def pop_exit_event(self) -> Optional[dict[str, Any]]:
@@ -365,9 +364,7 @@ class OptionsBridge:
                 total = Decimal("0")
                 for leg in legs:
                     price = getattr(leg, price_attr, Decimal("0")) or Decimal("0")
-                    total += price * Decimal(str(leg.total_quantity)) * (
-                        1 if leg.is_long else -1
-                    )
+                    total += price * Decimal(str(leg.total_quantity)) * (1 if leg.is_long else -1)
                 return float(total / Decimal(str(units)))
 
             leg_rows = [
@@ -400,12 +397,10 @@ class OptionsBridge:
                     "current_price": round(current, 2),
                     "unrealized_pnl": round(unrealized, 2),
                     "entry_cost": round(entry * units, 2),
-                    "open_pnl_pct": round(unrealized / (entry * units), 4)
-                    if entry * units
-                    else 0.0,
-                    "entry_ts": structure.opened_at.isoformat()
-                    if structure.opened_at
-                    else None,
+                    "open_pnl_pct": (
+                        round(unrealized / (entry * units), 4) if entry * units else 0.0
+                    ),
+                    "entry_ts": structure.opened_at.isoformat() if structure.opened_at else None,
                     # … plus the option-specific columns (C2).
                     "kind": "option",
                     "structure_id": structure.structure_id,
@@ -442,9 +437,7 @@ class OptionsBridge:
     # Per-bar pricing (task A1)
     # ------------------------------------------------------------------ #
 
-    def on_bar(
-        self, symbol: str, price: float, ts: Any = None
-    ) -> Optional[Decimal]:
+    def on_bar(self, symbol: str, price: float, ts: Any = None) -> Optional[Decimal]:
         """Mark the option book to market at one bar close.
 
         Called by :class:`~backtest.forward.paper_runner.StrategyRunner` for
@@ -486,16 +479,12 @@ class OptionsBridge:
             underlying = str(symbol or self.underlying or "NIFTY").upper()
             self.underlying = underlying
             self._sync_market(underlying, price, ts)
-            unrealized = self.option_broker.update_mtm(
-                self.quote_provider, self._bar_datetime(ts)
-            )
+            unrealized = self.option_broker.update_mtm(self.quote_provider, self._bar_datetime(ts))
             self.last_unrealized_pnl = Decimal(str(unrealized))
             self.last_spot = float(price)
             self.last_mtm_ts = str(ts) if ts else None
         except Exception as exc:  # noqa: BLE001 — pricing must never kill the runner
-            logger.warning(
-                "[options-bridge] MTM failed for %s @ %s: %s", symbol, price, exc
-            )
+            logger.warning("[options-bridge] MTM failed for %s @ %s: %s", symbol, price, exc)
             return None
 
         self._maybe_risk_exit(strategy_name="")
@@ -604,9 +593,7 @@ class OptionsBridge:
         decision = self._evaluate_exit(view=None)
         if decision is None or decision.reason not in RISK_REASONS:
             return None
-        return self._exit_structure(
-            decision, self._bar_ts(self._bar_dt), strategy_name, queue=True
-        )
+        return self._exit_structure(decision, self._bar_ts(self._bar_dt), strategy_name, queue=True)
 
     def _sync_market(self, underlying: str, spot: float, ts: Any = None) -> None:
         """Point the quote feed at a new spot / bar clock.
@@ -869,9 +856,7 @@ class OptionsBridge:
             self.quote_provider.generator = generator
         return generator
 
-    def _execute(
-        self, view: MarketView, structure_type: str, strategy_name: str
-    ) -> dict[str, Any]:
+    def _execute(self, view: MarketView, structure_type: str, strategy_name: str) -> dict[str, Any]:
         from backtest.options.paper_trading import InsufficientMarginError
 
         structure, option_type = STRUCTURES[structure_type]

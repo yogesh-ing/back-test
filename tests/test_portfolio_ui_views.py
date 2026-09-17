@@ -16,6 +16,13 @@ from backtest.forward.paper_runner import RunnerConfig
 from backtest.simulator.bucket_risk import BUCKET_RISK_LIMITS
 
 
+@pytest.fixture(autouse=True)
+def _arm_live_orders(monkeypatch):
+    """F-12: these suites exercise live-BUCKET accounting; arm the gateway
+    with the support module's fake venue (see live_test_support)."""
+    monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
+
+
 def _config(name: str, **overrides) -> RunnerConfig:
     base = dict(
         name=name,
@@ -33,7 +40,10 @@ def client():
     from backtest.forward.risk_supervisor import GlobalRiskConfig
     from backtest.web.app import create_app
 
+    from live_test_support import ARMED_KWARGS
+
     reset_portfolio_manager(
+        **ARMED_KWARGS,
         risk_config=GlobalRiskConfig(daily_loss_limit=100_000, max_drawdown_pct=0.50),
         tick_seconds=1.0,
         warmup_bars=15,
@@ -78,7 +88,9 @@ def test_runner_config_mode_source_defaults_and_validation():
 def test_manager_list_instances_filters_by_mode():
     from backtest.forward.portfolio_manager import PortfolioManager
 
-    mgr = PortfolioManager(auto_start_feed=False)
+    from live_test_support import ARMED_KWARGS
+
+    mgr = PortfolioManager(**ARMED_KWARGS, auto_start_feed=False)
     mgr.add_runner(_config("PAPER-ONE"), start=False)
     mgr.add_runner(_config("PAPER-TWO"), start=False)
     mgr.add_runner(_config("LIVE-ONE", mode="live", source="mstock"), start=False)
@@ -96,7 +108,9 @@ def test_manager_list_instances_filters_by_mode():
 def test_summary_scoped_to_bucket():
     from backtest.forward.portfolio_manager import PortfolioManager
 
-    mgr = PortfolioManager(auto_start_feed=False)
+    from live_test_support import ARMED_KWARGS
+
+    mgr = PortfolioManager(**ARMED_KWARGS, auto_start_feed=False)
     mgr.add_runner(_config("PAPER-ONE"), start=False)
     mgr.add_runner(
         _config("LIVE-ONE", mode="live", source="mstock", allocated_capital=250_000), start=False

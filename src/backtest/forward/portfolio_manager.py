@@ -19,6 +19,7 @@ Key properties:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from collections import deque
 from datetime import datetime, timezone
@@ -26,6 +27,11 @@ from typing import Any, Deque, Dict, List, Optional
 
 from backtest.forward.feed import SyntheticFeed
 from backtest.forward.feed_registry import get_chain_bus, get_feed_registry
+from backtest.forward.state_store import (
+    PortfolioStateStore,
+    capture_runner,
+    restore_runner,
+)
 from backtest.forward.paper_runner import (
     STATUS_PAUSED,
     STATUS_RUNNING,
@@ -57,6 +63,9 @@ class PortfolioManager:
         auto_start_feed: bool = True,
         mstock_feed_client: Optional[Any] = None,
         mstock_poll_interval_s: float = 60.0,
+        state_path: Optional[Any] = None,
+        live_broker: Optional[Any] = None,
+        confirm_live_orders: bool = False,
     ) -> None:
         self.ledger = OrderLedger()
         self.broker = PaperBroker(self.ledger)
@@ -122,6 +131,28 @@ class PortfolioManager:
 
         # U3.3: audit log with scope — every control action logs scope=paper|live|playbook|dashboard
         self._audit_log_entries: Deque[Dict[str, Any]] = deque(maxlen=1000)
+
+        # Gap #3 / V2 (P2.4): optional JSON state persistence. No path →
+        # byte-for-byte the old in-memory behaviour. With a path, every
+        # control-plane mutation (and every 60th tick) snapshots configs +
+        # books + breaker latches atomically, and a fresh manager rehydrates
+        # them: runners come back PAUSED (fail-closed — nothing trades after
+        # a restart until a human resumes), breakers stay tripped.
+        if state_path is None:
+            state_path = os.environ.get("PORTFOLIO_STATE_PATH") or None
+        # F-12: live equity order seam. ``live_broker`` is the injected
+        # session (tests pass a deterministic fake); None → the active
+        # broker from the session manager. The gateway itself is built
+        # lazily on the first mode='live' runner — a manager that never
+        # goes live never pays the arming check.
+        self._injected_live_broker = live_broker
+        self._confirm_live_orders = bool(confirm_live_orders)
+        self._live_gateway: Optional[Any] = None
+        self._state_store = (
+            PortfolioStateStore(state_path) if state_path else None
+        )
+        self._restoring = False  # suppress saves while rehydrating
+        self._restore_state()
 
     # ------------------------------------------------------------------ #
     # Bucket helpers (C2: derived-not-duplicated)
@@ -212,9 +243,7 @@ class PortfolioManager:
                 "peak_equity": round(peak, 2),
                 "drawdown_pct": round(self._bucket_drawdown(mode), 4),
                 "daily_pnl": round(daily, 2),
-                "daily_pnl_pct": (
-                    round(daily / day_start, 6) if day_start else 0.0
-                ),
+                "daily_pnl_pct": (round(daily / day_start, 6) if day_start else 0.0),
                 "realized_pnl": round(self._bucket_realized_pnl(mode), 2),
                 "deployed_capital": round(self._bucket_deployed(mode), 2),
                 "open_positions": self._bucket_open_positions(mode),
@@ -232,7 +261,13 @@ class PortfolioManager:
     # U3.3 — Audit logging with scope (AC-16)
     # ------------------------------------------------------------------
 
-    def _audit_log(self, action: str, scope: str = "paper", instance_id: Optional[str] = None, detail: str = "") -> None:
+    def _audit_log(
+        self,
+        action: str,
+        scope: str = "paper",
+        instance_id: Optional[str] = None,
+        detail: str = "",
+    ) -> None:
         """Log audit entry with scope — paper|live|playbook|dashboard.
 
         Every control action (spawn, flatten, kill, playbook CRUD, manual close)
@@ -246,7 +281,13 @@ class PortfolioManager:
             "detail": detail,
         }
         self._audit_log_entries.append(entry)
-        logger.info("[AUDIT] scope=%s action=%s instance_id=%s detail=%s", scope, action, instance_id or "-", detail)
+        logger.info(
+            "[AUDIT] scope=%s action=%s instance_id=%s detail=%s",
+            scope,
+            action,
+            instance_id or "-",
+            detail,
+        )
 
     def get_audit_log(self, scope: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         """Return audit log entries, optionally filtered by scope."""
@@ -266,6 +307,7 @@ class PortfolioManager:
         """
         try:
             from backtest.brokers.session_manager import get_session_manager
+
             return get_session_manager().is_authenticated()
         except Exception:  # noqa: BLE001 — never break summary on broker check
             return False
@@ -283,6 +325,7 @@ class PortfolioManager:
         """
         try:
             from backtest.web.options_api import get_option_broker, _broker
+
             # Only if singleton has been created
             if _broker is None:
                 return None
@@ -315,6 +358,7 @@ class PortfolioManager:
             # Refresh MTM if possible
             try:
                 from backtest.web.options_api import get_quote_provider
+
                 quotes = get_quote_provider()
                 broker.update_mtm(quotes)
             except Exception:
@@ -394,20 +438,27 @@ class PortfolioManager:
         count = 0
         try:
             from backtest.web.options_api import get_quote_provider
+
             quotes = get_quote_provider()
             for structure in list(broker.get_open_structures()):
                 try:
                     broker.close_structure(structure.structure_id, quotes, reason=reason)
                     count += 1
                 except Exception as exc:
-                    logger.warning("Failed to close dashboard structure %s: %s", structure.structure_id[:8], exc)
+                    logger.warning(
+                        "Failed to close dashboard structure %s: %s",
+                        structure.structure_id[:8],
+                        exc,
+                    )
         except Exception as exc:
             logger.warning("Dashboard flatten failed: %s", exc)
 
         if count:
             logger.critical("Dashboard book flattened: %d structures (%s)", count, reason)
             try:
-                self._audit_log(f"FLATTEN_DASHBOARD {reason}", scope="dashboard", detail=f"closed={count}")
+                self._audit_log(
+                    f"FLATTEN_DASHBOARD {reason}", scope="dashboard", detail=f"closed={count}"
+                )
             except Exception:
                 pass
         return count
@@ -415,6 +466,32 @@ class PortfolioManager:
     # ------------------------------------------------------------------ #
     # Runner lifecycle
     # ------------------------------------------------------------------ #
+
+    def _resolve_live_broker(self) -> Any:
+        """The broker session for live orders (F-12).
+
+        The injected ``live_broker`` wins (tests pass a deterministic fake);
+        otherwise the session manager's active broker. Never constructs a
+        fresh unauthenticated client here — an unauthenticated session must
+        REFUSE live runners, not half-send.
+        """
+        if self._injected_live_broker is not None:
+            return self._injected_live_broker
+        from backtest.forward.feed_registry import _default_quote_broker
+
+        return _default_quote_broker()
+
+    def _live_gateway_for(self) -> Any:
+        """Build (once) the gated live-order gateway; raises when disarmed."""
+        if self._live_gateway is None:
+            from backtest.forward.live_gateway import LiveEquityGateway
+
+            self._live_gateway = LiveEquityGateway(
+                self.ledger,
+                self._resolve_live_broker(),
+                confirm_live=self._confirm_live_orders,
+            )
+        return self._live_gateway
 
     def add_runner(
         self,
@@ -424,8 +501,14 @@ class PortfolioManager:
     ) -> str:
         """Spawn a runner from config. Returns its instance_id."""
         with self._lock:
+            broker_for_runner = self.broker
+            if config.mode == "live":
+                # F-12: live equity runners route orders to the REAL broker
+                # through the gated gateway. Fail-closed: arming raises
+                # here (refused runner) rather than paper-filling silently.
+                broker_for_runner = self._live_gateway_for()
             runner = StrategyRunner(
-                config, ledger=self.ledger, broker=self.broker, strategy=strategy
+                config, ledger=self.ledger, broker=broker_for_runner, strategy=strategy
             )
             self._runners[runner.instance_id] = runner
             self.total_capital += config.allocated_capital
@@ -443,9 +526,7 @@ class PortfolioManager:
             # shared live poll thread, everything else off the synthetic feed.
             feed = self.mstock_feed if config.source == "mstock" else self.feed
             for sym in config.symbols:
-                self.feed_registry.subscribe(
-                    config.source, sym, config.timeframe, feed=feed
-                )
+                self.feed_registry.subscribe(config.source, sym, config.timeframe, feed=feed)
             feed.add_symbols(config.symbols)
             self._refresh_anchors()
 
@@ -466,9 +547,15 @@ class PortfolioManager:
             )
             # U3.3 audit
             try:
-                self._audit_log(f"SPAWN {runner.config.name}", scope=bucket, instance_id=runner.instance_id, detail=f"strategy={config.strategy_name} capital={config.allocated_capital}")
+                self._audit_log(
+                    f"SPAWN {runner.config.name}",
+                    scope=bucket,
+                    instance_id=runner.instance_id,
+                    detail=f"strategy={config.strategy_name} capital={config.allocated_capital}",
+                )
             except Exception:
                 pass
+            self._persist_state()
             return runner.instance_id
 
     def remove_runner(self, instance_id: str) -> bool:
@@ -483,14 +570,8 @@ class PortfolioManager:
             # (The chain subscription went with runner.stop() — one release
             # per acquire, owned by the runner.)
             for sym in runner.config.symbols:
-                self.feed_registry.release(
-                    runner.config.source, sym, runner.config.timeframe
-                )
-            feed = (
-                self.mstock_feed
-                if runner.config.source == "mstock"
-                else self.feed
-            )
+                self.feed_registry.release(runner.config.source, sym, runner.config.timeframe)
+            feed = self.mstock_feed if runner.config.source == "mstock" else self.feed
             feed.remove_symbols(runner.config.symbols)
             self._sync_mstock_thread()
             self.total_capital -= runner.config.allocated_capital
@@ -505,8 +586,14 @@ class PortfolioManager:
                 self._bucket_day_start[bucket] = 0.0
                 self._bucket_day[bucket] = None
             logger.info("Runner removed: %s (bucket=%s)", runner.config.name, bucket)
+            self._persist_state()
             try:
-                self._audit_log(f"DELETE {runner.config.name}", scope=bucket, instance_id=instance_id, detail=f"bucket={bucket}")
+                self._audit_log(
+                    f"DELETE {runner.config.name}",
+                    scope=bucket,
+                    instance_id=instance_id,
+                    detail=f"bucket={bucket}",
+                )
             except Exception:
                 pass
             return True
@@ -541,23 +628,28 @@ class PortfolioManager:
                 self._sync_mstock_thread()
             try:
                 bucket = self._runner_bucket(runner)
-                self._audit_log(f"{action.upper()} {runner.config.name}", scope=bucket, instance_id=instance_id, detail=f"action={action}")
+                self._audit_log(
+                    f"{action.upper()} {runner.config.name}",
+                    scope=bucket,
+                    instance_id=instance_id,
+                    detail=f"action={action}",
+                )
             except Exception:
                 pass
+            self._persist_state()
             return state
 
     def pause_all(self, mode: Optional[str] = None) -> int:
         """Pause runners. ``mode=None`` pauses all; mode='paper'|'live' pauses only that bucket."""
         with self._lock:
-            targets = (
-                self._bucket_runners(mode) if mode else list(self._runners.values())
-            )
+            targets = self._bucket_runners(mode) if mode else list(self._runners.values())
             n = 0
             for runner in targets:
                 if runner.status == STATUS_RUNNING:
                     runner.pause()
                     n += 1
             logger.warning("Paused %d runners%s", n, f" [{mode}]" if mode else "")
+            self._persist_state()
             return n
 
     def resume_all(self, mode: Optional[str] = None) -> int:
@@ -575,23 +667,20 @@ class PortfolioManager:
             else:
                 if self.halted:
                     raise RuntimeError("portfolio is halted by circuit breaker; reset first")
-            targets = (
-                self._bucket_runners(mode) if mode else list(self._runners.values())
-            )
+            targets = self._bucket_runners(mode) if mode else list(self._runners.values())
             n = 0
             for runner in targets:
                 if runner.status == STATUS_PAUSED:
                     runner.resume()
                     n += 1
             logger.info("Resumed %d runners%s", n, f" [{mode}]" if mode else "")
+            self._persist_state()
             return n
 
     def stop_all(self, mode: Optional[str] = None) -> int:
         """Stop runners. ``mode=None`` stops all; mode='paper'|'live' stops only that bucket."""
         with self._lock:
-            targets = (
-                self._bucket_runners(mode) if mode else list(self._runners.values())
-            )
+            targets = self._bucket_runners(mode) if mode else list(self._runners.values())
             n = 0
             for runner in targets:
                 if runner.status != STATUS_STOPPED:
@@ -599,6 +688,7 @@ class PortfolioManager:
                     n += 1
             # Gap #1: stopping the last mstock runner retires the poll thread.
             self._sync_mstock_thread()
+            self._persist_state()
             return n
 
     def emergency_flatten_all(
@@ -620,9 +710,7 @@ class PortfolioManager:
                 if mode not in VALID_INSTANCE_MODES:
                     raise ValueError(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
 
-            targets = (
-                self._bucket_runners(mode) if mode else list(self._runners.values())
-            )
+            targets = self._bucket_runners(mode) if mode else list(self._runners.values())
             for runner in targets:
                 count += runner.flatten_all(reason=reason)
             for runner in targets:
@@ -670,10 +758,15 @@ class PortfolioManager:
             )
             try:
                 scope = mode or "all"
-                self._audit_log(f"EMERGENCY_FLATTEN {reason}", scope=scope, detail=f"closed={count} mode={scope}")
+                self._audit_log(
+                    f"EMERGENCY_FLATTEN {reason}",
+                    scope=scope,
+                    detail=f"closed={count} mode={scope}",
+                )
             except Exception:
                 pass
             self._evaluate_risk()
+            self._persist_state()
             return count
 
     def reset_daily_anchors(self) -> None:
@@ -687,6 +780,7 @@ class PortfolioManager:
                 self._bucket_day_start[mode] = self._bucket_equity(mode)
                 self._bucket_day[mode] = datetime.now(timezone.utc).date().isoformat()
             logger.info("Daily PnL anchors reset (baseline=%.2f)", self._day_start_equity)
+            self._persist_state()
 
     def reset_circuit_breaker(self, mode: Optional[str] = None) -> None:
         """Manually clear the halt latch after a breach is acknowledged.
@@ -709,6 +803,7 @@ class PortfolioManager:
                     self._bucket_halt_mode[m] = None
                     self._bucket_halted_ts[m] = None
                 logger.info("Circuit breaker reset (all buckets)")
+                self._persist_state()
                 try:
                     self._audit_log("RESET_BREAKER all", scope="all", detail="master reset")
                 except Exception:
@@ -729,6 +824,7 @@ class PortfolioManager:
                     self.halt_mode = None
                     self.halted_ts = None
                 logger.info("Circuit breaker reset (bucket=%s)", mode)
+                self._persist_state()
                 try:
                     self._audit_log(f"RESET_BREAKER {mode}", scope=mode, detail=f"bucket={mode}")
                 except Exception:
@@ -742,10 +838,7 @@ class PortfolioManager:
     @staticmethod
     def _bar_date(bar: Dict[str, Any]) -> str:
         """Extract YYYY-MM-DD from a bar's timestamp."""
-        return (
-            str(bar.get("ts", ""))[:10]
-            or datetime.now(timezone.utc).date().isoformat()
-        )
+        return str(bar.get("ts", ""))[:10] or datetime.now(timezone.utc).date().isoformat()
 
     def _sync_mstock_thread(self) -> None:
         """Run the live poll thread iff at least one mstock runner exists.
@@ -762,6 +855,136 @@ class PortfolioManager:
             self.mstock_feed.start()
         elif not has_live and self.mstock_feed.running:
             self.mstock_feed.stop()
+
+    # ------------------------------------------------------------------ #
+    # State persistence (Gap #3 / V2 — P2.4). No-op unless a state path is
+    # configured. Saves are atomic and cheap (control-plane rate, plus one
+    # write per 60 ticks for fresh scalars); a failure NEVER breaks trading.
+    # ------------------------------------------------------------------ #
+
+    def _snapshot_payload(self) -> Dict[str, Any]:
+        """Everything needed to rehydrate a manager: anchors, breaker
+        latches, and each runner's config + full book."""
+        runners = [capture_runner(r) for r in self._runners.values()]
+        return {
+            "manager": {
+                "total_capital": self.total_capital,
+                "peak_equity": self.peak_equity,
+                "day_start_equity": self._day_start_equity,
+                "current_day": self._current_day,
+                "halted": self.halted,
+                "halt_reason": self.halt_reason,
+                "halt_mode": self.halt_mode,
+                "halted_ts": self.halted_ts,
+                "tick_count": self.tick_count,
+                "tick_index": self.tick_index,
+            },
+            "buckets": {
+                mode: {
+                    "peak": self._bucket_peak.get(mode, 0.0),
+                    "halted": self._bucket_halted.get(mode, False),
+                    "halt_reason": self._bucket_halt_reason.get(mode),
+                    "halt_mode": self._bucket_halt_mode.get(mode),
+                    "halted_ts": self._bucket_halted_ts.get(mode),
+                    "day_start": self._bucket_day_start.get(mode, 0.0),
+                    "day": self._bucket_day.get(mode),
+                }
+                for mode in ("paper", "live")
+            },
+            "runners": runners,
+        }
+
+    def save_state(self) -> bool:
+        """Persist now (public — also usable from ops/API). Returns success."""
+        if self._state_store is None:
+            return False
+        try:
+            self._state_store.save(self._snapshot_payload())
+            return True
+        except Exception:  # noqa: BLE001 — persistence must never break trading
+            logger.exception("portfolio state save failed (%s)", self._state_store.path)
+            return False
+
+    def _persist_state(self) -> None:
+        if self._restoring:
+            return  # never re-write the file we are reading from
+        self.save_state()
+
+    def _restore_state(self) -> None:
+        """Rehydrate configs, books and breaker latches from the state file.
+
+        Runners saved as RUNNING come back PAUSED (fail-closed). Any failure
+        logs loudly and boots clean — persistence must never prevent a start.
+        """
+        if self._state_store is None:
+            return
+        payload = self._state_store.load()
+        if not payload:
+            return
+        try:
+            self._restoring = True
+            try:
+                self._apply_state_payload(payload)
+            finally:
+                self._restoring = False
+            logger.warning(
+                "[state] restored %d runner(s) + breaker latches from %s — "
+                "restored runners are PAUSED; resume explicitly",
+                len(payload.get("runners", [])),
+                self._state_store.path,
+            )
+        except Exception:  # noqa: BLE001 — a bad restore must not block boot
+            logger.exception(
+                "[state] restore from %s failed — starting clean", self._state_store.path
+            )
+
+    def _apply_state_payload(self, payload: Dict[str, Any]) -> None:
+        # Runners FIRST (add_runner re-subscribes feeds + the registry and
+        # re-books capital + recomputes anchors), then manager scalars and
+        # breaker latches override whatever add_runner initialised.
+        for runner_snap in payload.get("runners", []):
+            from backtest.forward.state_store import _config_from_dict
+
+            config = _config_from_dict(runner_snap["config"])
+            try:
+                self.add_runner(config, start=False)
+            except ValueError as exc:
+                # e.g. a mode='live' runner with no armed broker session this
+                # boot — fail-closed: skip THAT runner, never block the boot.
+                logger.warning(
+                    "[state] runner %s (%s) refused on restore: %s — skipped",
+                    config.instance_id, config.name, exc,
+                )
+                continue
+            runner = self._runners.get(config.instance_id)
+            if runner is None:
+                logger.warning(
+                    "[state] runner %s could not be re-created — skipped",
+                    config.instance_id,
+                )
+                continue
+            restore_runner(runner, runner_snap)
+
+        manager = payload.get("manager", {})
+        self.total_capital = float(manager.get("total_capital", 0.0))
+        self.peak_equity = float(manager.get("peak_equity", 0.0))
+        self._day_start_equity = float(manager.get("day_start_equity", 0.0))
+        self._current_day = manager.get("current_day")
+        self.halted = bool(manager.get("halted", False))
+        self.halt_reason = manager.get("halt_reason")
+        self.halt_mode = manager.get("halt_mode")
+        self.halted_ts = manager.get("halted_ts")
+        self.tick_count = int(manager.get("tick_count", 0))
+        self.tick_index = int(manager.get("tick_index", 0))
+
+        for mode, bucket in payload.get("buckets", {}).items():
+            self._bucket_peak[mode] = float(bucket.get("peak", 0.0))
+            self._bucket_halted[mode] = bool(bucket.get("halted", False))
+            self._bucket_halt_reason[mode] = bucket.get("halt_reason")
+            self._bucket_halt_mode[mode] = bucket.get("halt_mode")
+            self._bucket_halted_ts[mode] = bucket.get("halted_ts")
+            self._bucket_day_start[mode] = float(bucket.get("day_start", 0.0))
+            self._bucket_day[mode] = bucket.get("day")
 
     def _on_bar(self, symbol: str, bar: Dict[str, Any]) -> None:
         """Fan one closed candle out to every runner trading that symbol."""
@@ -791,6 +1014,25 @@ class PortfolioManager:
             for runner in self._runners.values():
                 runner.on_tick_end(tick_ts)
             self._evaluate_risk()
+            # V2: fresh scalars at a bounded write rate (one save per minute
+            # at the default 1s ticks) — a crash loses at most ~a minute.
+            if self._state_store is not None and self.tick_index % 60 == 0:
+                self._persist_state()
+
+            # F-12: poll the live gateway every tick — a fill sitting at the
+            # venue must reach the book in the same loop that drives risk.
+            # Reconciliation (the honesty check vs the broker's order book)
+            # runs on a slower cadence; neither may ever break the tick.
+            if self._live_gateway is not None and self._live_gateway.working_count():
+                try:
+                    self._live_gateway.poll_pending()
+                except Exception:  # noqa: BLE001
+                    logger.exception("[live] gateway poll failed")
+                if self.tick_index % 300 == 0:
+                    try:
+                        self._live_gateway.reconcile()
+                    except Exception:  # noqa: BLE001
+                        logger.exception("[live] gateway reconcile failed")
 
     def _evaluate_risk(self) -> None:
         """Evaluate risk per-bucket (independent breakers) + manager-level.
@@ -829,7 +1071,9 @@ class PortfolioManager:
                 self._bucket_halted_ts[mode] = now_ts
                 logger.critical(
                     "BUCKET HALT [%s]: %s (mode=%s)",
-                    mode.upper(), report.halt_reason, report.halt_mode,
+                    mode.upper(),
+                    report.halt_reason,
+                    report.halt_mode,
                 )
                 # Only pause/flatten runners in THIS bucket
                 for runner in bucket_runners:
@@ -985,14 +1229,28 @@ class PortfolioManager:
             try:
                 dashboard_book = self.get_dashboard_book_summary()
             except Exception:
-                dashboard_book = {"exists": False, "open_positions": 0, "open_structures": 0, "positions": [], "structures": []}
+                dashboard_book = {
+                    "exists": False,
+                    "open_positions": 0,
+                    "open_structures": 0,
+                    "positions": [],
+                    "structures": [],
+                }
 
             # Include dashboard book in totals when it exists — so portfolio
             # overview is honest about total money at risk (fix for invisible trades).
-            dashboard_equity = dashboard_book.get("equity", 0.0) if dashboard_book.get("exists") else 0.0
-            dashboard_daily = dashboard_book.get("unrealized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
-            dashboard_realized = dashboard_book.get("realized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
-            dashboard_positions = dashboard_book.get("open_positions", 0) if dashboard_book.get("exists") else 0
+            dashboard_equity = (
+                dashboard_book.get("equity", 0.0) if dashboard_book.get("exists") else 0.0
+            )
+            dashboard_daily = (
+                dashboard_book.get("unrealized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
+            )
+            dashboard_realized = (
+                dashboard_book.get("realized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
+            )
+            dashboard_positions = (
+                dashboard_book.get("open_positions", 0) if dashboard_book.get("exists") else 0
+            )
 
             # Combined totals include dashboard book so flatten/emergency is honest
             combined_equity = equity + dashboard_equity
@@ -1009,9 +1267,7 @@ class PortfolioManager:
                     round(deployed / self.total_capital, 4) if self.total_capital > 0 else 0.0
                 ),
                 "daily_pnl": round(combined_daily, 2),
-                "daily_pnl_pct": (
-                    round(combined_daily / day_start, 6) if day_start else 0.0
-                ),
+                "daily_pnl_pct": (round(combined_daily / day_start, 6) if day_start else 0.0),
                 "realized_pnl": round(combined_realized, 2),
                 "open_positions": combined_positions,
                 "runner_count": len(states),
@@ -1103,6 +1359,12 @@ class PortfolioManager:
         self.feed.emit_one(**bar_kwargs)
 
     def shutdown(self) -> None:
+        if self._live_gateway is not None and self._live_gateway.working_count():
+            try:
+                self._live_gateway.poll_pending()
+            except Exception:  # noqa: BLE001
+                logger.exception("[live] final poll before shutdown failed")
+        self._persist_state()  # V2: last write wins — leave a restorable state
         self.feed.stop()
         self.mstock_feed.stop()
         with self._lock:
@@ -1111,9 +1373,7 @@ class PortfolioManager:
                 # U6.2: bar-feed subscriptions must go too, or the process-wide
                 # registry leaks entries that shadow the next manager's feed.
                 for sym in runner.config.symbols:
-                    self.feed_registry.release(
-                        runner.config.source, sym, runner.config.timeframe
-                    )
+                    self.feed_registry.release(runner.config.source, sym, runner.config.timeframe)
 
 
 # ---------------------------------------------------------------------------
@@ -1138,6 +1398,8 @@ def reset_portfolio_manager(
     tick_seconds: float = 1.0,
     warmup_bars: int = 30,
     auto_start_feed: bool = True,
+    live_broker: Optional[Any] = None,
+    confirm_live_orders: bool = False,
 ) -> PortfolioManager:
     """Tear down and recreate the singleton (tests / restart)."""
     global _MANAGER
@@ -1149,5 +1411,7 @@ def reset_portfolio_manager(
             tick_seconds=tick_seconds,
             warmup_bars=warmup_bars,
             auto_start_feed=auto_start_feed,
+            live_broker=live_broker,
+            confirm_live_orders=confirm_live_orders,
         )
         return _MANAGER

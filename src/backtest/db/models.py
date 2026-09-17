@@ -741,6 +741,71 @@ class MarketDataCache(Base):
 
 
 # ---------------------------------------------------------------------------
+# 7b. Corporate actions (review §3.3 / gap 12c — adjusted-price policy store)
+# ---------------------------------------------------------------------------
+
+
+class CorporateActionRecord(Base):
+    """Split / bonus / dividend events per symbol.
+
+    The adjustment POLICY applies these at read time (``AdjustedSource``);
+    raw bars in ``market_data_cache`` are never rewritten. ``factor`` is the
+    pre-ex-date price multiplier: split ₹10 → ₹1 ⇒ 0.10; bonus 1:1 ⇒ 0.50;
+    dividends default to 1.0 (recorded, price-neutral).
+    """
+
+    __tablename__ = "corporate_actions"
+
+    action_id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: First day the post-action price trades. Bars strictly before this are
+    #: back-adjusted by ``factor``.
+    ex_date: Mapped[date] = mapped_column(Date, nullable=False)
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    factor: Mapped[Decimal] = mapped_column(Price, nullable=False, server_default=text("1"))
+    #: Dividend rupees per share (informational; policy does not auto-adjust).
+    amount: Mapped[Optional[Decimal]] = mapped_column(Money)
+    note: Mapped[Optional[str]] = mapped_column(String(255))
+    source: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'manual'"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('split', 'bonus', 'dividend')", name="ck_ca_kind"),
+        CheckConstraint("factor > 0", name="ck_ca_factor_pos"),
+        # One event per symbol/day/kind — re-announcements are updates, not rows.
+        UniqueConstraint("symbol", "ex_date", "kind", name="uq_ca_event"),
+        Index("ix_ca_symbol_exdate", "symbol", "ex_date"),
+    )
+
+    def to_action(self):
+        """→ ``backtest.data.corporate_actions.CorporateAction`` (lazy import)."""
+        from backtest.data.corporate_actions import CorporateAction
+
+        return CorporateAction(
+            symbol=self.symbol,
+            ex_date=self.ex_date,
+            kind=self.kind,
+            adjustment_factor=float(self.factor),
+            amount=float(self.amount) if self.amount is not None else None,
+            note=self.note or "",
+        )
+
+    @classmethod
+    def ensure_schema(cls, manager: Any) -> None:
+        """Create just this table (same convention as the snapshot asset)."""
+        engine = manager.engine if hasattr(manager, "engine") else manager
+        Base.metadata.create_all(engine, tables=[cls.__table__])
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"<CorporateAction {self.symbol} {self.kind} x{float(self.factor):g} "
+            f"ex={self.ex_date}>"
+        )
+
+
+# ---------------------------------------------------------------------------
 # 8. Performance metrics
 # ---------------------------------------------------------------------------
 
@@ -994,3 +1059,64 @@ class TradeStructure(Base):
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<TradeStructure {self.structure_type} {self.underlying} {self.status}>"
+
+
+class OptionChainSnapshot(Base):
+    """One contract's state in one option-chain snapshot batch (P1.1).
+
+    The data asset behind options *research*: every snapshot run appends the
+    full contract terms of the chain (from the instrument master — one API
+    call) plus L1 quotes where available, so backtests can eventually price
+    off recorded premiums/IV instead of Black-Scholes
+    (see ``docs/OPTIONS-FORWARD-TEST-EXPERIMENT.md`` E-6).
+
+    Append-only: each run writes a new batch sharing one ``snapshot_ts``;
+    there is no update path. Research reads go through
+    :func:`backtest.options.chain_snapshots.load_snapshots`.
+    """
+
+    __tablename__ = "option_chain_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: Batch timestamp — one value shared by every row of one snapshot run.
+    snapshot_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: Data source tag ("mstock" today; vendors plug in here).
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    underlying: Mapped[str] = mapped_column(String(32), nullable=False)
+    expiry: Mapped[date] = mapped_column(Date, nullable=False)
+    strike: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    option_type: Mapped[str] = mapped_column(String(2), nullable=False)
+    instrument_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    trading_symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    lot_size: Mapped[Optional[int]] = mapped_column(Integer)
+
+    #: L1 quotes — nullable because contract terms are captured even when a
+    #: quote call fails or is skipped (rate-limit budget).
+    ltp: Mapped[Optional[Decimal]] = mapped_column(Money)
+    bid: Mapped[Optional[Decimal]] = mapped_column(Money)
+    ask: Mapped[Optional[Decimal]] = mapped_column(Money)
+    volume: Mapped[Optional[int]] = mapped_column(Integer)
+    oi: Mapped[Optional[int]] = mapped_column(Integer)
+    #: Underlying spot at snapshot time (when the caller has one).
+    spot: Mapped[Optional[Decimal]] = mapped_column(Money)
+
+    __table_args__ = (
+        CheckConstraint(
+            option_type.in_(["CE", "PE"]), name="ck_option_chain_snapshots_type"
+        ),
+        Index("ix_chain_snapshots_ts", "snapshot_ts"),
+        Index("ix_chain_snapshots_underlying", "underlying"),
+        Index(
+            "ix_chain_snapshots_lookup",
+            "underlying",
+            "expiry",
+            "option_type",
+            "strike",
+        ),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"<OptionChainSnapshot {self.underlying} {self.expiry} "
+            f"{self.strike}{self.option_type}>"
+        )

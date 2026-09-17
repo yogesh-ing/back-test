@@ -162,6 +162,10 @@ class Order:
     avg_fill_price: Optional[float] = None
     filled_ts: Optional[str] = None
     tag: Dict = field(default_factory=dict)
+    #: F-12: venue order id once placed at the live broker (None for paper).
+    #: Survives state-file round-trips so a restart re-arms POLLING for the
+    #: same venue order instead of double-placing.
+    broker_order_id: Optional[str] = None
 
 
 @dataclass
@@ -314,6 +318,40 @@ class OrderLedger:
     def owner_of(self, client_order_id: str) -> Optional[str]:
         with self._lock:
             return self._routing.get(client_order_id)
+
+    def reattach_order(
+        self,
+        instance_id: str,
+        client_order_id: str,
+        spec: Dict[str, Any],
+        broker_order_id: Optional[str] = None,
+    ) -> Order:
+        """Re-tag an order from a previous process (live gateway restore).
+
+        The original PENDING order died with the old process; the venue
+        order it became did NOT. This recreates the ledger row so the
+        incoming fill has somewhere to route — the venue order is NEVER
+        re-placed.
+        """
+        order = Order(
+            client_order_id=client_order_id,
+            instance_id=instance_id,
+            symbol=str(spec.get("symbol", "")).upper(),
+            side=str(spec.get("side", "BUY")),
+            quantity=float(spec.get("quantity", 0.0)),
+            order_type="MARKET",
+            limit_price=None,
+            status=ORDER_PENDING,
+            created_ts=str(spec.get("created_ts") or datetime.now(timezone.utc).isoformat()),
+            tag=dict(spec.get("tag") or {}),
+            broker_order_id=broker_order_id,
+        )
+        with self._lock:
+            self._routing[client_order_id] = instance_id
+            self._orders[client_order_id] = order
+            self._order_history.append(client_order_id)
+            self._trim_locked()
+        return order
 
     def orders_for(self, instance_id: str) -> List[Order]:
         with self._lock:
@@ -573,20 +611,29 @@ class StrategyRunner:
         # contract registry + pricing clock).
         self.options_bridge: Optional["OptionsBridge"] = None
         self._chain_released = True  # U6.2 guard; flipped when a bridge takes its subscription
+        self._chain_source = "synthetic"  # P1.1: release must match the acquire source
         if str(config.instrument.get("type", "equity")) == "option":
-            from backtest.forward.feed_registry import (
-                get_chain_bus,
-                option_quote_provider,
-            )
+            from backtest.forward.feed_registry import option_quote_provider_for
 
-            bus = get_chain_bus()
-            shared_generator = bus.acquire(config.symbols[0] if config.symbols else "NIFTY")
             self._chain_underlying = config.symbols[0] if config.symbols else "NIFTY"
+            # P1.1: source routes the chain — mstock + authenticated session →
+            # the shared LiveChainProvider (real chains + LTP, one API budget
+            # per underlying); anything else → the synthetic pair. The fallback
+            # is deliberate and labelled ("synthetic:bs") so a synthetic-priced
+            # runner can never pass as live.
+            provider, quote_label = option_quote_provider_for(
+                config.source, self._chain_underlying
+            )
+            # The bus STORE the acquire landed in (synthetic|mstock) — derived
+            # from the resolved provider, not from config.source: a requested
+            # "mstock" that fell back to synthetic must release the synthetic
+            # entry, or stop() leaks the refcount.
+            self._chain_source = "mstock" if quote_label == "live:mstock" else "synthetic"
             self._chain_released = False  # one release per acquire (stop is idempotent)
             self.options_bridge = OptionsBridge(
                 capital=config.allocated_capital,
                 expression=config.instrument.get("expression"),
-                quote_provider=option_quote_provider(shared_generator),
+                quote_provider=provider,
             )
 
         # -- rolling candle buffers ----------------------------------------
@@ -773,7 +820,9 @@ class StrategyRunner:
             if self.options_bridge is not None and self._chain_released:
                 try:
                     from backtest.forward.feed_registry import get_chain_bus
-                    get_chain_bus().acquire(self._chain_underlying)
+                    get_chain_bus().acquire(
+                        self._chain_underlying, source=self._chain_source
+                    )
                     self._chain_released = False
                 except Exception:  # noqa: BLE001 — acquire must never block start
                     logger.exception("chain bus acquire failed for %s", self.instance_id[:8])
@@ -807,7 +856,9 @@ class StrategyRunner:
                 if self.options_bridge is not None:
                     try:
                         from backtest.forward.feed_registry import get_chain_bus
-                        get_chain_bus().release(self._chain_underlying)
+                        get_chain_bus().release(
+                            self._chain_underlying, source=self._chain_source
+                        )
                     except Exception:  # noqa: BLE001 — release must never block stop
                         logger.exception("chain bus release failed for %s", self.instance_id[:8])
                 self._chain_released = True
@@ -1216,6 +1267,15 @@ class StrategyRunner:
             return
         score_part = f" | pool rank score {score:+.4f}" if score is not None else ""
         reason = f"BUY signal{score_part}"
+        if not isinstance(fill, FillEvent):
+            # F-12: the live gateway returns the coid — the order is PLACED,
+            # not filled. Logging a fake instant fill here is exactly the
+            # silent-paper-trading this seam exists to prevent.
+            self._log_signal(
+                symbol, "LIVE_ORDER", 1, price,
+                f"{reason} → {side} {qty:g} @ ~{price:.2f} PLACED coid={fill}",
+            )
+            return
         self._log_signal(
             symbol, "ENTRY", 1, fill.price, f"{reason} → {side} {qty:g} @ {fill.price:.2f}"
         )
@@ -1237,6 +1297,12 @@ class StrategyRunner:
         except Exception as exc:  # noqa: BLE001
             self.error = str(exc)
             logger.exception("Exit order failed for %s: %s", symbol, exc)
+            return
+        if not isinstance(fill, FillEvent):
+            self._log_signal(
+                symbol, "LIVE_ORDER", 0, price,
+                f"{reason} → SELL {pos['qty']:g} @ ~{price:.2f} PLACED coid={fill}",
+            )
             return
         self._log_signal(
             symbol, "EXIT", 0, fill.price, f"{reason} → SELL {pos['qty']:g} @ {fill.price:.2f}"

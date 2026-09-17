@@ -15,6 +15,7 @@ Covers:
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock, patch, PropertyMock
@@ -236,17 +237,97 @@ class TestDryRun:
         assert result.completed_at is not None
 
 
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed arming gate (architect review 2026-09-17 §3.2)
+# ---------------------------------------------------------------------------
+
+
+class TestFailClosedGate:
+    """Live orders are impossible unless every gate is cleared explicitly."""
+
+    def test_default_is_dry_run(self):
+        broker = _make_mock_broker()
+        trader = LiveOptionTrader(broker=broker)
+        assert trader.dry_run is True
+        result = trader.execute_structure(_make_long_call_intent())
+        assert result.status == StructureExecStatus.FILLED
+        broker.place_order.assert_not_called()
+
+    def test_live_without_confirm_raises_before_any_broker_call(self):
+        broker = _make_mock_broker()
+        with pytest.raises(ValueError, match="confirm_live"):
+            LiveOptionTrader(broker=broker, dry_run=False)
+        broker.place_order.assert_not_called()
+
+    def test_confirm_without_env_kill_switch_raises(self, monkeypatch):
+        monkeypatch.delenv("ALLOW_LIVE_ORDERS", raising=False)
+        broker = _make_mock_broker()
+        with pytest.raises(ValueError, match="ALLOW_LIVE_ORDERS"):
+            LiveOptionTrader(broker=broker, dry_run=False, confirm_live=True)
+        broker.place_order.assert_not_called()
+
+    @pytest.mark.parametrize("value", ["", "0", "false", "no", "off"])
+    def test_env_kill_switch_off_values_raise(self, monkeypatch, value):
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", value)
+        broker = _make_mock_broker()
+        with pytest.raises(ValueError, match="ALLOW_LIVE_ORDERS"):
+            LiveOptionTrader(broker=broker, dry_run=False, confirm_live=True)
+
+    @pytest.mark.parametrize("value", ["1", "true", "YES"])
+    def test_env_kill_switch_on_values_arm(self, monkeypatch, value):
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", value)
+        trader = LiveOptionTrader(
+            broker=_make_mock_broker(), dry_run=False, confirm_live=True
+        )
+        assert trader.dry_run is False
+
+    def test_all_three_gates_arms_live_and_logs(self, monkeypatch, caplog):
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
+        broker = _make_mock_broker()
+        broker.place_order.return_value = BrokerOrderId("ORD001")
+        broker.get_order_book.return_value = [_make_filled_order("ORD001")]
+        with caplog.at_level(logging.WARNING, logger="backtest.options.live_trading"):
+            trader = LiveOptionTrader(
+                broker=broker,
+                dry_run=False,
+                confirm_live=True,
+                poll_timeout_seconds=1.0,
+            )
+        assert trader.dry_run is False
+        assert any("LIVE MODE ARMED" in rec.getMessage() for rec in caplog.records)
+
+        result = trader.execute_structure(_make_long_call_intent())
+        assert result.status == StructureExecStatus.FILLED
+        broker.place_order.assert_called()
+
+    def test_arming_one_instance_does_not_arm_the_next(self, monkeypatch):
+        """The gate is per-instance — no process-wide leak."""
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
+        armed = LiveOptionTrader(broker=_make_mock_broker(), dry_run=False, confirm_live=True)
+        assert armed.dry_run is False
+        safe = LiveOptionTrader(broker=_make_mock_broker())
+        assert safe.dry_run is True
+        assert safe.confirm_live is False
+
+
 # ---------------------------------------------------------------------------
 # Live execution — success path
 # ---------------------------------------------------------------------------
 
 class TestLiveExecutionSuccess:
+
+    @pytest.fixture(autouse=True)
+    def _allow_live_orders(self, monkeypatch):
+        """These classes exercise the LIVE path against a mock broker."""
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
     def test_single_leg_fills(self):
         broker = _make_mock_broker()
         broker.place_order.return_value = BrokerOrderId("ORD001")
         broker.get_order_book.return_value = [_make_filled_order("ORD001")]
 
-        trader = LiveOptionTrader(broker=broker, dry_run=False, poll_timeout_seconds=1.0)
+        trader = LiveOptionTrader(broker=broker, dry_run=False, confirm_live=True, poll_timeout_seconds=1.0)
         intent = _make_long_call_intent()
         result = trader.execute_structure(intent)
 
@@ -263,7 +344,7 @@ class TestLiveExecutionSuccess:
             [_make_filled_order("ORD002")],
         ]
 
-        trader = LiveOptionTrader(broker=broker, dry_run=False, poll_timeout_seconds=1.0)
+        trader = LiveOptionTrader(broker=broker, dry_run=False, confirm_live=True, poll_timeout_seconds=1.0)
         intent = _make_bull_call_spread_intent()
         result = trader.execute_structure(intent)
 
@@ -277,6 +358,11 @@ class TestLiveExecutionSuccess:
 # ---------------------------------------------------------------------------
 
 class TestLiveExecutionRollback:
+
+    @pytest.fixture(autouse=True)
+    def _allow_live_orders(self, monkeypatch):
+        """These classes exercise the LIVE path against a mock broker."""
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
     def test_second_leg_rejects_rollback_first(self):
         broker = _make_mock_broker()
         # leg 1: submit + poll → filled
@@ -294,7 +380,7 @@ class TestLiveExecutionRollback:
         ]
 
         trader = LiveOptionTrader(
-            broker=broker, dry_run=False,
+            broker=broker, dry_run=False, confirm_live=True,
             retry_config=RetryConfig(max_retries=1, base_delay_seconds=0.01),
             poll_timeout_seconds=1.0,
         )
@@ -316,7 +402,7 @@ class TestLiveExecutionRollback:
         broker.get_order_book.return_value = []
 
         trader = LiveOptionTrader(
-            broker=broker, dry_run=False,
+            broker=broker, dry_run=False, confirm_live=True,
             retry_config=RetryConfig(max_retries=1, base_delay_seconds=0.01),
             poll_timeout_seconds=1.0,
         )
@@ -334,6 +420,11 @@ class TestLiveExecutionRollback:
 # ---------------------------------------------------------------------------
 
 class TestRetryLogic:
+
+    @pytest.fixture(autouse=True)
+    def _allow_live_orders(self, monkeypatch):
+        """These classes exercise the LIVE path against a mock broker."""
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
     def test_retries_on_failure(self):
         broker = _make_mock_broker()
         broker.place_order.side_effect = [
@@ -345,7 +436,7 @@ class TestRetryLogic:
 
         trader = LiveOptionTrader(
             broker=broker,
-            dry_run=False,
+            dry_run=False, confirm_live=True,
             retry_config=RetryConfig(max_retries=3, base_delay_seconds=0.01),
             poll_timeout_seconds=1.0,
         )
@@ -361,7 +452,7 @@ class TestRetryLogic:
 
         trader = LiveOptionTrader(
             broker=broker,
-            dry_run=False,
+            dry_run=False, confirm_live=True,
             retry_config=RetryConfig(max_retries=2, base_delay_seconds=0.01),
             poll_timeout_seconds=1.0,
         )
@@ -438,13 +529,18 @@ class TestIntegrationDryRun:
 # ---------------------------------------------------------------------------
 
 class TestErrorLogging:
+
+    @pytest.fixture(autouse=True)
+    def _allow_live_orders(self, monkeypatch):
+        """These classes exercise the LIVE path against a mock broker."""
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
     def test_rejection_logged(self):
         broker = _make_mock_broker()
         broker.place_order.side_effect = MStockOrderError("RMS rejection: max positions exceeded")
 
         trader = LiveOptionTrader(
             broker=broker,
-            dry_run=False,
+            dry_run=False, confirm_live=True,
             retry_config=RetryConfig(max_retries=0, base_delay_seconds=0.01),
             poll_timeout_seconds=1.0,
         )
@@ -462,7 +558,7 @@ class TestErrorLogging:
 
         trader = LiveOptionTrader(
             broker=broker,
-            dry_run=False,
+            dry_run=False, confirm_live=True,
             retry_config=RetryConfig(max_retries=0),
             poll_timeout_seconds=0.5,
         )

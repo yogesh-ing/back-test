@@ -154,7 +154,7 @@ from backtest.options.live_trading import LiveOptionTrader, RetryConfig
 broker = MStockBroker(...)          # authenticated session (login + TOTP)
 trader = LiveOptionTrader(
     broker,
-    dry_run=True,                   # log payloads, place nothing
+    dry_run=True,                   # default — log payloads, place nothing
     retry_config=RetryConfig(max_retries=3, base_delay_seconds=1.0),
 )
 
@@ -166,9 +166,24 @@ Behaviour you can rely on:
 - **Legs submit sequentially.** If a leg fails after retries, every
   previously filled leg is **cancelled (rollback)** — a structure never ends
   up half-open by accident.
-- **Dry-run first.** `dry_run=True` is the default posture for bring-up: it
-  logs the exact payloads (`POST /openapi/typea/orders/regular`) and places
-  nothing. Flip to `False` only after verifying the logs.
+- **Dry-run is the default — fail-closed.** `dry_run=True` is the *code
+  default* (architect review 2026-09-17 §3.2): it logs the exact payloads
+  (`POST /openapi/typea/orders/regular`) and places nothing. Arming real
+  orders requires **all three gates** at construction, or the constructor
+  raises `ValueError` before touching the broker:
+
+  | Gate | Switch | Meaning |
+  |---|---|---|
+  | 1 | `dry_run=False` | explicit opt-out of the safe default |
+  | 2 | `confirm_live=True` | deliberate, per-instance confirmation (never inherited from a copy-pasted config) |
+  | 3 | `ALLOW_LIVE_ORDERS=1` (environment) | ops-level kill-switch — a desk can disable all live placement centrally, without a deploy |
+
+  ```python
+  trader = LiveOptionTrader(broker, dry_run=False, confirm_live=True)  # + env ALLOW_LIVE_ORDERS=1
+  ```
+
+  Arming is logged loudly (`LIVE MODE ARMED`) and every live submission is
+  logged. `trader.confirm_live` reads `True` only when actually armed.
 - **Status polling.** Fill confirmation polls order status with
   `poll_interval_seconds` / `poll_timeout_seconds`; partial fills and
   rejections surface on `LegResult` and `StructureResult`.
