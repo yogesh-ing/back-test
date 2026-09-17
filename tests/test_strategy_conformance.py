@@ -36,7 +36,6 @@ from backtest.plugins import (
     discover_plugins,
     plugin_strategy_names,
 )
-from backtest.strategy import registry as strategy_registry
 from backtest.strategy.registry import _REGISTRY, get_strategy, list_strategies, signal_kind
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -118,15 +117,31 @@ def _load(dir_: Path, filename: str):
 
 
 class TestBuiltIns:
+    # The six canonical built-ins (exact-name check, NOT registry size: any
+    # test module that defines a Strategy subclass pollutes the global
+    # registry, so counting entries is order-dependent).
+    BUILTINS = (
+        "buy_and_hold",
+        "donchian_breakout",
+        "price_move",
+        "rsi_reversion",
+        "sma_crossover",
+        "directional_options",
+    )
+
     def test_all_six_builtins_pass_the_battery(self):
-        assert len(list_strategies()) == 6
-        for name in list_strategies():
+        registered = set(list_strategies())
+        for name in self.BUILTINS:
+            assert name in registered, f"built-in {name} not registered"
             res = conformance_errors(get_strategy(name))
             assert res.ok, f"{name}: {res.errors}"
 
     def test_builtin_signal_kinds(self):
         assert signal_kind(get_strategy("directional_options")) == "option"
-        for name in ("buy_and_hold", "donchian_breakout", "price_move", "rsi_reversion", "sma_crossover"):
+        equity = (
+            "buy_and_hold", "donchian_breakout", "price_move", "rsi_reversion", "sma_crossover",
+        )
+        for name in equity:
             assert signal_kind(get_strategy(name)) == "equity", name
 
     def test_catalogue_entries_carry_params_and_kind(self):
@@ -160,14 +175,15 @@ class TestTemplates:
                 getattr(module, a)
                 for a in dir(module)
                 if isinstance(getattr(module, a), type)
-                and getattr(getattr(module, a), "name", "").startswith("my_")
+                and str(getattr(getattr(module, a), "name", "")).startswith("my_")
             ]
             assert len(classes) == 1, f"{filename} must define exactly one template strategy"
             res = conformance_errors(classes[0])
             assert res.ok, res.errors
             assert signal_kind(classes[0]) == kind
         finally:
-            name = getattr(getattr(module, "MyEmaTrend", None) or getattr(module, "MyOptionMomentum"), "name", "")
+            tpl_cls = getattr(module, "MyEmaTrend", None) or getattr(module, "MyOptionMomentum")
+            name = getattr(tpl_cls, "name", "")
             if name in _REGISTRY:
                 _REGISTRY.pop(name)
 

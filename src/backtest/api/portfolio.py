@@ -210,8 +210,12 @@ def create_runner() -> Tuple[Response, int]:
             source=data.get("source") or "synthetic",
             instrument=instrument,
             playbook_id=data.get("playbook_id"),
-            playbook_version=int(data["playbook_version"]) if data.get("playbook_version") is not None else None,
-            playbook_snapshot=data.get("playbook_snapshot") or data.get("instrument", {}).get("expression"),
+            playbook_version=(
+                int(data["playbook_version"]) if data.get("playbook_version") is not None else None
+            ),
+            playbook_snapshot=(
+                data.get("playbook_snapshot") or data.get("instrument", {}).get("expression")
+            ),
         )
         auto_start = bool(data.get("auto_start", True))
         instance_id = _manager().add_runner(config, start=auto_start)

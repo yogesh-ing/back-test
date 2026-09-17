@@ -20,6 +20,7 @@ from backtest.playbooks.registry import (
     reset_playbook_registry,
 )
 
+
 # Convenience wrappers used by API layer and tests (kept for backward compat)
 def list_playbooks(tag: Optional[str] = None, underlying: Optional[str] = None) -> List[Playbook]:
     return get_playbook_registry().list(tag=tag, underlying=underlying)

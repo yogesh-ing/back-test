@@ -212,9 +212,7 @@ class PortfolioManager:
                 "peak_equity": round(peak, 2),
                 "drawdown_pct": round(self._bucket_drawdown(mode), 4),
                 "daily_pnl": round(daily, 2),
-                "daily_pnl_pct": (
-                    round(daily / day_start, 6) if day_start else 0.0
-                ),
+                "daily_pnl_pct": (round(daily / day_start, 6) if day_start else 0.0),
                 "realized_pnl": round(self._bucket_realized_pnl(mode), 2),
                 "deployed_capital": round(self._bucket_deployed(mode), 2),
                 "open_positions": self._bucket_open_positions(mode),
@@ -232,7 +230,13 @@ class PortfolioManager:
     # U3.3 — Audit logging with scope (AC-16)
     # ------------------------------------------------------------------
 
-    def _audit_log(self, action: str, scope: str = "paper", instance_id: Optional[str] = None, detail: str = "") -> None:
+    def _audit_log(
+        self,
+        action: str,
+        scope: str = "paper",
+        instance_id: Optional[str] = None,
+        detail: str = "",
+    ) -> None:
         """Log audit entry with scope — paper|live|playbook|dashboard.
 
         Every control action (spawn, flatten, kill, playbook CRUD, manual close)
@@ -246,7 +250,13 @@ class PortfolioManager:
             "detail": detail,
         }
         self._audit_log_entries.append(entry)
-        logger.info("[AUDIT] scope=%s action=%s instance_id=%s detail=%s", scope, action, instance_id or "-", detail)
+        logger.info(
+            "[AUDIT] scope=%s action=%s instance_id=%s detail=%s",
+            scope,
+            action,
+            instance_id or "-",
+            detail,
+        )
 
     def get_audit_log(self, scope: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         """Return audit log entries, optionally filtered by scope."""
@@ -266,6 +276,7 @@ class PortfolioManager:
         """
         try:
             from backtest.brokers.session_manager import get_session_manager
+
             return get_session_manager().is_authenticated()
         except Exception:  # noqa: BLE001 — never break summary on broker check
             return False
@@ -283,6 +294,7 @@ class PortfolioManager:
         """
         try:
             from backtest.web.options_api import get_option_broker, _broker
+
             # Only if singleton has been created
             if _broker is None:
                 return None
@@ -315,6 +327,7 @@ class PortfolioManager:
             # Refresh MTM if possible
             try:
                 from backtest.web.options_api import get_quote_provider
+
                 quotes = get_quote_provider()
                 broker.update_mtm(quotes)
             except Exception:
@@ -394,20 +407,27 @@ class PortfolioManager:
         count = 0
         try:
             from backtest.web.options_api import get_quote_provider
+
             quotes = get_quote_provider()
             for structure in list(broker.get_open_structures()):
                 try:
                     broker.close_structure(structure.structure_id, quotes, reason=reason)
                     count += 1
                 except Exception as exc:
-                    logger.warning("Failed to close dashboard structure %s: %s", structure.structure_id[:8], exc)
+                    logger.warning(
+                        "Failed to close dashboard structure %s: %s",
+                        structure.structure_id[:8],
+                        exc,
+                    )
         except Exception as exc:
             logger.warning("Dashboard flatten failed: %s", exc)
 
         if count:
             logger.critical("Dashboard book flattened: %d structures (%s)", count, reason)
             try:
-                self._audit_log(f"FLATTEN_DASHBOARD {reason}", scope="dashboard", detail=f"closed={count}")
+                self._audit_log(
+                    f"FLATTEN_DASHBOARD {reason}", scope="dashboard", detail=f"closed={count}"
+                )
             except Exception:
                 pass
         return count
@@ -443,9 +463,7 @@ class PortfolioManager:
             # shared live poll thread, everything else off the synthetic feed.
             feed = self.mstock_feed if config.source == "mstock" else self.feed
             for sym in config.symbols:
-                self.feed_registry.subscribe(
-                    config.source, sym, config.timeframe, feed=feed
-                )
+                self.feed_registry.subscribe(config.source, sym, config.timeframe, feed=feed)
             feed.add_symbols(config.symbols)
             self._refresh_anchors()
 
@@ -466,7 +484,12 @@ class PortfolioManager:
             )
             # U3.3 audit
             try:
-                self._audit_log(f"SPAWN {runner.config.name}", scope=bucket, instance_id=runner.instance_id, detail=f"strategy={config.strategy_name} capital={config.allocated_capital}")
+                self._audit_log(
+                    f"SPAWN {runner.config.name}",
+                    scope=bucket,
+                    instance_id=runner.instance_id,
+                    detail=f"strategy={config.strategy_name} capital={config.allocated_capital}",
+                )
             except Exception:
                 pass
             return runner.instance_id
@@ -483,14 +506,8 @@ class PortfolioManager:
             # (The chain subscription went with runner.stop() — one release
             # per acquire, owned by the runner.)
             for sym in runner.config.symbols:
-                self.feed_registry.release(
-                    runner.config.source, sym, runner.config.timeframe
-                )
-            feed = (
-                self.mstock_feed
-                if runner.config.source == "mstock"
-                else self.feed
-            )
+                self.feed_registry.release(runner.config.source, sym, runner.config.timeframe)
+            feed = self.mstock_feed if runner.config.source == "mstock" else self.feed
             feed.remove_symbols(runner.config.symbols)
             self._sync_mstock_thread()
             self.total_capital -= runner.config.allocated_capital
@@ -506,7 +523,12 @@ class PortfolioManager:
                 self._bucket_day[bucket] = None
             logger.info("Runner removed: %s (bucket=%s)", runner.config.name, bucket)
             try:
-                self._audit_log(f"DELETE {runner.config.name}", scope=bucket, instance_id=instance_id, detail=f"bucket={bucket}")
+                self._audit_log(
+                    f"DELETE {runner.config.name}",
+                    scope=bucket,
+                    instance_id=instance_id,
+                    detail=f"bucket={bucket}",
+                )
             except Exception:
                 pass
             return True
@@ -541,7 +563,12 @@ class PortfolioManager:
                 self._sync_mstock_thread()
             try:
                 bucket = self._runner_bucket(runner)
-                self._audit_log(f"{action.upper()} {runner.config.name}", scope=bucket, instance_id=instance_id, detail=f"action={action}")
+                self._audit_log(
+                    f"{action.upper()} {runner.config.name}",
+                    scope=bucket,
+                    instance_id=instance_id,
+                    detail=f"action={action}",
+                )
             except Exception:
                 pass
             return state
@@ -549,9 +576,7 @@ class PortfolioManager:
     def pause_all(self, mode: Optional[str] = None) -> int:
         """Pause runners. ``mode=None`` pauses all; mode='paper'|'live' pauses only that bucket."""
         with self._lock:
-            targets = (
-                self._bucket_runners(mode) if mode else list(self._runners.values())
-            )
+            targets = self._bucket_runners(mode) if mode else list(self._runners.values())
             n = 0
             for runner in targets:
                 if runner.status == STATUS_RUNNING:
@@ -575,9 +600,7 @@ class PortfolioManager:
             else:
                 if self.halted:
                     raise RuntimeError("portfolio is halted by circuit breaker; reset first")
-            targets = (
-                self._bucket_runners(mode) if mode else list(self._runners.values())
-            )
+            targets = self._bucket_runners(mode) if mode else list(self._runners.values())
             n = 0
             for runner in targets:
                 if runner.status == STATUS_PAUSED:
@@ -589,9 +612,7 @@ class PortfolioManager:
     def stop_all(self, mode: Optional[str] = None) -> int:
         """Stop runners. ``mode=None`` stops all; mode='paper'|'live' stops only that bucket."""
         with self._lock:
-            targets = (
-                self._bucket_runners(mode) if mode else list(self._runners.values())
-            )
+            targets = self._bucket_runners(mode) if mode else list(self._runners.values())
             n = 0
             for runner in targets:
                 if runner.status != STATUS_STOPPED:
@@ -620,9 +641,7 @@ class PortfolioManager:
                 if mode not in VALID_INSTANCE_MODES:
                     raise ValueError(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
 
-            targets = (
-                self._bucket_runners(mode) if mode else list(self._runners.values())
-            )
+            targets = self._bucket_runners(mode) if mode else list(self._runners.values())
             for runner in targets:
                 count += runner.flatten_all(reason=reason)
             for runner in targets:
@@ -670,7 +689,11 @@ class PortfolioManager:
             )
             try:
                 scope = mode or "all"
-                self._audit_log(f"EMERGENCY_FLATTEN {reason}", scope=scope, detail=f"closed={count} mode={scope}")
+                self._audit_log(
+                    f"EMERGENCY_FLATTEN {reason}",
+                    scope=scope,
+                    detail=f"closed={count} mode={scope}",
+                )
             except Exception:
                 pass
             self._evaluate_risk()
@@ -742,10 +765,7 @@ class PortfolioManager:
     @staticmethod
     def _bar_date(bar: Dict[str, Any]) -> str:
         """Extract YYYY-MM-DD from a bar's timestamp."""
-        return (
-            str(bar.get("ts", ""))[:10]
-            or datetime.now(timezone.utc).date().isoformat()
-        )
+        return str(bar.get("ts", ""))[:10] or datetime.now(timezone.utc).date().isoformat()
 
     def _sync_mstock_thread(self) -> None:
         """Run the live poll thread iff at least one mstock runner exists.
@@ -829,7 +849,9 @@ class PortfolioManager:
                 self._bucket_halted_ts[mode] = now_ts
                 logger.critical(
                     "BUCKET HALT [%s]: %s (mode=%s)",
-                    mode.upper(), report.halt_reason, report.halt_mode,
+                    mode.upper(),
+                    report.halt_reason,
+                    report.halt_mode,
                 )
                 # Only pause/flatten runners in THIS bucket
                 for runner in bucket_runners:
@@ -985,14 +1007,28 @@ class PortfolioManager:
             try:
                 dashboard_book = self.get_dashboard_book_summary()
             except Exception:
-                dashboard_book = {"exists": False, "open_positions": 0, "open_structures": 0, "positions": [], "structures": []}
+                dashboard_book = {
+                    "exists": False,
+                    "open_positions": 0,
+                    "open_structures": 0,
+                    "positions": [],
+                    "structures": [],
+                }
 
             # Include dashboard book in totals when it exists — so portfolio
             # overview is honest about total money at risk (fix for invisible trades).
-            dashboard_equity = dashboard_book.get("equity", 0.0) if dashboard_book.get("exists") else 0.0
-            dashboard_daily = dashboard_book.get("unrealized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
-            dashboard_realized = dashboard_book.get("realized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
-            dashboard_positions = dashboard_book.get("open_positions", 0) if dashboard_book.get("exists") else 0
+            dashboard_equity = (
+                dashboard_book.get("equity", 0.0) if dashboard_book.get("exists") else 0.0
+            )
+            dashboard_daily = (
+                dashboard_book.get("unrealized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
+            )
+            dashboard_realized = (
+                dashboard_book.get("realized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
+            )
+            dashboard_positions = (
+                dashboard_book.get("open_positions", 0) if dashboard_book.get("exists") else 0
+            )
 
             # Combined totals include dashboard book so flatten/emergency is honest
             combined_equity = equity + dashboard_equity
@@ -1009,9 +1045,7 @@ class PortfolioManager:
                     round(deployed / self.total_capital, 4) if self.total_capital > 0 else 0.0
                 ),
                 "daily_pnl": round(combined_daily, 2),
-                "daily_pnl_pct": (
-                    round(combined_daily / day_start, 6) if day_start else 0.0
-                ),
+                "daily_pnl_pct": (round(combined_daily / day_start, 6) if day_start else 0.0),
                 "realized_pnl": round(combined_realized, 2),
                 "open_positions": combined_positions,
                 "runner_count": len(states),
@@ -1111,9 +1145,7 @@ class PortfolioManager:
                 # U6.2: bar-feed subscriptions must go too, or the process-wide
                 # registry leaks entries that shadow the next manager's feed.
                 for sym in runner.config.symbols:
-                    self.feed_registry.release(
-                        runner.config.source, sym, runner.config.timeframe
-                    )
+                    self.feed_registry.release(runner.config.source, sym, runner.config.timeframe)
 
 
 # ---------------------------------------------------------------------------

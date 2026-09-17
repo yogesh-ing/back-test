@@ -35,8 +35,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from backtest.options.exit_policy import EXIT_DTE, ExitConfig, ExitPolicy
-from backtest.strategy.intent import Direction, MarketView
+from backtest.options.exit_policy import ExitConfig, ExitPolicy
+from backtest.strategy.intent import MarketView
 from backtest.strategy.signal import (
     ChainSnapshot,
     ExecutionContext,
@@ -53,11 +53,17 @@ EXIT_PRECEDENCE = [
     (0, "emergency", "Engine", "Unconditional. Overrides everything — breakers, flatten."),
     (1, "stop_loss_pct", "Playbook", "Risk control beats strategy signal."),
     (2, "take_profit_pct", "Playbook", "Profit-taking is also protective."),
-    (3, "time_dte_square_off", "Playbook-configured, engine-executed", "min_days_to_expiry default 1."),
+    (
+        3,
+        "time_dte_square_off",
+        "Playbook-configured, engine-executed",
+        "min_days_to_expiry default 1.",
+    ),
     (4, "signal_flip", "Strategy", "Last. Only if 1-3 didn't fire."),
 ]
 
-# Re-entry rule: when reenter=true, re-entry happens on next bar only — never same-bar. Default false.
+# Re-entry rule: when reenter=true, re-entry happens on next bar only —
+# never same-bar. Default false.
 # Evidence: same-bar re-enter churned -₹41,844 in 2026-09-16 forward experiment.
 # V1.1 knob: max_reentries_per_day default 2.
 DEFAULT_REENTER = False
@@ -152,7 +158,9 @@ class UnifiedExecutionEngine:
         """
         # Context must have been created by engine — has chain or bar reference
         # If context has no market data, it's a violation of C2 (strategy fetched elsewhere)
-        assert context is not None, "C2 violation: ExecutionContext is None — strategy must receive data from engine"
+        assert (
+            context is not None
+        ), "C2 violation: ExecutionContext is None — strategy must receive data from engine"
         # At least one of chain_snapshot or bar must be present — engine feeds it
         # (We allow empty for unit tests that mock, but we log a warning)
         has_data = (
@@ -163,7 +171,8 @@ class UnifiedExecutionEngine:
         if not has_data:
             logger.debug(
                 "C2: context has no chain/bar — allowed in unit tests, but in production "
-                "strategies must receive market data from engine (bars + chain snapshots flow engine → strategy)"
+                "strategies must receive market data from engine "
+                "(bars + chain snapshots flow engine → strategy)"
             )
 
     def get_chain_snapshot(
@@ -179,6 +188,7 @@ class UnifiedExecutionEngine:
         if self.chain_generator is None:
             try:
                 from backtest.options.quote_providers import SyntheticChainGenerator
+
                 self.chain_generator = SyntheticChainGenerator()
             except Exception:
                 return None
@@ -189,6 +199,7 @@ class UnifiedExecutionEngine:
             # Resolve expiry
             if expiry is None:
                 from backtest.options.expiry_policy import NearestExpiryPolicy
+
                 expiry = NearestExpiryPolicy().select_expiry(
                     self.chain_generator.available_expiries(underlying)
                 )
@@ -211,7 +222,11 @@ class UnifiedExecutionEngine:
                 spot_price=spot,
                 strikes=strikes,
                 chain=chain_dict,
-                source=getattr(self.quote_provider, "source_name", "synthetic") if self.quote_provider else "synthetic",
+                source=(
+                    getattr(self.quote_provider, "source_name", "synthetic")
+                    if self.quote_provider
+                    else "synthetic"
+                ),
             )
         except Exception as exc:
             logger.warning("Chain snapshot failed for %s: %s", underlying, exc)
@@ -324,7 +339,11 @@ class UnifiedExecutionEngine:
             "rejected_count": self.rejected_count,
             "exit_count": self.exit_count,
             "risk_envelope": self.risk_envelope.to_dict(),
-            "quote_source": getattr(self.quote_provider, "source_name", "unknown") if self.quote_provider else "none",
+            "quote_source": (
+                getattr(self.quote_provider, "source_name", "unknown")
+                if self.quote_provider
+                else "none"
+            ),
         }
 
 

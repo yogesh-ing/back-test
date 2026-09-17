@@ -234,7 +234,8 @@ class TestPolling:
         def latest_bar(symbol):
             counter["n"] += 1
             client.calls.append(symbol)
-            return dict(ISO_BAR, ts=f"2026-09-17 09:45:0{counter['n'] % 10}", close=25_000 + counter["n"])
+            n = counter["n"]
+            return dict(ISO_BAR, ts=f"2026-09-17 09:45:0{n % 10}", close=25_000 + n)
 
         client.latest_bar = latest_bar
         delivered: list[dict] = []

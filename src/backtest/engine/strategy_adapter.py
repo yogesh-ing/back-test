@@ -124,7 +124,9 @@ class StrategyAdapter:
             sub_series = sig_series.iloc[: idx + 1]
             if sub_series.empty:
                 continue
-            sig = self._signals_to_unified(sub_series, sub_candles, underlying, strat_name, chain_snapshot)
+            sig = self._signals_to_unified(
+                sub_series, sub_candles, underlying, strat_name, chain_snapshot
+            )
             if sig is not None:
                 signals.append(sig)
         return signals
@@ -147,7 +149,11 @@ class StrategyAdapter:
                 if hasattr(strategy, "underlying"):
                     return str(getattr(strategy, "underlying"))
         except Exception as exc:  # noqa: BLE001 — logged; fall back to the default underlying
-            logger.debug("underlying resolution failed for %s: %s", getattr(strategy, "name", "unknown"), exc)
+            logger.debug(
+                "underlying resolution failed for %s: %s",
+                getattr(strategy, "name", "unknown"),
+                exc,
+            )
         return self.default_underlying
 
     def _try_market_view(self, strategy: Any, candles: pd.DataFrame) -> Optional[MarketView]:
@@ -165,7 +171,11 @@ class StrategyAdapter:
         except NotImplementedError:
             return None
         except Exception as exc:
-            logger.debug("generate_market_view failed for %s: %s", getattr(strategy, "name", "unknown"), exc)
+            logger.debug(
+                "generate_market_view failed for %s: %s",
+                getattr(strategy, "name", "unknown"),
+                exc,
+            )
             return None
 
     def _try_generate_signals(self, strategy: Any, candles: pd.DataFrame) -> Optional[pd.Series]:
@@ -184,7 +194,11 @@ class StrategyAdapter:
                     getattr(strategy, "name", "unknown"),
                 )
             except Exception as exc:
-                logger.debug("generate_signals failed for %s: %s", getattr(strategy, "name", "unknown"), exc)
+                logger.debug(
+                    "generate_signals failed for %s: %s",
+                    getattr(strategy, "name", "unknown"),
+                    exc,
+                )
                 return None
 
         # Try entries/exits model
@@ -214,7 +228,11 @@ class StrategyAdapter:
         if spot is None or spot == 0:
             # Fallback to last close
             try:
-                spot = Decimal(str(candles["close"].iloc[-1])) if "close" in candles.columns else Decimal("0")
+                spot = (
+                    Decimal(str(candles["close"].iloc[-1]))
+                    if "close" in candles.columns
+                    else Decimal("0")
+                )
             except Exception:
                 spot = Decimal("0")
 
@@ -274,7 +292,11 @@ class StrategyAdapter:
 
         # Spot price from last close
         try:
-            spot = Decimal(str(candles["close"].iloc[-1])) if "close" in candles.columns else Decimal("0")
+            spot = (
+                Decimal(str(candles["close"].iloc[-1]))
+                if "close" in candles.columns
+                else Decimal("0")
+            )
         except Exception:
             spot = Decimal("0")
 

@@ -52,7 +52,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from backtest.strategy.intent import Direction, MarketView
+from backtest.strategy.intent import MarketView
 
 logger = logging.getLogger("backtest.strategy.signal")
 
@@ -61,18 +61,20 @@ logger = logging.getLogger("backtest.strategy.signal")
 # Signal types
 # ---------------------------------------------------------------------------
 
+
 class SignalType(str, Enum):
     """What kind of signal the strategy emitted."""
 
     EQUITY_ENTRY = "equity_entry"  # swing: buy/sell equity
-    EQUITY_EXIT = "equity_exit"    # swing: exit equity
-    OPTION_VIEW = "option_view"    # option: directional view → expression layer builds structure
+    EQUITY_EXIT = "equity_exit"  # swing: exit equity
+    OPTION_VIEW = "option_view"  # option: directional view → expression layer builds structure
     OPTION_DIRECT = "option_direct"  # option: strategy directly names strikes/legs (advanced)
 
 
 # ---------------------------------------------------------------------------
 # Chain snapshot — data ownership (engine provides, strategy consumes)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ChainSnapshot:
@@ -135,6 +137,7 @@ class ChainSnapshot:
 # ---------------------------------------------------------------------------
 # Risk envelope — instrument-agnostic risk normalization
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class RiskEnvelope:
@@ -235,6 +238,7 @@ class RiskEnvelope:
 # Execution context — what the engine provides to execute a signal
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ExecutionContext:
     """Everything the engine provides to execute a signal (HOW).
@@ -285,6 +289,7 @@ class ExecutionContext:
 # Exit ownership — two tiers
 # ---------------------------------------------------------------------------
 
+
 class ExitTier(str, Enum):
     """Who owns the exit decision."""
 
@@ -305,7 +310,9 @@ class ExitSignal:
     """
 
     tier: ExitTier
-    reason: str  # stop_loss, take_profit, signal_flip, signal_neutral, time_stop, auto_square_off, manual, circuit_breaker, emergency_flatten
+    # stop_loss, take_profit, signal_flip, signal_neutral, time_stop,
+    # auto_square_off, manual, circuit_breaker, emergency_flatten
+    reason: str
     detail: str = ""
     structure_id: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
@@ -329,6 +336,7 @@ class ExitSignal:
 # ---------------------------------------------------------------------------
 # Unified signal — the contract
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class UnifiedSignal:
@@ -551,6 +559,7 @@ class UnifiedSignal:
 # Execution router — the HOW (instrument-agnostic)
 # ---------------------------------------------------------------------------
 
+
 class SignalRouter:
     """Routes UnifiedSignal to the right execution path — paper/live, equity/option.
 
@@ -689,7 +698,11 @@ class SignalRouter:
             if signal.signal_type == SignalType.OPTION_DIRECT:
                 plan["strikes"] = signal.strike_info
             else:
-                plan["market_view"] = signal.market_view.to_dict() if hasattr(signal.market_view, "to_dict") else str(signal.market_view)
+                plan["market_view"] = (
+                    signal.market_view.to_dict()
+                    if hasattr(signal.market_view, "to_dict")
+                    else str(signal.market_view)
+                )
 
         else:
             plan = {

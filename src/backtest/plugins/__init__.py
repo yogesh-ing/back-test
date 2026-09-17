@@ -61,6 +61,7 @@ FORBIDDEN_IMPORTS = frozenset(
     }
 )
 
+
 class _ForbiddenImportVisitor(ast.NodeVisitor):
     """AST walk that records every import a module performs."""
 
@@ -124,7 +125,7 @@ def conformance_errors(cls: type, *, run_behaviour: bool = True) -> ConformanceR
     plugin loader (skip-and-log) and by ``tests/test_strategy_conformance.py``
     (assert-empty) so both enforce exactly the same contract.
     """
-    from backtest.strategy.base import Strategy, StrategyContractError
+    from backtest.strategy.base import Strategy
 
     res = ConformanceResult(cls=cls)
 
@@ -239,7 +240,11 @@ def _check_determinism(cls: type, candles: Any, kind: Optional[str]) -> None:
         # signature); MarketView → its dataclass repr; None → "None".
         if isinstance(value, pd.Series):
             return f"{value.dtype}:{value.tolist()}"
-        return repr(getattr(value, "__dict__", value) if not hasattr(value, "__dataclass_fields__") else value)
+        return repr(
+            getattr(value, "__dict__", value)
+            if not hasattr(value, "__dataclass_fields__")
+            else value
+        )
 
     if _sig(a) != _sig(b):
         raise AssertionError(
@@ -316,8 +321,7 @@ def _vet_plugin_classes(module: Any) -> List[str]:
         if name in _REGISTRY and _REGISTRY[name] is not cls:
             # Two classes claiming one name inside one module: first wins.
             logger.warning(
-                "plugin %s: duplicate strategy name %r — keeping the first, "
-                "skipping %s",
+                "plugin %s: duplicate strategy name %r — keeping the first, " "skipping %s",
                 module.__name__,
                 name,
                 cls.__name__,
@@ -359,9 +363,7 @@ def discover_plugins(force: bool = False) -> List[str]:
                 _LAST_SCAN[modname] = mtime
                 registered.extend(_vet_plugin_classes(module))
             except Exception as exc:  # noqa: BLE001 — a bad plugin never crashes the app
-                logger.warning(
-                    "plugin %s skipped: %s: %s", path.name, exc.__class__.__name__, exc
-                )
+                logger.warning("plugin %s skipped: %s: %s", path.name, exc.__class__.__name__, exc)
                 logger.debug("plugin %s import failed", path.name, exc_info=True)
                 sys.modules.pop(modname, None)
         return registered

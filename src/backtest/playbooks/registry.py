@@ -1,9 +1,11 @@
 """Playbook registry — thread-safe singleton, 3 seeded defaults, optional PLAYBOOKS_PATH JSON.
 
 Delete blocks pb_default_* IDs. Mirrors the existing pattern in options/playbook.py
-but is the canonical location per ARCHITECTURE-UNIFIED-TRADING.md §2 / UNIFIED-TRADING-TASKS.md U1.1.
+but is the canonical location per ARCHITECTURE-UNIFIED-TRADING.md §2 /
+UNIFIED-TRADING-TASKS.md U1.1.
 
-U1.1 requires: thread-safe singleton _REGISTRY, 3 seeded defaults (bull call spread / bear put spread / long call),
+U1.1 requires: thread-safe singleton _REGISTRY, 3 seeded defaults (bull call spread /
+bear put spread / long call),
 optional PLAYBOOKS_PATH JSON load/save.
 """
 
@@ -47,7 +49,9 @@ class PlaybookRegistry:
                     "reenter": False,
                 },
                 max_loss_per_trade=5000,
-                description="Conservative ATM spreads — 50% stop, 100% target, square off 1d before expiry",
+                description=(
+                    "Conservative ATM spreads — 50% stop, 100% target, square off 1d before expiry"
+                ),
                 tags=["conservative", "nifty", "spread"],
                 playbook_id="pb_default_bull_spread",
             ),
@@ -145,7 +149,9 @@ class PlaybookRegistry:
                 playbook.updated_at = datetime.now(timezone.utc).isoformat()
             self._playbooks[playbook.playbook_id] = playbook
         self._save_to_file()
-        logger.info("Saved playbook %r (%s) v%d", playbook.name, playbook.playbook_id, playbook.version)
+        logger.info(
+            "Saved playbook %r (%s) v%d", playbook.name, playbook.playbook_id, playbook.version
+        )
         return playbook
 
     def delete(self, playbook_id: str) -> bool:
