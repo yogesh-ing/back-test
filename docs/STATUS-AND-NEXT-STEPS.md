@@ -105,17 +105,24 @@ doc is stale, this file follows the code.
    *(Then: enable branch protection on `main` requiring the CI check.)*
 
 ### 🟠 P1 — Close the "real data" loop (highest value)
-1. **Live option chain + quotes (the last synthetic gap).** Bars now come from
-   mStock, but the option chain stack is still synthetic — runner
-   `quote_source` reads `synthetic:bs` and options price off BS, not real LTP
-   (confirmed: `forward/options_bridge.py` hard-imports `SyntheticChainGenerator`).
-   Wire `MStockClient.get_option_chain()` + `get_option_quote()` /
-   `LiveQuoteProvider` into `ChainBus`/`OptionsBridge` when `source=mstock` &&
-   authenticated; also fix the U2 quote-seam mismatch (see §1 note). **~1 day. Unblocks any meaningful options forward test.**
+1. **Live option chain + quotes (the last synthetic gap).** ~~Wire
+   `MStockClient.get_option_chain()` + `get_option_quote()` / `LiveQuoteProvider`
+   into `ChainBus`/`OptionsBridge` when `source=mstock` && authenticated~~
+   **WIRED 2026-09-17** (`tests/test_live_options_wiring.py`, 31 tests): 
+   `LiveChainProvider` serves real chains + LTP behind the generator duck type;
+   `ChainBus.acquire(source="mstock")` shares ONE provider per underlying
+   (rate-limit rule); runners route by `source` with a **labelled**
+   `synthetic:bs` fallback when no session; the U2 engine seam now returns a
+   real `LiveQuoteProvider` gated on a session check that actually exists.
+   **Remaining:** T9.5 — exercise it against a REAL mStock session and record
+   payloads (user action, credentials required).
 1b. **(New) Start EOD option-chain snapshot capture the day P1.1 lands.**
-   Without stored snapshots (strikes/premiums/IV/OI), options *backtests* stay
-   synthetic-BS forever — the PRD admits this. Cheapest while the live wiring
-   is open; accrues the data asset that risk-envelope V2 needs.
+   **DONE 2026-09-17** (`tests/test_chain_snapshots.py`): `OptionChainSnapshot`
+   table + `ChainSnapshotRecorder` (terms for the whole chain in one
+   instrument-master call, quotes for the nearest expiry via one call per
+   expiry, append-only batches) + `scripts/snapshot_option_chains.py`
+   (one-shot for cron, or `--interval-seconds` loop). **User action:** schedule
+   it against the authenticated session — the data asset accrues from day one.
 2. **Exercised live dry-run (T9.5).** The order client and `LiveOptionTrader`
    are tested only against mocks. Run the documented dry-run against a real
    mStock session and record payloads in the experiment doc.

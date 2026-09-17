@@ -994,3 +994,64 @@ class TradeStructure(Base):
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<TradeStructure {self.structure_type} {self.underlying} {self.status}>"
+
+
+class OptionChainSnapshot(Base):
+    """One contract's state in one option-chain snapshot batch (P1.1).
+
+    The data asset behind options *research*: every snapshot run appends the
+    full contract terms of the chain (from the instrument master — one API
+    call) plus L1 quotes where available, so backtests can eventually price
+    off recorded premiums/IV instead of Black-Scholes
+    (see ``docs/OPTIONS-FORWARD-TEST-EXPERIMENT.md`` E-6).
+
+    Append-only: each run writes a new batch sharing one ``snapshot_ts``;
+    there is no update path. Research reads go through
+    :func:`backtest.options.chain_snapshots.load_snapshots`.
+    """
+
+    __tablename__ = "option_chain_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: Batch timestamp — one value shared by every row of one snapshot run.
+    snapshot_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: Data source tag ("mstock" today; vendors plug in here).
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    underlying: Mapped[str] = mapped_column(String(32), nullable=False)
+    expiry: Mapped[date] = mapped_column(Date, nullable=False)
+    strike: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    option_type: Mapped[str] = mapped_column(String(2), nullable=False)
+    instrument_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    trading_symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    lot_size: Mapped[Optional[int]] = mapped_column(Integer)
+
+    #: L1 quotes — nullable because contract terms are captured even when a
+    #: quote call fails or is skipped (rate-limit budget).
+    ltp: Mapped[Optional[Decimal]] = mapped_column(Money)
+    bid: Mapped[Optional[Decimal]] = mapped_column(Money)
+    ask: Mapped[Optional[Decimal]] = mapped_column(Money)
+    volume: Mapped[Optional[int]] = mapped_column(Integer)
+    oi: Mapped[Optional[int]] = mapped_column(Integer)
+    #: Underlying spot at snapshot time (when the caller has one).
+    spot: Mapped[Optional[Decimal]] = mapped_column(Money)
+
+    __table_args__ = (
+        CheckConstraint(
+            option_type.in_(["CE", "PE"]), name="ck_option_chain_snapshots_type"
+        ),
+        Index("ix_chain_snapshots_ts", "snapshot_ts"),
+        Index("ix_chain_snapshots_underlying", "underlying"),
+        Index(
+            "ix_chain_snapshots_lookup",
+            "underlying",
+            "expiry",
+            "option_type",
+            "strike",
+        ),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"<OptionChainSnapshot {self.underlying} {self.expiry} "
+            f"{self.strike}{self.option_type}>"
+        )

@@ -116,9 +116,15 @@
   separately, historical chain snapshots are captured for research
   (architect review §3.4). Until then: report synthetic runs as plumbing
   checks with `quote_source` attached; make no edge claims from them.
-* **What would close it:** (a) real LTP chains in forward tests; (b) an
-  accumulating `option_chain_snapshots` store so backtests can price off
-  recorded premiums/IV.
+* **Status (updated 2026-09-17):** the wiring to close it landed — live
+  chains/LTP are routed to option runners (`source=mstock` + authenticated
+  session; labelled `synthetic:bs` fallback otherwise), and the snapshot
+  recorder (`options/chain_snapshots.py` + `scripts/snapshot_option_chains.py`)
+  accumulates real terms+quotes into `option_chain_snapshots` from day one.
+  Still open until (a) a run actually executes against a real session (T9.5)
+  and (b) enough snapshots accrue for research pricing. Until then: report
+  synthetic runs as plumbing checks with `quote_source` attached; make no
+  edge claims from them.
 
 ## E-7 — Forward-test state is memory-only — OPEN (known, scheduled)
 
