@@ -1,6 +1,12 @@
 # Status — What We Have & What Needs To Be Done
 
 **Date:** 2026-09-17 · **Branch:** `main` @ `b39da03` · **Suite:** ~2,435 passed, 7 skipped (mStock credentials), known Windows process-pool flake
+**⚠️ Architect review 2026-09-17 (`docs/ARCHITECT-REVIEW-2026-09-17.md`):** the
+suite figure above was measured on an uncommitted working tree. **On a clean
+checkout of this commit the app cannot boot and the suite cannot collect**
+(28 errors, 406 tests blocked) — the U6.2/U6.3/U7.1 deliverables were never
+`git add`ed. See the new **P0** below; claims in this file are being corrected
+against that review.
 
 This is the single consolidated picture, drawn from `UNIFIED-TRADING-TASKS.md`,
 `instructions/ROADMAP.md`, `instructions/BACKLOG.md`, `PROJECT-CONTEXT.md`,
@@ -22,7 +28,7 @@ doc is stale, this file follows the code.
 - CLI (`list / run / compare / preflight / papertrade`) and web UI
   (backtest, compare, forward, data, health).
 
-### Unified trading stack (P0–P7 of the Unified Trading PRD — 21/21 done ✅)
+### Unified trading stack (P0–P7 of the Unified Trading PRD — 21/21 done ✅ — *except the deliverables below were never committed; on a clean checkout they are absent*)
 - **Playbooks:** declarative plug-and-play option configs — dataclass + registry
   (thread-safe, JSON persistence via `PLAYBOOKS_PATH`, 3 seeded defaults,
   version auto-bump), 6 API routes, Portfolio-tab card grid UI, spawn snapshot
@@ -30,6 +36,10 @@ doc is stale, this file follows the code.
 - **Execution engine:** `mode` × `source` routing (paper→simulator,
   live→broker+margin gate), lot size from instrument master (never the
   playbook), pre-trade `max_loss_per_trade` risk cap, C2 data-ownership assert.
+  *Architect note: the U2 "live" quote branch in `engine/execution_engine.py`
+  (`_resolve_quote_source`) returns `MStockLiveFeed` — a bar feed — where the
+  quote-provider contract is `get_quote(token)` + `source_name`; fix this seam
+  during P1.1.*
 - **Two-tier exits:** emergency > stop > target > DTE square-off > signal flip;
   same-bar re-entry impossible; `reenter` default **off** with
   `max_reentries_per_day` (closes the −₹41,844 churn finding).
@@ -38,18 +48,25 @@ doc is stale, this file follows the code.
   Portfolio; audit log with scope; slim 7-field spawn form.
 - **Strategy plugins:** drop-in `plugins/strategies/*.py` with AST import-ban,
   conformance battery (determinism, output shape, metadata), templates for
-  equity + option strategies — `docs/STRATEGY-AUTHORING.md`.
+  equity + option strategies — `docs/STRATEGY-AUTHORING.md`. *⚠️ the
+  `backtest.plugins` package, the two `templates/` files and the doc are NOT in
+  the repo — P0.*
 
-### Data bus + mStock ✅ (the recent push)
+### Data bus + mStock ✅ (the recent push — *⚠️ bus file uncommitted, see P0*)
 - **Shared Market Data Bus** (`forward/feed_registry.py`): refcounted feeds per
   `(source, symbol, timeframe)`, one shared chain generator per underlying,
-  process-wide singletons.
+  process-wide singletons. *⚠️ This file is MISSING from the repo — it was never
+  committed with U6.2/U7.1. The app cannot import `portfolio_manager` without it.*
 - **mStock live bars into the bus (U7.1):** one background poll thread for all
   mstock symbols, market-hours gate, dedupe, error-soft — one sweep = one API
-  call regardless of runner count. Committed as `b39da03`.
+  call regardless of runner count. Committed as `b39da03` *minus the bus itself
+  and its test module (`tests/forward/test_mstock_live_bus.py`)*.
 - **mStock auth + order layer:** login/TOTP/OTP, session manager, order
   place/modify/cancel, fill polling, multi-leg `LiveOptionTrader`
-  (dry-run default). 202 stocks / 467K daily bars + 154K instruments in Postgres.
+  (*⚠️ not "dry-run default": `options/live_trading.py` has
+  `dry_run: bool = False` — fail-open on a live-money path; flip to `True` +
+  explicit confirm before T9.5*). 202 stocks / 467K daily bars + 154K
+  instruments in Postgres (unverifiable in-repo; external DB).
 
 ### Portfolio command center ✅
 - Live/Paper buckets with independent circuit breakers, per-bucket derived
@@ -60,13 +77,33 @@ doc is stale, this file follows the code.
 
 ## 2. What needs to be done
 
-### 🔴 P1 — Close the "real data" loop (highest value)
+### 🔴 P0 — Restore the uncommitted U6/U7 deliverables (blocks everything, added by architect review)
+0. **Recover/restore the files that were never committed** (full evidence and a
+   reconstructed interface contract in `docs/ARCHITECT-REVIEW-2026-09-17.md` §1):
+   `src/backtest/forward/feed_registry.py` (fatal import), `src/backtest/plugins/__init__.py`,
+   `templates/equity+option_strategy_template.py`, `tests/forward/test_feed_registry.py`,
+   `tests/test_strategy_conformance.py`, `tests/forward/test_mstock_live_bus.py`,
+   `docs/STRATEGY-AUTHORING.md`, `docs/OPTIONS-FORWARD-TEST-EXPERIMENT.md`.
+   First choice: `git status` on the machine that built `b39da03` and commit the
+   untracked files. Fallback: rebuild from the call-site contract (review §1.4).
+   Then add **clean-clone CI** (pytest + `node --test tests/js` + `create_app()`
+   smoke) so "green on my machine" states can never ship again.
+0b. **Fail-closed fix (hours):** `LiveOptionTrader(dry_run=False)` default →
+   `True` + explicit live confirmation gate; sweep other live branches for
+   fail-open defaults.
+
+### 🟠 P1 — Close the "real data" loop (highest value)
 1. **Live option chain + quotes (the last synthetic gap).** Bars now come from
    mStock, but the option chain stack is still synthetic — runner
-   `quote_source` reads `synthetic:bs` and options price off BS, not real LTP.
+   `quote_source` reads `synthetic:bs` and options price off BS, not real LTP
+   (confirmed: `forward/options_bridge.py` hard-imports `SyntheticChainGenerator`).
    Wire `MStockClient.get_option_chain()` + `get_option_quote()` /
    `LiveQuoteProvider` into `ChainBus`/`OptionsBridge` when `source=mstock` &&
-   authenticated. **~1 day. Unblocks any meaningful options forward test.**
+   authenticated; also fix the U2 quote-seam mismatch (see §1 note). **~1 day. Unblocks any meaningful options forward test.**
+1b. **(New) Start EOD option-chain snapshot capture the day P1.1 lands.**
+   Without stored snapshots (strikes/premiums/IV/OI), options *backtests* stay
+   synthetic-BS forever — the PRD admits this. Cheapest while the live wiring
+   is open; accrues the data asset that risk-envelope V2 needs.
 2. **Exercised live dry-run (T9.5).** The order client and `LiveOptionTrader`
    are tested only against mocks. Run the documented dry-run against a real
    mStock session and record payloads in the experiment doc.
@@ -85,14 +122,17 @@ doc is stale, this file follows the code.
    manual-book structures in trailing 14 days **and** ≥10 playbook-spawned
    runners; review by **2026-09-30** regardless. Delete
    `options.html` + `options.js` shell; keep chain/Greeks/expiry services.
-7. **Consultant sign-off on 6 open questions** (`docs/consultant quest review.md` §0.4):
+7. **Consultant sign-off on 6 open questions** (root **`CONSULTANT_RESPONSE.md`**, "Open Questions" §0.4 — *path corrected; no `docs/consultant quest review.md` exists*):
    playbook scope (option-only vs equity), risk-envelope V2 (BS+IV+SPAN
    inputs), exit precedence confirmation, re-enter policy, playbook
    versioning, hard-delete metric.
 
 ### 🟡 P3 — Engine depth (Roadmap Phase 1–2 leftovers)
-8. Position sizing (fixed-fraction / fixed-cash / ATR-target), fill models
-   (next-open vs close, pluggable slippage), trade log export (CSV/JSON).
+8. Position sizing presets for the **vectorized engine + CLI** (fixed-fraction /
+   fixed-cash / ATR-target), fill models (next-open vs close, pluggable
+   slippage), trade log export (CSV/JSON). *Scope correction: sizers already
+   exist on the forward side (`strategy_adapter.py`, `simulator/position_sizing.py`,
+   `backtest_driver.size_fn`) — the gap is presets/exposure on the vectorized path.*
 9. Richer metrics: Sortino, expectancy, profit factor, monthly heatmap.
 10. Parameter optimization + walk-forward analysis (grid/random search,
     rolling in-sample/out-of-sample), Monte-Carlo / deflated Sharpe.
@@ -100,9 +140,19 @@ doc is stale, this file follows the code.
     Phase B, do **not** bundle with anything.
 
 ### 🟢 P4 — Platform hygiene (low urgency, real debt)
-12. **Orphaned code:** `forward/live_engine.py` (697 lines, zero importers —
-    delete or wire it), dead config files (`market_data.yaml`,
-    `time_sync.yaml`), legacy `dashboard/app.py` slated for retirement.
+12. ~~Orphaned code: `forward/live_engine.py` (697 lines)~~ **already deleted**
+    (folded into `data/mstock_live_feed.py` per P3.4; its old tests now exercise
+    `ForwardTestingEngine`) ~~dead config files (`market_data.yaml`, `time_sync.yaml`)~~
+    **already removed** — both closed by architect review. Remaining here:
+    legacy `/dashboard` route + `dashboard.html` template slated for retirement.
+12b. **(New) Repo hygiene:** `graphify-out/` + `.idea/` tracked despite
+    `.gitignore` (52 files) → `git rm -r --cached`; move shared test fixtures
+    out of test-to-test imports (`test_bucket_risk.py` ← `test_live_engine.py`)
+    into a helpers/conftest module.
+12c. **(New) Corporate actions:** no split/bonus/dividend handling anywhere in
+    the data layer — raw NSE daily bars mean one unadjusted 10:1 split poisons
+    metrics and any walk-forward split crossing it. Add an adjusted-price
+    policy + a `data_quality.yaml` outlier rule (see review §3.3).
 13. **Production server:** still Flask dev server; Gunicorn needs
     `--workers 1` until state is externalized (the multi-worker trap, §13 of
     project-overview). Blocked behind #4.
@@ -117,9 +167,12 @@ doc is stale, this file follows the code.
 ## 3. Suggested order
 
 ```
-1. Live option chain/quotes wiring  ← makes forward tests REAL
-2. Live dry-run exercise (T9.5)     ← proves the order path
-3. Runner-state persistence         ← survives restarts, unblocks Gunicorn
+0. Restore missing U6/U7 files + CI clean-clone gate   ← P0, nothing else is real until this is done
+0b. Fail-closed defaults on LiveOptionTrader           ← hours, do first
+1. Live option chain/quotes wiring                     ← makes forward tests REAL
+1b. Start EOD option-chain snapshot capture            ← rides #1; options research data accrues
+2. Live dry-run exercise (T9.5) + F-12 equity fills    ← proves the order path (idempotent + reconciled)
+3. Runner-state persistence                            ← survives restarts, unblocks Gunicorn
 4. Consultant answers → risk envelope V2
 5. Engine depth (sizing, metrics, optimization) in parallel
 ```
@@ -133,7 +186,8 @@ doc is stale, this file follows the code.
 | Task-by-task unified trading record | `docs/UNIFIED-TRADING-TASKS.md` |
 | Full platform tour | `docs/project-overview.md` |
 | Invariants | `PROJECT-CONTEXT.md` |
-| Write a strategy | `docs/STRATEGY-AUTHORING.md` |
-| Forward-test experiment log (honest findings) | `docs/OPTIONS-FORWARD-TEST-EXPERIMENT.md` |
+| Architect cross-verification of this file + new gaps | `docs/ARCHITECT-REVIEW-2026-09-17.md` |
+| Write a strategy | `docs/STRATEGY-AUTHORING.md` *(missing from repo — P0)* |
+| Forward-test experiment log (honest findings) | `docs/OPTIONS-FORWARD-TEST-EXPERIMENT.md` *(missing from repo — P0)* |
 | Big-picture plan | `instructions/ROADMAP.md` + `instructions/BACKLOG.md` |
-| Playbook architecture sign-off | `docs/consultant quest review.md` |
+| Playbook architecture sign-off + the 6 open questions | root `CONSULTANT_RESPONSE.md` |
