@@ -1,12 +1,15 @@
 # Status — What We Have & What Needs To Be Done
 
 **Date:** 2026-09-17 · **Branch:** `main` @ `b39da03` · **Suite:** ~2,435 passed, 7 skipped (mStock credentials), known Windows process-pool flake
-**⚠️ Architect review 2026-09-17 (`docs/ARCHITECT-REVIEW-2026-09-17.md`):** the
-suite figure above was measured on an uncommitted working tree. **On a clean
-checkout of this commit the app cannot boot and the suite cannot collect**
-(28 errors, 406 tests blocked) — the U6.2/U6.3/U7.1 deliverables were never
-`git add`ed. See the new **P0** below; claims in this file are being corrected
-against that review.
+**✅ Architect restoration 2026-09-17:** the P0 missing deliverables are
+**restored** on `arena/01a0b02a-back-test` — `feed_registry.py` +
+`plugins/__init__.py` (user, via `main`), plus rebuilt test modules
+(`test_feed_registry` 22, `test_strategy_conformance` 21, `test_mstock_live_bus`
+31), strategy templates, `STRATEGY-AUTHORING.md` and the rebuilt experiment log.
+The F-10 lint gate was also found red on committed `src/` (56 findings — more
+uncommitted-tree state) and is green again. **Measured on the tree now:
+2,457 passed / 4 skipped, JS harnesses green, app boots.** Remaining P0: clean-clone
+CI (review §3.1). Full details: `docs/ARCHITECT-REVIEW-2026-09-17.md`.
 
 This is the single consolidated picture, drawn from `UNIFIED-TRADING-TASKS.md`,
 `instructions/ROADMAP.md`, `instructions/BACKLOG.md`, `PROJECT-CONTEXT.md`,
@@ -77,20 +80,16 @@ doc is stale, this file follows the code.
 
 ## 2. What needs to be done
 
-### 🔴 P0 — Restore the uncommitted U6/U7 deliverables (blocks everything, added by architect review)
-0. **Recover/restore the files that were never committed** (full evidence and a
-   reconstructed interface contract in `docs/ARCHITECT-REVIEW-2026-09-17.md` §1):
-   `src/backtest/forward/feed_registry.py` (fatal import), `src/backtest/plugins/__init__.py`,
-   `templates/equity+option_strategy_template.py`, `tests/forward/test_feed_registry.py`,
-   `tests/test_strategy_conformance.py`, `tests/forward/test_mstock_live_bus.py`,
-   `docs/STRATEGY-AUTHORING.md`, `docs/OPTIONS-FORWARD-TEST-EXPERIMENT.md`.
-   First choice: `git status` on the machine that built `b39da03` and commit the
-   untracked files. Fallback: rebuild from the call-site contract (review §1.4).
-   Then add **clean-clone CI** (pytest + `node --test tests/js` + `create_app()`
-   smoke) so "green on my machine" states can never ship again.
+### 🔴 P0 — ~~Restore the uncommitted U6/U7 deliverables~~ **DONE 2026-09-17** — remaining: CI
+0. ~~Recover/restore the files that were never committed~~ **DONE** — merged
+   `feed_registry.py` + `plugins/__init__.py` from `main`; rebuilt the rest
+   (tests, templates, docs) on `arena/01a0b02a-back-test` with the F-10 lint
+   gate green and the full suite passing on the committed tree. **Still open
+   from this item:** the clean-clone CI gate (pytest + `node --test tests/js`
+   + `create_app()` smoke) so a "green on my machine" state can never ship again.
 0b. **Fail-closed fix (hours):** `LiveOptionTrader(dry_run=False)` default →
    `True` + explicit live confirmation gate; sweep other live branches for
-   fail-open defaults.
+   fail-open defaults. *(Not yet done — next after CI.)*
 
 ### 🟠 P1 — Close the "real data" loop (highest value)
 1. **Live option chain + quotes (the last synthetic gap).** Bars now come from

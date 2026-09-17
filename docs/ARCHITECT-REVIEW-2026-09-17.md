@@ -7,6 +7,29 @@
 committed tree — imports executed, `create_app()` booted, test suite collected and
 run on a clean venv, referenced files resolved, call sites read.
 
+> ## ✅ Restoration status (updated 2026-09-17, later the same day)
+>
+> The P0 restoration is **done** on `arena/01a0b02a-back-test`:
+>
+> * User committed `feed_registry.py` + `plugins/__init__.py` to `main`; merged here.
+> * Rebuilt from the §1.4 contract and the task records:
+>   `tests/forward/test_feed_registry.py` (22 tests), `templates/` (2 templates),
+>   `tests/test_strategy_conformance.py` (21 tests), `tests/forward/test_mstock_live_bus.py`
+>   (31 tests), `docs/STRATEGY-AUTHORING.md`, `docs/OPTIONS-FORWARD-TEST-EXPERIMENT.md`
+>   (reconstructed from committed sources, provenance stated).
+> * **New P0-class finding while restoring:** the F-10 zero-findings lint gate was
+>   red on committed `src/` — 56 flake8 findings across 12 files (unused imports,
+>   over-long lines). The lint-clean versions were *also* only in the lost working
+>   tree. Fixed (mechanical + black@100); `flake8 src/` green again.
+> * Fixed a pre-existing e2e test-isolation bug:
+>   `test_summary_endpoint_serves_full_session` rehydrated stale open structures
+>   from the shared DB (`OPTIONS_PERSISTENCE=auto`); pinned to `off` — DB round-trips
+>   remain covered by `tests/test_options_persistence.py`.
+> * **Measured on the committed tree now:** 2,457 passed / 4 skipped (mStock
+>   credentials), `node --test` 7/7 JS harnesses, `create_app()` boots. The
+>   remaining P0 action is **CI on a clean checkout** (§3.1) so this class of
+>   incident cannot recur.
+
 ---
 
 ## 0. Executive verdict
