@@ -27,9 +27,13 @@ run on a clean venv, referenced files resolved, call sites read.
 >   remain covered by `tests/test_options_persistence.py`.
 > * **Measured on the committed tree now:** 2,471 passed / 4 skipped (mStock
 >   credentials), `node --test` 7/7 JS harnesses, `create_app()` boots.
-> * **§3.1 CI — DONE:** `.github/workflows/ci.yml` + `scripts/smoke_check.py`
->   (clean install → lint gate → full suite → boot smoke → JS harnesses).
->   Remaining user action: require the CI check in `main`'s branch protection.
+> * **§3.1 CI — READY (needs one permitted push):** `scripts/smoke_check.py`
+>   is on the branch; the workflow content (`.github/workflows/ci.yml`) is
+>   prepared in the workspace but the agent token may not write `workflows/`
+>   paths. Land it from any account with workflow permission:
+>   copy the file to `.github/workflows/ci.yml` on the branch,
+>   `git add .github/workflows/ci.yml && git commit -m "ci: clean-clone gate"
+>   && git push`. Then require the CI check in `main`'s branch protection.
 > * **§3.2 fail-closed — DONE:** `LiveOptionTrader` defaults to `dry_run=True`;
 >   arming real orders needs `dry_run=False` + `confirm_live=True` + env
 >   `ALLOW_LIVE_ORDERS=1`, else `ValueError` before any broker call. Gate tests
