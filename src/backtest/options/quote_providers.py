@@ -36,6 +36,7 @@ logger = logging.getLogger("backtest.options.quotes")
 __all__ = [
     "SyntheticQuoteProvider",
     "LiveQuoteProvider",
+    "LiveChainProvider",
     "CachedQuoteProvider",
     "SyntheticChainGenerator",
     "bs_price",
@@ -376,3 +377,200 @@ class CachedQuoteProvider:
         quote = self.inner.get_quote(instrument_token)
         self._cache[instrument_token] = (quote, now)
         return quote
+
+
+# ---------------------------------------------------------------------------
+# LiveChainProvider (P1.1 — real mStock chain behind the synthetic duck type)
+# ---------------------------------------------------------------------------
+
+
+class LiveChainProvider:
+    """Real mStock option chain + LTP behind the *generator* duck type.
+
+    P1.1 — the last synthetic gap in the runner path. When an option runner
+    runs with ``source="mstock"`` and an authenticated session, this class
+    replaces the ``SyntheticChainGenerator`` + ``SyntheticQuoteProvider``
+    pair inside the runner's :class:`~backtest.forward.options_bridge.OptionsBridge`
+    so chains, strikes and MTM come from the broker, not Black-Scholes.
+
+    One object, two surfaces (the bridge holds it as its ``quote_provider``
+    and reaches the generator surface through ``.generator``):
+
+    * **Quote surface** (:class:`~backtest.options.paper_trading.OptionPaperBroker`
+      contract) — ``get_quote(token)`` returns real LTP/bid/ask through a TTL
+      cache; ``register_chain(chain)`` keeps the token → contract registry.
+    * **Generator surface** (``OptionsBridge`` contract) —
+      ``generate_chain``/``available_expiries`` serve the *contract terms*
+      (strike/expiry/lot/token/symbol) fetched from the instrument master —
+      ONE API call per underlying per ``chain_ttl_seconds`` no matter how many
+      runners share it (the §5.2 rate-limit rule); ``get_spot``/``set_spot``
+      carry the real underlying spot pushed in from the runner's bars
+      (``OptionsBridge._sync_market`` calls ``set_spot`` already — no bridge
+      change needed); ``price_contract`` returns the live LTP.
+
+    Fail semantics: quotes and chain fetches are error-soft (log + last-known
+    or zero-quote), matching :class:`LiveQuoteProvider`. ``get_spot`` raises
+    ``ValueError`` until the first real spot arrives — no real spot means no
+    strike selection, i.e. **no trading until a real bar shows up** (never a
+    silent fall-back to synthetic scale). ``set_reference`` is accepted and
+    ignored: the live clock is the market's clock.
+    """
+
+    #: Underlying → starting spot while no real bar has arrived. Used ONLY
+    #: to answer ``get_spot`` before the first bar; a runner that trades on
+    #: it would be trading a guess — so ``require_live_spot`` (default True)
+    #: makes ``get_spot`` raise instead. Keep for research/read-only use.
+    DEFAULT_SPOTS = dict(SyntheticChainGenerator.DEFAULT_SPOTS)
+
+    def __init__(
+        self,
+        broker: Any,
+        quote_ttl_seconds: int = 5,
+        chain_ttl_seconds: int = 900,
+        require_live_spot: bool = True,
+    ) -> None:
+        self.broker = broker
+        self._quotes = LiveQuoteProvider(broker, cache_ttl_seconds=quote_ttl_seconds)
+        self._chain_ttl = float(chain_ttl_seconds)
+        self._require_live_spot = bool(require_live_spot)
+        self._chain_cache: dict[str, tuple[list[Any], float]] = {}
+        self._contracts: dict[str, Any] = {}  # instrument_token → OptionContract
+        self._spots: dict[str, float] = {}
+
+    # -- identity -----------------------------------------------------------
+
+    @property
+    def source_name(self) -> str:
+        return "live:mstock"
+
+    @property
+    def generator(self) -> "LiveChainProvider":
+        """The generator surface is this object (``OptionsBridge._generator``)."""
+        return self
+
+    def __repr__(self) -> str:  # pragma: no cover — debug helper
+        return f"<LiveChainProvider underlying_contracts={len(self._contracts)}>"
+
+    # -- quote surface (OptionPaperBroker) -----------------------------------
+
+    def register_chain(self, chain: dict[Any, Any]) -> None:
+        """Remember token → contract for every contract in ``chain``."""
+        for contract in chain.values():
+            self._contracts[str(contract.instrument_token)] = contract
+
+    def get_quote(self, instrument_token: str) -> dict[str, Any]:
+        """Real L1 quote (TTL-cached) for one contract token."""
+        return self._quotes.get_quote(instrument_token)
+
+    def get_quotes_bulk(self, tokens: list[str]) -> dict[str, dict[str, Any]]:
+        """Quotes for many tokens (each individually error-soft)."""
+        return {token: self.get_quote(token) for token in tokens}
+
+    # -- generator surface (OptionsBridge) ------------------------------------
+
+    def set_spot(self, underlying: str, spot: float) -> None:
+        """Record the real underlying spot (pushed from the runner's bars)."""
+        self._spots[str(underlying).upper()] = float(spot)
+
+    def get_spot(self, underlying: str) -> float:
+        """The real spot. Raises before the first real bar (fail-loud)."""
+        key = str(underlying).upper()
+        if key in self._spots:
+            return self._spots[key]
+        if self._require_live_spot:
+            raise ValueError(
+                f"no live spot yet for {underlying} — waiting for the first "
+                "mStock bar (synthetic scale is never substituted)"
+            )
+        return self.DEFAULT_SPOTS.get(key, 100.0)
+
+    def set_reference(self, reference: datetime | None) -> None:
+        """Accepted for API parity — live pricing uses the market clock."""
+
+    def _fetch_chain(self, underlying: str) -> list[Any]:
+        """All contracts for ``underlying`` (instrument master, TTL-cached)."""
+        now = time.monotonic()
+        cached = self._chain_cache.get(underlying)
+        if cached is not None:
+            contracts, ts = cached
+            if now - ts < self._chain_ttl:
+                return contracts
+        try:
+            contracts = list(self.broker.get_option_chain(underlying))
+        except Exception as exc:  # noqa: BLE001 — a chain hiccup must not kill the bar
+            logger.error("LiveChainProvider chain fetch failed for %s: %s", underlying, exc)
+            return cached[0] if cached is not None else []
+        self._chain_cache[underlying] = (contracts, now)
+        return contracts
+
+    @staticmethod
+    def _expiry_code(expiry: date) -> str:
+        """mStock chain-data expiry code — ``"25DEC"`` style (``%d%b`` upper)."""
+        return expiry.strftime("%d%b").upper()
+
+    def available_expiries(
+        self,
+        underlying: str,
+        count: int = 3,
+        reference: date | None = None,
+    ) -> list[date]:
+        """Distinct real expiries for ``underlying`` (nearest-first)."""
+        ref = reference or date.today()
+        expiries = sorted(
+            {
+                c.expiry
+                for c in self._fetch_chain(underlying)
+                if getattr(c, "expiry", None) is not None and c.expiry >= ref
+            }
+        )
+        return expiries[: max(int(count), 0)]
+
+    def generate_chain(
+        self,
+        underlying: str,
+        expiry: date | None = None,
+        strikes_each_side: int | None = None,
+        option_type: str = "CE",
+    ) -> dict[Decimal, Any]:
+        """``{strike: contract}`` from REAL contracts for one expiry + side.
+
+        Mirrors ``SyntheticChainGenerator.generate_chain`` (the V1 chain
+        shape): one contract per strike, filtered to ``expiry`` (default:
+        nearest available) and ``option_type``. Raises ``ValueError`` when
+        the broker serves no matching contracts — the bridge surfaces it as
+        a soft rejection rather than trading an empty chain.
+        """
+        if option_type not in ("CE", "PE"):
+            raise ValueError(f"option_type must be CE or PE, got {option_type!r}")
+        contracts = self._fetch_chain(underlying)
+        expiries = sorted({c.expiry for c in contracts if getattr(c, "expiry", None)})
+        if expiry is None:
+            future = [e for e in expiries if e >= date.today()]
+            if not future:
+                raise ValueError(f"no option contracts available for {underlying}")
+            expiry = future[0]
+        chain: dict[Decimal, Any] = {}
+        for c in contracts:
+            if c.expiry != expiry:
+                continue
+            raw_type = str(getattr(c.option_type, "value", c.option_type)).upper()
+            type_code = "CE" if raw_type.startswith("C") else "PE"
+            if type_code != option_type:
+                continue
+            chain[c.strike] = c
+        if not chain:
+            raise ValueError(
+                f"no {option_type} contracts for {underlying} expiry {expiry} "
+                f"({len(contracts)} contracts in master)"
+            )
+        return chain
+
+    def price_contract(
+        self,
+        contract: Any,
+        option_type: str = "CE",
+        reference: datetime | None = None,
+    ) -> float:
+        """Live LTP for ``contract`` (0.0 when the quote is unavailable)."""
+        quote = self.get_quote(str(contract.instrument_token))
+        return float(quote.get("ltp", 0.0) or 0.0)

@@ -573,20 +573,29 @@ class StrategyRunner:
         # contract registry + pricing clock).
         self.options_bridge: Optional["OptionsBridge"] = None
         self._chain_released = True  # U6.2 guard; flipped when a bridge takes its subscription
+        self._chain_source = "synthetic"  # P1.1: release must match the acquire source
         if str(config.instrument.get("type", "equity")) == "option":
-            from backtest.forward.feed_registry import (
-                get_chain_bus,
-                option_quote_provider,
-            )
+            from backtest.forward.feed_registry import option_quote_provider_for
 
-            bus = get_chain_bus()
-            shared_generator = bus.acquire(config.symbols[0] if config.symbols else "NIFTY")
             self._chain_underlying = config.symbols[0] if config.symbols else "NIFTY"
+            # P1.1: source routes the chain — mstock + authenticated session →
+            # the shared LiveChainProvider (real chains + LTP, one API budget
+            # per underlying); anything else → the synthetic pair. The fallback
+            # is deliberate and labelled ("synthetic:bs") so a synthetic-priced
+            # runner can never pass as live.
+            provider, quote_label = option_quote_provider_for(
+                config.source, self._chain_underlying
+            )
+            # The bus STORE the acquire landed in (synthetic|mstock) — derived
+            # from the resolved provider, not from config.source: a requested
+            # "mstock" that fell back to synthetic must release the synthetic
+            # entry, or stop() leaks the refcount.
+            self._chain_source = "mstock" if quote_label == "live:mstock" else "synthetic"
             self._chain_released = False  # one release per acquire (stop is idempotent)
             self.options_bridge = OptionsBridge(
                 capital=config.allocated_capital,
                 expression=config.instrument.get("expression"),
-                quote_provider=option_quote_provider(shared_generator),
+                quote_provider=provider,
             )
 
         # -- rolling candle buffers ----------------------------------------
@@ -773,7 +782,9 @@ class StrategyRunner:
             if self.options_bridge is not None and self._chain_released:
                 try:
                     from backtest.forward.feed_registry import get_chain_bus
-                    get_chain_bus().acquire(self._chain_underlying)
+                    get_chain_bus().acquire(
+                        self._chain_underlying, source=self._chain_source
+                    )
                     self._chain_released = False
                 except Exception:  # noqa: BLE001 — acquire must never block start
                     logger.exception("chain bus acquire failed for %s", self.instance_id[:8])
@@ -807,7 +818,9 @@ class StrategyRunner:
                 if self.options_bridge is not None:
                     try:
                         from backtest.forward.feed_registry import get_chain_bus
-                        get_chain_bus().release(self._chain_underlying)
+                        get_chain_bus().release(
+                            self._chain_underlying, source=self._chain_source
+                        )
                     except Exception:  # noqa: BLE001 — release must never block stop
                         logger.exception("chain bus release failed for %s", self.instance_id[:8])
                 self._chain_released = True

@@ -162,15 +162,54 @@ class ChainBus:
     so strikes, expiry and premiums are identical across runners and priced
     off the one shared spot. Generators are created lazily and refcounted —
     when the last option runner on an underlying detaches, the entry goes.
+
+    P1.1: ``source="mstock"`` acquires a shared :class:`LiveChainProvider`
+    instead — ONE real chain/LTP object per underlying regardless of runner
+    count (the §5.2 rate-limit rule; the instrument master is fetched once
+    per TTL and quotes share one TTL cache). A live acquire **requires** a
+    quote broker client — there is no silent synthetic substitution on the
+    live path (the caller decides the fallback and labels it).
     """
 
     def __init__(self) -> None:
         self._generators: Dict[str, _FeedEntry] = {}
+        self._live: Dict[str, _FeedEntry] = {}
         self._lock = threading.RLock()
 
-    def acquire(self, underlying: str) -> SyntheticChainGenerator:
-        """Return the shared generator for ``underlying``, +1 subscriber."""
+    def acquire(
+        self,
+        underlying: str,
+        source: str = "synthetic",
+        broker: Any = None,
+    ) -> Any:
+        """Return the shared generator for ``underlying``, +1 subscriber.
+
+        ``source="synthetic"`` → the classic shared ``SyntheticChainGenerator``.
+        ``source="mstock"`` → the shared :class:`LiveChainProvider`; needs a
+        broker client exposing ``get_option_chain`` / ``get_option_quote``.
+        """
         key = str(underlying).upper()
+        with self._lock:
+            if str(source).lower() == "mstock":
+                if broker is None:
+                    raise ValueError(
+                        "ChainBus.acquire(source='mstock') requires a quote "
+                        "broker client — no silent synthetic substitution"
+                    )
+                entry = self._live.get(key)
+                if entry is None:
+                    from backtest.options.quote_providers import LiveChainProvider
+
+                    entry = _FeedEntry(
+                        feed=LiveChainProvider(broker), key=(key, "mstock", "")
+                    )
+                    self._live[key] = entry
+                    logger.info("live chain provider registered: %s", key)
+                entry.subscribers += 1
+                return entry.feed
+            return self._acquire_synthetic(key)
+
+    def _acquire_synthetic(self, key: str) -> SyntheticChainGenerator:
         with self._lock:
             entry = self._generators.get(key)
             if entry is None:
@@ -180,28 +219,30 @@ class ChainBus:
             entry.subscribers += 1
             return entry.feed
 
-    def release(self, underlying: str) -> int:
+    def release(self, underlying: str, source: str = "synthetic") -> int:
         """Drop one subscriber; evict the generator at zero."""
         key = str(underlying).upper()
         with self._lock:
-            entry = self._generators.get(key)
+            store = self._live if str(source).lower() == "mstock" else self._generators
+            entry = store.get(key)
             if entry is None:
                 return 0
             entry.subscribers = max(0, entry.subscribers - 1)
             if entry.subscribers == 0:
-                self._generators.pop(key, None)
-                logger.info("chain generator released: %s", key)
+                store.pop(key, None)
+                logger.info("chain generator released: %s (%s)", key, source)
                 return 0
             return entry.subscribers
 
-    def subscriber_count(self, underlying: str) -> int:
+    def subscriber_count(self, underlying: str, source: str = "synthetic") -> int:
         with self._lock:
-            entry = self._generators.get(str(underlying).upper())
+            store = self._live if str(source).lower() == "mstock" else self._generators
+            entry = store.get(str(underlying).upper())
             return entry.subscribers if entry else 0
 
     def generator_count(self) -> int:
         with self._lock:
-            return len(self._generators)
+            return len(self._generators) + len(self._live)
 
 
 def option_quote_provider(
@@ -215,6 +256,55 @@ def option_quote_provider(
     shared one. Same contract for every runner, one source of spots.
     """
     return SyntheticQuoteProvider(chain_generator=generator)
+
+
+def _default_quote_broker() -> Any | None:
+    """The authenticated order broker, or ``None`` (never raises).
+
+    Resolved through the broker session manager — the same place the web UI's
+    broker-auth flow lands its session. ``None`` means "not authenticated":
+    callers decide the fallback (and label it) themselves.
+    """
+    try:
+        from backtest.brokers.session_manager import get_session_manager
+
+        mgr = get_session_manager()
+        if mgr.is_authenticated():
+            return mgr.get_active_broker()
+    except Exception:  # noqa: BLE001 — session resolution must never break a spawn
+        logger.debug("quote-broker resolution failed", exc_info=True)
+    return None
+
+
+def option_quote_provider_for(
+    source: str,
+    underlying: str,
+    quote_broker: Any | None = None,
+) -> tuple[Any, str]:
+    """``(quote_provider, label)`` for an option runner's bridge — P1.1.
+
+    * ``source="mstock"`` + an authenticated broker (explicit or via the
+      session manager) → the shared :class:`LiveChainProvider`
+      (``"live:mstock"``): real chains, real LTP, one API budget per
+      underlying (ChainBus refcount).
+    * otherwise → the synthetic pair (``"synthetic:bs"``). The fallback is
+      **deliberate and labelled** — every surface that shows the runner also
+      shows the label, so a synthetic-priced run is never mistaken for a
+      live one (the honesty rule; runner summaries carry ``quote_source``).
+    """
+    underlying = str(underlying).upper()
+    if str(source).lower() == "mstock":
+        broker = quote_broker if quote_broker is not None else _default_quote_broker()
+        if broker is not None:
+            provider = get_chain_bus().acquire(underlying, source="mstock", broker=broker)
+            return provider, getattr(provider, "source_name", "live:mstock")
+        logger.warning(
+            "option runner on %s requested source=mstock but no authenticated "
+            "broker session — using synthetic chain (labelled)",
+            underlying,
+        )
+    generator = get_chain_bus().acquire(underlying)
+    return option_quote_provider(generator), "synthetic:bs"
 
 
 class MStockBarFeed:

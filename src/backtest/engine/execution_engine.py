@@ -161,9 +161,17 @@ class ExecutionEngine:
 
         Returns (provider, data_source_label) where label is:
         - "synthetic" for synthetic path
-        - "live:mstock" for live authenticated path
+        - "live:mstock" for live authenticated path (a LiveQuoteProvider —
+          the QUOTE contract ``get_quote(token)`` + ``source_name``)
         - "synthetic-fallback" when source=mstock but no valid session, so we fall back to synthetic
           with a label on the result (so callers know it's fallback, not real live).
+
+        P1.1 seam fix: the live branch used to hand back ``MStockLiveFeed`` —
+        a BAR feed (``latest_bar(symbol)``) — where every caller needs the
+        QUOTE contract; it also gated on a ``get_active_session`` method the
+        session manager never had, so live could never engage. Both fixed:
+        the gate is ``session_mgr.is_authenticated()`` and the provider is a
+        ``LiveQuoteProvider`` over the session's order broker.
 
         C2: Engine owns the feed — strategies never call broker APIs directly.
         """
@@ -176,24 +184,13 @@ class ExecutionEngine:
                 from backtest.brokers.session_manager import get_session_manager
 
                 session_mgr = get_session_manager()
-                # Check if broker session is valid
-                session = (
-                    session_mgr.get_active_session()
-                    if hasattr(session_mgr, "get_active_session")
-                    else None
-                )
-                if session and getattr(session, "is_valid", lambda: False)():
-                    # Live path — try to get LiveQuoteProvider
-                    try:
-                        from backtest.data.mstock_live_feed import MStockLiveFeed
+                if session_mgr.is_authenticated():
+                    # Live path — the QUOTE provider over the order broker
+                    # (MStockBroker: get_option_quote per token, TTL-cached).
+                    from backtest.options.quote_providers import LiveQuoteProvider
 
-                        provider = MStockLiveFeed()
-                        return provider, "live:mstock"
-                    except Exception as exc:
-                        logger.warning(
-                            "Live quote provider failed, falling back to synthetic: %s", exc
-                        )
-                        # Fall through to synthetic-fallback
+                    provider = LiveQuoteProvider(broker=session_mgr.get_active_broker())
+                    return provider, "live:mstock"
                 # No valid session → synthetic-fallback
                 # Per spec: live orders require an authenticated broker session,
                 # else OrderRejected("no_session")
