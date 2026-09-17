@@ -19,6 +19,7 @@ Key properties:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from collections import deque
 from datetime import datetime, timezone
@@ -26,6 +27,11 @@ from typing import Any, Deque, Dict, List, Optional
 
 from backtest.forward.feed import SyntheticFeed
 from backtest.forward.feed_registry import get_chain_bus, get_feed_registry
+from backtest.forward.state_store import (
+    PortfolioStateStore,
+    capture_runner,
+    restore_runner,
+)
 from backtest.forward.paper_runner import (
     STATUS_PAUSED,
     STATUS_RUNNING,
@@ -57,6 +63,7 @@ class PortfolioManager:
         auto_start_feed: bool = True,
         mstock_feed_client: Optional[Any] = None,
         mstock_poll_interval_s: float = 60.0,
+        state_path: Optional[Any] = None,
     ) -> None:
         self.ledger = OrderLedger()
         self.broker = PaperBroker(self.ledger)
@@ -122,6 +129,20 @@ class PortfolioManager:
 
         # U3.3: audit log with scope — every control action logs scope=paper|live|playbook|dashboard
         self._audit_log_entries: Deque[Dict[str, Any]] = deque(maxlen=1000)
+
+        # Gap #3 / V2 (P2.4): optional JSON state persistence. No path →
+        # byte-for-byte the old in-memory behaviour. With a path, every
+        # control-plane mutation (and every 60th tick) snapshots configs +
+        # books + breaker latches atomically, and a fresh manager rehydrates
+        # them: runners come back PAUSED (fail-closed — nothing trades after
+        # a restart until a human resumes), breakers stay tripped.
+        if state_path is None:
+            state_path = os.environ.get("PORTFOLIO_STATE_PATH") or None
+        self._state_store = (
+            PortfolioStateStore(state_path) if state_path else None
+        )
+        self._restoring = False  # suppress saves while rehydrating
+        self._restore_state()
 
     # ------------------------------------------------------------------ #
     # Bucket helpers (C2: derived-not-duplicated)
@@ -492,6 +513,7 @@ class PortfolioManager:
                 )
             except Exception:
                 pass
+            self._persist_state()
             return runner.instance_id
 
     def remove_runner(self, instance_id: str) -> bool:
@@ -522,6 +544,7 @@ class PortfolioManager:
                 self._bucket_day_start[bucket] = 0.0
                 self._bucket_day[bucket] = None
             logger.info("Runner removed: %s (bucket=%s)", runner.config.name, bucket)
+            self._persist_state()
             try:
                 self._audit_log(
                     f"DELETE {runner.config.name}",
@@ -571,6 +594,7 @@ class PortfolioManager:
                 )
             except Exception:
                 pass
+            self._persist_state()
             return state
 
     def pause_all(self, mode: Optional[str] = None) -> int:
@@ -583,6 +607,7 @@ class PortfolioManager:
                     runner.pause()
                     n += 1
             logger.warning("Paused %d runners%s", n, f" [{mode}]" if mode else "")
+            self._persist_state()
             return n
 
     def resume_all(self, mode: Optional[str] = None) -> int:
@@ -607,6 +632,7 @@ class PortfolioManager:
                     runner.resume()
                     n += 1
             logger.info("Resumed %d runners%s", n, f" [{mode}]" if mode else "")
+            self._persist_state()
             return n
 
     def stop_all(self, mode: Optional[str] = None) -> int:
@@ -620,6 +646,7 @@ class PortfolioManager:
                     n += 1
             # Gap #1: stopping the last mstock runner retires the poll thread.
             self._sync_mstock_thread()
+            self._persist_state()
             return n
 
     def emergency_flatten_all(
@@ -697,6 +724,7 @@ class PortfolioManager:
             except Exception:
                 pass
             self._evaluate_risk()
+            self._persist_state()
             return count
 
     def reset_daily_anchors(self) -> None:
@@ -710,6 +738,7 @@ class PortfolioManager:
                 self._bucket_day_start[mode] = self._bucket_equity(mode)
                 self._bucket_day[mode] = datetime.now(timezone.utc).date().isoformat()
             logger.info("Daily PnL anchors reset (baseline=%.2f)", self._day_start_equity)
+            self._persist_state()
 
     def reset_circuit_breaker(self, mode: Optional[str] = None) -> None:
         """Manually clear the halt latch after a breach is acknowledged.
@@ -732,6 +761,7 @@ class PortfolioManager:
                     self._bucket_halt_mode[m] = None
                     self._bucket_halted_ts[m] = None
                 logger.info("Circuit breaker reset (all buckets)")
+                self._persist_state()
                 try:
                     self._audit_log("RESET_BREAKER all", scope="all", detail="master reset")
                 except Exception:
@@ -752,6 +782,7 @@ class PortfolioManager:
                     self.halt_mode = None
                     self.halted_ts = None
                 logger.info("Circuit breaker reset (bucket=%s)", mode)
+                self._persist_state()
                 try:
                     self._audit_log(f"RESET_BREAKER {mode}", scope=mode, detail=f"bucket={mode}")
                 except Exception:
@@ -783,6 +814,127 @@ class PortfolioManager:
         elif not has_live and self.mstock_feed.running:
             self.mstock_feed.stop()
 
+    # ------------------------------------------------------------------ #
+    # State persistence (Gap #3 / V2 — P2.4). No-op unless a state path is
+    # configured. Saves are atomic and cheap (control-plane rate, plus one
+    # write per 60 ticks for fresh scalars); a failure NEVER breaks trading.
+    # ------------------------------------------------------------------ #
+
+    def _snapshot_payload(self) -> Dict[str, Any]:
+        """Everything needed to rehydrate a manager: anchors, breaker
+        latches, and each runner's config + full book."""
+        runners = [capture_runner(r) for r in self._runners.values()]
+        return {
+            "manager": {
+                "total_capital": self.total_capital,
+                "peak_equity": self.peak_equity,
+                "day_start_equity": self._day_start_equity,
+                "current_day": self._current_day,
+                "halted": self.halted,
+                "halt_reason": self.halt_reason,
+                "halt_mode": self.halt_mode,
+                "halted_ts": self.halted_ts,
+                "tick_count": self.tick_count,
+                "tick_index": self.tick_index,
+            },
+            "buckets": {
+                mode: {
+                    "peak": self._bucket_peak.get(mode, 0.0),
+                    "halted": self._bucket_halted.get(mode, False),
+                    "halt_reason": self._bucket_halt_reason.get(mode),
+                    "halt_mode": self._bucket_halt_mode.get(mode),
+                    "halted_ts": self._bucket_halted_ts.get(mode),
+                    "day_start": self._bucket_day_start.get(mode, 0.0),
+                    "day": self._bucket_day.get(mode),
+                }
+                for mode in ("paper", "live")
+            },
+            "runners": runners,
+        }
+
+    def save_state(self) -> bool:
+        """Persist now (public — also usable from ops/API). Returns success."""
+        if self._state_store is None:
+            return False
+        try:
+            self._state_store.save(self._snapshot_payload())
+            return True
+        except Exception:  # noqa: BLE001 — persistence must never break trading
+            logger.exception("portfolio state save failed (%s)", self._state_store.path)
+            return False
+
+    def _persist_state(self) -> None:
+        if self._restoring:
+            return  # never re-write the file we are reading from
+        self.save_state()
+
+    def _restore_state(self) -> None:
+        """Rehydrate configs, books and breaker latches from the state file.
+
+        Runners saved as RUNNING come back PAUSED (fail-closed). Any failure
+        logs loudly and boots clean — persistence must never prevent a start.
+        """
+        if self._state_store is None:
+            return
+        payload = self._state_store.load()
+        if not payload:
+            return
+        try:
+            self._restoring = True
+            try:
+                self._apply_state_payload(payload)
+            finally:
+                self._restoring = False
+            logger.warning(
+                "[state] restored %d runner(s) + breaker latches from %s — "
+                "restored runners are PAUSED; resume explicitly",
+                len(payload.get("runners", [])),
+                self._state_store.path,
+            )
+        except Exception:  # noqa: BLE001 — a bad restore must not block boot
+            logger.exception(
+                "[state] restore from %s failed — starting clean", self._state_store.path
+            )
+
+    def _apply_state_payload(self, payload: Dict[str, Any]) -> None:
+        # Runners FIRST (add_runner re-subscribes feeds + the registry and
+        # re-books capital + recomputes anchors), then manager scalars and
+        # breaker latches override whatever add_runner initialised.
+        for runner_snap in payload.get("runners", []):
+            from backtest.forward.state_store import _config_from_dict
+
+            config = _config_from_dict(runner_snap["config"])
+            self.add_runner(config, start=False)
+            runner = self._runners.get(config.instance_id)
+            if runner is None:
+                logger.warning(
+                    "[state] runner %s could not be re-created — skipped",
+                    config.instance_id,
+                )
+                continue
+            restore_runner(runner, runner_snap)
+
+        manager = payload.get("manager", {})
+        self.total_capital = float(manager.get("total_capital", 0.0))
+        self.peak_equity = float(manager.get("peak_equity", 0.0))
+        self._day_start_equity = float(manager.get("day_start_equity", 0.0))
+        self._current_day = manager.get("current_day")
+        self.halted = bool(manager.get("halted", False))
+        self.halt_reason = manager.get("halt_reason")
+        self.halt_mode = manager.get("halt_mode")
+        self.halted_ts = manager.get("halted_ts")
+        self.tick_count = int(manager.get("tick_count", 0))
+        self.tick_index = int(manager.get("tick_index", 0))
+
+        for mode, bucket in payload.get("buckets", {}).items():
+            self._bucket_peak[mode] = float(bucket.get("peak", 0.0))
+            self._bucket_halted[mode] = bool(bucket.get("halted", False))
+            self._bucket_halt_reason[mode] = bucket.get("halt_reason")
+            self._bucket_halt_mode[mode] = bucket.get("halt_mode")
+            self._bucket_halted_ts[mode] = bucket.get("halted_ts")
+            self._bucket_day_start[mode] = float(bucket.get("day_start", 0.0))
+            self._bucket_day[mode] = bucket.get("day")
+
     def _on_bar(self, symbol: str, bar: Dict[str, Any]) -> None:
         """Fan one closed candle out to every runner trading that symbol."""
         with self._lock:
@@ -811,6 +963,10 @@ class PortfolioManager:
             for runner in self._runners.values():
                 runner.on_tick_end(tick_ts)
             self._evaluate_risk()
+            # V2: fresh scalars at a bounded write rate (one save per minute
+            # at the default 1s ticks) — a crash loses at most ~a minute.
+            if self._state_store is not None and self.tick_index % 60 == 0:
+                self._persist_state()
 
     def _evaluate_risk(self) -> None:
         """Evaluate risk per-bucket (independent breakers) + manager-level.
@@ -1137,6 +1293,7 @@ class PortfolioManager:
         self.feed.emit_one(**bar_kwargs)
 
     def shutdown(self) -> None:
+        self._persist_state()  # V2: last write wins — leave a restorable state
         self.feed.stop()
         self.mstock_feed.stop()
         with self._lock:
