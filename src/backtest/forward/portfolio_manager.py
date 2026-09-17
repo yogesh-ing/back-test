@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional
 
 from backtest.forward.feed import SyntheticFeed
+from backtest.forward.feed_registry import get_chain_bus, get_feed_registry
 from backtest.forward.paper_runner import (
     STATUS_PAUSED,
     STATUS_RUNNING,
@@ -98,6 +99,12 @@ class PortfolioManager:
             on_tick_end=self._on_tick_end,
         )
         self._auto_start_feed = auto_start_feed
+
+        # U6.2 shared data bus: every runner's symbols + option underlyings
+        # are accounted here. One feed per (source, symbol, timeframe); one
+        # chain generator per option underlying (see feed_registry module doc).
+        self.feed_registry = get_feed_registry()
+        self.chain_bus = get_chain_bus()
 
         # U3.3: audit log with scope — every control action logs scope=paper|live|playbook|dashboard
         self._audit_log_entries: Deque[Dict[str, Any]] = deque(maxlen=1000)
@@ -413,7 +420,15 @@ class PortfolioManager:
             bucket = self._runner_bucket(runner)
             self._ensure_bucket_state(bucket)
 
-            # Feed + anchors
+            # Feed + anchors — subscriptions accounted in the shared bus
+            # (U6.2). Bar-feed subscriptions are taken here; the chain-bus
+            # subscription was already taken by StrategyRunner's constructor
+            # (the bridge needs its generator at build time), so the manager
+            # must NOT acquire again — one runner, one chain subscription.
+            for sym in config.symbols:
+                self.feed_registry.subscribe(
+                    config.source, sym, config.timeframe, feed=self.feed
+                )
             self.feed.add_symbols(config.symbols)
             self._refresh_anchors()
 
@@ -442,8 +457,15 @@ class PortfolioManager:
             if runner is None:
                 return False
             bucket = self._runner_bucket(runner)
-            runner.stop()
+            runner.stop()  # U6.2: stop() releases the runner's chain-bus subscription
             self.ledger.unregister_handler(instance_id)
+            # U6.2: release the bar-feed subscription this runner held.
+            # (The chain subscription went with runner.stop() — one release
+            # per acquire, owned by the runner.)
+            for sym in runner.config.symbols:
+                self.feed_registry.release(
+                    runner.config.source, sym, runner.config.timeframe
+                )
             self.feed.remove_symbols(runner.config.symbols)
             self.total_capital -= runner.config.allocated_capital
             self._refresh_anchors()
@@ -1036,7 +1058,13 @@ class PortfolioManager:
         self.feed.stop()
         with self._lock:
             for runner in self._runners.values():
-                runner.stop()
+                runner.stop()  # releases the runner's chain-bus subscription
+                # U6.2: bar-feed subscriptions must go too, or the process-wide
+                # registry leaks entries that shadow the next manager's feed.
+                for sym in runner.config.symbols:
+                    self.feed_registry.release(
+                        runner.config.source, sym, runner.config.timeframe
+                    )
 
 
 # ---------------------------------------------------------------------------

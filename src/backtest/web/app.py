@@ -351,6 +351,18 @@ def create_app(
     # SSE broadcast cadence for the portfolio command center.
     app.config.setdefault("PORTFOLIO_SSE_INTERVAL", 1.0)
 
+    # U6.3 / D7: drop-in strategy plugins (plugins/strategies/*.py). Import-
+    # clean + conformance-passing files register here; broken files are logged
+    # and skipped — never crash the app.
+    try:
+        from backtest.plugins import discover_plugins
+
+        loaded = discover_plugins()
+        if loaded:
+            logger.info("plugin strategies loaded: %s", ", ".join(loaded))
+    except Exception:  # noqa: BLE001 — plugin loading must never break startup
+        logger.exception("strategy plugin discovery failed — continuing without plugins")
+
     # Broker session expiry monitor (auth epic Task 2.2): idempotent daemon
     # thread, one per process, polls the active broker session every 5 min.
     get_session_manager().start_monitor()

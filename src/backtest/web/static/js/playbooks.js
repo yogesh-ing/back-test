@@ -123,7 +123,9 @@
   }
 
   async function spawnFromPlaybook(playbookId) {
-    // Reuse the spawn modal but pre-fill from playbook
+    // U6.1: the spawn form is routing-only now, so Deploying a playbook opens
+    // the slim modal with strategy=option-kind and the playbook pre-selected.
+    // Trading logic (structure/strikes/exits) is carried by the playbook itself.
     try {
       const data = await api(`/api/playbooks/${playbookId}`);
       const pb = data.playbook;
@@ -137,73 +139,32 @@
           await loadSpawnForm();
         }
 
-        // Pre-fill
+        // Pre-fill routing fields only
         const nameEl = $("spawn-name");
         if (nameEl) nameEl.value = pb.name + " · " + new Date().toLocaleTimeString();
 
-        const instrumentEl = $("spawn-instrument-type");
-        if (instrumentEl) {
-          instrumentEl.value = "option";
-          instrumentEl.dispatchEvent(new Event("change"));
+        // Strategy: prefer an option-kind strategy from the catalogue
+        const stratSel = $("spawn-strategy");
+        if (stratSel && stratSel._catalogue) {
+          const optStrat = stratSel._catalogue.find((s) => s.signal_kind === "option");
+          if (optStrat) stratSel.value = optStrat.name;
+          stratSel.dispatchEvent(new Event("change"));
         }
 
         const symbolEl = $("spawn-symbol");
         if (symbolEl) symbolEl.value = pb.underlying;
 
-        const structEl = $("spawn-opt-structure");
-        if (structEl) {
-          // Map playbook structure to form
-          const st = pb.structure_type;
-          if (typeof st === "string") structEl.value = st;
-          else structEl.value = "direction_aware";
-          structEl.dispatchEvent(new Event("change"));
+        // Select the playbook in the picker
+        const pbSel = $("spawn-playbook");
+        if (pbSel) {
+          pbSel.value = playbookId;
+          pbSel.dispatchEvent(new Event("change"));
         }
-
-        const strikeEl = $("spawn-opt-strike");
-        if (strikeEl) {
-          strikeEl.value = pb.strike_selection;
-          strikeEl.dispatchEvent(new Event("change"));
-        }
-
-        const deltaEl = $("spawn-opt-delta");
-        if (deltaEl && pb.strike_selection === "delta") deltaEl.value = pb.delta_target;
-
-        const qtyEl = $("spawn-opt-qty");
-        if (qtyEl) qtyEl.value = pb.quantity;
-
-        // Exit config
-        const exit = pb.exit_config || {};
-        const stopEl = $("spawn-opt-stop");
-        if (stopEl && exit.stop_loss_pct != null) stopEl.value = Math.round(exit.stop_loss_pct * 100);
-
-        const targetEl = $("spawn-opt-target");
-        if (targetEl && exit.take_profit_pct != null) targetEl.value = Math.round(exit.take_profit_pct * 100);
-
-        const dteEl = $("spawn-opt-dte");
-        if (dteEl) {
-          if (exit.min_days_to_expiry === null) {
-            const settleEl = $("spawn-opt-settle");
-            if (settleEl) settleEl.checked = true;
-          } else {
-            dteEl.value = exit.min_days_to_expiry ?? 1;
-          }
-        }
-
-        const flipEl = $("spawn-opt-flip");
-        if (flipEl) flipEl.checked = exit.signal_flip !== false;
-
-        const reenterEl = $("spawn-opt-reenter");
-        if (reenterEl) reenterEl.checked = !!exit.reenter;
-
-        // Trigger summary update
-        const syncFn = window.OptionConfig ? null : null;
-        // The portfolio.js syncOptionForm is not global, so we dispatch events
-        if (instrumentEl) instrumentEl.dispatchEvent(new Event("change"));
 
         // Store playbook id for spawn
         modal.dataset.playbookId = playbookId;
 
-        if (window.showToast) window.showToast(`Loaded playbook ${pb.name} — adjust and Deploy`, "info");
+        if (window.showToast) window.showToast(`Loaded playbook ${pb.name} — pick bucket/source and Deploy`, "info");
       } else {
         // Fallback: direct spawn via API — new spec: spawn returns config, caller creates (no side effects)
         const strategy = prompt("Strategy name for this playbook (e.g. directional_options):", "directional_options");

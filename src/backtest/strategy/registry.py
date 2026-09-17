@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .base import Strategy
+else:
+    from .base import Strategy  # runtime: _BASE_MARKET_VIEW needs the class
 
 from backtest.logging_config import get_logger
 
@@ -68,11 +70,29 @@ def get_strategy(name: str) -> type[Strategy]:
 # ---------------------------------------------------------------------------
 
 
+# The base class ships a default ``generate_market_view`` (derived from
+# ``generate_signals``), so ``hasattr`` is useless for detecting option-native
+# strategies — every strategy "has" it. Override detection compares the
+# function object against the base implementation (U6.1 spawn contract).
+_BASE_MARKET_VIEW = Strategy.generate_market_view
+
+
+def signal_kind(cls: type) -> str:
+    """``"option"`` when the strategy overrides ``generate_market_view``, else ``"equity"``.
+
+    This is the spawn-form contract (architecture §5.1): an option strategy
+    locks the spawn form to Single Symbol + index underlyings; an equity
+    strategy may target Single Symbol or Pool.
+    """
+    return "option" if cls.generate_market_view is not _BASE_MARKET_VIEW else "equity"
+
+
 def get_all() -> list[dict[str, Any]]:
     """Full strategy catalogue as plain dicts.
 
-    Each entry is ``{name, description, version, author, params}`` where
-    ``params`` is the normalised schema. Invalid strategies are skipped with a
+    Each entry is ``{name, description, version, author, params, signal_kind}``
+    where ``params`` is the normalised schema and ``signal_kind`` drives the
+    spawn form's target-type lock (U6.1). Invalid strategies are skipped with a
     logged warning rather than raising.
     """
     _discover()
@@ -93,6 +113,7 @@ def get_all() -> list[dict[str, Any]]:
                 "version": getattr(cls, "version", "") or "",
                 "author": getattr(cls, "author", "") or "",
                 "params": cls.param_schema(),
+                "signal_kind": signal_kind(cls),
             }
         )
     logger.info(

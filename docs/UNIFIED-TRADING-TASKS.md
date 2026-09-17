@@ -16,9 +16,11 @@
 | P3 — Portfolio integration | U3.1–U3.4 | 2.5d | 4 |
 | P4 — UI (Playbooks + Manual Book tabs) | U4.1–U4.3 | 1.5d | 3 |
 | P5 — Deprecate Options tab | U5.1–U5.2 | 0.5d | 2 |
+| P6 — Slim spawn form, data bus, strategy templates | U6.1–U6.3 | 2.5d | 1 |
 
-**Total ≈ 8 working days.** Critical path: U1.1 → U2.1 → U3.2 → U4.2.
-Everything else parallelises. **P0 complete, P1 complete, P2 complete, P3 complete, P4 complete, P5 complete — 20/20 tasks DONE.**
+**Total ≈ 10.5 working days.** Critical path: U1.1 → U2.1 → U3.2 → U4.2.
+Everything else parallelises. **P0–P5 complete — 20/20 tasks DONE.**
+**Next up: P6 (user findings, 2026-09-16) — see Phase 6.**
 
 ---
 
@@ -359,18 +361,80 @@ Added to `instructions/BACKLOG.md`:
 
 ---
 
+## Phase 6 — User findings round (2026-09-16): slim form, shared data, plug-in templates
+
+**Source:** user review of the live spawn modal + data-overload question + template request.
+**Architecture refs:** §5.1 (spawn contract), §5.2 (data bus), §9 (template contract), decisions D5–D7.
+
+### ✅ U6.1 — Slim the Add Instance form to the 6-field routing contract
+
+**Effort:** 0.5d · **Depends on:** — (pure UI + one API param) · **Do first in P6** · **Status:** DONE (2026-09-16)
+
+The modal is noise: it duplicates Playbook decisions (instrument, structure, strikes, stops, exits). New contract (architecture §5.1):
+
+1. Strategy (dropdown from registry)
+2. Timeframe
+3. Target type — **auto-set and locked** from the strategy's `signal_kind`: option → Single Symbol only; equity → Single Symbol or Pool
+4. Symbol — options: index whitelist (NIFTY, BANKNIFTY); equity: any
+5. Bucket mode (paper / live)
+6. Data source (synthetic / replay / mStock)
+7. Allocation (₹)
+
+Remove from the form: instrument selector, structure/strike/delta/qty controls, all exit-rule fields (they live in the Playbook). If the chosen strategy has no saved Playbook, offer "pick a Playbook" dropdown or "use seed default" — the form never asks trading-logic questions.
+
+Backend: `signal_kind` surfaced by `GET /api/strategies` (it's derivable — option strategies implement `generate_market_view`).
+
+**Tests:** `tests/test_options_spawn_ui.py` update — form renders 7 fields, no instrument/strike/exit controls; option strategy selected → target type locked to Single Symbol + index-only symbols; payload still matches what `/runner/create` accepts. JS harness updated.
+
+**Landed:**
+- `src/backtest/strategy/registry.py` — `signal_kind(cls)` override-detection (option iff the class overrides `generate_market_view`; `hasattr` is useless because the base class ships a default). Catalogue entries carry `signal_kind`.
+- `src/backtest/api/strategies.py` — the endpoint was building its own dict and dropping fields; now passes `params` + `signal_kind` through.
+- `_portfolio_center.html` — modal rebuilt: name, strategy (+hint), playbook picker (option strategies only), target type, timeframe, bucket mode, data source, symbol (+index datalist for options), allocation. All 14 instrument/structure/exit controls removed.
+- `portfolio.js` — `syncSpawnForm()` replaces `syncOptionForm()`/`readOptionForm()`: option → pool locked off, symbol funnelled to the `spawn-index-list` datalist (NIFTY/BANKNIFTY), playbook row shown, expression comes from the selected playbook's `/spawn` snapshot or engine defaults (never form fields). Equity → free text, pool allowed, playbook row hidden. `OptionConfig` stays for payload-pure tests; no longer drives the form.
+- `playbooks.js` — Deploy-from-playbook no longer pre-fills removed controls; it selects the option-kind strategy, the underlying, and the playbook in the picker.
+- **Verified in the live preview:** option strategy → pool disabled + NIFTY funnel + playbook picker with the 3 seeds; equity → free symbol + pool back; switching back restores a sensible equity default.
+
+### ✅ U6.2 — Shared Market Data Bus (one feed per source×symbol×timeframe) — DONE
+
+**Effort:** 1.5d · **Depends on:** — · **Unblocks mStock wiring (Gap #1)**
+
+As-built (small correction to the plan): the bar-feed side was already shared — the manager owns ONE `SyntheticFeed` fanned out to all runners. The real duplication was the **option chain stack**: every option runner's `OptionsBridge` built a private `SyntheticChainGenerator` + quote provider, so N NIFTY runners held N different views of NIFTY priced off their own last bar. Fix shipped (architecture §5.2, completes C2):
+
+1. `src/backtest/forward/feed_registry.py` — `FeedRegistry` (refcounted feeds keyed `(source, symbol, timeframe)`; release at zero evicts; idempotent), `ChainBus` (one shared `SyntheticChainGenerator` per underlying, refcounted), `option_quote_provider()` (per-runner cheap provider priced off the shared generator), process-wide singletons + `reset_data_bus()`.
+2. `PortfolioManager.add_runner/remove_runner` account every runner's symbols in the registry; `shutdown()` drains all subscriptions (no stale entries across a manager restart).
+3. `StrategyRunner` acquires its chain subscription at construction and releases it exactly once in `stop()` (explicit `_chain_released` flag — runners are born STOPPED, so status is no good as a guard); re-`start()` re-acquires.
+4. No strategy/bridge API change — C2 stays: engine hands data in; the bus only changes where the engine gets it. mStock lands here later as just another feed under `("mstock", symbol, timeframe)`.
+
+**Tests:** `tests/forward/test_feed_registry.py` (18) — two runners same key → one feed (refcount 2); release to zero → evicted; different timeframe → different feed; two NIFTY option runners → ONE generator, identical spot (`bridge1._sync_market` visible in `bridge2`); remove/stop/shutdown → refcounts drain to zero; equity runner bypasses the chain bus. Regression: full forward+portfolio slice (431 tests) and full suite green (2,400 passed; only the known Windows process-pool flake red).
+
+### ✅ U6.3 — Strategy templates + plugin discovery + conformance test — DONE
+
+**Effort:** 0.5d · **Depends on:** U6.1 (signal_kind) · **The plug-and-play close-out (D7)**
+
+As-built (two contract discoveries en route):
+
+1. `templates/option_strategy_template.py` + `templates/equity_strategy_template.py` — minimal working EMA examples; docstrings walk every hook the engine calls and the hard rules (determinism, C2 import ban). Option template carries the trivial `entries()` fallback — the base contract requires a signal hook from every strategy, and `get_all()` enforces it via `validate()`.
+2. `src/backtest/plugins/__init__.py` — scans `plugins/strategies/*.py` at startup (`create_app` hook): AST-based C2 import ban (forbidden modules **and their submodules**, incl. requests/urllib/websockets), clean-import gate, then the conformance battery; survivors register, failures are logged and skipped (never crash the app). mtime-based re-import only when a file changes. **Key mechanic:** `Strategy.__init_subclass__` auto-registers during `exec_module` — the loader therefore VETS then POPS failures out of the registry, so a broken plugin can never leave a half-valid class behind.
+3. Conformance battery (`conformance_errors()`, shared by loader + tests): unique non-empty `name`; `Strategy.validate()`; `signal_kind` consistency ("option" ⇔ `generate_market_view` really overridden); metadata (`description`/`version`/`author`); params UI labels; output shape (Series aligned to candles / `MarketView`-or-None); **determinism — same candles twice → identical output (value-compared, not repr)**.
+4. `docs/STRATEGY-AUTHORING.md` — the one-minute drop-in flow, hook table, C2 ban list, param schema form, determinism rule, battery spec, lifecycle + review guidance.
+
+**Tests:** `tests/test_strategy_conformance.py` (17) — all 6 built-ins pass the battery; both templates conform and never import engine modules; good equity/option drop-ins register with correct `signal_kind`; bad plugins (syntax error, broker import, submodule + http imports, nondeterministic, duplicate name vs built-in, missing hook, missing dir) are skipped with a warning, built-in untouched. Regression: strategy/API/portfolio slice 85 passed; full suite 2,417 passed (only the known Windows process-pool flake red).
+
+---
+
 ## Concurrency & sequencing
 
 ```
-P0 (dev) ──► P1 ──► P2 ──► P3 ──► P4 ──► P5
-              │      │      │
-              └──────┴──────┴── U3.1 can start right after P0 (highest value-per-hour)
+P0 (dev) ──► P1 ──► P2 ──► P3 ──► P4 ──► P5 ──► P6
+                                            
+U6.1 (slim form) ──► U6.3 (templates)   U6.2 (data bus) in parallel
+                          
+U6.2 unblocks: mStock live-data wiring (Gap #1) — the bus is where real
+feeds land; wiring mStock BEFORE the bus means rewiring it after.
 ```
 
-- **Do U3.1 first after the merge** — it fixes the original complaint (option
-  trades invisible on Portfolio) for ~4h before any new machinery lands.
-- P1 and P2 can run in parallel after U1.1 exists (U2.1 depends on the
-  playbook entity, not the API).
+- **P6 order: U6.1 → (U6.2 ∥ U6.3).** U6.1 is user-visible relief in half a day;
+  U6.2 is the load fix; U6.3 closes plug-and-play.
 - Chain-shape refactor (straddles/condors) is **Phase B** — richer option
   playbooks wait for it. Do not bundle.
 
@@ -392,8 +456,8 @@ P0 (dev) ──► P1 ──► P2 ──► P3 ──► P4 ──► P5
 
 ## Out of scope (tracked elsewhere)
 
-- Synthetic-feed → mStock wiring (Gap #1, highest-value next task *after*
-  this rollout).
+- Synthetic-feed → mStock wiring (Gap #1) — **now sequenced AFTER U6.2**, since
+  real feeds land into the shared bus, not per-runner feeds.
 - Chain-shape refactor for multi-leg V2 structures (Phase B).
 - Runner-state persistence (Gap #3).
 - Per-runner vs per-bucket accounting (separate decision).

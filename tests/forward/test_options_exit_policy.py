@@ -356,7 +356,13 @@ class TestBridgeExits:
         bridge.on_market_view(_view(Direction.BEARISH), "s")  # signal exit
         assert bridge.pop_exit_event() is None  # not queued for the bar drain
 
-    def test_reentry_opens_the_reverse_structure(self):
+    def test_reentry_opens_the_reverse_structure_next_bar(self):
+        """U2.2: flip + ``reenter`` closes on this bar, reverses on the NEXT bar.
+
+        Same-bar re-entry is impossible by design (it churned −₹41,844 in the
+        2026-09-16 forward experiment): the exit-bar view must leave the book
+        flat; only a view on a later bar may open the reverse structure.
+        """
         bridge = _bridge(
             {
                 "type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"},
@@ -368,11 +374,18 @@ class TestBridgeExits:
 
         result = bridge.on_market_view(_view(Direction.BEARISH), "s")
 
-        assert result.get("exited") is None  # this is an entry, not an exit
-        assert result["structure_type"] == "bear_put_spread"
+        # Exit bar: the flip closes, nothing re-opens yet.
+        assert result["exited"] is True
         assert bridge.closed_count == 1
-        assert len(bridge.option_broker.get_open_structures()) == 1
-        assert bridge.option_broker.get_open_structures()[0].structure_type == "bear_put_spread"
+        assert bridge.option_broker.get_open_structures() == []
+
+        # Next bar: the bar clock advances, then the bearish view re-enters.
+        bridge.on_bar("NIFTY", 24_700.0, "2026-09-11T09:15:00")
+        entry = bridge.on_market_view(_view(Direction.BEARISH), "s")
+        assert entry is not None and not entry.get("rejected")
+        opens = bridge.option_broker.get_open_structures()
+        assert len(opens) == 1
+        assert opens[0].structure_type == "bear_put_spread"
 
     def test_no_same_bar_reentry_after_a_stop(self):
         """A stop-out must not immediately re-open the same trade."""

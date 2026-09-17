@@ -146,8 +146,8 @@ class StrategyAdapter:
                 # Instance attribute
                 if hasattr(strategy, "underlying"):
                     return str(getattr(strategy, "underlying"))
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — logged; fall back to the default underlying
+            logger.debug("underlying resolution failed for %s: %s", getattr(strategy, "name", "unknown"), exc)
         return self.default_underlying
 
     def _try_market_view(self, strategy: Any, candles: pd.DataFrame) -> Optional[MarketView]:
@@ -179,7 +179,10 @@ class StrategyAdapter:
                 if isinstance(sig, (list, tuple)):
                     return pd.Series(sig, index=candles.index[: len(sig)])
             except NotImplementedError:
-                pass
+                logger.debug(
+                    "generate_signals not implemented for %s — trying entries model",
+                    getattr(strategy, "name", "unknown"),
+                )
             except Exception as exc:
                 logger.debug("generate_signals failed for %s: %s", getattr(strategy, "name", "unknown"), exc)
                 return None

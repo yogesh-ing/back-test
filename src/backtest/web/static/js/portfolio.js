@@ -468,11 +468,31 @@
   }
 
   // ---------------------------------------------------------------- spawn modal
+  // U6.1: the form is ROUTING only (architecture §5.1) — strategy, timeframe,
+  // target type (locked by signal_kind), symbol/index, bucket mode, data
+  // source, allocation. Trading logic comes from the Playbook the user picks;
+  // the form never asks instrument/structure/exit questions.
+
+  // Index underlyings the option path accepts (mirrors the synthetic chain +
+  // mStock FNO index set; OptionConfig.SYNTHETIC_UNDERLYINGS for the BS path).
+  const OPTION_INDEXES = ["NIFTY", "BANKNIFTY"];
+
+  function selectedStrategy() {
+    const sel = $("spawn-strategy");
+    return (sel._catalogue || []).find((s) => s.name === sel.value) || null;
+  }
+
+  function selectedSignalKind() {
+    const strat = selectedStrategy();
+    return strat && strat.signal_kind === "option" ? "option" : "equity";
+  }
+
   async function loadSpawnForm() {
     try {
-      const [strats, unis] = await Promise.all([
+      const [strats, unis, pbs] = await Promise.all([
         fetch("/api/strategies").then((r) => r.json()),
         api("/api/portfolio/universes"),
+        fetch("/api/playbooks").then((r) => r.json()).catch(() => ({ playbooks: [] })),
       ]);
       const stratSel = $("spawn-strategy");
       const catalogue = strats.strategies || strats || [];
@@ -484,14 +504,16 @@
       uniSel.innerHTML = unis.universes.map((u) =>
         '<option value="' + u.id + '">' + u.label + " (" + u.size + " symbols)</option>").join("");
 
-      const structureSel = $("spawn-opt-structure");
-      if (structureSel && typeof OptionConfig !== "undefined") {
-        structureSel.innerHTML = OptionConfig.STRUCTURES.map((s) =>
-          '<option value="' + s.id + '">' + s.label + "</option>").join("");
-      }
+      const pbSel = $("spawn-playbook");
+      const playbookList = (pbs.playbooks || []).filter(
+        (p) => !String(p.playbook_id || "").startsWith("pb_default_") || true,
+      );
+      pbSel.innerHTML = '<option value="">(engine defaults — no playbook)</option>' +
+        playbookList.map((p) =>
+          '<option value="' + p.playbook_id + '">' + p.name + " v" + (p.version ?? 1) + "</option>").join("");
 
       renderSpawnParams();
-      syncOptionForm();
+      syncSpawnForm();
     } catch (e) { toast("Failed to load spawn form: " + e.message, "error"); }
   }
 
@@ -512,72 +534,58 @@
       }).join("");
   }
 
-  // ------------------------------------------------------- option spawn form
-  // The payload shape lives in components/option_config.js (pure, and covered
-  // by tests/js/test_option_config.mjs) so the browser and the harness cannot
-  // drift apart.
+  /**
+   * U6.1 sync — one rule set, driven by the selected strategy's signal_kind:
+   * - option → target type locked to Single Symbol; symbol becomes an index
+   *   picker (NIFTY / BANKNIFTY); Playbook row shown.
+   * - equity → Single Symbol or Pool; free-text symbol; Playbook row hidden.
+   */
+  function syncSpawnForm() {
+    const kind = selectedSignalKind();
+    const isOption = kind === "option";
 
-  function readOptionForm() {
-    const val = (id) => {
-      const el = $(id);
-      return el ? el.value : "";
-    };
-    const checked = (id) => {
-      const el = $(id);
-      return el ? !!el.checked : false;
-    };
-    return {
-      instrumentType: val("spawn-instrument-type") || "equity",
-      targetType: $("spawn-target-type") ? $("spawn-target-type").value : "single",
-      source: $("spawn-source") ? $("spawn-source").value : "synthetic",
-      underlying: (val("spawn-symbol") || "").trim(),
-      structure: val("spawn-opt-structure") || "direction_aware",
-      strikeSelection: val("spawn-opt-strike") || "atm",
-      deltaTarget: val("spawn-opt-delta"),
-      quantity: val("spawn-opt-qty"),
-      stopLossPct: val("spawn-opt-stop"),
-      takeProfitPct: val("spawn-opt-target"),
-      neutralBars: val("spawn-opt-neutral"),
-      maxBars: val("spawn-opt-maxbars"),
-      minDaysToExpiry: val("spawn-opt-dte"),
-      rideToSettlement: checked("spawn-opt-settle"),
-      signalFlip: checked("spawn-opt-flip"),
-      reenter: checked("spawn-opt-reenter"),
-    };
-  }
-
-  /** Show/hide the option panel, the delta row and the pool target for options. */
-  function syncOptionForm() {
-    const cfg = readOptionForm();
-    const isOption = OptionConfig.isOption(cfg.instrumentType);
-    const box = $("spawn-option-box");
-    if (box) box.hidden = !isOption;
-
-    const hint = $("spawn-instrument-hint");
+    const hint = $("spawn-strategy-hint");
     if (hint) {
       hint.textContent = isOption
-        ? "Option runners trade one index and convert the strategy's view into a structure."
-        : "Equity trades the symbol directly; Options converts the strategy's directional view into a multi-leg structure.";
+        ? "Option strategy — its view is executed as the playbook's structure on an index."
+        : "Equity strategy — trades the symbol(s) directly. Signal owns trigger/stop/target logic.";
     }
 
-    const deltaRow = $("spawn-opt-delta-row");
-    if (deltaRow) deltaRow.hidden = cfg.strikeSelection !== "delta";
-
-    // Options are single-underlying in V1: the engine routes views to the
-    // bridge only for single-symbol runners, so a pool would never open.
+    // Target type: pool is impossible for options (a pool would never open a
+    // structure — the engine refuses it). Lock it, don't just disable: the
+    // user asked for the form to decide, not to warn afterwards.
     const targetSel = $("spawn-target-type");
-    if (targetSel) {
-      const poolOpt = targetSel.querySelector('option[value="pool"]');
-      if (poolOpt) poolOpt.disabled = isOption;
-      if (isOption && targetSel.value === "pool") targetSel.value = "single";
+    const poolOpt = targetSel.querySelector('option[value="pool"]');
+    if (poolOpt) poolOpt.disabled = isOption;
+    if (isOption && targetSel.value === "pool") targetSel.value = "single";
+
+    // Symbol: index picker for options, free text for equity.
+    const symbolInput = $("spawn-symbol");
+    if (isOption) {
+      symbolInput.setAttribute("list", "spawn-index-list");
+      if (!OPTION_INDEXES.includes((symbolInput.value || "").toUpperCase())) {
+        symbolInput.value = "NIFTY";
+      }
+    } else {
+      symbolInput.removeAttribute("list");
+      // Coming back from an option strategy: NIFTY is a valid equity symbol too,
+      // but BTC/USD (the old default) is not — reset only when the current
+      // value is an index the user was funnelled into.
+      if (symbolInput.value === "NIFTY" && symbolInput.dataset.wasIndex === "1") {
+        symbolInput.value = "RELIANCE";
+      }
     }
+    symbolInput.dataset.wasIndex = isOption ? "1" : "0";
 
-    // Ride-into-settlement and days-to-expiry are mutually exclusive.
-    const dte = $("spawn-opt-dte");
-    if (dte) dte.disabled = cfg.rideToSettlement;
+    // Playbook row: only meaningful for option strategies.
+    const pbRow = $("spawn-playbook-row");
+    if (pbRow) pbRow.hidden = !isOption;
 
-    const summary = $("spawn-opt-summary");
-    if (summary) summary.textContent = isOption ? OptionConfig.summarize(cfg) : "";
+    // Pool rows follow target type (unchanged behaviour).
+    const pool = targetSel.value === "pool";
+    $("spawn-symbol-row").hidden = pool;
+    $("spawn-universe-row").hidden = !pool;
+    $("spawn-maxpos-row").hidden = !pool;
   }
 
   async function submitSpawn() {
@@ -604,16 +612,40 @@
       source: $("spawn-source") ? $("spawn-source").value : "synthetic",
     };
 
-    // Ticket C1: option runners are spawned from this same form. The payload
-    // block is built by the shared, unit-tested module rather than inline.
-    const optionCfg = readOptionForm();
-    if (typeof OptionConfig !== "undefined" && OptionConfig.isOption(optionCfg.instrumentType)) {
-      const problems = OptionConfig.validate(optionCfg);
-      if (problems.length) {
-        toast(problems[0], "error");
+    // U6.1: option routing comes from signal_kind + the selected playbook.
+    // The expression block is the playbook's snapshot — never form fields.
+    const kind = selectedSignalKind();
+    if (kind === "option") {
+      const symbolUpper = (body.symbol || "").toUpperCase();
+      if (!OPTION_INDEXES.includes(symbolUpper)) {
+        toast("Option strategies trade an index — pick NIFTY or BANKNIFTY.", "error");
         return;
       }
-      body.instrument = OptionConfig.buildInstrument(optionCfg);
+      const pbId = $("spawn-playbook") ? $("spawn-playbook").value : "";
+      if (pbId) {
+        try {
+          const pbResp = await api("/api/playbooks/" + pbId + "/spawn", "POST", {
+            strategy: body.strategy,
+            allocated_capital: body.allocated_capital,
+            mode: body.mode,
+            source: body.source,
+          });
+          const rc = pbResp.runner_config || pbResp.config;
+          if (rc && rc.instrument) body.instrument = rc.instrument;
+          if (rc && rc.playbook_id) {
+            body.playbook_id = rc.playbook_id;
+            body.playbook_version = rc.playbook_version;
+          }
+        } catch (e) { toast("Playbook spawn failed: " + e.message, "error"); return; }
+      } else {
+        // Engine defaults (direction-aware spreads, churn-guarded exits).
+        body.instrument = {
+          type: "option",
+          expression: {
+            type: { BULLISH: "bull_call_spread", BEARISH: "bear_put_spread" },
+          },
+        };
+      }
     }
     if (targetType === "pool") {
       body.target_type = "SYMBOL_UNIVERSE";
@@ -626,11 +658,11 @@
 
     try {
       const data = await api("/api/portfolio/runner/create", "POST", body);
-      const kind = body.instrument && body.instrument.type === "option"
-        ? " · " + OptionConfig.summarize(optionCfg)
+      const kindLabel = body.instrument && body.instrument.type === "option"
+        ? " · option (" + ((body.playbook_id && $("spawn-playbook") && $("spawn-playbook").selectedOptions[0]) ? $("spawn-playbook").selectedOptions[0].textContent : "engine defaults") + ")"
         : "";
       addAudit(
-        "Spawned " + data.runner.name + " (" + data.runner.target_label + kind + ")",
+        "Spawned " + data.runner.name + " (" + data.runner.target_label + kindLabel + ")",
         "spawn"
       );
       toast("Instance deployed: " + data.runner.name, "success");
@@ -696,30 +728,21 @@
     document.querySelectorAll("[data-close]").forEach((b) =>
       b.addEventListener("click", () => { $(b.dataset.close).hidden = true; }));
 
-    $("spawn-target-type").addEventListener("change", (e) => {
-      const pool = e.target.value === "pool";
-      $("spawn-symbol-row").hidden = pool;
-      $("spawn-universe-row").hidden = !pool;
-      $("spawn-maxpos-row").hidden = !pool;
-    });
-    $("spawn-strategy").addEventListener("change", renderSpawnParams);
-    const instrumentSel = $("spawn-instrument-type");
-    if (instrumentSel) instrumentSel.addEventListener("change", syncOptionForm);
-    ["spawn-opt-structure", "spawn-opt-strike", "spawn-opt-delta", "spawn-opt-qty",
-     "spawn-opt-stop", "spawn-opt-target", "spawn-opt-neutral", "spawn-opt-maxbars",
-     "spawn-opt-dte", "spawn-opt-settle", "spawn-opt-flip", "spawn-opt-reenter"]
-      .forEach((id) => {
-        const el = $(id);
-        if (!el) return;
-        el.addEventListener("change", syncOptionForm);
-        el.addEventListener("input", syncOptionForm);
-      });
+    $("spawn-target-type").addEventListener("change", syncSpawnForm);
+    $("spawn-strategy").addEventListener("change", () => { renderSpawnParams(); syncSpawnForm(); });
+    // Index datalist for the option symbol picker.
+    if (!document.getElementById("spawn-index-list")) {
+      const dl = document.createElement("datalist");
+      dl.id = "spawn-index-list";
+      dl.innerHTML = OPTION_INDEXES.map((i) => '<option value="' + i + '">').join("");
+      document.body.appendChild(dl);
+    }
     $("spawn-submit").addEventListener("click", submitSpawn);
 
     // Expose for Playbooks UI — allows playbook spawn to pre-fill modal
     window.PortfolioSpawn = {
       loadSpawnForm,
-      syncOptionForm,
+      syncSpawnForm,
       renderSpawnParams,
       submitSpawn,
     };

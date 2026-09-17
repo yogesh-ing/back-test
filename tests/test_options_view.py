@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -177,6 +178,7 @@ def _render(workdir: Path, detail_file: str) -> dict[str, str]:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",  # harness prints ₹/→; Windows cp1252 decode kills stdout=None
         timeout=120,
     )
     assert result.returncode == 0, (
@@ -212,7 +214,8 @@ def rendered_equity(snapshots):
 @requires_node
 def test_option_view_component_behaviour():
     result = subprocess.run(
-        ["node", str(_VIEW_HARNESS)], cwd=REPO_ROOT, capture_output=True, text=True, timeout=60
+        ["node", str(_VIEW_HARNESS)], cwd=REPO_ROOT, capture_output=True, text=True,
+        encoding="utf-8", timeout=60,
     )
     assert result.returncode == 0, (
         f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -465,24 +468,24 @@ def test_live_api_payload_renders_option_columns(api_client, tmp_path):
 
 
 def test_components_are_loaded_and_used():
-    base = (REPO_ROOT / "src/backtest/web/templates/base.html").read_text()
+    base = (REPO_ROOT / "src/backtest/web/templates/base.html").read_text(encoding="utf-8")
     assert "js/components/option_view.js" in base
     # Order matters: option_view.js declares its dependency on option_config.js.
     assert base.index("option_config.js") < base.index("option_view.js")
 
-    portfolio = (REPO_ROOT / "src/backtest/web/static/js/portfolio.js").read_text()
+    portfolio = (REPO_ROOT / "src/backtest/web/static/js/portfolio.js").read_text(encoding="utf-8")
     for call in ("OptionView.isOption", "OptionView.matrixNotes",
                  "OptionView.positionsCell", "OptionView.openStructures"):
         assert call in portfolio, f"matrix does not use {call}"
 
-    deep_dive = (REPO_ROOT / "src/backtest/web/static/js/deep_dive.js").read_text()
+    deep_dive = (REPO_ROOT / "src/backtest/web/static/js/deep_dive.js").read_text(encoding="utf-8")
     for call in ("OptionView.bookStats", "OptionView.structureRows",
                  "OptionView.exitReasonLabel", "OptionView.isOptionTrade"):
         assert call in deep_dive, f"drawer does not use {call}"
 
 
 def test_option_columns_have_styles():
-    css = (REPO_ROOT / "src/backtest/web/static/css/app.css").read_text()
+    css = (REPO_ROOT / "src/backtest/web/static/css/app.css").read_text(encoding="utf-8")
     assert ".badge-option" in css
     assert ".dd-stats-4" in css
     assert ".opt-total" in css

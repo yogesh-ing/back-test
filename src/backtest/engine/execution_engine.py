@@ -405,8 +405,11 @@ class ExecutionEngine:
             try:
                 # For V1 we use simple premium-based estimate
                 return spot_price * 0.02 * qty * lot_size
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 — logged, falls through to the V1 estimate
+                logger.warning(
+                    "margin_calculator failed (spot=%s qty=%s lots=%s): %s — using V1 estimate",
+                    spot_price, qty, lot_size, exc,
+                )
 
         # Fallback V1 estimate: spot * pct * qty * lot_size
         pct = 0.02

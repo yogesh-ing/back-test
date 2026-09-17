@@ -473,8 +473,15 @@ class TestLoggingSecurity:
             )
 
         log_text = caplog.text.lower()
+        # The submitted secret must never appear…
         assert "super_secret_password" not in log_text
-        assert "password" not in log_text or "password field" in log_text
+        # …and neither may a field=value dump of it. The bare word "password"
+        # is allowed: the broker's own rejection copy ("Invalid username or
+        # password") contains it, and that is not a leak.
+        import re
+        assert not re.search(r"password\s*[:=]\s*\S", log_text), (
+            f"possible password field=value leak in logs: {log_text!r}"
+        )
 
     def test_totp_does_not_log_code(self, client, broker, caplog):
         """Verify TOTP verification doesn't log codes."""

@@ -163,14 +163,43 @@ Formula V2: `max_loss = max(premium_based, margin_based) × qty`, still capped b
 
 ---
 
+## 5.1 Spawn Modal Contract (slim — user finding, 2026-09-16)
+
+The Add Instance form owns **routing only** — six fields, nothing else:
+
+| Field | Values | Notes |
+|---|---|---|
+| Strategy | registry list | Owns trigger/SL/target logic (plug-and-play) |
+| Timeframe | 1min…1day | Runner-level, not strategy-level |
+| Target type | Single Symbol \| Pool | **Auto-set and locked by the strategy's `signal_kind`**: option strategy → Single Symbol only, index-whitelisted symbols; equity → either |
+| Symbol | NIFTY, BANKNIFTY (options V1) / any (equity) | Options limited to indices |
+| Bucket mode | paper \| live | Routes execution |
+| Data source | synthetic \| replay \| mStock | Feeds the shared bus |
+| Allocation (₹) | number | Capital assigned |
+
+Everything previously on the form (instrument, structure, strikes, stops, exits) is **Playbook territory** — removed from the modal. One Playbooks tab action ("New Playbook") is where trading logic is configured. Noise = configuration in the wrong layer.
+
+## 5.2 Shared Market Data Bus (C2 completion)
+
+**Rule: one feed per `(source, symbol, timeframe)`, shared by every runner subscribed to it.** Strategies receive bars/chain snapshots from the engine — they never construct feeds. For options, one chain generator per underlying is shared by all option runners on that underlying.
+
+Motivation: today each runner builds its own feed (N runners = N polling loops); on mStock (~1 req/s rate limit) 5 runners would trip limits and overload the box. The bus makes runner count and request count independent.
+
+- `FeedRegistry`: refcounted singleton feeds; the last subscriber to detach stops the feed.
+- Runner spawn takes a feed *handle* from the registry, never a new `SyntheticFeed`.
+- mStock: exactly one poller per symbol regardless of subscriber count.
+
 ## 6. Decision Log (ratified)
 
 | Decision | Ruling | Status |
 |---|---|---|
 | D1 Script vs Entity | **Declarative entity.** Arbitrary Python in the live path is an RCE surface. `to_python()` exporter may be added later — no architecture break. | Ratified |
+| D5 Spawn-form scope | **Form = routing, Playbook = trading logic.** Six fields max; strategy `signal_kind` auto-locks target type. | Ratified (user finding) |
+| D6 Data sharing | **Shared bus, engine-owned.** One feed per (source, symbol, timeframe); strategies subscribe, never fetch. | Ratified (user finding) |
 | D2 Hard delete vs Soft deprecate | **Soft-deprecate.** Ledger merges now; UI shell retires on Q6 metrics; service view persists. Reversible. | Ratified |
 | D3 Risk envelope phased | **V1 estimate → V2 BS+margin.** Interface already takes `spot_price, lot_size`; IV injects without breaking the API. | Ratified |
 | Scrap vs Fix | **Fix.** ~1,600-line UI surface vs 5,900 lines of machinery + 16,900 test lines a revert would destroy. | Ratified (matches 2026-09-16 analysis) |
+| D7 Strategy upload | **Template-conformant file-drop, not live-paste.** Strategies are Python classes dropped in `plugins/strategies/`, discovered at startup, validated against the template conformance test. No eval/exec of uploaded text in the live path. | Ratified |
 
 ---
 
@@ -190,7 +219,31 @@ Formula V2: `max_loss = max(premium_based, margin_based) × qty`, still capped b
 
 ## 8. Known Gaps Carried Forward (not blocking, tracked)
 
-1. **Synthetic feed wiring** — `source=mstock` is still metadata on the forward engine (`SyntheticFeed` hardcoded, `SyntheticQuoteProvider` default). Highest-value next task after this merge. (Ref: `docs/OPTIONS-FORWARD-TEST-EXPERIMENT.md`)
+1. **Synthetic feed wiring** — `source=mstock` is still metadata on the forward engine (`SyntheticFeed` hardcoded, `SyntheticQuoteProvider` default). Highest-value next task after this merge; superseded in priority by the Shared Data Bus (§5.2), which the mStock wiring lands into. (Ref: `docs/OPTIONS-FORWARD-TEST-EXPERIMENT.md`)
 2. **Chain-shape refactor** — straddle/strangle/iron-condor/calendar unpriceable; blocks richer option playbooks. Phase B.
 3. **Runner-state persistence** — portfolio manager is in-memory V1; restart loses the book.
 4. **Per-runner vs per-bucket accounting** — separate decision; do not bundle into this rollout.
+
+## 9. Strategy Template Contract (plug-and-play, D7)
+
+A strategy is conformant when it satisfies the template — nothing else is inspected:
+
+```python
+class MyStrategy(Strategy):          # or duck-typed equivalent
+    name = "my_strategy"            # unique, becomes the registry key
+    signal_kind = "option"           # "option" | "equity" — locks target type in the spawn form
+    params = {...}                   # schema: {name: {default, min, max, type, label, tooltip}}
+
+    def generate_market_view(self, candles) -> MarketView | None:   # option kind
+    #   — or —
+    def generate_signals(self, candles) -> pd.Series:               # equity kind
+```
+
+Rules:
+1. **Signal owns the trading logic.** Trigger, and any strategy-opinion on exits (`metadata` may carry suggested stops — the engine/playbook decides whether to honour them).
+2. **Data comes in, never fetched** (C2). The engine hands `candles` (and chain snapshots for option kind). A strategy that imports a broker/quote/feed module fails the conformance test.
+3. **Determinism:** same candles in → same view out. No `datetime.now()`, no `random`, no file I/O.
+4. **Drop-in discovery:** `plugins/strategies/*.py` scanned at startup; each file must import cleanly and pass the conformance test to register. A non-conformant file is logged and skipped — never crashes the app.
+5. **Two templates ship as reference:** `templates/option_strategy_template.py` and `templates/equity_strategy_template.py`, each with a minimal working example (EMA-based) and a filled conformance test.
+
+Implementation note: templates + conformance test + plugin discovery = one task (U6.3); the conformance test doubles as the acceptance gate for user-uploaded strategies.

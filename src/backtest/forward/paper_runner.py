@@ -567,11 +567,26 @@ class StrategyRunner:
         # -- options bridge (Gap G3.2) --------------------------------------
         # Runners with instrument.type == "option" route bars through the
         # expression layer instead of the equity signal flow.
+        # U6.2: the chain generator is the SHARED one (one per underlying via
+        # the ChainBus) so two NIFTY runners price identical chains off the
+        # same spot. The quote provider stays per-runner (cheap, per-book
+        # contract registry + pricing clock).
         self.options_bridge: Optional["OptionsBridge"] = None
+        self._chain_released = True  # U6.2 guard; flipped when a bridge takes its subscription
         if str(config.instrument.get("type", "equity")) == "option":
+            from backtest.forward.feed_registry import (
+                get_chain_bus,
+                option_quote_provider,
+            )
+
+            bus = get_chain_bus()
+            shared_generator = bus.acquire(config.symbols[0] if config.symbols else "NIFTY")
+            self._chain_underlying = config.symbols[0] if config.symbols else "NIFTY"
+            self._chain_released = False  # one release per acquire (stop is idempotent)
             self.options_bridge = OptionsBridge(
                 capital=config.allocated_capital,
                 expression=config.instrument.get("expression"),
+                quote_provider=option_quote_provider(shared_generator),
             )
 
         # -- rolling candle buffers ----------------------------------------
@@ -753,6 +768,15 @@ class StrategyRunner:
                 return
             self.status = STATUS_RUNNING
             self.error = None
+            # U6.2: re-acquire the chain subscription if this runner was
+            # previously stopped (stop released it); start is idempotent.
+            if self.options_bridge is not None and self._chain_released:
+                try:
+                    from backtest.forward.feed_registry import get_chain_bus
+                    get_chain_bus().acquire(self._chain_underlying)
+                    self._chain_released = False
+                except Exception:  # noqa: BLE001 — acquire must never block start
+                    logger.exception("chain bus acquire failed for %s", self.instance_id[:8])
             logger.info(
                 "Runner %s (%s) started: %s on %s",
                 self.instance_id[:8],
@@ -776,6 +800,17 @@ class StrategyRunner:
 
     def stop(self) -> None:
         with self._lock:
+            if not self._chain_released:
+                # U6.2: give back the shared chain-generator subscription.
+                # (Status is no good as a guard — runners are BORN stopped,
+                # so stop() must release exactly once per acquire.)
+                if self.options_bridge is not None:
+                    try:
+                        from backtest.forward.feed_registry import get_chain_bus
+                        get_chain_bus().release(self._chain_underlying)
+                    except Exception:  # noqa: BLE001 — release must never block stop
+                        logger.exception("chain bus release failed for %s", self.instance_id[:8])
+                self._chain_released = True
             self.status = STATUS_STOPPED
             logger.info("Runner %s stopped", self.instance_id[:8])
 

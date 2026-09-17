@@ -20,6 +20,8 @@ def list_strategies() -> tuple:
             "description": s["description"],
             "version": s["version"],
             "author": s["author"],
+            "params": s["params"],
+            "signal_kind": s["signal_kind"],
         }
         for s in get_all()
     ]

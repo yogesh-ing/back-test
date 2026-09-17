@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,7 @@ def test_option_config_js_behaviour():
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",  # ₹/→ in JS output; Windows cp1252 cannot decode them
         timeout=60,
     )
     assert result.returncode == 0, (
@@ -75,30 +77,44 @@ def test_option_components_are_loaded_on_every_page(client, url):
 
 
 class TestSpawnForm:
+    """U6.1 — the spawn form is a 7-field routing contract.
+
+    Trading logic (structure, strikes, exit rules) lives in Playbooks, not
+    here. The instrument is derived from the strategy's signal_kind and is
+    never asked; option strategies lock the target type to Single Symbol and
+    restrict the symbol to index underlyings.
+    """
+
     @pytest.fixture()
     def modal_html(self, client):
         """The spawn modal as the paper portfolio page renders it."""
         html = client.get("/portfolio/paper").get_data(as_text=True)
-        assert "spawn-instrument-type" in html, "spawn modal did not render"
+        assert "spawn-strategy" in html, "spawn modal did not render"
         return html
 
-    def test_instrument_selector_offers_equity_and_options(self, modal_html):
-        assert 'id="spawn-instrument-type"' in modal_html
-        assert '<option value="equity"' in modal_html
-        assert '<option value="option"' in modal_html
-
-    def test_option_controls_are_present(self, modal_html):
+    def test_form_has_exactly_the_routing_fields(self, modal_html):
         for field in (
+            "spawn-name",
+            "spawn-strategy",
+            "spawn-playbook",
+            "spawn-target-type",
+            "spawn-timeframe",
+            "spawn-mode",
+            "spawn-source",
+            "spawn-symbol",
+            "spawn-capital",
+        ):
+            assert f'id="{field}"' in modal_html, f"{field} missing from the spawn form"
+
+    def test_form_has_no_trading_logic_controls(self, modal_html):
+        """Instrument/structure/strike/exit controls are Playbook territory."""
+        for gone in (
+            "spawn-instrument-type",
             "spawn-option-box",
             "spawn-opt-structure",
             "spawn-opt-strike",
             "spawn-opt-delta",
             "spawn-opt-qty",
-        ):
-            assert f'id="{field}"' in modal_html, f"{field} missing from the spawn form"
-
-    def test_exit_rule_controls_are_present(self, modal_html):
-        for field in (
             "spawn-opt-stop",
             "spawn-opt-target",
             "spawn-opt-neutral",
@@ -108,23 +124,42 @@ class TestSpawnForm:
             "spawn-opt-settle",
             "spawn-opt-reenter",
         ):
-            assert f'id="{field}"' in modal_html, f"{field} missing from the spawn form"
+            assert f'id="{gone}"' not in modal_html, (
+                f"{gone} is Playbook territory — must not be on the spawn form"
+            )
 
-    def test_option_block_starts_hidden(self, modal_html):
-        """Equity stays the default; the option panel only appears on demand."""
-        assert 'id="spawn-option-box" hidden' in modal_html
-        assert 'value="equity" selected' in modal_html
+    def test_index_datalist_is_bound_by_js(self):
+        """Option symbols come from the index datalist the JS injects."""
+        js = (REPO_ROOT / "src/backtest/web/static/js/portfolio.js").read_text(
+            encoding="utf-8"
+        )
+        assert 'spawn-index-list' in js
+        assert "OPTION_INDEXES" in js
+        assert "NIFTY" in js and "BANKNIFTY" in js
+
+    def test_js_locks_target_type_and_symbol_by_signal_kind(self):
+        js = (REPO_ROOT / "src/backtest/web/static/js/portfolio.js").read_text(
+            encoding="utf-8"
+        )
+        assert "signal_kind" in js
+        assert "poolOpt.disabled = isOption" in js
+        assert "spawn-playbook" in js
+
+    def test_api_exposes_signal_kind(self, client):
+        """GET /api/strategies carries signal_kind (option vs equity)."""
+        catalogue = client.get("/api/strategies").get_json()
+        kinds = {s["name"]: s["signal_kind"] for s in catalogue}
+        assert kinds["directional_options"] == "option"
+        assert kinds["sma_crossover"] == "equity"
 
     def test_js_submits_the_instrument_block(self):
-        js = (REPO_ROOT / "src/backtest/web/static/js/portfolio.js").read_text()
-        assert "OptionConfig.buildInstrument" in js
+        js = (REPO_ROOT / "src/backtest/web/static/js/portfolio.js").read_text(
+            encoding="utf-8"
+        )
+        # Option routing: playbook snapshot or engine defaults — never form fields.
         assert "body.instrument" in js
-        assert "OptionConfig.validate" in js
-
-    def test_js_binds_the_option_controls(self):
-        js = (REPO_ROOT / "src/backtest/web/static/js/portfolio.js").read_text()
-        assert 'instrumentSel.addEventListener("change", syncOptionForm)' in js
-        assert "syncOptionForm()" in js
+        assert "/api/playbooks/" in js
+        assert "bull_call_spread" in js  # engine-default expression
 
 
 # ---------------------------------------------------------------------------
