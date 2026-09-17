@@ -456,8 +456,19 @@ feeds land; wiring mStock BEFORE the bus means rewiring it after.
 
 ## Out of scope (tracked elsewhere)
 
-- Synthetic-feed → mStock wiring (Gap #1) — **now sequenced AFTER U6.2**, since
-  real feeds land into the shared bus, not per-runner feeds.
+- ~~Synthetic-feed → mStock wiring (Gap #1)~~ **DONE** — see "U7.1" below.
 - Chain-shape refactor for multi-leg V2 structures (Phase B).
 - Runner-state persistence (Gap #3).
 - Per-runner vs per-bucket accounting (separate decision).
+
+### ✅ U7.1 — mStock live bars into the shared bus (Gap #1) — DONE
+
+**Effort:** 1d (as-built) · **Depends on:** U6.2 · **Unblocks:** real-money paper bucket
+
+As-built — the §5.2 promise kept, no runner changes (C2):
+
+1. `MStockBarFeed` (in `feed_registry.py`, the bus's promised home) — ONE background poll thread per manager for ALL mstock symbols (round-robin sweep every `poll_interval_s`, default 60); delegates fetching to a duck-typed `latest_bar(symbol)` client (default `MStockLiveFeed`, which owns market-hours gate + credentials + scriptmaster); bars normalized to the canonical runner shape (ISO ts; epoch-millis absorbed) and deduped per symbol; errors logged-and-skipped (a data hiccup never takes the loop down); market-closed: one catch-up seed per symbol, then idle — a closed API is never hammered.
+2. Source routing in `PortfolioManager`: `add_runner`/`remove_runner`/`shutdown` pick `mstock_feed` vs synthetic `feed` by `config.source`; `control_runner`/`stop_all`/shutdown keep the poll thread in step (`_sync_mstock_thread`) — it runs iff an mstock runner is live, so a synthetic-only manager pays zero API cost. Bars ride the same `_on_bar`/`_on_tick_end` fan-out: pool scans, risk supervisor, ledger — all unchanged.
+3. Not wired yet (deliberate): option-chain live pricing (ChainBus stays synthetic — real chain data is its own task); runner-state persistence (Gap #3).
+
+**Tests:** `tests/forward/test_mstock_live_bus.py` (18) — normalization (ISO + epoch millis + garbage rows), dedupe, error-soft client failures, market-gate catch-up-then-idle, tick-end once per sweep; manager routing (mstock runner bars arrive via the shared thread; synthetic untouched; registry keyed `(mstock, NIFTY, 1hour)`); **one sweep = ONE API call with two runners on NIFTY** (the rate-limit proof); thread lifecycle across spawn/stop/stop_all/shutdown. Full suite 2,435 passed (known Windows flake only).

@@ -55,6 +55,8 @@ class PortfolioManager:
         tick_seconds: float = 1.0,
         warmup_bars: int = 30,
         auto_start_feed: bool = True,
+        mstock_feed_client: Optional[Any] = None,
+        mstock_poll_interval_s: float = 60.0,
     ) -> None:
         self.ledger = OrderLedger()
         self.broker = PaperBroker(self.ledger)
@@ -105,6 +107,18 @@ class PortfolioManager:
         # chain generator per option underlying (see feed_registry module doc).
         self.feed_registry = get_feed_registry()
         self.chain_bus = get_chain_bus()
+
+        # Gap #1: live mStock bars ride the SAME fan-out as synthetic bars.
+        # The feed owns ONE poll thread for all its symbols (rate-limit rule);
+        # it only runs while at least one runner trades source=mstock.
+        from backtest.forward.feed_registry import MStockBarFeed
+
+        self.mstock_feed = MStockBarFeed(
+            feed_client=mstock_feed_client,
+            poll_interval_s=mstock_poll_interval_s,
+        )
+        self.mstock_feed.on_bar = self._on_bar
+        self.mstock_feed.on_tick_end = self._on_tick_end
 
         # U3.3: audit log with scope — every control action logs scope=paper|live|playbook|dashboard
         self._audit_log_entries: Deque[Dict[str, Any]] = deque(maxlen=1000)
@@ -425,17 +439,23 @@ class PortfolioManager:
             # subscription was already taken by StrategyRunner's constructor
             # (the bridge needs its generator at build time), so the manager
             # must NOT acquire again — one runner, one chain subscription.
+            # Gap #1: source routes the feed — mstock runners bar off the
+            # shared live poll thread, everything else off the synthetic feed.
+            feed = self.mstock_feed if config.source == "mstock" else self.feed
             for sym in config.symbols:
                 self.feed_registry.subscribe(
-                    config.source, sym, config.timeframe, feed=self.feed
+                    config.source, sym, config.timeframe, feed=feed
                 )
-            self.feed.add_symbols(config.symbols)
+            feed.add_symbols(config.symbols)
             self._refresh_anchors()
 
             if start:
                 runner.start()
                 if self._auto_start_feed:
-                    self.feed.start(warmup=True)
+                    feed.start(warmup=True)
+                    # Gap #1: keep the live poll thread in step with the
+                    # mstock runner population (one thread total).
+                    self._sync_mstock_thread()
 
             logger.info(
                 "Runner added: %s (%s) alloc=%.0f — %d runners total",
@@ -466,7 +486,13 @@ class PortfolioManager:
                 self.feed_registry.release(
                     runner.config.source, sym, runner.config.timeframe
                 )
-            self.feed.remove_symbols(runner.config.symbols)
+            feed = (
+                self.mstock_feed
+                if runner.config.source == "mstock"
+                else self.feed
+            )
+            feed.remove_symbols(runner.config.symbols)
+            self._sync_mstock_thread()
             self.total_capital -= runner.config.allocated_capital
             self._refresh_anchors()
             # If this was the last runner in the bucket, reset bucket state
@@ -509,6 +535,10 @@ class PortfolioManager:
         with self._lock:
             runner = self._control(instance_id, action)
             state = runner.get_state()
+            # Gap #1: start/stop flips change whether any mstock runner is
+            # live — keep the shared poll thread in step.
+            if runner.config.source == "mstock":
+                self._sync_mstock_thread()
             try:
                 bucket = self._runner_bucket(runner)
                 self._audit_log(f"{action.upper()} {runner.config.name}", scope=bucket, instance_id=instance_id, detail=f"action={action}")
@@ -567,6 +597,8 @@ class PortfolioManager:
                 if runner.status != STATUS_STOPPED:
                     runner.stop()
                     n += 1
+            # Gap #1: stopping the last mstock runner retires the poll thread.
+            self._sync_mstock_thread()
             return n
 
     def emergency_flatten_all(
@@ -714,6 +746,22 @@ class PortfolioManager:
             str(bar.get("ts", ""))[:10]
             or datetime.now(timezone.utc).date().isoformat()
         )
+
+    def _sync_mstock_thread(self) -> None:
+        """Run the live poll thread iff at least one mstock runner exists.
+
+        The thread is expensive (API polls) — it must not idle-spin while no
+        runner consumes live bars, and it must be running before the first
+        mstock runner's bars are expected.
+        """
+        has_live = any(
+            r.config.source == "mstock" and r.status != STATUS_STOPPED
+            for r in self._runners.values()
+        )
+        if has_live and not self.mstock_feed.running:
+            self.mstock_feed.start()
+        elif not has_live and self.mstock_feed.running:
+            self.mstock_feed.stop()
 
     def _on_bar(self, symbol: str, bar: Dict[str, Any]) -> None:
         """Fan one closed candle out to every runner trading that symbol."""
@@ -1056,6 +1104,7 @@ class PortfolioManager:
 
     def shutdown(self) -> None:
         self.feed.stop()
+        self.mstock_feed.stop()
         with self._lock:
             for runner in self._runners.values():
                 runner.stop()  # releases the runner's chain-bus subscription

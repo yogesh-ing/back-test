@@ -219,7 +219,7 @@ Motivation: today each runner builds its own feed (N runners = N polling loops);
 
 ## 8. Known Gaps Carried Forward (not blocking, tracked)
 
-1. **Synthetic feed wiring** — `source=mstock` is still metadata on the forward engine (`SyntheticFeed` hardcoded, `SyntheticQuoteProvider` default). Highest-value next task after this merge; superseded in priority by the Shared Data Bus (§5.2), which the mStock wiring lands into. (Ref: `docs/OPTIONS-FORWARD-TEST-EXPERIMENT.md`)
+1. ~~**Synthetic feed wiring**~~ **CLOSED (Gap #1, this merge).** `MStockBarFeed` (in `feed_registry.py`) is the live poll thread — ONE per manager for all mstock symbols, riding the same `on_bar`/`on_tick_end` fan-out as synthetic bars. `add_runner` routes by `config.source`; the thread auto-runs only while an mstock runner is live; market-closed it seeds once per symbol then idles. Runner code unchanged (C2). Remaining live-work is operational: credentials/session in `backtest.live.auth`, and option-chain live pricing (still synthetic via the ChainBus). (Ref: `docs/OPTIONS-FORWARD-TEST-EXPERIMENT.md`)
 2. **Chain-shape refactor** — straddle/strangle/iron-condor/calendar unpriceable; blocks richer option playbooks. Phase B.
 3. **Runner-state persistence** — portfolio manager is in-memory V1; restart loses the book.
 4. **Per-runner vs per-bucket accounting** — separate decision; do not bundle into this rollout.
