@@ -12,6 +12,11 @@ The single place that decides *where a run's bars come from*:
 
 Unknown modes and paper runs without a valid source choice raise
 :class:`~backtest.db.config.ConfigError` with a message naming the bad value.
+
+``mode='backtest'`` sources are wrapped in :class:`~backtest.data.
+corporate_actions.AdjustedSource` when the corporate-action policy
+(``config/data_quality.yaml → daily_bar.corporate_actions``) is enabled —
+raw DB bars are back-adjusted at read time; disabled ⇒ unchanged.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 from backtest.data.base import DataSource
+from backtest.data.corporate_actions import AdjustedSource, calendar_from_config
 from backtest.data.db_source import DbSource
 from backtest.data.mstock_live_feed import MStockLiveFeed
 from backtest.data.synthetic import SyntheticSource
@@ -34,7 +40,14 @@ class SourceRegistry:
         mode = str(mode or "").strip().lower()
 
         if mode == "backtest":
-            return DbSource(**kwargs)  # fixed: historical DB
+            source = DbSource(**kwargs)  # fixed: historical DB
+            # Corporate-action policy (review §3.3): raw DB bars are
+            # back-adjusted at READ time when the policy is enabled and has
+            # actions. Disabled/empty ⇒ the plain DbSource, byte-identical.
+            calendar = calendar_from_config()
+            if calendar:
+                return AdjustedSource(source, calendar)
+            return source
 
         if mode == "live":
             return MStockLiveFeed(**kwargs)  # fixed: real broker feed
