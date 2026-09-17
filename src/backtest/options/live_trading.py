@@ -16,6 +16,24 @@ Usage::
     trader = LiveOptionTrader(broker=mstock_broker, dry_run=True)
     fills = trader.execute_structure(trade_intent)
 
+Arming live orders (fail-closed, three gates)
+---------------------------------------------
+
+This class defaults to **dry-run**. Real orders are impossible unless a
+caller clears all three gates at construction:
+
+1. ``dry_run=False`` — the explicit opt-out of the safe default;
+2. ``confirm_live=True`` — a per-instance, deliberate confirmation
+   (refuses to inherit live mode from a copy-pasted config);
+3. environment kill-switch ``ALLOW_LIVE_ORDERS=1`` — the ops-level switch;
+   unset, live arming fails even with 1 + 2 (lets a desk disable all live
+   placement centrally without a deploy).
+
+Any gate missing → ``ValueError`` at construction, before any broker call.
+Going live is logged loudly. The previous default (``dry_run=False``) placed
+real orders whenever a caller omitted the flag — the exact opposite of the
+repo's fail-closed principle (architect review 2026-09-17 §3.2).
+
 V1 scope: sequential leg submission (not atomic at exchange level).
 The exchange doesn't support multi-leg orders, so we submit each leg
 and monitor for failures.
@@ -24,6 +42,7 @@ and monitor for failures.
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -151,13 +170,41 @@ class LiveOptionTrader:
     def __init__(
         self,
         broker: MStockBroker,
-        dry_run: bool = False,
+        dry_run: bool = True,
         retry_config: RetryConfig | None = None,
         poll_interval_seconds: float = 2.0,
         poll_timeout_seconds: float = 60.0,
+        confirm_live: bool = False,
     ) -> None:
+        # Fail-closed arming (see module docstring): live orders require ALL
+        # THREE gates. Any gate missing raises BEFORE any broker call — the
+        # default posture is log-only, never placement.
+        self.dry_run = bool(dry_run)
+        if not self.dry_run:
+            if not confirm_live:
+                raise ValueError(
+                    "[live-options] refusing to arm live orders: dry_run=False "
+                    "requires confirm_live=True (explicit per-instance confirmation)"
+                )
+            if os.environ.get("ALLOW_LIVE_ORDERS", "").strip().lower() not in (
+                "1",
+                "true",
+                "yes",
+            ):
+                raise ValueError(
+                    "[live-options] refusing to arm live orders: environment "
+                    "kill-switch ALLOW_LIVE_ORDERS is not set — export "
+                    "ALLOW_LIVE_ORDERS=1 to allow real order placement"
+                )
+            logger.warning(
+                "[live-options] LIVE MODE ARMED — real orders will be placed "
+                "via %r; every submission is logged",
+                type(broker).__name__,
+            )
+        # Telemetry: True only when the trader is actually armed for live.
+        self.confirm_live = bool(confirm_live) and not self.dry_run
+
         self.broker = broker
-        self.dry_run = dry_run
         self.retry = retry_config or RetryConfig()
         self.poll_interval = poll_interval_seconds
         self.poll_timeout = poll_timeout_seconds
