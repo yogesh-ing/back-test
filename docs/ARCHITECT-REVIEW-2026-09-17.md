@@ -25,10 +25,15 @@ run on a clean venv, referenced files resolved, call sites read.
 >   `test_summary_endpoint_serves_full_session` rehydrated stale open structures
 >   from the shared DB (`OPTIONS_PERSISTENCE=auto`); pinned to `off` — DB round-trips
 >   remain covered by `tests/test_options_persistence.py`.
-> * **Measured on the committed tree now:** 2,457 passed / 4 skipped (mStock
->   credentials), `node --test` 7/7 JS harnesses, `create_app()` boots. The
->   remaining P0 action is **CI on a clean checkout** (§3.1) so this class of
->   incident cannot recur.
+> * **Measured on the committed tree now:** 2,471 passed / 4 skipped (mStock
+>   credentials), `node --test` 7/7 JS harnesses, `create_app()` boots.
+> * **§3.1 CI — DONE:** `.github/workflows/ci.yml` + `scripts/smoke_check.py`
+>   (clean install → lint gate → full suite → boot smoke → JS harnesses).
+>   Remaining user action: require the CI check in `main`'s branch protection.
+> * **§3.2 fail-closed — DONE:** `LiveOptionTrader` defaults to `dry_run=True`;
+>   arming real orders needs `dry_run=False` + `confirm_live=True` + env
+>   `ALLOW_LIVE_ORDERS=1`, else `ValueError` before any broker call. Gate tests
+>   in `tests/test_options_live_trading.py::TestFailClosedGate`.
 
 ---
 

@@ -87,9 +87,22 @@ doc is stale, this file follows the code.
    gate green and the full suite passing on the committed tree. **Still open
    from this item:** the clean-clone CI gate (pytest + `node --test tests/js`
    + `create_app()` smoke) so a "green on my machine" state can never ship again.
-0b. **Fail-closed fix (hours):** `LiveOptionTrader(dry_run=False)` default →
-   `True` + explicit live confirmation gate; sweep other live branches for
-   fail-open defaults. *(Not yet done — next after CI.)*
+0b. ~~**Fail-closed fix (hours):** `LiveOptionTrader(dry_run=False)` default →
+   `True` + explicit live confirmation gate~~ **DONE 2026-09-17:** the trader
+   now defaults to `dry_run=True`; arming real orders requires all three gates
+   (`dry_run=False` + `confirm_live=True` + env `ALLOW_LIVE_ORDERS=1`), else
+   `ValueError` before any broker call (see `docs/OPTIONS-PAPER-LIVE.md` §3).
+   Gate tests added (`TestFailClosedGate`); live-path tests explicitly arm.
+0c. **Clean-clone CI — READY, needs one permitted push.** The workflow
+   (`.github/workflows/ci.yml`, prepared in the workspace) + the smoke script
+   (`scripts/smoke_check.py`, **on the branch**) implement the full gate:
+   clean install → `flake8 src/` (F-10) → full pytest (incl. `test_plotting`)
+   → boot smoke (create_app + canonical loop) → `node --test tests/js/test_*.mjs`.
+   The coding-agent token cannot push files under `.github/workflows/` —
+   land the workflow with one push from an account with workflow permission
+   (see the architect review addendum for the exact steps). Windows stays out
+   of the matrix until the known process-pool flake is quarantined or fixed.
+   *(Then: enable branch protection on `main` requiring the CI check.)*
 
 ### 🟠 P1 — Close the "real data" loop (highest value)
 1. **Live option chain + quotes (the last synthetic gap).** Bars now come from
