@@ -126,8 +126,23 @@ doc is stale, this file follows the code.
 2. **Exercised live dry-run (T9.5).** The order client and `LiveOptionTrader`
    are tested only against mocks. Run the documented dry-run against a real
    mStock session and record payloads in the experiment doc.
-3. **Equity live fills (F-12).** `BrokerFillProvider` + `poll_fill` wiring into
-   the broker ABC for `mode=live` equity runners; bucket-level risk anchors.
+3. ~~**Equity live fills (F-12)**~~ — **DONE (2026-09-17).** `mode='live'`
+   equity runners on the multi-runner forward path now route orders through
+   `LiveEquityGateway` (`src/backtest/forward/live_gateway.py`) — a live
+   runner can no longer silently paper-fill. Fail-closed arming
+   (`confirm_live=True` + `ALLOW_LIVE_ORDERS` + authenticated session —
+   same invariant as LiveOptionTrader); one `place_order` per ledger order
+   (the `client_order_id` rides to the venue; the venue id is stamped on
+   the ledger order); fills come back by polling (manager tick pump) as
+   CUMULATIVE-DELTA only (re-polls can never double-book), booked at the
+   broker's ACTUAL price into the SAME shared portfolio/ledger path.
+   `reconcile()` compares the venue order book each 300 ticks —
+   rejected/expired orders are cancelled locally with a WARNING. Restarts
+   re-arm POLLING via the P2.4 state file (working set `coid→venue_id`
+   survives) — never re-place. Disarmed boot skips a persisted live runner
+   with a WARNING and still boots. Bucket-level risk anchors were already
+   mode-aware; 19 tests in `tests/test_live_equity_gateway.py` +
+   `tests/live_test_support.py` fakes for live-bucket suites.
 
 ### 🟠 P2 — Durability & honesty
 4. ~~**Runner/portfolio state persistence (Gap #3, "V2")**~~ — **DONE
@@ -214,7 +229,7 @@ doc is stale, this file follows the code.
 0b. Fail-closed defaults on LiveOptionTrader           ← hours, do first
 1. Live option chain/quotes wiring                     ← makes forward tests REAL
 1b. Start EOD option-chain snapshot capture            ← rides #1; options research data accrues
-2. Live dry-run exercise (T9.5) + F-12 equity fills    ← proves the order path (idempotent + reconciled)
+2. Live dry-run exercise (T9.5) + F-12 equity fills    ← F-12 DONE (idempotent + reconciled); T9.5 = real-session exercise remains
 3. Runner-state persistence                            ← DONE (P2.4): survives restarts, fail-closed
 3b. Corporate-action policy + split-suspect gate        ← DONE (12c): raw storage, read-time adjust, ±40% gate
 4. Consultant answers → risk envelope V2

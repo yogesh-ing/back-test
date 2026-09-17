@@ -32,6 +32,14 @@ from backtest.forward.risk_supervisor import GlobalRiskConfig
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _arm_live_orders(monkeypatch):
+    """F-12: these suites exercise live-BUCKET accounting; arm the gateway
+    with the support module's fake venue (see live_test_support)."""
+    monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
+
+
 def _paper_config(name="P1", capital=100_000, symbols=None):
     return RunnerConfig(
         name=name,
@@ -58,7 +66,10 @@ def _live_config(name="L1", capital=200_000, symbols=None):
 
 @pytest.fixture
 def manager():
+    from live_test_support import ARMED_KWARGS
+
     mgr = PortfolioManager(
+        **ARMED_KWARGS,
         risk_config=GlobalRiskConfig(daily_loss_limit=100_000, max_drawdown_pct=0.50),
         auto_start_feed=False,
     )
@@ -386,7 +397,9 @@ class TestPhantomPnL:
 class TestRestartBehavior:
     def test_new_manager_has_clean_state(self):
         """A fresh PortfolioManager has no stale halt state — restart resets everything."""
-        mgr = PortfolioManager(auto_start_feed=False)
+        from live_test_support import ARMED_KWARGS
+
+        mgr = PortfolioManager(**ARMED_KWARGS, auto_start_feed=False)
         try:
             # No runners, no halt, no peak
             assert mgr.halted is False

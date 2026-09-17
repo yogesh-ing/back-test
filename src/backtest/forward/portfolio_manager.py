@@ -64,6 +64,8 @@ class PortfolioManager:
         mstock_feed_client: Optional[Any] = None,
         mstock_poll_interval_s: float = 60.0,
         state_path: Optional[Any] = None,
+        live_broker: Optional[Any] = None,
+        confirm_live_orders: bool = False,
     ) -> None:
         self.ledger = OrderLedger()
         self.broker = PaperBroker(self.ledger)
@@ -138,6 +140,14 @@ class PortfolioManager:
         # a restart until a human resumes), breakers stay tripped.
         if state_path is None:
             state_path = os.environ.get("PORTFOLIO_STATE_PATH") or None
+        # F-12: live equity order seam. ``live_broker`` is the injected
+        # session (tests pass a deterministic fake); None → the active
+        # broker from the session manager. The gateway itself is built
+        # lazily on the first mode='live' runner — a manager that never
+        # goes live never pays the arming check.
+        self._injected_live_broker = live_broker
+        self._confirm_live_orders = bool(confirm_live_orders)
+        self._live_gateway: Optional[Any] = None
         self._state_store = (
             PortfolioStateStore(state_path) if state_path else None
         )
@@ -457,6 +467,32 @@ class PortfolioManager:
     # Runner lifecycle
     # ------------------------------------------------------------------ #
 
+    def _resolve_live_broker(self) -> Any:
+        """The broker session for live orders (F-12).
+
+        The injected ``live_broker`` wins (tests pass a deterministic fake);
+        otherwise the session manager's active broker. Never constructs a
+        fresh unauthenticated client here — an unauthenticated session must
+        REFUSE live runners, not half-send.
+        """
+        if self._injected_live_broker is not None:
+            return self._injected_live_broker
+        from backtest.forward.feed_registry import _default_quote_broker
+
+        return _default_quote_broker()
+
+    def _live_gateway_for(self) -> Any:
+        """Build (once) the gated live-order gateway; raises when disarmed."""
+        if self._live_gateway is None:
+            from backtest.forward.live_gateway import LiveEquityGateway
+
+            self._live_gateway = LiveEquityGateway(
+                self.ledger,
+                self._resolve_live_broker(),
+                confirm_live=self._confirm_live_orders,
+            )
+        return self._live_gateway
+
     def add_runner(
         self,
         config: RunnerConfig,
@@ -465,8 +501,14 @@ class PortfolioManager:
     ) -> str:
         """Spawn a runner from config. Returns its instance_id."""
         with self._lock:
+            broker_for_runner = self.broker
+            if config.mode == "live":
+                # F-12: live equity runners route orders to the REAL broker
+                # through the gated gateway. Fail-closed: arming raises
+                # here (refused runner) rather than paper-filling silently.
+                broker_for_runner = self._live_gateway_for()
             runner = StrategyRunner(
-                config, ledger=self.ledger, broker=self.broker, strategy=strategy
+                config, ledger=self.ledger, broker=broker_for_runner, strategy=strategy
             )
             self._runners[runner.instance_id] = runner
             self.total_capital += config.allocated_capital
@@ -904,7 +946,16 @@ class PortfolioManager:
             from backtest.forward.state_store import _config_from_dict
 
             config = _config_from_dict(runner_snap["config"])
-            self.add_runner(config, start=False)
+            try:
+                self.add_runner(config, start=False)
+            except ValueError as exc:
+                # e.g. a mode='live' runner with no armed broker session this
+                # boot — fail-closed: skip THAT runner, never block the boot.
+                logger.warning(
+                    "[state] runner %s (%s) refused on restore: %s — skipped",
+                    config.instance_id, config.name, exc,
+                )
+                continue
             runner = self._runners.get(config.instance_id)
             if runner is None:
                 logger.warning(
@@ -967,6 +1018,21 @@ class PortfolioManager:
             # at the default 1s ticks) — a crash loses at most ~a minute.
             if self._state_store is not None and self.tick_index % 60 == 0:
                 self._persist_state()
+
+            # F-12: poll the live gateway every tick — a fill sitting at the
+            # venue must reach the book in the same loop that drives risk.
+            # Reconciliation (the honesty check vs the broker's order book)
+            # runs on a slower cadence; neither may ever break the tick.
+            if self._live_gateway is not None and self._live_gateway.working_count():
+                try:
+                    self._live_gateway.poll_pending()
+                except Exception:  # noqa: BLE001
+                    logger.exception("[live] gateway poll failed")
+                if self.tick_index % 300 == 0:
+                    try:
+                        self._live_gateway.reconcile()
+                    except Exception:  # noqa: BLE001
+                        logger.exception("[live] gateway reconcile failed")
 
     def _evaluate_risk(self) -> None:
         """Evaluate risk per-bucket (independent breakers) + manager-level.
@@ -1293,6 +1359,11 @@ class PortfolioManager:
         self.feed.emit_one(**bar_kwargs)
 
     def shutdown(self) -> None:
+        if self._live_gateway is not None and self._live_gateway.working_count():
+            try:
+                self._live_gateway.poll_pending()
+            except Exception:  # noqa: BLE001
+                logger.exception("[live] final poll before shutdown failed")
         self._persist_state()  # V2: last write wins — leave a restorable state
         self.feed.stop()
         self.mstock_feed.stop()
@@ -1327,6 +1398,8 @@ def reset_portfolio_manager(
     tick_seconds: float = 1.0,
     warmup_bars: int = 30,
     auto_start_feed: bool = True,
+    live_broker: Optional[Any] = None,
+    confirm_live_orders: bool = False,
 ) -> PortfolioManager:
     """Tear down and recreate the singleton (tests / restart)."""
     global _MANAGER
@@ -1338,5 +1411,7 @@ def reset_portfolio_manager(
             tick_seconds=tick_seconds,
             warmup_bars=warmup_bars,
             auto_start_feed=auto_start_feed,
+            live_broker=live_broker,
+            confirm_live_orders=confirm_live_orders,
         )
         return _MANAGER

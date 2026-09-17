@@ -354,6 +354,11 @@ def capture_runner(runner: Any) -> Dict[str, Any]:
     }
     if runner.options_bridge is not None:
         snapshot["bridge"] = capture_bridge(runner.options_bridge)
+    # F-12: live gateway working orders — a restart re-arms POLLING for the
+    # venue orders instead of double-placing them.
+    snap_gateway = getattr(runner.broker, "snapshot_state", None)
+    if callable(snap_gateway):
+        snapshot["live_gateway"] = snap_gateway()
     return snapshot
 
 
@@ -387,6 +392,11 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
 
     if runner.options_bridge is not None and snapshot.get("bridge"):
         restore_bridge(runner.options_bridge, snapshot["bridge"])
+
+    gateway_state = snapshot.get("live_gateway")
+    restore_gateway = getattr(runner.broker, "restore_state", None)
+    if gateway_state and callable(restore_gateway):
+        restore_gateway(gateway_state)
 
     saved_status = snapshot.get("status", STATUS_STOPPED)
     if saved_status == STATUS_RUNNING:

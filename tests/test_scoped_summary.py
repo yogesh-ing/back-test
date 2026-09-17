@@ -27,6 +27,14 @@ from backtest.forward.risk_supervisor import GlobalRiskConfig
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _arm_live_orders(monkeypatch):
+    """F-12: these suites exercise live-BUCKET accounting; arm the gateway
+    with the support module's fake venue (see live_test_support)."""
+    monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
+
+
 def _paper_config(name="P1", capital=100_000, symbols=None):
     return RunnerConfig(
         name=name,
@@ -60,7 +68,10 @@ def _first_bar(symbol="AAA"):
 
 @pytest.fixture
 def manager():
+    from live_test_support import ARMED_KWARGS
+
     mgr = PortfolioManager(
+        **ARMED_KWARGS,
         risk_config=GlobalRiskConfig(daily_loss_limit=100_000, max_drawdown_pct=0.50),
         auto_start_feed=False,
     )
