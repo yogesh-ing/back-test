@@ -178,10 +178,22 @@ doc is stale, this file follows the code.
     `.gitignore` (52 files) → `git rm -r --cached`; move shared test fixtures
     out of test-to-test imports (`test_bucket_risk.py` ← `test_live_engine.py`)
     into a helpers/conftest module.
-12c. **(New) Corporate actions:** no split/bonus/dividend handling anywhere in
-    the data layer — raw NSE daily bars mean one unadjusted 10:1 split poisons
-    metrics and any walk-forward split crossing it. Add an adjusted-price
-    policy + a `data_quality.yaml` outlier rule (see review §3.3).
+12c. ~~**(New) Corporate actions**~~ — **DONE (2026-09-17).** Policy wired:
+     `src/backtest/data/corporate_actions.py`. Storage stays RAW;
+     back-adjustment happens at READ time (`AdjustedSource`, wrapped into
+     `mode='backtest'` by `SourceRegistry` when
+     `config/data_quality.yaml → daily_bar.corporate_actions.enabled: true`).
+     Split/bonus factors: pre-ex-date prices × factor, volume ÷ factor,
+     latest bars stay traded. `corporate_actions` DB table (`models.py`) is
+     the ops upkeep path; `data/corporate_actions.csv` the flat-file path.
+     The gate: `daily_return_outliers` flags |1-day returns| > ±40%
+     (configurable) as suspected unadjusted actions — run
+     `scripts/scan_split_suspects.py --root data --strict` on a schedule;
+     unexplained suspects WARN in every adjusted read too. Default OFF ⇒
+     byte-identical legacy behaviour. 34 tests:
+     `tests/test_corporate_actions.py`. **Operator TODO:** populate
+     `data/corporate_actions.csv` for the live universe (NSE announcements),
+     then flip `enabled: true`.
 13. **Production server:** still Flask dev server. #4 (state persistence) is
     DONE — the restart-survival half of the Gunicorn blocker is closed; the
     multi-worker trap remains (shared mutable state across workers), so
@@ -204,6 +216,7 @@ doc is stale, this file follows the code.
 1b. Start EOD option-chain snapshot capture            ← rides #1; options research data accrues
 2. Live dry-run exercise (T9.5) + F-12 equity fills    ← proves the order path (idempotent + reconciled)
 3. Runner-state persistence                            ← DONE (P2.4): survives restarts, fail-closed
+3b. Corporate-action policy + split-suspect gate        ← DONE (12c): raw storage, read-time adjust, ±40% gate
 4. Consultant answers → risk envelope V2
 5. Engine depth (sizing, metrics, optimization) in parallel
 ```
