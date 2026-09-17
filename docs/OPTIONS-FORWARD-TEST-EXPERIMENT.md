@@ -126,15 +126,22 @@
   synthetic runs as plumbing checks with `quote_source` attached; make no
   edge claims from them.
 
-## E-7 — Forward-test state is memory-only — OPEN (known, scheduled)
+## E-7 — Forward-test state is memory-only — CLOSED (P2.4, 2026-09-17)
 
-* **Observation:** runner/portfolio state lives in process memory
+* **Observation:** runner/portfolio state lived in process memory
   (`PortfolioManager` singletons; playbook registry file-backed only when
-  `PLAYBOOKS_PATH` is set). A restart loses books and resurrects halted
+  `PLAYBOOKS_PATH` is set). A restart lost books and resurrected halted
   breakers — the persistence "V2" gap, prerequisite for Gunicorn.
-* **Interim discipline:** treat long-running forward sessions as disposable
-  evidence; export/record anything you intend to cite (the ledger and audit
-  log live in the process).
+* **Resolution:** opt-in JSON state persistence is wired
+  (`state_path=` / `PORTFOLIO_STATE_PATH`). Control-plane mutations and every
+  60th tick snapshot atomically; a fresh manager rehydrates configs (same
+  instance ids), full portfolio books, option bridge books and breaker
+  latches. Restored RUNNING comes back PAUSED (fail-closed); corrupt state
+  boots clean. See `src/backtest/forward/state_store.py` and
+  `tests/forward/test_state_persistence.py`. Sessions that don't set a path
+  behave exactly as before.
+* **Still true:** without `PORTFOLIO_STATE_PATH` set, treat long-running
+  sessions as disposable evidence — persistence must be opted into.
 
 ---
 

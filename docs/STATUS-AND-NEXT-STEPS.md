@@ -130,10 +130,20 @@ doc is stale, this file follows the code.
    the broker ABC for `mode=live` equity runners; bucket-level risk anchors.
 
 ### 🟠 P2 — Durability & honesty
-4. **Runner/portfolio state persistence (Gap #3, "V2").** All forward-test
-   state is in-memory; a restart loses the book and resurrects halted
-   breakers. Persist runner configs + ledgers; this is also the prerequisite
-   for any production WSGI move (see #8).
+4. ~~**Runner/portfolio state persistence (Gap #3, "V2")**~~ — **DONE
+   (P2.4, wired 2026-09-17).** Opt-in via `state_path=` ctor arg or
+   `PORTFOLIO_STATE_PATH`. Every control-plane mutation (add/remove/control/
+   pause/resume/stop/flatten/breaker-reset/anchors/shutdown) plus every 60th
+   tick snapshots atomically (tmp+`os.replace`) to JSON: runner configs with
+   instance identity, the full `Portfolio.to_dict` book (cash/positions/
+   orders/equity history), runtime scalars, option bridge books (structures,
+   legs, broker cash, bar-clock), and manager + bucket breaker latches.
+   A fresh manager rehydrates everything; persisted RUNNING comes back
+   **PAUSED** (fail-closed — nothing trades until a human resumes), tripped
+   breakers STAY tripped. Corrupt files are renamed `*.corrupt` and boot is
+   clean; schema mismatch is ignored; a failed write never corrupts the last
+   good state. No path → byte-identical V1 behaviour. 16 tests:
+   `tests/forward/test_state_persistence.py`.
 5. **Portfolio-page option trade rows.** API exposes them; render
    per-structure rows in the instance/bucket trade table UI (U3.1 backend
    landed, UI polish remains).
@@ -172,9 +182,11 @@ doc is stale, this file follows the code.
     the data layer — raw NSE daily bars mean one unadjusted 10:1 split poisons
     metrics and any walk-forward split crossing it. Add an adjusted-price
     policy + a `data_quality.yaml` outlier rule (see review §3.3).
-13. **Production server:** still Flask dev server; Gunicorn needs
-    `--workers 1` until state is externalized (the multi-worker trap, §13 of
-    project-overview). Blocked behind #4.
+13. **Production server:** still Flask dev server. #4 (state persistence) is
+    DONE — the restart-survival half of the Gunicorn blocker is closed; the
+    multi-worker trap remains (shared mutable state across workers), so
+    Gunicorn still wants `--workers 1` + `--preload`, or an external store
+    before scaling out.
 14. Timeframe cosmetic on synthetic/CSV (daily bars only — gap G6).
 15. Money inexact on SQLite (NUMERIC→float) — Postgres for anything reported.
 16. Broker cost rates are FY 2024-25 — re-verify against a fresh contract note.
@@ -191,7 +203,7 @@ doc is stale, this file follows the code.
 1. Live option chain/quotes wiring                     ← makes forward tests REAL
 1b. Start EOD option-chain snapshot capture            ← rides #1; options research data accrues
 2. Live dry-run exercise (T9.5) + F-12 equity fills    ← proves the order path (idempotent + reconciled)
-3. Runner-state persistence                            ← survives restarts, unblocks Gunicorn
+3. Runner-state persistence                            ← DONE (P2.4): survives restarts, fail-closed
 4. Consultant answers → risk envelope V2
 5. Engine depth (sizing, metrics, optimization) in parallel
 ```
