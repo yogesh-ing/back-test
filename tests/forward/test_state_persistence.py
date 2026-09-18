@@ -149,7 +149,10 @@ class TestRestartCycle:
         mgr1.feed.warmup()
         _run_bars(mgr1, 10)
         runner1 = mgr1.get_runner(list(mgr1._runners)[0])
-        mgr1._current_day = "2026-09-17"
+        # Far-future date: can never collide with the real wall clock (the
+        # bar timestamps are now+1d), so this test is date-independent.
+        mgr1._current_day = "2030-01-01"
+        runner1._current_day = "2030-01-01"
         mgr1._day_start_equity = float(runner1.portfolio.current_cash)
         mgr1.shutdown()
 
@@ -176,7 +179,9 @@ class TestRestartCycle:
             )
             assert restored.portfolio.portfolio_id == runner1.portfolio.portfolio_id
             assert restored.bars_processed == runner1.bars_processed
-            assert restored._current_day == "2026-09-17"
+            # day anchors survive (runner + manager level)
+            assert restored._current_day == "2030-01-01"
+            assert mgr2._current_day == "2030-01-01"
 
             # and it can trade again after an explicit resume
             restored.resume()

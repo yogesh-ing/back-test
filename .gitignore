@@ -37,3 +37,12 @@ graphify-out/
 .DS_Store
 Thumbs.db
 /reusable-prompts/
+/.freebuff/
+.idea/
+/scripts/start-server.bat
+/scripts/start-server.ps1
+/scripts/write_blueprint.py
+/.vscode/
+/.mstock_session_token
+/pyproject.toml
+/strategy-plan/
