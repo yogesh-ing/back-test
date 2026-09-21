@@ -427,6 +427,11 @@ body[data-active="portfolio"] .nav-link[data-key="portfolio"] {
 .tab-panel { min-height: 120px; }
 
 /* Audit log */
+/* Equity snapshot stats (on-demand view, 2026-09-21) */
+.equity-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.equity-stat { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid rgba(51,65,85,.45); border-radius: 8px; background: rgba(51,65,85,.15); }
+.equity-stat span { color: #94a3b8; font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; }
+.equity-stat strong { font-size: .95rem; }
 .audit-log { max-height: 320px; overflow-y: auto; font-size: .84rem; font-family: ui-monospace, monospace; }
 .audit-line { display: flex; gap: 10px; padding: 5px 8px; border-bottom: 1px solid rgba(51,65,85,.4); }
 .audit-ts { color: var(--muted); flex-shrink: 0; }

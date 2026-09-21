@@ -120,6 +120,22 @@ def buckets() -> Tuple[Response, int]:
     return jsonify({"success": True, "buckets": _manager().get_bucket_aggregates()}), 200
 
 
+@portfolio_bp.get("/api/portfolio/equity/snapshot")
+def equity_snapshot() -> Tuple[Response, int]:
+    """On-demand equity snapshot views (owner decision 2026-09-21).
+
+    Query params: ?mode=paper|live   (default: combined)
+    Returns session summary, per-runner table, day-close series and
+    today's intraday points. Replaces the continuously ticking curve.
+    """
+    mode = request.args.get("mode") or None
+    try:
+        snap = _manager().get_equity_snapshots(mode=mode)
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    return jsonify({"success": True, "snapshot": snap}), 200
+
+
 @portfolio_bp.get("/api/portfolio/audit")
 def audit_log() -> Tuple[Response, int]:
     """U3.3: audit log with scope filter — paper|live|playbook|dashboard|all.
@@ -192,6 +208,19 @@ def create_runner() -> Tuple[Response, int]:
             "option runners trade a single underlying in V1 — use target_type "
             "SINGLE_SYMBOL (pool mode would never open a structure)"
         )
+    # GAP-2 hardening (2026-09-21): the frontend validates the index allowlist,
+    # but defense in depth — an option runner on a non-index symbol would sit
+    # inert (no chain, no quotes) instead of failing loudly. Reject here too.
+    if (
+        isinstance(instrument, dict)
+        and str(instrument.get("type", "equity")).lower() == "option"
+        and target_type == TARGET_SINGLE
+    ):
+        underlyings = {str(s).strip().upper() for s in (symbols or [])}
+        if not underlyings or not underlyings <= {"NIFTY", "BANKNIFTY"}:
+            return _error(
+                "Option strategies trade an index — pick NIFTY or BANKNIFTY."
+            )
     try:
         config = RunnerConfig(
             name=name,

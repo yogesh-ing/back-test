@@ -139,7 +139,17 @@ class PortfolioManager:
         # them: runners come back PAUSED (fail-closed — nothing trades after
         # a restart until a human resumes), breakers stay tripped.
         if state_path is None:
-            state_path = os.environ.get("PORTFOLIO_STATE_PATH") or None
+            # Env default is a PRODUCTION convenience only. Under pytest the
+            # repo-root .env is loaded too — a stale/production snapshot at
+            # that path would leak 20+ runners into every clean-manager test.
+            # Opt-in tests set the env var INSIDE the test (monkeypatch.setenv)
+            # after collection, so PYTEST_CURRENT_TEST doesn't exist yet; it
+            # only appears once a test is RUNNING. The opt-in test bypasses
+            # this by passing the var explicitly before the manager builds.
+            if "PYTEST_CURRENT_TEST" not in os.environ or os.environ.get(
+                "PORTFOLIO_STATE_PATH_TEST_OPTIN"
+            ):
+                state_path = os.environ.get("PORTFOLIO_STATE_PATH") or None
         # F-12: live equity order seam. ``live_broker`` is the injected
         # session (tests pass a deterministic fake); None → the active
         # broker from the session manager. The gateway itself is built
@@ -151,6 +161,17 @@ class PortfolioManager:
         self._state_store = (
             PortfolioStateStore(state_path) if state_path else None
         )
+        # GAP-4 (2026-09-21): permanent trade history in PostgreSQL. Fail-soft:
+        # a missing/unreachable DB degrades to the JSON snapshot only.
+        self._trade_persister: Optional[Any] = None
+        try:
+            from backtest.forward.trade_persistence import LiveTradePersister
+
+            from backtest.db import DatabaseManager
+
+            self._trade_persister = LiveTradePersister(DatabaseManager.from_env())
+        except Exception:  # noqa: BLE001 — persistence is best-effort
+            logger.info("trade persistence disabled (no reachable database)", exc_info=True)
         self._restoring = False  # suppress saves while rehydrating
         self._restore_state()
 
@@ -290,9 +311,15 @@ class PortfolioManager:
         )
 
     def get_audit_log(self, scope: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-        """Return audit log entries, optionally filtered by scope."""
+        """Return audit log entries, optionally filtered by scope.
+
+        GAP-1 fix (2026-09-21): ``scope="all"`` is a selector meaning "no
+        filter" (per the U3.3 API contract) — it used to be treated as a
+        literal scope value, matching no entries and always returning []
+        from the Audit tab.
+        """
         entries = list(self._audit_log_entries)
-        if scope:
+        if scope and scope.lower() != "all":
             scope = scope.lower()
             entries = [e for e in entries if e.get("scope") == scope]
         # Most recent first
@@ -1007,6 +1034,17 @@ class PortfolioManager:
                 if symbol.upper() in [s.upper() for s in runner.config.symbols]:
                     runner.process_candle_event(symbol, bar)
 
+            # GAP-4: flush closed trades the moment they close (a bar can exit
+            # a structure). The persister's dedupe makes this cheap — already-
+            # flushed trades are skipped in memory without touching the DB.
+            if self._trade_persister is not None and not self._restoring:
+                for runner in self._runners.values():
+                    if symbol.upper() in [s.upper() for s in runner.config.symbols]:
+                        try:
+                            self._trade_persister.flush_runner(runner)
+                        except Exception:  # noqa: BLE001 — never break the bar
+                            logger.exception("trade flush failed for %s", runner.instance_id)
+
     def _on_tick_end(self, tick_ts: str) -> None:
         """All symbols have their bar for this tick: run pool scans + risk."""
         with self._lock:
@@ -1014,10 +1052,20 @@ class PortfolioManager:
             for runner in self._runners.values():
                 runner.on_tick_end(tick_ts)
             self._evaluate_risk()
-            # V2: fresh scalars at a bounded write rate (one save per minute
-            # at the default 1s ticks) — a crash loses at most ~a minute.
-            if self._state_store is not None and self.tick_index % 60 == 0:
+            # V2: bounded save rate. The %60 was tuned for 1s synthetic ticks
+            # (one save/min); the live mStock feed ticks once per SWEEP (60s),
+            # so %60 meant one save per HOUR (live-session finding 2026-09-21).
+            # Every 5 sweeps ≈ 5 min on live, 5s on synthetic — bounded either way.
+            if self._state_store is not None and self.tick_index % 5 == 0:
                 self._persist_state()
+            # GAP-4: flush newly closed trades to Postgres on the same cadence
+            # — idempotent (dedupe in the persister), fail-soft.
+            if self._trade_persister is not None and self.tick_index % 5 == 0:
+                for runner in list(self._runners.values()):
+                    try:
+                        self._trade_persister.flush_runner(runner)
+                    except Exception:  # noqa: BLE001 — never break the tick
+                        logger.exception("trade flush failed for %s", runner.instance_id)
 
             # F-12: poll the live gateway every tick — a fill sitting at the
             # venue must reach the book in the same loop that drives risk.
@@ -1303,6 +1351,115 @@ class PortfolioManager:
         if runner is None:
             raise KeyError(f"unknown runner: {instance_id}")
         return runner.get_detail()
+
+    def get_equity_snapshots(self, mode: Optional[str] = None) -> Dict[str, Any]:
+        """On-demand equity snapshot views (replaces the ticking live curve).
+
+        Owner decision 2026-09-21: the combined equity line ticking on every
+        SSE frame carried no information for a 1-minute validator fleet.
+        What teaches something is asked-for views computed here, once:
+
+        * ``per_runner``   — one row per runner: equity, realized/unrealized,
+          daily PnL, win rate, trade count. The "which strategy earns" table.
+        * ``day_closes``   — the combined-book equity at each day's last
+          recorded point, derived from runner equity curves (no new storage).
+        * ``session``      — today's session summary: day start, current,
+          net, peak, drawdown.
+
+        ``mode`` scopes to one bucket, same semantics as the summary.
+        """
+        if mode is not None:
+            mode = str(mode).strip().lower()
+            if mode not in VALID_INSTANCE_MODES:
+                raise ValueError(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
+
+        with self._lock:
+            runners = list(self._runners.values())
+        if mode is not None:
+            runners = [r for r in runners if self._runner_bucket(r) == mode]
+
+        # -- per-runner rows -------------------------------------------------
+        per_runner = []
+        day_points: Dict[str, float] = {}  # date -> last equity point of that day
+        intraday_today: List[Dict[str, Any]] = []
+        today = datetime.now(timezone.utc).date().isoformat()
+        for r in runners:
+            with r._lock:
+                curve = list(r.equity_curve)
+                trades = r.closed_trades
+                trades_today = [
+                    t for t in trades if (t.get("exit_ts") or "")[:10] == today
+                ]
+            state = r.get_state()
+            per_runner.append(
+                {
+                    "instance_id": state["instance_id"],
+                    "name": state["name"],
+                    "strategy": state["strategy_name"],
+                    "target": state["target_label"],
+                    "status": state["status"],
+                    "mode": state["mode"],
+                    "equity": state["equity"],
+                    "realized_pnl": state["realized_pnl"],
+                    "daily_pnl": state["daily_pnl"],
+                    "open_pnl": state["open_pnl"],
+                    "win_rate": state["win_rate"],
+                    "trades": len(trades),
+                    "trades_today": len(trades_today),
+                    "bars_processed": state["bars_processed"],
+                }
+            )
+            for point in curve:
+                ts = str(point.get("ts") or "")
+                day = ts[:10]
+                if not day:
+                    continue
+                eq = float(point.get("equity") or 0.0)
+                day_points[day] = eq  # curve is chronological → last write wins
+                if day == today:
+                    intraday_today.append({"ts": ts, "equity": eq})
+
+        day_closes = [
+            {"date": d, "equity": round(day_points[d], 2)}
+            for d in sorted(day_points)
+        ]
+
+        # -- session summary --------------------------------------------------
+        equity = sum(p["equity"] for p in per_runner)
+        daily = sum(p["daily_pnl"] for p in per_runner)
+        realized = sum(p["realized_pnl"] for p in per_runner)
+        allocated = sum(r.config.allocated_capital for r in runners)
+        day_start = (
+            self._bucket_day_start.get(mode, equity) if mode is not None else self._day_start_equity
+        )
+        peak = (
+            self._bucket_peak.get(mode, equity)
+            if mode is not None
+            else max(self.peak_equity, equity)
+        )
+        drawdown = ((peak - equity) / peak) if peak > 0 else 0.0
+        wins = sum(p["win_rate"] for p in per_runner)
+        total_trades = sum(p["trades"] for p in per_runner)
+
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "mode": mode or "all",
+            "session": {
+                "day_start_equity": round(day_start or equity, 2),
+                "equity": round(equity, 2),
+                "net_today": round(daily, 2),
+                "realized_total": round(realized, 2),
+                "peak_equity": round(peak, 2),
+                "drawdown_pct": round(drawdown, 4),
+                "allocated_capital": round(allocated, 2),
+                "trades_total": total_trades,
+                "wins": int(round(wins)) if total_trades == 0 else round(wins),
+                "win_rate": round(wins / total_trades, 4) if total_trades else None,
+            },
+            "per_runner": per_runner,
+            "day_closes": day_closes,
+            "intraday_today": intraday_today,
+        }
 
     # ------------------------------------------------------------------ #
     # Test / debug helpers

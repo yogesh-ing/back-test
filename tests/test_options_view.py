@@ -31,7 +31,32 @@ from pathlib import Path
 import pytest
 
 from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRunner
+from backtest.strategy.base import Strategy
 from backtest.strategy.intent import Direction, MarketView
+from backtest.strategy import registry as _registry
+
+if "silent_option_fixture" not in _registry._REGISTRY:
+
+    class _SilentOptionStrategy(Strategy):
+        """Emits NO view ever — the fixture drives entries explicitly.
+
+        Needed since the warmup exemption (2026-09-18): option runners act on
+        bar 1, and the base ``generate_market_view`` returns a NEUTRAL view for
+        signal 0 — which plain-string expressions trade. A silent strategy is
+        the only way a fixture can own the entry timing.
+        """
+
+        name = "silent_option_fixture"
+
+        def generate_signals(self, candles):
+            import pandas as pd
+
+            return pd.Series(0, index=candles.index)
+
+        def generate_market_view(self, candles):
+            return None
+
+    _registry._REGISTRY[_SilentOptionStrategy.name] = _SilentOptionStrategy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _JS_DIR = REPO_ROOT / "tests" / "js"
@@ -73,9 +98,15 @@ def _option_runner_config(**overrides) -> RunnerConfig:
             "exit": {"max_bars": 2, "min_days_to_expiry": 1},
         },
     }
+    # NOTE (2026-09-21): option runners are exempt from the warmup gate, so
+    # the runner's OWN strategy views fire from bar 1. sma_crossover signals
+    # BULLISH immediately on a rising series — the fixture would auto-trade.
+    # The fixture's explicit on_market_view calls must be the only entries,
+    # so the params below pin a strategy whose view stays None (price_move
+    # with an unreachable threshold does exactly that).
     params = dict(
         name="NIFTY-BCS",
-        strategy_name="sma_crossover",  # no option views of its own: we drive them
+        strategy_name="silent_option_fixture",  # emits no view: fixture drives
         allocated_capital=500_000,
         symbols=["NIFTY"],
         timeframe="1day",

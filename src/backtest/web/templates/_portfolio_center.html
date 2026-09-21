@@ -156,7 +156,23 @@
             <button class="tab" data-tab="log" type="button">Master Audit Log</button>
         </div>
         <div class="tab-panel" id="tab-equity">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <div>
+                    <h3 style="margin:0;">Equity — On-Demand Snapshots</h3>
+                    <div class="muted">Computed when you ask, not per tick. Session summary, day-close series and a per-runner comparison.</div>
+                </div>
+                <button id="btn-equity-snapshot" class="btn btn-primary btn-small" type="button">↻ Refresh Snapshot</button>
+            </div>
+            <div id="equity-session-stats" class="equity-stats" hidden></div>
             <canvas id="portfolio-equity-chart" height="90"></canvas>
+            <table class="matrix-table" style="margin-top:12px;">
+                <thead><tr><th>Runner</th><th>Strategy</th><th>Target</th><th class="num">Equity</th>
+                    <th class="num">Realized P&amp;L</th><th class="num">Today</th>
+                    <th class="num">Win rate</th><th class="num">Trades (today/all)</th></tr></thead>
+                <tbody id="equity-runner-table">
+                    <tr><td colspan="8" class="muted" style="padding:16px">Click “Refresh Snapshot” to compute.</td></tr>
+                </tbody>
+            </table>
         </div>
         <div class="tab-panel" id="tab-positions" hidden>
             <div class="table-scroll">

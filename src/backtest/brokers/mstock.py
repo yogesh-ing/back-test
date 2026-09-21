@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -690,17 +691,20 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                     continue
                 row = dict(zip(header, fields))
 
-                # Filter: NFO segment, matching underlying, options only
-                segment = row.get("instrument_segment", "")
-                sym = row.get("trading_symbol", "")
-                inst_type = row.get("instrument_type", "")
+                # Filter: index-option segment, matching underlying, options
+                # only. REAL scriptmaster columns (verified live 2026-09-18):
+                # segment="OPTIDX", instrument_type="CE"/"PE",
+                # tradingsymbol="NIFTY26NOV18950CE". (The old guesses
+                # instrument_segment/trading_symbol/NFO never matched a
+                # single row — every option was silently dropped.)
+                segment = str(row.get("segment", row.get("instrument_segment", "")))
+                sym = str(row.get("tradingsymbol", row.get("trading_symbol", "")))
+                inst_type = str(row.get("instrument_type", ""))
 
-                # Match underlying (e.g. NIFTY in NIFTY24DEC24500CE)
+                # Match underlying (e.g. NIFTY in NIFTY26NOV18950CE)
                 if not sym.startswith(underlying):
                     continue
-                if "OPT" not in inst_type.upper():
-                    continue
-                if segment.upper() != "NFO":
+                if "OPT" not in segment.upper() and inst_type.upper() not in ("CE", "PE"):
                     continue
 
                 contract = self._parse_option_contract(row)
@@ -761,22 +765,45 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             ``{"ltp": float, "bid": float, "ask": float, ...}`` or empty dict.
         """
         token = self._require_session()
-        try:
-            headers = self._session_token_headers(token)
-            url = f"{self._base_url()}{_OPTION_QUOTE_PATH}"
-            resp = requests.get(
-                url, headers=headers,
-                params=[("i", f"NFO:{instrument_token}")],
-                timeout=self._http_timeout,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-            if isinstance(payload, dict) and "data" in payload:
-                return payload["data"] if isinstance(payload["data"], dict) else {}
-            return payload if isinstance(payload, dict) else {}
-        except requests.RequestException:
-            logger.warning("Option quote request failed for %s", instrument_token)
-            return {}
+        headers = self._session_token_headers(token)
+        url = f"{self._base_url()}{_OPTION_QUOTE_PATH}"
+        # REAL API (verified live 2026-09-18): the quote/ltp endpoint keys
+        # on the TRADING SYMBOL ("NFO:NIFTY26SEP23300CE"), not the numeric
+        # instrument_token ("NFO:51201" → "Invalid symbol"). Accept a
+        # bare OptionContract too so callers can pass the contract row
+        # they got from get_option_chain().
+        symbol = getattr(instrument_token, "trading_symbol", None) or str(
+            instrument_token
+        )
+        # One retry on transient failures (live-session lesson 2026-09-21:
+        # rate-limit blips coinciding with a fill turned into ltp=0 phantoms).
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                resp = requests.get(
+                    url, headers=headers,
+                    params=[("i", f"NFO:{symbol}")],
+                    timeout=self._http_timeout,
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+                if isinstance(payload, dict) and "data" in payload:
+                    data = payload["data"] if isinstance(payload["data"], dict) else {}
+                    inner = data.get(f"NFO:{symbol}", data)
+                    if isinstance(inner, dict) and "message" not in inner:
+                        return inner
+                    return {}
+                return payload if isinstance(payload, dict) else {}
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt == 0:
+                    time.sleep(1.0)
+        logger.warning(
+            "Option quote request failed after retry for %s: %s",
+            instrument_token,
+            last_exc,
+        )
+        return {}
 
     @staticmethod
     def _parse_option_contract(row: dict[str, Any]) -> OptionContract | None:
@@ -785,8 +812,8 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         Returns ``None`` if the row cannot be parsed.
         """
         try:
-            symbol = row.get("trading_symbol", "")
-            token = row.get("security_token", row.get("instrument_token", ""))
+            symbol = str(row.get("tradingsymbol", row.get("trading_symbol", "")))
+            token = row.get("instrument_token", row.get("security_token", ""))
 
             from datetime import date
 
@@ -814,13 +841,31 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                 return None
 
             year = 2000 + int(year_suffix)
-            # Expiry: last Thursday of the month (approximate)
-            import calendar
-            last_day = calendar.monthrange(year, month)[1]
-            expiry = date(year, month, last_day)
+            # Expiry: the master carries the REAL expiry date ("2026-11-23")
+            # — use it, fall back to the last-Thursday approximation only
+            # when missing/unparseable.
+            expiry = None
+            raw_expiry = str(row.get("expiry", "") or "").strip()
+            if raw_expiry:
+                try:
+                    expiry = date.fromisoformat(raw_expiry[:10])
+                except ValueError:
+                    pass
+            if expiry is None:
+                import calendar
+                last_day = calendar.monthrange(year, month)[1]
+                expiry = date(year, month, last_day)
 
-            lot_size = int(row.get("lot_size", row.get("contract_size", 25)))
-            tick = Decimal(str(row.get("tick_size", "0.05")))
+            def _num(field: str, default: float) -> float:
+                value = row.get(field)
+                try:
+                    value = float(value)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    return default
+                return value if value == value else default  # NaN check
+
+            lot_size = int(_num("lot_size", _num("contract_size", 50.0)))
+            tick = Decimal(str(_num("tick_size", 0.05)))
 
             return OptionContract(
                 instrument_token=str(token),

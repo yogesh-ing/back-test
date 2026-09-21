@@ -926,7 +926,16 @@ class StrategyRunner:
 
                 if self.config.target_type == TARGET_SINGLE:
                     # Single-symbol runners act immediately on their own bar.
-                    if len(self._bars[symbol]) >= MIN_WARMUP_BARS:
+                    # Option runners are exempt from the warmup gate (2026-09-18):
+                    # the bridge owns history needs (ATM strike = closest chain
+                    # strike, no lookback math), and an "immediate entry" spec
+                    # cannot wait 12 bars for a warmup designed for lookback
+                    # indicators. The strategy contract is unaffected.
+                    warmup_ok = (
+                        len(self._bars[symbol]) >= MIN_WARMUP_BARS
+                        or self.options_bridge is not None
+                    )
+                    if warmup_ok:
                         if self.options_bridge is not None:
                             # Gap G3.2: option instrument → expression layer.
                             self._process_option_bar(symbol, bar)

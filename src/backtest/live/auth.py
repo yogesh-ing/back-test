@@ -144,6 +144,20 @@ def get_session_token() -> str:
     """Get a valid session token. Ignore unusable cached values and re-auth when needed."""
     cache_file = ".mstock_session_token"
 
+    # 1) Live web session first — the Portfolio UI login (broker session
+    #    manager) holds a fresh, server-side token. Using it avoids the
+    #    interactive TOTP prompt firing inside background threads (the
+    #    2026-09-18 finding: bar feeds hung on "Enter TOTP" mid-market).
+    #    Lazy import: backtest.brokers imports backtest.live at module load.
+    try:
+        from backtest.brokers.session_manager import get_session_manager
+
+        web_token = get_session_manager().get_active_session_token()
+        if web_token:
+            return web_token
+    except Exception:
+        pass  # no web session — fall through to cache / interactive flow
+
     if os.path.exists(cache_file):
         try:
             with open(cache_file) as f:

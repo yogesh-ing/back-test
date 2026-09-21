@@ -145,6 +145,127 @@ def status() -> tuple:
         )
 
 
+@broker_auth_bp.get("/api/broker/probe-historical")
+def probe_historical() -> tuple:
+    """TEMP DEBUG (2026-09-18): probe the TypeA historical endpoint with the
+    live session token for a set of candidate index tokens. Remove after the
+    NIFTY/BANKNIFTY token convention is confirmed."""
+    try:
+        import requests
+        import os
+
+        from backtest.brokers.session_manager import get_session_manager
+        from backtest.data.mstock_live_feed import _typea_headers
+
+        token = get_session_manager().get_active_session_token()
+        if not token:
+            return jsonify({"success": False, "error": "no active session"}), 200
+        api_key = os.getenv("MSTOCK_API_KEY", "")
+        headers = _typea_headers(api_key, token)
+        out = {}
+        from flask import request as _req
+
+        seg = _req.args.get("seg", "NSE")
+        tok = _req.args.get("tok", "2885")
+        interval = _req.args.get("interval", "minute")
+        frm = _req.args.get("from", "2026-09-18 09:15:00")
+        to = _req.args.get("to", "2026-09-18 10:30:00")
+        try:
+            r = requests.get(
+                f"https://api.mstock.trade/openapi/typea/instruments/historical/{seg}/{tok}/{interval}",
+                headers=headers,
+                params={"from": frm, "to": to},
+                timeout=15,
+            )
+            info: dict = {"status": r.status_code}
+            try:
+                candles = (r.json().get("data") or {}).get("candles")
+                if candles is None:
+                    info["candles"] = None
+                else:
+                    info["count"] = len(candles)
+                    info["last"] = candles[-1]
+            except Exception:  # noqa: BLE001
+                info["body"] = r.text[:200]
+            out[f"{seg}/{tok}/{interval}"] = info
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = str(exc)
+        return jsonify({"success": True, "probes": out}), 200
+    except Exception:  # noqa: BLE001
+        logger.exception("probe-historical failed")
+        return jsonify({"success": False, "error": "probe failed"}), 500
+
+
+@broker_auth_bp.get("/api/broker/probe-quote")
+def probe_quote() -> tuple:
+    """TEMP DEBUG (2026-09-18): probe the quote/ohlc + quote/ltp endpoints
+    with the live session to discover today's-session response shape.
+    Remove after the live quote bar path is wired."""
+    try:
+        import requests
+        import os
+
+        from backtest.brokers.session_manager import get_session_manager
+        from backtest.data.mstock_live_feed import _typea_headers
+        from flask import request as _req
+
+        token = get_session_manager().get_active_session_token()
+        if not token:
+            return jsonify({"success": False, "error": "no active session"}), 200
+        api_key = os.getenv("MSTOCK_API_KEY", "")
+        headers = _typea_headers(api_key, token)
+        route = _req.args.get("route", "ohlc")
+        sym = _req.args.get("sym", "NSE:RELIANCE")
+        if route == "chain":
+            # Fetch scriptmaster server-side and dump a real NIFTY option row
+            r = requests.get(
+                "https://api.mstock.trade/openapi/typea/instruments/scriptmaster",
+                headers=headers,
+                timeout=30,
+            )
+            import io
+            import pandas as pd
+
+            frame = pd.read_csv(io.StringIO(r.text), low_memory=False)
+            frame.columns = [c.strip().lower() for c in frame.columns]
+            ts_col = "tradingsymbol" if "tradingsymbol" in frame.columns else "trading_symbol"
+            sym_up = frame[ts_col].astype(str).str.upper()
+            opt_mask = sym_up.str.match(r"^NIFTY\d{2}[A-Z]{3}\d+(CE|PE)$")
+            sample = frame[opt_mask].head(3)
+            return jsonify(
+                {
+                    "success": True,
+                    "columns": list(frame.columns),
+                    "segment_values": sorted(
+                        frame.loc[opt_mask, "segment"].dropna().unique().tolist()
+                    )[:8],
+                    "instrument_type_values": sorted(
+                        frame.loc[opt_mask, "instrument_type"].dropna().unique().tolist()
+                    )[:8],
+                    "sample_rows": sample.to_dict(orient="records"),
+                    "nifty_option_count": int(opt_mask.sum()),
+                }
+            ), 200
+        path = (
+            "openapi/typea/instruments/quote/ohlc"
+            if route == "ohlc"
+            else "openapi/typea/instruments/quote/ltp"
+        )
+        try:
+            r = requests.get(
+                f"https://api.mstock.trade/{path}",
+                headers=headers,
+                params=[("i", sym)],
+                timeout=15,
+            )
+            return jsonify({"success": True, "status": r.status_code, "body": r.text[:800]}), 200
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"success": False, "error": str(exc)}), 200
+    except Exception:  # noqa: BLE001
+        logger.exception("probe-quote failed")
+        return jsonify({"success": False, "error": "probe failed"}), 500
+
+
 @broker_auth_bp.post("/api/broker/logout")
 def logout() -> tuple:
     """Clear the active session and all notification state."""

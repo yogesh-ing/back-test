@@ -132,19 +132,53 @@ def _fetch_bars(
     """Fetch bars for ``[start, end]`` from the TypeA historical endpoint.
 
     Returns ``[]`` (with a logged error) when the API is unreachable — a
-    feed hiccup must never take the poll loop down.
+    feed hiccup must never take the poll loop down. Transient failures
+    (408/429/timeouts — mStock rate-limits bursts) are retried once after a
+    short backoff (live-session lesson 2026-09-21: single-shot fetches
+    dropped bars on every rate-limit blip).
     """
     url = f"{base_url}/openapi/typea/instruments/historical/{segment}/{security_token}/{interval}"
     params = {"from": start, "to": end}
-    try:
-        resp = requests.get(url, headers=_typea_headers(api_key, token), params=params, timeout=15)
-        resp.raise_for_status()
-        rows = _extract_candles(resp.json())
-    except Exception as exc:  # noqa: BLE001 — feed hiccups are logged, not fatal
-        logger.error("Failed to fetch bars for %s: %s", security_token, exc)
-        return []
-    bars = [_candle_row_to_bar(row) for row in rows]
-    return [b for b in bars if b is not None]
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            resp = requests.get(
+                url, headers=_typea_headers(api_key, token), params=params, timeout=15
+            )
+            resp.raise_for_status()
+            rows = _extract_candles(resp.json())
+            bars = [_candle_row_to_bar(row) for row in rows]
+            return [b for b in bars if b is not None]
+        except Exception as exc:  # noqa: BLE001 — feed hiccups are logged, not fatal
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(1.0)  # brief backoff, then one retry
+    logger.error("Failed to fetch bars for %s: %s", security_token, last_exc)
+    return []
+
+
+#: NSE index tokens. Indexes are NOT in scriptmaster (which lists only
+#: tradable instruments — equities, ETFs, derivatives), so they resolve via
+#: this fixed map. Values are mStock instrument tokens, verified live against
+#: the TypeA historical endpoint on 2026-09-18 (NIFTY ~23.3K, BANKNIFTY ~56.5K
+#: closes — the NSE convention 26000/26009, NOT Zerodha's 99926000/99926009).
+INDEX_SECURITY_TOKENS: dict[str, str] = {
+    "NIFTY": "26000",
+    "NIFTY50": "26000",
+    "NIFTY 50": "26000",
+    "BANKNIFTY": "26009",
+    "NIFTY BANK": "26009",
+    "NIFTYBANK": "26009",
+}
+
+#: Index display names for the LIVE quote endpoint (``quote/ohlc``). That
+#: endpoint serves TODAY's session (open/high/low + last_price) while
+#: ``instruments/historical`` is T+1 (completed sessions only — verified
+#: live 2026-09-18), so the feed builds its live bars from here.
+QUOTE_SYMBOL_NAMES: dict[str, str] = {
+    "NIFTY": "NSE:NIFTY 50",
+    "BANKNIFTY": "NSE:NIFTY BANK",
+}
 
 
 def _resolve_security_token(base_url: str, api_key: str, token: str, symbol: str) -> str:
@@ -230,31 +264,104 @@ class MStockLiveFeed:
         url = self._base_url_override or os.getenv("MSTOCK_BASE_URL", "https://api.mstock.trade")
         return str(url).rstrip("/")
 
+    def _fetch_quote_bar(self, symbol: str) -> dict | None:
+        """Today's running bar from ``quote/ohlc`` (indexes only).
+
+        Returns a bar ``{ts, open, high, low, close, volume}`` where OHLC
+        is the session's running aggregate and ``ts`` is the minute floor
+        of "now" (IST). ``None`` when the symbol has no quote mapping or
+        the API fails — callers fall back to the historical path.
+        """
+        quote_name = QUOTE_SYMBOL_NAMES.get(str(symbol).strip().upper())
+        if quote_name is None:
+            return None
+        # One retry on transient failures (408/429/timeout) — mStock
+        # rate-limits bursts; the feed poll and option-quote calls can land
+        # in the same second (live-session lesson 2026-09-21).
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                token, api_key = self._credentials()
+                resp = requests.get(
+                    f"{self._base_url()}/openapi/typea/instruments/quote/ohlc",
+                    headers=_typea_headers(api_key, token),
+                    params=[("i", quote_name)],
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                payload = resp.json().get("data") or {}
+                entry = payload.get(quote_name) or {}
+                ohlc = entry.get("ohlc") or {}
+                last = entry.get("last_price")
+                if not ohlc or last is None:
+                    return None
+                ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+                ts = ist.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+                return {
+                    "ts": ts,
+                    "open": float(ohlc.get("open") or last),
+                    "high": float(ohlc.get("high") or last),
+                    "low": float(ohlc.get("low") or last),
+                    "close": float(last),
+                    "volume": 0,
+                }
+            except Exception as exc:  # noqa: BLE001 — transient: back off, retry once
+                last_exc = exc
+                if attempt == 0:
+                    time.sleep(1.0)
+        logger.warning(
+            "mstock feed: quote bar for %s failed after retry: %s", symbol, last_exc
+        )
+        return None
+
     def _security_token_for(self, symbol: str) -> str:
         key = str(symbol).strip().upper()
         if key not in self._security_tokens:
-            token, api_key = self._credentials()
-            self._security_tokens[key] = _resolve_security_token(
-                self._base_url(), api_key, token, key
-            )
+            if key in INDEX_SECURITY_TOKENS:
+                # Indexes never appear in scriptmaster — fixed token map.
+                self._security_tokens[key] = INDEX_SECURITY_TOKENS[key]
+            else:
+                token, api_key = self._credentials()
+                self._security_tokens[key] = _resolve_security_token(
+                    self._base_url(), api_key, token, key
+                )
         return self._security_tokens[key]
 
     # -- bar access ----------------------------------------------------------
 
     def latest_bar(self, symbol: str) -> dict | None:
-        """The latest bar for ``symbol`` (``None`` when none is available)."""
+        """The latest bar for ``symbol`` (``None`` if none is available).
+
+        Live path (2026-09-18): for symbols with a quote mapping, build the
+        bar from the TODAY-session ``quote/ohlc`` endpoint — the historical
+        endpoint is T+1 and never returns the current session. Falls back
+        to the historical window for everything else (catch-up / equities).
+        """
         if self.client is not None:
             return self.client.get_latest_bar(symbol)
+
+        quote_bar = self._fetch_quote_bar(symbol)
+        if quote_bar is not None:
+            return quote_bar
+
         token, api_key = self._credentials()
-        today = date.today().strftime("%Y-%m-%d")
-        start = (date.today() - timedelta(days=3)).strftime("%Y-%m-%d")
+        # API window rules (all verified live 2026-09-18):
+        #   * ``to`` must be strictly in the past (clock skew ⇒ 400);
+        #   * full datetimes required — date-only strings ⇒ 400;
+        #   * max 1000 candles per request (docs §Historical Data Limit).
+        # So: trailing window ending at the last completed minute minus a
+        # 2-minute skew guard, sized to stay under the 1000-candle cap
+        # (375 × 6.25h trading minutes/375-min trading day < 1000).
+        now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        to_dt = (now - timedelta(minutes=2)).replace(second=0, microsecond=0)
+        start = (to_dt - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
         bars = _fetch_bars(
             self._base_url(),
             token,
             api_key,
             self._security_token_for(symbol),
             start,
-            today,
+            to_dt.strftime("%Y-%m-%d %H:%M:%S"),
             self.segment,
             "minute",
         )

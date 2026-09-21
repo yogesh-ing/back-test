@@ -87,6 +87,9 @@ class TestOptIn:
 
         state_file = tmp_path / "state.json"
         monkeypatch.setenv("PORTFOLIO_STATE_PATH", str(state_file))
+        # Opt-in flag: the env default is skipped under pytest (a production
+        # snapshot would leak into clean-manager tests); this test opts in.
+        monkeypatch.setenv("PORTFOLIO_STATE_PATH_TEST_OPTIN", "1")
         try:
             mgr = reset_portfolio_manager(auto_start_feed=False)
             assert mgr._state_store is not None

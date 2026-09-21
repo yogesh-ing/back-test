@@ -33,6 +33,8 @@ from backtest.strategy.intent import (
     TradeIntent,
 )
 
+from typing import Any
+
 
 # ---------------------------------------------------------------------------
 # Base class
@@ -111,6 +113,29 @@ class OptionStructure(ABC):
             lot_size=contract.lot_size,
         )
 
+    def _contract_at(
+        self,
+        chain: Any,
+        strike: Decimal,
+        option_type: str,
+    ) -> OptionContract:
+        """Fetch the contract at ``strike`` from either chain shape.
+
+        Flat ``{strike: contract}`` → contract as-is. Nested
+        ``{strike: {"CE": c, "PE": c}}`` → pick the requested side.
+        """
+        entry = chain.get(strike)
+        if entry is None:
+            raise ValueError(f"No contract found for strike {strike}")
+        if isinstance(entry, dict):
+            contract = entry.get(option_type)
+            if contract is None:
+                raise ValueError(
+                    f"No {option_type} contract at strike {strike}"
+                )
+            return contract
+        return entry
+
     def _estimate_net_premium(
         self,
         priced_legs: list[tuple[OptionContract, OptionLeg]],
@@ -146,6 +171,7 @@ class OptionStructure(ABC):
 
         net = Decimal("0")
         for contract, leg in priced_legs:
+            contract = getattr(contract, "contract", contract)
             vol = contract.metadata.get("vol")
             if not vol:
                 continue
@@ -389,6 +415,99 @@ class BearPutSpread(OptionStructure):
 
 
 # ---------------------------------------------------------------------------
+# Short Strangle
+# ---------------------------------------------------------------------------
+
+class ShortStrangle(OptionStructure):
+    """Sell an OTM call + OTM put — neutral premium-selling trade.
+
+    Strike selection (spec 2026-09-18 "Time-Based Auto Trade" family):
+    call = first chain strike strictly above spot × (1 + otm_pct),
+    put = first chain strike strictly below spot × (1 − otm_pct).
+    Default 2% OTM (the spec's "OR +2% to +3% OTM" arm; delta-based
+    selection needs per-strike Greeks the V1 chain doesn't carry).
+    Selected from the merged CE+PE chain keys, ignoring the generic
+    selector's strikes (ATM-plus-neighbour is wrong for a strangle).
+
+    Maximum gain: net premium received. Maximum loss: unlimited.
+    """
+
+    name = "strangle"
+    description = (
+        "Short strangle — sell OTM call above spot and OTM put below "
+        "spot (~2% each) for net credit."
+    )
+    min_legs = 2
+    max_legs = 2
+
+    OTM_PCT = 2.0
+
+    def build(
+        self,
+        view: MarketView,
+        strikes: list[Decimal],
+        chain: Any,
+        expiry: date,
+        strategy_name: str = "",
+    ) -> TradeIntent:
+        """Build the 2-leg credit strangle.
+
+        ``chain`` accepts both shapes: the flat ``{strike: contract}``
+        (single-side chains — contract used as-is) and the two-sided nested
+        ``{strike: {"CE": c, "PE": c}}`` (the bridge's BOTH path). Selects
+        its own strikes from the chain keys + spot, ignoring the generic
+        selector's output (ATM-plus-neighbour is wrong for a strangle).
+        """
+        spot = float(view.spot_price or 0)
+        if spot <= 0:
+            raise ValueError("ShortStrangle requires a positive spot in the view")
+        if not chain:
+            raise ValueError("ShortStrangle requires a non-empty chain")
+
+        band = self.OTM_PCT / 100.0
+        call_target = Decimal(str(spot * (1.0 + band)))
+        put_target = Decimal(str(spot * (1.0 - band)))
+        all_strikes = sorted(
+            s for s, c in chain.items() if c
+        )
+
+        call_strike = next((s for s in all_strikes if s > call_target), None)
+        put_strike = next((s for s in reversed(all_strikes) if s < put_target), None)
+        if call_strike is None or put_strike is None:
+            raise ValueError(
+                f"ShortStrangle: no strikes beyond ±{self.OTM_PCT}% band "
+                f"(spot={spot}, call_target={call_target}, put_target={put_target})"
+            )
+
+        call_contract = self._contract_at(chain, call_strike, "CE")
+        put_contract = self._contract_at(chain, put_strike, "PE")
+        call_leg = self._build_leg(call_contract, "SELL")
+        put_leg = self._build_leg(put_contract, "SELL")
+
+        return TradeIntent(
+            view=view,
+            structure_type="strangle",
+            estimated_premium=self._estimate_net_premium(
+                [(call_contract, call_leg), (put_contract, put_leg)],
+                view,
+                expiry,
+            ),
+            legs=(call_leg, put_leg),
+            expiry=expiry,
+            strategy_name=strategy_name,
+            metadata={
+                "call_strike": str(call_strike),
+                "put_strike": str(put_strike),
+                "option_type": "BOTH",
+                "strikes": {
+                    call_leg.trading_symbol: str(call_strike),
+                    put_leg.trading_symbol: str(put_strike),
+                },
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
 # Structure factory
 # ---------------------------------------------------------------------------
 
@@ -406,6 +525,7 @@ def create_structure(structure_type: str) -> OptionStructure:
         "long_put": LongPut,
         "bull_call_spread": BullCallSpread,
         "bear_put_spread": BearPutSpread,
+        "strangle": ShortStrangle,
     }
     cls = structures.get(structure_type)
     if cls is None:

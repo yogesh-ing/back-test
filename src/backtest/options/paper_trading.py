@@ -352,6 +352,16 @@ class OptionPaperBroker:
             fill_price = self._apply_slippage(
                 Decimal(str(quote.get("ltp", 0))), leg.side
             )
+            # Unpriceable leg guard (live-session lesson 2026-09-21): a
+            # transient broker failure surfaces as ltp=0. Filling at 0
+            # books a phantom ₹0 entry and the exit then books the WHOLE
+            # premium as profit. A live market never sells an option for
+            # ₹0 — reject the structure instead of filling blind.
+            if fill_price <= 0:
+                raise InsufficientMarginError(
+                    f"no live quote for {leg.trading_symbol or leg.instrument_token} "
+                    "(ltp=0) — structure rejected rather than filled at a phantom price"
+                )
             leg_cost = fill_price * Decimal(str(leg.total_quantity))
             commission = self.commission_per_lot * Decimal(str(leg.quantity))
 

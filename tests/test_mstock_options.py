@@ -32,14 +32,16 @@ def _make_broker_with_session() -> MStockBroker:
     return broker
 
 
-# Sample instrument master CSV (simplified)
+# Sample instrument master CSV — matches mStock's REAL schema
+# (verified live 2026-09-18: segment=OPTIDX, instrument_token, tradingsymbol,
+#  explicit expiry date column, lot 65 for NIFTY).
 _SAMPLE_CSV = (
-    "trading_symbol,security_token,instrument_segment,instrument_type,lot_size,tick_size\n"
-    "NIFTY26SEP24500CE,NFO_NIFTY26SEP24500CE,NFO,OPTIDX,25,0.05\n"
-    "NIFTY26SEP24500PE,NFO_NIFTY26SEP24500PE,NFO,OPTIDX,25,0.05\n"
-    "NIFTY26SEP25000CE,NFO_NIFTY26SEP25000CE,NFO,OPTIDX,25,0.05\n"
-    "BANKNIFTY26SEP51000CE,NFO_BANKNIFTY26SEP51000CE,NFO,OPTIDX,15,0.05\n"
-    "RELIANCE26SEPEQ,NFO_RELIANCE26SEP,NFO,EQ,1,0.05\n"
+    "tradingsymbol,instrument_token,segment,instrument_type,lot_size,tick_size,expiry,strike\n"
+    "NIFTY26SEP24500CE,51201,OPTIDX,CE,65,0.05,2026-09-24,24500.00\n"
+    "NIFTY26SEP24500PE,51202,OPTIDX,PE,65,0.05,2026-09-24,24500.00\n"
+    "NIFTY26SEP25000CE,51203,OPTIDX,CE,65,0.05,2026-09-24,25000.00\n"
+    "BANKNIFTY26SEP51000CE,51204,OPTIDX,CE,35,0.05,2026-09-24,51000.00\n"
+    "NIFTY 50,26000,IDX,IN,1,0.05,,0.00\n"
 )
 
 
@@ -48,15 +50,21 @@ _SAMPLE_CSV = (
 # ---------------------------------------------------------------------------
 
 class TestParseOptionContract:
-    def test_parse_nifty_call(self):
-        row = {
-            "trading_symbol": "NIFTY26SEP24500CE",
-            "security_token": "NFO_NIFTY26SEP24500CE",
-            "instrument_segment": "NFO",
-            "instrument_type": "OPTIDX",
-            "lot_size": "25",
+    def _row(self, tradingsymbol: str, token: str, itype: str,
+             lot: str = "65", strike: str = "24500.00") -> dict:
+        return {
+            "tradingsymbol": tradingsymbol,
+            "instrument_token": token,
+            "segment": "OPTIDX",
+            "instrument_type": itype,
+            "lot_size": lot,
             "tick_size": "0.05",
+            "expiry": "2026-09-24T00:00:00",
+            "strike": strike,
         }
+
+    def test_parse_nifty_call(self):
+        row = self._row("NIFTY26SEP24500CE", "51201", "CE")
         contract = MStockBroker._parse_option_contract(row)
         assert contract is not None
         assert contract.underlying == "NIFTY"
@@ -64,41 +72,29 @@ class TestParseOptionContract:
         assert contract.option_type == "CE"
         assert contract.expiry.year == 2026
         assert contract.expiry.month == 9
-        assert contract.lot_size == 25
+        assert contract.expiry.day == 24
+        assert contract.lot_size == 65
 
     def test_parse_nifty_put(self):
-        row = {
-            "trading_symbol": "NIFTY26SEP24500PE",
-            "security_token": "NFO_NIFTY26SEP24500PE",
-            "instrument_segment": "NFO",
-            "instrument_type": "OPTIDX",
-            "lot_size": "25",
-            "tick_size": "0.05",
-        }
+        row = self._row("NIFTY26SEP24500PE", "51202", "PE")
         contract = MStockBroker._parse_option_contract(row)
         assert contract is not None
         assert contract.option_type == "PE"
 
     def test_parse_banknifty(self):
-        row = {
-            "trading_symbol": "BANKNIFTY26SEP51000CE",
-            "security_token": "NFO_BANKNIFTY26SEP51000CE",
-            "instrument_segment": "NFO",
-            "instrument_type": "OPTIDX",
-            "lot_size": "15",
-            "tick_size": "0.05",
-        }
+        row = self._row("BANKNIFTY26SEP51000CE", "51204", "CE", lot="35",
+                        strike="51000.00")
         contract = MStockBroker._parse_option_contract(row)
         assert contract is not None
         assert contract.underlying == "BANKNIFTY"
         assert contract.strike == Decimal("51000")
-        assert contract.lot_size == 15
+        assert contract.lot_size == 35
 
     def test_parse_equity_returns_none(self):
         row = {
-            "trading_symbol": "RELIANCE26SEPEQ",
-            "security_token": "NFO_RELIANCE26SEP",
-            "instrument_segment": "NFO",
+            "tradingsymbol": "RELIANCE26SEPEQ",
+            "instrument_token": "2885",
+            "segment": "NSE",
             "instrument_type": "EQ",
             "lot_size": "1",
             "tick_size": "0.05",
@@ -106,18 +102,11 @@ class TestParseOptionContract:
         assert MStockBroker._parse_option_contract(row) is None
 
     def test_parse_invalid_symbol_returns_none(self):
-        row = {"trading_symbol": "INVALID", "security_token": "X"}
+        row = {"tradingsymbol": "INVALID", "instrument_token": "X"}
         assert MStockBroker._parse_option_contract(row) is None
 
     def test_parse_contract_is_valid(self):
-        row = {
-            "trading_symbol": "NIFTY26SEP24500CE",
-            "security_token": "NFO_NIFTY26SEP24500CE",
-            "instrument_segment": "NFO",
-            "instrument_type": "OPTIDX",
-            "lot_size": "25",
-            "tick_size": "0.05",
-        }
+        row = self._row("NIFTY26SEP24500CE", "51201", "CE")
         contract = MStockBroker._parse_option_contract(row)
         assert contract is not None
         assert contract.is_valid()
@@ -210,14 +199,17 @@ class TestGetOptionQuote:
         assert quote["ltp"] == 150.5
         assert quote["bid"] == 150.0
 
+    @patch("backtest.brokers.mstock.time.sleep")  # retry backoff: keep test fast
     @patch("backtest.brokers.mstock.requests.get")
-    def test_network_error_returns_empty(self, mock_get):
+    def test_network_error_returns_empty(self, mock_get, mock_sleep):
         import requests
         mock_get.side_effect = requests.ConnectionError("timeout")
 
         broker = _make_broker_with_session()
         quote = broker.get_option_quote("NFO_NIFTY26SEP24500CE")
         assert quote == {}
+        # transient-failure retry: two attempts before giving up
+        assert mock_get.call_count == 2
 
 
 # ---------------------------------------------------------------------------

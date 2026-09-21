@@ -77,6 +77,7 @@ from backtest.options.structures import (
     BullCallSpread,
     LongCall,
     LongPut,
+    ShortStrangle,
 )
 from backtest.strategy.intent import Direction, MarketView
 
@@ -88,10 +89,20 @@ STRUCTURES: dict[str, tuple[Any, str]] = {
     "long_put": (LongPut(), "PE"),
     "bull_call_spread": (BullCallSpread(), "CE"),
     "bear_put_spread": (BearPutSpread(), "PE"),
+    # Strangles need BOTH sides — the bridge materialises a two-sided
+    # nested chain {strike: {"CE": c, "PE": c}} at execution time (the flat
+    # V1 shape cannot hold two contracts at one strike).
+    "strangle": (ShortStrangle(), "BOTH"),
 }
 
 #: One- vs two-strike structures.
-_STRICKES_NEEDED = {"long_call": 1, "long_put": 1, "bull_call_spread": 2, "bear_put_spread": 2}
+_STRICKES_NEEDED = {
+    "long_call": 1,
+    "long_put": 1,
+    "bull_call_spread": 2,
+    "bear_put_spread": 2,
+    "short_strangle": 2,
+}
 
 #: Default expression: direction-aware spreads, ATM strikes, one lot.
 DEFAULT_EXPRESSION: dict[str, Any] = {
@@ -875,9 +886,32 @@ class OptionsBridge:
         expiry = self._select_expiry(generator, underlying)
         if expiry is None:
             raise ValueError(f"no available expiry for {underlying}")
-        chain = generator.generate_chain(underlying, expiry=expiry, option_type=option_type)
+        if option_type == "BOTH":
+            # Two-sided structure (e.g. short strangle): build a nested
+            # {strike: {"CE": c, "PE": c}} map — the flat shape cannot hold
+            # two contracts at one strike. A wide window is requested so
+            # ±2–3% OTM strikes actually exist (the default ±10×50pt window
+            # stops at ~2% on NIFTY).
+            flat: dict[Decimal, dict[str, Any]] = {}
+            for side in ("CE", "PE"):
+                for strike, contract in generator.generate_chain(
+                    underlying, expiry=expiry, option_type=side, strikes_each_side=30
+                ).items():
+                    flat.setdefault(strike, {})[side] = contract
+            chain: Any = flat
+        else:
+            chain = generator.generate_chain(
+                underlying, expiry=expiry, option_type=option_type
+            )
         if hasattr(self.quote_provider, "register_chain"):
-            self.quote_provider.register_chain(chain)
+            # Nested two-sided chains are flattened to contracts for the
+            # provider's token→contract registry.
+            flat_contracts = (
+                [c for side_map in chain.values() for c in side_map.values()]
+                if option_type == "BOTH"
+                else list(chain.values())
+            )
+            self.quote_provider.register_chain(flat_contracts)
 
         strikes = self._pick_strikes(structure_type, spot, chain, view.direction)
         if not strikes:

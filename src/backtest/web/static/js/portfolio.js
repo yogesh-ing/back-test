@@ -15,6 +15,7 @@
     tab: "equity",
     chart: null,
     audit: [],
+    backendAudit: [],
   };
 
 
@@ -88,8 +89,31 @@
       ts: new Date().toLocaleTimeString(),
       message,
       kind: kind || "info",
+      live: true,
     });
     state.audit = state.audit.slice(0, 200);
+    renderAudit();
+  }
+
+  // GAP-1 fix (2026-09-21): the tab used to render ONLY browser-session
+  // events and showed "Waiting for activity…" forever. It now fetches the
+  // backend's real audit trail ([AUDIT] entries from PortfolioManager) every
+  // time the tab opens, and keeps live addAudit events on top.
+  async function fetchBackendAudit() {
+    try {
+      const d = await api("/api/portfolio/audit?scope=all&limit=200");
+      state.backendAudit = (d.audit || []).map((e) => ({
+        ts: (e.ts || "").replace("T", " ").slice(5, 19),
+        message:
+          (e.action || "") +
+          (e.instance_id ? " [" + e.instance_id.slice(0, 8) + "]" : "") +
+          (e.detail ? " — " + e.detail : ""),
+        kind: e.scope === "live" ? "danger" : e.action && e.action.toUpperCase().startsWith("SPAWN") ? "spawn" : "action",
+        scope: e.scope,
+      }));
+    } catch (_e) {
+      state.backendAudit = [];
+    }
     renderAudit();
   }
 
@@ -313,65 +337,92 @@
   function renderAudit() {
     const el = $("audit-log");
     if (!el) return;
-    el.innerHTML = state.audit.map((a) =>
+    const live = state.audit || [];
+    const backend = state.backendAudit || [];
+    const merged = live.concat(backend);
+    el.innerHTML = merged.map((a) =>
       '<div class="audit-line audit-' + a.kind + '"><span class="audit-ts">' + a.ts +
       "</span><span>" + a.message + "</span></div>").join("") ||
-      '<p class="muted" style="padding:12px">Waiting for activity…</p>';
+      '<p class="muted" style="padding:12px">No audit entries yet.</p>';
   }
 
   // ---------------------------------------------------------------- chart
+  // Owner decision 2026-09-21: the equity view is ON-DEMAND, not a ticking
+  // line. "Refresh snapshot" fetches /api/portfolio/equity/snapshot once and
+  // renders (a) session summary stats, (b) day-close series, (c) runner
+  // comparison. The SSE stream no longer appends equity points per frame.
   function renderChart(p) {
     if (state.tab !== "equity") return;
-    const canvas = $("portfolio-equity-chart");
-    if (!canvas || typeof Chart === "undefined") return;
+    if (state.equitySnapshot) renderEquitySnapshot(state.equitySnapshot);
+  }
 
-    // T2.2: Use bucket equity when scoped, combined when not.
-    const equity = (PAGE_MODE && p.buckets && p.buckets[PAGE_MODE])
-      ? p.buckets[PAGE_MODE].equity
-      : p.total_equity;
-
-    // Lightweight live series: equity appended on every frame.
-    if (!window._pccEquity) window._pccEquity = [];
-    window._pccEquity.push({ t: Date.now(), equity: equity });
-    if (window._pccEquity.length > 300) window._pccEquity.shift();
-    const series = window._pccEquity;
-
-    const labels = series.map((_, i) => i);
-    const data = series.map((s) => s.equity);
-    const label = PAGE_MODE ? PAGE_MODE.charAt(0).toUpperCase() + PAGE_MODE.slice(1) + " Equity" : "Portfolio Equity";
-
-    if (state.chart) {
-      state.chart.data.labels = labels;
-      state.chart.data.datasets[0].data = data;
-      state.chart.data.datasets[0].label = label;
-      state.chart.update("none");
-      return;
+  async function refreshEquitySnapshot() {
+    const url =
+      "/api/portfolio/equity/snapshot" + (PAGE_MODE ? "?mode=" + PAGE_MODE : "");
+    try {
+      const d = await api(url);
+      state.equitySnapshot = d.snapshot;
+      renderEquitySnapshot(d.snapshot);
+    } catch (err) {
+      toast("Snapshot failed: " + err.message, "error");
     }
-    state.chart = new Chart(canvas.getContext("2d"), {
-      type: "line",
-      data: {
-        labels,
-        datasets: [{
-          label: label,
-          data,
-          borderColor: PAGE_MODE === "live" ? "#ef4444" : PAGE_MODE === "paper" ? "#3b82f6" : "#3b82f6",
-          backgroundColor: PAGE_MODE === "live" ? "rgba(239,68,68,.12)" : "rgba(59,130,246,.12)",
-          fill: true,
-          borderWidth: 2,
-          pointRadius: 0,
-          tension: 0.25,
-        }],
-      },
-      options: {
-        responsive: true,
-        animation: false,
-        plugins: { legend: { labels: { color: "#94a3b8" } } },
-        scales: {
-          x: { display: false },
-          y: { ticks: { color: "#94a3b8" }, grid: { color: "rgba(148,163,184,.1)" } },
+  }
+
+  function renderEquitySnapshot(snap) {
+    const canvas = $("portfolio-equity-chart");
+    const statsEl = $("equity-session-stats");
+    const runnerEl = $("equity-runner-table");
+    if (!canvas || !statsEl || !runnerEl) return;
+
+    // (a) Session summary card
+    const s = snap.session || {};
+    statsEl.hidden = false;
+    statsEl.innerHTML =
+      '<div class="equity-stat"><span>Day start</span><strong>' + fmtMoney(s.day_start_equity) +
+      '</strong></div><div class="equity-stat"><span>Equity now</span><strong>' + fmtMoney(s.equity) +
+      '</strong></div><div class="equity-stat"><span>Net today</span><strong class="' + pnlClass(s.net_today) + '">' + fmtSigned(s.net_today) +
+      '</strong></div><div class="equity-stat"><span>Realized (all)</span><strong>' + fmtSigned(s.realized_total) +
+      '</strong></div><div class="equity-stat"><span>Drawdown</span><strong>' + pct(s.drawdown_pct) +
+      '</strong></div><div class="equity-stat"><span>Trades / Win rate</span><strong>' + (s.trades_total || 0) +
+      " / " + (s.win_rate == null ? "—" : (s.win_rate * 100).toFixed(1) + "%") + "</strong></div>";
+
+    // (b) Chart: day closes (one point per day); fall back to today's
+    // intraday when the book has seen a single session.
+    let labels = [], data = [], label = "";
+    if (snap.day_closes && snap.day_closes.length > 1) {
+      labels = snap.day_closes.map((d) => d.date);
+      data = snap.day_closes.map((d) => d.equity);
+      label = "Equity at day close";
+    } else if (snap.intraday_today && snap.intraday_today.length > 1) {
+      labels = snap.intraday_today.map((pt) => (pt.ts || "").slice(11, 16));
+      data = snap.intraday_today.map((pt) => pt.equity);
+      label = "Today's session";
+    }
+    if (state.chart) { state.chart.destroy(); state.chart = null; }
+    if (labels.length && typeof Chart !== "undefined") {
+      state.chart = new Chart(canvas.getContext("2d"), {
+        type: "line",
+        data: { labels, datasets: [{ label, data, borderColor: "#3b82f6", backgroundColor: "rgba(59,130,246,.12)", fill: true, borderWidth: 2, pointRadius: 2, tension: 0.25 }] },
+        options: {
+          responsive: true, animation: false,
+          plugins: { legend: { labels: { color: "#94a3b8" } } },
+          scales: { x: { ticks: { color: "#94a3b8" }, grid: { color: "rgba(148,163,184,.1)" } }, y: { ticks: { color: "#94a3b8" }, grid: { color: "rgba(148,163,184,.1)" } } },
         },
-      },
-    });
+      });
+    } else {
+      canvas.replaceWith(canvas.cloneNode(false));
+    }
+
+    // (c) Runner comparison table
+    const rows = (snap.per_runner || []).map((r) =>
+      '<tr><td>' + r.name + '</td><td>' + r.strategy + '</td><td>' + r.target +
+      '</td><td class="num">' + fmtMoney(r.equity) + '</td><td class="num ' + pnlClass(r.realized_pnl) + '">' + fmtSigned(r.realized_pnl) +
+      '</td><td class="num ' + pnlClass(r.daily_pnl) + '">' + fmtSigned(r.daily_pnl) +
+      '</td><td class="num">' + (r.win_rate == null ? "—" : (r.win_rate * 100).toFixed(1) + "%") +
+      '</td><td class="num">' + r.trades_today + " / " + r.trades + "</td></tr>"
+    );
+    runnerEl.innerHTML = rows.join("") ||
+      '<tr><td colspan="8" class="muted" style="padding:16px">No runners in this bucket.</td></tr>';
   }
 
   // ---------------------------------------------------------------- dashboard book banner
@@ -603,6 +654,10 @@
       strategy: $("spawn-strategy").value,
       timeframe: $("spawn-timeframe").value,
       allocated_capital: parseFloat($("spawn-capital").value) || 100000,
+      // GAP-2 fix (2026-09-21): symbol must be read HERE, before the option
+      // validation below — it used to be attached only AFTER the check, so
+      // every option deployment failed with "pick NIFTY or BANKNIFTY".
+      symbol: $("spawn-symbol").value.trim(),
       params,
       // Ticket #10 — the bucket (mode/source) is ALWAYS sent so the runner is
       // labelled from the user's selection; scoped pages default the controls
@@ -651,6 +706,7 @@
       body.target_type = "SYMBOL_UNIVERSE";
       body.universe_id = $("spawn-universe").value;
       body.max_pool_positions = parseInt($("spawn-maxpos").value, 10) || 5;
+      delete body.symbol;
     } else {
       body.target_type = "SINGLE_SYMBOL";
       body.symbol = $("spawn-symbol").value.trim();
@@ -672,6 +728,9 @@
 
   // ---------------------------------------------------------------- events
   function bindEvents() {
+    // On-demand equity snapshot (owner decision 2026-09-21).
+    const snapBtn = $("btn-equity-snapshot");
+    if (snapBtn) snapBtn.addEventListener("click", refreshEquitySnapshot);
     $("matrix-search").addEventListener("input", (e) => {
       state.search = e.target.value;
       if (state.portfolio) renderMatrix(state.portfolio);
@@ -758,7 +817,7 @@
         document.querySelectorAll(".tab-panel").forEach((p) => { p.hidden = true; });
         $("tab-" + state.tab).hidden = false;
         if (state.tab === "equity" && state.portfolio) renderChart(state.portfolio);
-        if (state.tab === "log") renderAudit();
+        if (state.tab === "log") fetchBackendAudit();
       }));
 
     // Demo: Ctrl+Shift+T injects a crash for circuit-breaker verification.

@@ -248,9 +248,14 @@ class SyntheticQuoteProvider:
 
     # -- registry -------------------------------------------------------
 
-    def register_chain(self, chain: dict[Decimal, OptionContract]) -> None:
-        """Register contracts so ``get_quote`` can price their tokens."""
-        for contract in chain.values():
+    def register_chain(self, chain: Any) -> None:
+        """Register contracts so ``get_quote`` can price their tokens.
+
+        Accepts a ``{strike: contract}`` dict or a plain iterable of
+        contracts (the bridge's flattened two-sided chains).
+        """
+        contracts = chain.values() if hasattr(chain, "values") else chain
+        for contract in contracts:
             self._contracts[contract.instrument_token] = contract
 
     def register_contract(self, contract: OptionContract) -> None:
@@ -318,7 +323,12 @@ class LiveQuoteProvider:
                 return quote
 
         quote = self._fetch(instrument_token)
-        self._cache[instrument_token] = (quote, now)
+        # Never cache a failure (live-session lesson 2026-09-21): a transient
+        # broker hiccup returns ltp=0; caching it pins the zero for the whole
+        # TTL and a fill landing inside that window books a phantom ₹0 entry.
+        # Let the next call retry instead.
+        if float(quote.get("ltp", 0) or 0) > 0:
+            self._cache[instrument_token] = (quote, now)
         return quote
 
     def _fetch(self, instrument_token: str) -> dict[str, Any]:
@@ -453,14 +463,29 @@ class LiveChainProvider:
 
     # -- quote surface (OptionPaperBroker) -----------------------------------
 
-    def register_chain(self, chain: dict[Any, Any]) -> None:
-        """Remember token → contract for every contract in ``chain``."""
-        for contract in chain.values():
+    def register_chain(self, chain: Any) -> None:
+        """Remember token → contract for every contract in ``chain``.
+
+        Accepts a ``{strike: contract}`` dict or a plain iterable of
+        contracts (the bridge's flattened two-sided chains).
+        """
+        contracts = chain.values() if hasattr(chain, "values") else chain
+        for contract in contracts:
             self._contracts[str(contract.instrument_token)] = contract
 
     def get_quote(self, instrument_token: str) -> dict[str, Any]:
-        """Real L1 quote (TTL-cached) for one contract token."""
-        return self._quotes.get_quote(instrument_token)
+        """Real L1 quote (TTL-cached) for one contract token.
+
+        mStock's quote endpoint keys on the TRADING SYMBOL, not the numeric
+        token (verified live 2026-09-18: ``NFO:NIFTY26SEP23300CE`` → 200 with
+        ``last_price``; ``NFO:73923`` → "Invalid symbol"). Translate through
+        the registered chain contracts; unknown keys pass through unchanged.
+        """
+        key = str(instrument_token)
+        contract = self._contracts.get(key)
+        if contract is not None and getattr(contract, "trading_symbol", None):
+            key = str(contract.trading_symbol)
+        return self._quotes.get_quote(key)
 
     def get_quotes_bulk(self, tokens: list[str]) -> dict[str, dict[str, Any]]:
         """Quotes for many tokens (each individually error-soft)."""
@@ -571,6 +596,19 @@ class LiveChainProvider:
         option_type: str = "CE",
         reference: datetime | None = None,
     ) -> float:
-        """Live LTP for ``contract`` (0.0 when the quote is unavailable)."""
-        quote = self.get_quote(str(contract.instrument_token))
-        return float(quote.get("ltp", 0.0) or 0.0)
+        """Live LTP for ``contract`` (0.0 when the quote is unavailable).
+
+        Tries the trading symbol first (mStock keys quotes on the symbol),
+        then the token — duck-typed brokers in tests key on either.
+        """
+        symbol = getattr(contract, "trading_symbol", None)
+        token = str(getattr(contract, "instrument_token", ""))
+        if symbol:
+            quote = self._quotes.get_quote(str(symbol))
+            if float(quote.get("ltp", 0) or 0) > 0:
+                return float(quote["ltp"])
+        if token:
+            quote = self.get_quote(token)
+            if float(quote.get("ltp", 0) or 0) > 0:
+                return float(quote["ltp"])
+        return 0.0
