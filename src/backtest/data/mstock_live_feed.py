@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator
 
 import pandas as pd

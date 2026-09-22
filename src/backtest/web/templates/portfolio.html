@@ -3,8 +3,26 @@
 
 {% block content %}
 
+<!-- Tier 2: Global Risk Header — auto-expanded if any limit >=50% else collapsed -->
+<div id="global-risk-header" class="global-risk-header collapsed" hidden>
+    <div class="grh-top" id="grh-toggle">
+        <div class="grh-title">🛡️ Global Risk Status — <span id="grh-status-text">Loading…</span></div>
+        <div class="grh-summary">
+            <span class="grh-metric"><span id="grh-dloss-text">Daily Loss: —</span><div class="risk-strip-mini-bar"><div id="grh-dloss-bar" class="risk-strip-bar-fill"></div></div></span>
+            <span class="grh-metric"><span id="grh-dd-text">DD: —</span><div class="risk-strip-mini-bar"><div id="grh-dd-bar" class="risk-strip-bar-fill"></div></div></span>
+            <span class="grh-metric"><span id="grh-dep-text">Deployed: —</span></span>
+            <button id="grh-expand-btn" class="btn btn-ghost btn-small" type="button">▼ Details</button>
+        </div>
+    </div>
+    <div class="grh-details" id="grh-details">
+        <div class="grh-detail-card"><div class="metric-label">Daily P&L</div><div class="metric-value" id="grh-daily-pnl">—</div><div class="metric-sub" id="grh-daily-pnl-sub"></div></div>
+        <div class="grh-detail-card"><div class="metric-label">Daily Loss Limit Usage</div><div class="metric-value" id="grh-loss-usage">—</div><div class="pbar"><div id="grh-loss-bar" class="pbar-fill pbar-fill-danger"></div></div></div>
+        <div class="grh-detail-card"><div class="metric-label">Drawdown</div><div class="metric-value" id="grh-dd">—</div><div class="metric-sub" id="grh-dd-sub"></div></div>
+        <div class="grh-detail-card"><div class="metric-label">Top Losing Runners</div><div id="grh-losers" class="muted small">—</div></div>
+    </div>
+</div>
 
-<!-- Bucket summary cards -->
+<!-- Bucket summary cards with mini-risk row -->
 <div class="card pcc-header portfolio-landing">
     <div class="pcc-title-row">
         <div>
@@ -15,13 +33,18 @@
     <div class="bucket-cards">
         {% for mode in bucket_modes %}
         {% set b = buckets[mode] %}
-        <a class="card bucket-card" href="/portfolio/{{ mode }}">
+        <a class="card bucket-card" href="/portfolio/{{ mode }}" data-bucket="{{ mode }}" id="bucket-card-{{ mode }}">
             <div class="bucket-name">{{ "🔴 " if mode == "live" else "📄 " }}{{ mode | upper }}</div>
             <div class="bucket-row"><span>Instances</span><strong>{{ b.count }}</strong></div>
             <div class="bucket-row"><span>Allocated</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.allocated) }}</strong></div>
             <div class="bucket-row"><span>Equity</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.equity) }}</strong></div>
             <div class="bucket-row"><span>Daily P&amp;L</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.daily_pnl) }}</strong></div>
             <div class="bucket-row"><span>Realized P&amp;L</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.realized_pnl) }}</strong></div>
+            <div class="bucket-mini-risk" id="bucket-mini-risk-{{ mode }}">
+                <span class="mini-gauge"><span class="muted">DLoss</span><span class="mini-gauge-bar" id="bmr-{{ mode }}-dloss-bar">░░░</span><span id="bmr-{{ mode }}-dloss">—</span></span>
+                <span class="mini-gauge"><span class="muted">DD</span><span id="bmr-{{ mode }}-dd">—</span></span>
+                <span class="mini-gauge"><span class="muted">Pos</span><span id="bmr-{{ mode }}-pos">—</span></span>
+            </div>
             <div class="bucket-go">View {{ mode }} portfolio →</div>
         </a>
         {% endfor %}
@@ -76,6 +99,8 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/components/landing_risk.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/risk_board.js') }}"></script>
 <script src="{{ url_for('static', filename='js/deep_dive.js') }}"></script>
 <script src="{{ url_for('static', filename='js/portfolio.js') }}"></script>
 {% endblock %}

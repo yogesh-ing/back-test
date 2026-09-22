@@ -423,6 +423,10 @@ def create_app(
             instances=list_instances("live"),
         )
 
+    @app.get("/risk")
+    def risk_page() -> Any:
+        return render_template("risk.html", active="risk")
+
     @app.get("/data")
     def data_page() -> Any:
         return render_template("data_manager.html", active="data")

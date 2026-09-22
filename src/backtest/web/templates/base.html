@@ -13,12 +13,17 @@
       data-currency-locale="{{ currency_locale }}" data-replay-speed="{{ replay_speed }}">
     <nav class="topnav">
         <div class="brand">🤖 Trading Bot</div>
+        <div id="halt-pill" class="halt-pill halt-pill-safe" title="All runners active — click to view Risk Board">
+            <span id="halt-pill-dot">🟢</span>
+            <span id="halt-pill-text">LIVE</span>
+        </div>
         <div class="nav-links">
             <a href="/dashboard"  class="nav-link" data-key="dashboard">Dashboard</a>
             <a href="/backtest"   class="nav-link" data-key="backtest">Backtest</a>
             <a href="/compare"    class="nav-link" data-key="compare">Compare</a>
             <a href="/forward"    class="nav-link" data-key="forward">Forward Test</a>
             <a href="/portfolio"  class="nav-link" data-key="portfolio">Portfolio</a>
+            <a href="/risk"       class="nav-link" data-key="risk">🛡️ Risk</a>
             <a href="/options"    class="nav-link" data-key="options" title="Deprecated — use Portfolio → Playbooks. Kept for chain/Greeks services">Options (deprecated)</a>
             <a href="/data"       class="nav-link" data-key="data">Data</a>
         </div>
@@ -29,6 +34,40 @@
         </button>
     </nav>
 
+    <!-- Tier 1: Sticky Risk Strip — always visible survival layer -->
+    <div id="risk-strip" class="risk-strip risk-strip-safe" hidden>
+        <div class="risk-strip-collapsed" id="risk-strip-collapsed">
+            <div class="risk-strip-left">
+                <span id="risk-strip-feed" class="risk-strip-feed">🟢 Feed OK</span>
+                <span class="risk-strip-sep">·</span>
+                <span id="risk-strip-dloss" class="risk-strip-metric">Daily Loss: —</span>
+                <div class="risk-strip-mini-bar"><div id="risk-strip-dloss-bar" class="risk-strip-bar-fill"></div></div>
+                <span id="risk-strip-dd" class="risk-strip-metric">DD: —</span>
+                <div class="risk-strip-mini-bar"><div id="risk-strip-dd-bar" class="risk-strip-bar-fill"></div></div>
+                <span id="risk-strip-deployed" class="risk-strip-metric">Deployed: —</span>
+                <div class="risk-strip-mini-bar"><div id="risk-strip-deployed-bar" class="risk-strip-bar-fill"></div></div>
+                <span id="risk-strip-positions" class="risk-strip-metric">Pos: —</span>
+            </div>
+            <div class="risk-strip-right">
+                <button id="risk-strip-expand" class="btn btn-ghost btn-small" type="button" title="Expand breakdown">▼ Details</button>
+                <button id="risk-strip-flatten" class="btn btn-danger btn-small" type="button">🔴 FLATTEN ALL</button>
+            </div>
+        </div>
+        <div class="risk-strip-expanded" id="risk-strip-expanded" hidden>
+            <div class="risk-strip-expanded-head">
+                <strong>Daily Loss Breakdown (Last 6 Hours) + Top Losers</strong>
+                <button id="risk-strip-collapse" class="btn btn-ghost btn-small" type="button">Close ↑</button>
+            </div>
+            <div class="risk-strip-expanded-body">
+                <div class="risk-strip-chart-wrap"><canvas id="risk-strip-chart" height="60"></canvas></div>
+                <div class="risk-strip-details">
+                    <div id="risk-strip-detail-stats" class="risk-strip-stats"></div>
+                    <div id="risk-strip-top-losers" class="risk-strip-losers"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <main class="container">
         {% block content %}{% endblock %}
     </main>
@@ -37,12 +76,28 @@
 
     {% include "components/broker_auth_modal.html" %}
 
+    <!-- Risk Flatten Confirmation Modal (Tier 1) -->
+    <div id="risk-flatten-modal" class="modal-overlay" hidden>
+        <div class="modal modal-sm">
+            <div class="modal-head"><h3>⚠️ Emergency Flatten All Positions</h3><button class="modal-close" data-close="risk-flatten-modal" type="button">✕</button></div>
+            <div class="modal-body" id="risk-flatten-body">
+                <p>This will immediately close all open positions across all runners.</p>
+                <div id="risk-flatten-stats" class="muted"></div>
+            </div>
+            <div class="modal-foot">
+                <button class="btn btn-ghost" data-close="risk-flatten-modal" type="button">Cancel</button>
+                <button id="risk-flatten-confirm" class="btn btn-danger" type="button">🔴 YES, FLATTEN EVERYTHING</button>
+            </div>
+        </div>
+    </div>
+
     <script src="{{ url_for('static', filename='js/components/currency.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/option_config.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/option_view.js') }}"></script>
     <script src="{{ url_for('static', filename='js/session_state.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/toast.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/loader.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/risk_strip.js') }}"></script>
     <script src="{{ url_for('static', filename='js/broker_status.js') }}"></script>
     <script src="{{ url_for('static', filename='js/broker_auth_modal.js') }}"></script>
     <script src="{{ url_for('static', filename='js/playbooks.js') }}"></script>

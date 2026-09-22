@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Risk Management{% endblock %}
+
+{% block content %}
+<div class="risk-page" id="risk-page">
+  <div class="risk-page-header">
+    <div>
+      <h1 class="risk-page-title">🛡️ Risk Management & Monitoring</h1>
+      <div class="muted">Tier 3 Analysis — Global dashboard, configuration, audit timeline, exposure analysis, trade analytics</div>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <select id="risk-page-mode" class="input input-select" style="min-width:130px;">
+        <option value="">All Buckets</option>
+        <option value="paper">Paper Only</option>
+        <option value="live">Live Only</option>
+      </select>
+      <button id="risk-page-refresh" class="btn btn-primary btn-small" type="button">↻ Refresh</button>
+      <button id="risk-page-export" class="btn btn-ghost btn-small" type="button">Export CSV</button>
+    </div>
+  </div>
+
+  <!-- Global Dashboard — 6 large gauges -->
+  <div id="risk-global-dashboard">
+    <h3 style="margin-bottom:10px;">Global Risk Dashboard</h3>
+    <div class="risk-dashboard-grid" id="risk-dashboard-grid">
+      <div class="muted">Loading…</div>
+    </div>
+    <div id="risk-cb-banner" hidden></div>
+    <div id="risk-warnings-banner" hidden></div>
+  </div>
+
+  <!-- Tabs for sub-sections -->
+  <div class="tabs" style="margin-top:20px;">
+    <button class="tab active" data-tab="config" type="button">⚙️ Risk Configuration</button>
+    <button class="tab" data-tab="audit" type="button">📜 Audit Timeline</button>
+    <button class="tab" data-tab="exposure" type="button">📊 Exposure Analysis</button>
+    <button class="tab" data-tab="trades" type="button">📈 Trade History & Analytics</button>
+  </div>
+
+  <!-- Config Tab -->
+  <div class="tab-panel" id="tab-config">
+    <div class="risk-config-panel">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+        <h3 style="margin:0;">Risk Configuration Panel</h3>
+        <div class="risk-presets" id="risk-presets">
+          <button class="btn btn-ghost btn-small" data-preset="conservative" type="button">Conservative</button>
+          <button class="btn btn-ghost btn-small" data-preset="balanced" type="button">Balanced</button>
+          <button class="btn btn-ghost btn-small" data-preset="aggressive" type="button">Aggressive</button>
+          <button class="btn btn-ghost btn-small" id="btn-live-mode" type="button">🔴 Live Mode</button>
+        </div>
+      </div>
+
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px;">
+        <div>
+          <h4 style="margin-bottom:8px;">Global Limits (Supervisor)</h4>
+          <div id="risk-global-config-form"></div>
+          <div style="margin-top:12px;">
+            <button id="btn-save-global" class="btn btn-primary btn-small" type="button">💾 Save Global Config</button>
+            <span id="risk-save-msg" class="muted" style="margin-left:8px;"></span>
+          </div>
+        </div>
+        <div>
+          <h4 style="margin-bottom:8px;">Per-Bucket Overrides</h4>
+          <div id="risk-bucket-config-form"></div>
+          <div style="margin-top:12px;">
+            <button id="btn-save-buckets" class="btn btn-primary btn-small" type="button">💾 Save Bucket Overrides</button>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:20px;">
+        <h4>Correlation Groups</h4>
+        <div id="risk-correlation-config" class="muted">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Audit Tab -->
+  <div class="tab-panel" id="tab-audit" hidden>
+    <div class="audit-timeline">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+        <h3 style="margin:0;">Audit Timeline</h3>
+        <div class="audit-filters">
+          <select id="audit-scope" class="input input-select" style="min-width:110px;">
+            <option value="all">All Scopes</option>
+            <option value="paper">Paper</option>
+            <option value="live">Live</option>
+            <option value="playbook">Playbook</option>
+            <option value="dashboard">Dashboard</option>
+          </select>
+          <select id="audit-type" class="input input-select" style="min-width:130px;">
+            <option value="all">All Types</option>
+            <option value="breach">Breaches Only</option>
+            <option value="flatten">Flattens</option>
+            <option value="halt">Halts</option>
+          </select>
+          <input id="audit-search" class="input" type="text" placeholder="Search action/reason…" style="min-width:180px;">
+          <button id="btn-audit-refresh" class="btn btn-ghost btn-small" type="button">↻ Refresh</button>
+          <button id="btn-audit-export" class="btn btn-ghost btn-small" type="button">Export CSV</button>
+        </div>
+      </div>
+      <div class="table-scroll" style="max-height:500px; overflow-y:auto;">
+        <table class="audit-table">
+          <thead><tr><th>Time</th><th>Scope</th><th>Action</th><th>Details</th><th>Runner</th></tr></thead>
+          <tbody id="audit-tbody"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="pagination" id="audit-pagination" style="margin-top:12px;"></div>
+    </div>
+  </div>
+
+  <!-- Exposure Tab -->
+  <div class="tab-panel" id="tab-exposure" hidden>
+    <div class="exposure-grid">
+      <div class="exposure-card">
+        <h4>Exposure by Symbol — Pie</h4>
+        <canvas id="exposure-pie" height="200"></canvas>
+        <div id="exposure-concentration-warnings"></div>
+      </div>
+      <div class="exposure-card">
+        <h4>Exposure by Correlation Group</h4>
+        <canvas id="exposure-bar" height="200"></canvas>
+      </div>
+    </div>
+    <div class="exposure-grid">
+      <div class="exposure-card">
+        <h4>Drawdown & Daily Loss — Last 6h</h4>
+        <canvas id="exposure-line" height="150"></canvas>
+      </div>
+      <div class="exposure-card">
+        <h4>Exposure Details</h4>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+          <div>
+            <strong>By Symbol</strong>
+            <div class="table-scroll" style="max-height:260px;">
+              <table class="matrix-table"><thead><tr><th>Symbol</th><th class="num">Notional</th><th class="num">Runners</th></tr></thead><tbody id="exp-symbol-tbody"></tbody></table>
+            </div>
+          </div>
+          <div>
+            <strong>By Correlation</strong>
+            <div class="table-scroll" style="max-height:260px;">
+              <table class="matrix-table"><thead><tr><th>Group</th><th class="num">Notional</th><th class="num">Count</th></tr></thead><tbody id="exp-corr-tbody"></tbody></table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Trades Tab -->
+  <div class="tab-panel" id="tab-trades" hidden>
+    <div class="perf-summary-card" id="perf-summary">
+      <div class="muted">Loading performance summary…</div>
+    </div>
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+      <h3 style="margin:0;">Trade History — Grouped by Day</h3>
+      <div style="display:flex; gap:8px;">
+        <select id="trades-kind" class="input input-select"><option value="all">All</option><option value="equity">Equity</option><option value="option">Option</option></select>
+        <select id="trades-limit" class="input input-select"><option value="50">50</option><option value="100" selected>100</option><option value="200">200</option><option value="500">500</option></select>
+        <button id="btn-trades-refresh" class="btn btn-primary btn-small" type="button">↻ Refresh</button>
+        <button id="btn-trades-export" class="btn btn-ghost btn-small" type="button">Export CSV</button>
+      </div>
+    </div>
+    <div id="trades-grouped"></div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/components/risk_page.js') }}"></script>
+{% endblock %}

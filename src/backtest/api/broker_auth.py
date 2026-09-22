@@ -171,8 +171,12 @@ def probe_historical() -> tuple:
         frm = _req.args.get("from", "2026-09-18 09:15:00")
         to = _req.args.get("to", "2026-09-18 10:30:00")
         try:
+            url = (
+                f"https://api.mstock.trade/openapi/typea/instruments/"
+                f"historical/{seg}/{tok}/{interval}"
+            )
             r = requests.get(
-                f"https://api.mstock.trade/openapi/typea/instruments/historical/{seg}/{tok}/{interval}",
+                url,
                 headers=headers,
                 params={"from": frm, "to": to},
                 timeout=15,

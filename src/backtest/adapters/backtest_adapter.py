@@ -61,6 +61,7 @@ class BacktestAdapter:
             "win_rate_pct": _f(m.get("win_rate", 0.0) * 100, 2),
             "max_drawdown_pct": _f(m.get("max_drawdown", 0.0) * 100, 2),
             "sharpe": _f(m.get("sharpe", 0.0), 2),
+            "sortino": _f(m.get("sortino", 0.0), 2),
             "total_trades": int(m.get("num_trades", 0)),
             # Breakdown behind the two numbers above: win_rate only covers closed
             # trades, so a run with an open position says so explicitly.
@@ -72,6 +73,17 @@ class BacktestAdapter:
             "avg_trade_pnl": _f(m.get("avg_trade_pnl", 0.0), 2),
             "best_trade_pnl": _f(m.get("best_trade_pnl", 0.0), 2),
             "worst_trade_pnl": _f(m.get("worst_trade_pnl", 0.0), 2),
+            # Quant-grade risk extensions
+            "profit_factor": _f(m.get("profit_factor", 0.0), 4),
+            "expectancy": _f(m.get("expectancy", 0.0), 2),
+            "gross_profit": _f(m.get("gross_profit", 0.0), 2),
+            "gross_loss": _f(m.get("gross_loss", 0.0), 2),
+            "max_consecutive_losses": int(m.get("max_consecutive_losses", 0)),
+            "avg_holding_bars": _f(m.get("avg_holding_bars", 0.0), 2),
+            "var_95_pct": _f(m.get("var_95", 0.0) * 100, 4),
+            "es_95_pct": _f(m.get("es_95", 0.0) * 100, 4),
+            "var_99_pct": _f(m.get("var_99", 0.0) * 100, 4),
+            "es_99_pct": _f(m.get("es_99", 0.0) * 100, 4),
             # extras surfaced for richer cards
             "final_equity": _f(m.get("final_equity", self._equity.iloc[-1]), 2),
             "cagr_pct": _f(m.get("cagr", 0.0) * 100, 2),

@@ -151,6 +151,8 @@
         <div class="tabs">
             <button class="tab active" data-tab="equity" type="button">Combined Equity Curve</button>
             <button class="tab" data-tab="positions" type="button">Aggregate Open Positions</button>
+            <button class="tab" data-tab="risk" type="button">🛡️ Risk Board</button>
+            <button class="tab" data-tab="aggregated-trades" type="button">📊 Aggregated Trades</button>
             <button class="tab" data-tab="playbooks" type="button">📚 Playbooks (Option Plug-and-Play)</button>
             <button class="tab" data-tab="dashboard-book" type="button">📦 Manual Options Book</button>
             <button class="tab" data-tab="log" type="button">Master Audit Log</button>
@@ -180,6 +182,116 @@
                     <thead><tr><th>Instance</th><th>Symbol</th><th>Side</th><th class="num">Qty</th>
                         <th class="num">Entry</th><th class="num">Current</th><th class="num">Unrealized P&amp;L</th></tr></thead>
                     <tbody id="aggregate-positions"></tbody>
+                </table>
+            </div>
+        </div>
+        <div class="tab-panel" id="tab-risk" hidden>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+                <div>
+                    <h3 style="margin:0;">🛡️ Risk Management Board</h3>
+                    <div class="muted">Live risk gauges, bucket limits, exposure breakdown, and stress controls. Self-sufficient system needs all 4 layers in one view.</div>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <select id="risk-mode" class="input input-select" style="min-width:120px;">
+                        <option value="">All Buckets</option>
+                        <option value="paper">Paper Only</option>
+                        <option value="live">Live Only</option>
+                    </select>
+                    <button id="btn-risk-refresh" class="btn btn-primary btn-small" type="button">↻ Refresh Risk</button>
+                    <button id="btn-risk-stress" class="btn btn-warn btn-small" type="button">💥 Stress Test (-25%)</button>
+                    <button id="btn-risk-reset-breaker" class="btn btn-ghost btn-small" type="button">Reset Breaker</button>
+                </div>
+            </div>
+
+            <!-- Gauges -->
+            <div id="risk-gauges" class="risk-gauges-grid" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-bottom:16px;">
+                <div class="muted">Loading risk gauges…</div>
+            </div>
+
+            <!-- CB status + warnings -->
+            <div id="risk-cb-status" style="margin-bottom:12px;"></div>
+            <div id="risk-warnings" class="warning-banner" style="margin-bottom:16px;"></div>
+
+            <!-- Two column: global config + trade stats -->
+            <div style="display:grid; grid-template-columns: 1fr 2fr; gap:16px; margin-bottom:16px;">
+                <div class="card" style="padding:12px;">
+                    <h4 style="margin:0 0 8px;">Global Risk Config</h4>
+                    <div id="risk-global-config" class="risk-kv-list"></div>
+                    <div class="muted" style="margin-top:8px; font-size:.75rem;">Source: RiskSupervisor + risk.yaml. Tune via config/risk.yaml and env. Live caps are in bucket_risk.py.</div>
+                </div>
+                <div class="card" style="padding:12px;">
+                    <h4 style="margin:0 0 8px;">Closed Trade Risk Stats (aggregated)</h4>
+                    <div id="risk-trade-stats"></div>
+                </div>
+            </div>
+
+            <!-- Bucket limits -->
+            <div class="card" style="padding:12px; margin-bottom:16px;">
+                <h4 style="margin:0 0 8px;">Per-Bucket Risk Limits & Usage</h4>
+                <div class="table-scroll">
+                    <table class="matrix-table">
+                        <thead><tr><th>Bucket</th><th class="num">Runners</th><th class="num">Equity</th><th class="num">Daily PnL</th><th class="num">Drawdown</th><th class="num">Open Pos</th><th class="num">Max Pos %</th><th class="num">Max Value</th><th>Allowed Sources</th><th>Status</th></tr></thead>
+                        <tbody id="risk-bucket-table"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Exposure breakdown -->
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px; margin-bottom:16px;">
+                <div class="card" style="padding:12px;">
+                    <h4 style="margin:0 0 8px;">Exposure by Symbol <span id="risk-exposure-summary" class="muted" style="font-weight:400; font-size:.8rem;"></span></h4>
+                    <div class="table-scroll" style="max-height:300px;">
+                        <table class="matrix-table">
+                            <thead><tr><th>Symbol</th><th class="num">Notional</th><th class="num">Qty</th><th class="num">Runners</th><th>Sides</th></tr></thead>
+                            <tbody id="risk-exposure-symbol"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="card" style="padding:12px;">
+                    <h4 style="margin:0 0 8px;">Exposure by Correlation Group</h4>
+                    <div class="table-scroll" style="max-height:300px;">
+                        <table class="matrix-table">
+                            <thead><tr><th>Group</th><th class="num">Notional</th><th class="num">Count</th><th>Symbols</th><th>Status</th></tr></thead>
+                            <tbody id="risk-exposure-correlation"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Risk audit -->
+            <div class="card" style="padding:12px;">
+                <h4 style="margin:0 0 8px;">Risk Events Timeline (audit log)</h4>
+                <div id="risk-audit" class="audit-log"></div>
+            </div>
+        </div>
+        <div class="tab-panel" id="tab-aggregated-trades" hidden>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+                <div>
+                    <h3 style="margin:0;">📊 Aggregated Closed Trades</h3>
+                    <div class="muted">All closed trades across runners — the missing post-trade view. Use filters to slice by bucket or instrument.</div>
+                    <div id="agg-trades-summary" class="muted" style="margin-top:4px;"></div>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <select id="agg-trade-kind" class="input input-select" style="min-width:110px;">
+                        <option value="all">All Kinds</option>
+                        <option value="equity">Equity Only</option>
+                        <option value="option">Option Only</option>
+                    </select>
+                    <select id="agg-trade-limit" class="input input-select" style="min-width:90px;">
+                        <option value="50">50</option>
+                        <option value="100" selected>100</option>
+                        <option value="200">200</option>
+                        <option value="500">500</option>
+                    </select>
+                    <button id="btn-agg-trades-refresh" class="btn btn-primary btn-small" type="button">↻ Refresh</button>
+                </div>
+            </div>
+            <div class="table-scroll">
+                <table class="matrix-table">
+                    <thead><tr><th>Symbol</th><th>Runner</th><th>Strategy</th><th>Kind</th><th>Side</th><th class="num">Qty</th><th class="num">Entry → Exit</th><th class="num">PnL</th><th>Exit Reason / Time</th></tr></thead>
+                    <tbody id="agg-trades-body">
+                        <tr><td colspan="9" class="muted" style="padding:16px">Click Refresh to load aggregated trades.</td></tr>
+                    </tbody>
                 </table>
             </div>
         </div>

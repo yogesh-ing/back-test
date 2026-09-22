@@ -808,16 +808,20 @@
     // Backward compat: some playbooks.js checks for loadSpawnForm globally
     window.loadSpawnForm = loadSpawnForm;
 
-    // Tabs
+    // Tabs — extended for risk board + aggregated trades
     document.querySelectorAll(".tab").forEach((t) =>
       t.addEventListener("click", () => {
         document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
         t.classList.add("active");
         state.tab = t.dataset.tab;
         document.querySelectorAll(".tab-panel").forEach((p) => { p.hidden = true; });
-        $("tab-" + state.tab).hidden = false;
+        const panel = $("tab-" + state.tab);
+        if (panel) panel.hidden = false;
         if (state.tab === "equity" && state.portfolio) renderChart(state.portfolio);
         if (state.tab === "log") fetchBackendAudit();
+        if (state.tab === "risk" && window.RiskBoard) window.RiskBoard.refresh();
+        if (state.tab === "aggregated-trades" && window.RiskBoard) window.RiskBoard.refreshAggregatedTrades();
+        if (state.tab === "positions" && state.portfolio) renderAggregatePositions(state.portfolio);
       }));
 
     // Demo: Ctrl+Shift+T injects a crash for circuit-breaker verification.
