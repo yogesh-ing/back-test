@@ -166,7 +166,10 @@ def test_get_all_returns_valid_catalogue():
     assert {"sma_crossover", "rsi_reversion", "buy_and_hold", "donchian_breakout"} <= names
     for entry in catalogue:
         # U6.1: signal_kind rides along (spawn-form contract, architecture §5.1).
-        assert set(entry) == {"name", "description", "version", "author", "params", "signal_kind"}
+        assert set(entry) == {
+            "name", "description", "version", "author", "params", "signal_kind",
+            "eligible_instruments",
+        }
         assert entry["params"] == registry.get_params(entry["name"])
         assert entry["signal_kind"] in {"option", "equity"}
 

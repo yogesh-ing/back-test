@@ -76,7 +76,10 @@ def lot_sizes() -> tuple:
             return jsonify({"lot_sizes": result, "source": "mstock_live"}), 200
         raise RuntimeError("scriptmaster parse produced no rows")
     except Exception as exc:  # noqa: BLE001 — offline fallback keeps the form working
-        log.warning("lot-sizes: live fetch failed (%s: %s) — static fallback", exc.__class__.__name__, exc)
+        log.warning(
+            "lot-sizes: live fetch failed (%s: %s) — static fallback",
+            exc.__class__.__name__, exc,
+        )
         return jsonify({"lot_sizes": _FALLBACK_LOT_SIZES, "source": "fallback"}), 200
 
 

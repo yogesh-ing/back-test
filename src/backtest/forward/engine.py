@@ -1796,10 +1796,15 @@ class ForwardTestingEngine:
                     # loss limit and the consecutive-loss breaker live.
                     now_utc = datetime.now(timezone.utc)
                     for res in results or []:
-                        if res.did_trade and res.fill is not None and self.risk_manager is not None:
+                        if (
+                            res.did_trade
+                            and res.fill is not None
+                            and self.risk_manager is not None
+                        ):
                             try:
                                 self.risk_manager._record_fill_pnl(res.fill, when=now_utc)
-                            except Exception:  # noqa: BLE001 — risk telemetry never breaks the fill path
+                            except Exception:  # noqa: BLE001
+                                # Risk telemetry never breaks the fill path.
                                 logger.exception("fill pnl recording failed")
 
                     # Mark to market at the close of the bars just processed.

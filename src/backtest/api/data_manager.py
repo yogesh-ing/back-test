@@ -143,7 +143,9 @@ def fetch_start() -> tuple:
             with open(token_file) as f:
                 token = f.read().strip()
     if not token or len(token) < 16:
-        return jsonify({"error": "No auth token. Please authenticate via the Broker button first."}), 401
+        return jsonify(
+            {"error": "No auth token. Please authenticate via the Broker button first."}
+        ), 401
 
     # Reset job state
     with _lock:
