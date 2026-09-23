@@ -10,7 +10,8 @@ breakers*. These tests pin the fix end-to-end through the real manager:
   positions, orders, equity history), runtime scalars, bucket breaker
   latches and day anchors;
 * RUNNING comes back PAUSED (fail-closed — nothing trades after a restart
-  until a human resumes); a tripped breaker STAYS tripped;
+  until a human resumes); breaker latches are SESSION-scoped and start clean
+  (2026-09-23: a restored halt trapped the dashboard in "🔴 HALTED" forever);
 * option runners bring their whole bridge book back (open structures, legs,
   broker cash, bar-clock scalars);
 * corrupt / wrong-schema files boot clean, never crash;
@@ -224,8 +225,16 @@ class TestRestartCycle:
         finally:
             mgr2.shutdown()
 
-    def test_tripped_breaker_stays_tripped(self, tmp_path):
-        """THE original complaint: a restart must not resurrect a halted breaker."""
+    def test_a_halt_is_session_scoped_and_starts_clean(self, tmp_path):
+        """2026-09-23 reversal of the original complaint.
+
+        Restoring breaker latches looked right ("a restart must not resurrect
+        a halted breaker") until an emergency-stop latched one into the file
+        and every later boot came up halted — the dashboard read
+        "🔴 HALTED: Emergency flatten" forever while trading was actually
+        fine. A halt guards THIS session's P&L, so the latch is written but
+        deliberately not re-armed; the book, anchors and configs still are.
+        """
         state = tmp_path / "state.json"
         mgr1 = _manager(state)
         mgr1.add_runner(_runner_config("HALTED"))
@@ -235,18 +244,20 @@ class TestRestartCycle:
         mgr1._bucket_halted_ts["paper"] = "2026-09-17T10:00:00+00:00"
         mgr1.shutdown()
 
+        # The latch IS written (the file is a snapshot of what happened)…
+        payload = json.loads(state.read_text())
+        assert payload["buckets"]["paper"]["halted"] is True
+
         mgr2 = _manager(state)
         try:
-            assert mgr2._bucket_halted["paper"] is True
-            assert mgr2._bucket_halt_reason["paper"] == "daily loss limit breached"
-            assert mgr2._bucket_halt_mode["paper"] == "daily_loss_limit"
-            # and the guard still refuses a scoped resume
-            with pytest.raises(RuntimeError, match="halted by circuit breaker"):
-                mgr2.resume_all("paper")
+            # …and deliberately not re-armed on boot.
+            assert mgr2._bucket_halted["paper"] is False
+            assert mgr2._bucket_halt_reason["paper"] is None
+            assert mgr2.resume_all("paper") is not None  # no latch to refuse it
         finally:
             mgr2.shutdown()
 
-    def test_manager_level_halt_survives(self, tmp_path):
+    def test_a_manager_level_halt_also_starts_clean(self, tmp_path):
         state = tmp_path / "state.json"
         mgr1 = _manager(state)
         mgr1.halted = True
@@ -254,7 +265,7 @@ class TestRestartCycle:
         mgr1.shutdown()
         mgr2 = _manager(state)
         try:
-            assert mgr2.halted is True and mgr2.halt_reason == "master kill"
+            assert mgr2.halted is False and mgr2.halt_reason is None
         finally:
             mgr2.shutdown()
 

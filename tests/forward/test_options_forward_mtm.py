@@ -20,7 +20,7 @@ See ``docs/OPTIONS-FORWARD-TESTING.md`` → task A1.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 import pytest
@@ -223,17 +223,26 @@ class _ExplodingQuoteProvider:
 
 
 class TestBarClockTheta:
-    def _long_call_bridge(self):
+    def _long_call_bridge(self, entry_day: date | None = None):
+        provider = SyntheticQuoteProvider(SyntheticChainGenerator())
         bridge = OptionsBridge(
             capital=1_000_000,
             expression={"type": "long_call"},
-            quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+            quote_provider=provider,
+        )
+        # The bridge prices the entry off ``view.bar_timestamp``; without one
+        # it falls back to the wall clock, so on the eve of an expiry the entry
+        # premium is a few rupees and a theta assertion measures the calendar.
+        entry_ts = (
+            datetime.combine(entry_day, time(9, 15)).isoformat()
+            if entry_day is not None else None
         )
         view = MarketView(
             direction=Direction.BULLISH,
             confidence=0.9,
             underlying="NIFTY",
             spot_price=Decimal("24800"),
+            bar_timestamp=entry_ts,
         )
         result = bridge.on_market_view(view, "directional_options")
         assert result is not None
@@ -242,16 +251,15 @@ class TestBarClockTheta:
     def test_premium_decays_as_bars_advance_on_a_flat_spot(self):
         """Flat spot + advancing bar timestamps → the option loses time value.
 
-        The bar timestamps are derived from the structure's own expiry, so the
-        assertion holds whenever the suite runs (the synthetic chain prices the
-        next monthly expiry relative to today).
+        Entry and bars share one clock (``expiry - 6d``), so the P&L assertion
+        holds whenever the suite runs — including on the day before an expiry.
         """
-        bridge, structure = self._long_call_bridge()
-        expiry = structure.expiry
-        leg = structure.legs[0]
-
+        expiry = SyntheticChainGenerator().next_monthly_expiry()
         early = expiry - timedelta(days=6)
         later = expiry - timedelta(days=3)
+        bridge, structure = self._long_call_bridge(entry_day=early)
+        leg = structure.legs[0]
+
         bridge.on_bar("NIFTY", 24_800.0, f"{early.isoformat()}T09:15:00")
         price_early = leg.current_price
 

@@ -334,8 +334,33 @@ def client(app):
     return app.test_client()
 
 
+@pytest.fixture()
+def priced_7_days_out():
+    """Pin the synthetic chain's clock 7 days before its nearest expiry.
+
+    The chain picks its expiry relative to ``date.today()``, so a run on the
+    eve of an expiry prices an ATM NIFTY call at a few rupees. The premium and
+    risk-cap assertions below would then be measuring the calendar: pinning
+    the clock keeps them honest on any run date.
+    """
+    from datetime import datetime, timedelta
+
+    from backtest.web.options_api import get_quote_provider
+
+    provider = get_quote_provider()
+    synthetic = getattr(provider, "inner", provider)
+    expiry = synthetic.generator.next_monthly_expiry()
+    synthetic.set_reference(
+        datetime.combine(expiry - timedelta(days=7), datetime.min.time())
+    )
+    getattr(provider, "clear", lambda: None)()
+    yield
+    synthetic.set_reference(None)
+    getattr(provider, "clear", lambda: None)()
+
+
 class TestTradeDriverApi:
-    def test_open_long_call_201(self, client):
+    def test_open_long_call_201(self, client, priced_7_days_out):
         resp = client.post(
             "/api/options/trade",
             json={"underlying": "NIFTY", "structure_type": "long_call", "quantity": 1},
@@ -383,7 +408,7 @@ class TestTradeDriverApi:
         assert scaled.legs[0].quantity == 3
         assert scaled.legs[0].lot_size == 75
 
-    def test_oversized_quantity_rejected_by_risk_policy(self, client):
+    def test_oversized_quantity_rejected_by_risk_policy(self, client, priced_7_days_out):
         """3 lots of ATM premium ≈ 5% of capital > the 2% per-trade loss cap."""
         resp = client.post(
             "/api/options/trade",
