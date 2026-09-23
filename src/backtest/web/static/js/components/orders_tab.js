@@ -12,6 +12,19 @@
  *   REJECTED  terminal failure with the reason (never left PENDING forever)
  *   CANCELLED cancelled locally (venue refusal / operator cancel)
  *
+ * Phase 3 adds the two things a passive ledger cannot do:
+ *
+ *   AMEND     a working order at its venue (quantity / limit price) via
+ *             `POST /api/portfolio/orders/<coid>/modify`. The venue is asked
+ *             first — a refusal leaves local state untouched and is shown
+ *             verbatim. Only orders the server marks `modifiable` (working at
+ *             a venue) get the button; a simulated order fills or rejects in
+ *             the same call, so amending one would amend nothing.
+ *   AGING      a working order past the server's thresholds is badged and
+ *             colour-banded (warn 60s / alert 5min). The bands come from the
+ *             server with the rows, so the page, the audit trail and the
+ *             engine's own alerts agree on what "stuck" means.
+ *
  * Reads `/api/portfolio/orders` (bucketed by the page's mode) and cancels via
  * `/api/portfolio/orders/<coid>/cancel`. Relative URLs only, so the page works
  * through the platform proxy.
@@ -21,6 +34,7 @@ const OrdersTab = (function () {
 
   const LIST_URL = "/api/portfolio/orders";
   const CANCEL_URL = (coid) => "/api/portfolio/orders/" + encodeURIComponent(coid) + "/cancel";
+  const MODIFY_URL = (coid) => "/api/portfolio/orders/" + encodeURIComponent(coid) + "/modify";
   const REFRESH_MS = 3000; // while the tab is visible; the SSE already runs at 1 Hz
 
   const STATUS_META = {
@@ -36,12 +50,19 @@ const OrdersTab = (function () {
     summary: null,
     lastFetch: 0,
     inFlight: false,
-    filters: { status: "", search: "", limit: 100 },
+    filters: { status: "", search: "", limit: 100, agingOnly: false },
     toast: null,
     onChanged: null,
+    //: The order the open amend modal is acting on (never a "current row"
+    //: global that a 3s refresh could swap underneath the form).
+    amendTarget: null,
+    amendBusy: false,
   };
 
   const $ = (id) => document.getElementById(id);
+
+  const statusLabel = (order) =>
+    (STATUS_META[order.status] || { label: order.status }).label;
 
   function toast(message, kind) {
     if (state.toast) return state.toast(message, kind);
@@ -68,14 +89,55 @@ const OrdersTab = (function () {
     return m ? m[1] : (text.slice(11, 19) || "—");
   }
 
+  function ageSeconds(order) {
+    // The server's age is authoritative when present (it is what the aging
+    // bands and the engine's alerts were computed from); the client only
+    // falls back to its own arithmetic for a row that carries no age.
+    if (order.age_s !== null && order.age_s !== undefined) return Number(order.age_s);
+    const created = Date.parse(String(order.created_ts || "").replace(" ", "T"));
+    if (!Number.isFinite(created)) return null;
+    return Math.max(0, Math.round((Date.now() - created) / 1000));
+  }
+
   function ageText(order) {
     if (order.status !== "PENDING") return "";
-    const created = Date.parse(String(order.created_ts || "").replace(" ", "T"));
-    if (!Number.isFinite(created)) return "";
-    const secs = Math.max(0, Math.round((Date.now() - created) / 1000));
-    if (secs < 60) return secs + "s old";
-    if (secs < 3600) return Math.round(secs / 60) + "m old";
-    return Math.round(secs / 3600) + "h old";
+    const secs = ageSeconds(order);
+    if (secs === null) return "";
+    if (secs < 60) return secs + "s";
+    if (secs < 3600) return Math.round(secs / 60) + "m";
+    return Math.round(secs / 3600) + "h";
+  }
+
+  /** Age cell: a plain number normally, a warning once the venue goes quiet. */
+  function ageCell(order) {
+    if (order.status !== "PENDING") return '<td class="num muted">—</td>';
+    const band = order.aging || "";
+    const text = ageText(order);
+    if (!band) return '<td class="num muted">' + text + "</td>";
+    const icon = band === "alert" ? "🚨" : "⏰";
+    const why = band === "alert"
+      ? "Working far longer than a fill should take — the venue is not answering"
+      : "Working longer than normal — watch it";
+    return '<td class="num order-aging-' + band + '" title="' + esc(why) + '">' +
+      icon + " " + text + "</td>";
+  }
+
+  /** Retry lineage (Phase 3 auto-retry) — what this order replaced. */
+  function lineageText(order) {
+    if (!order.retry_of) return "";
+    return "↻ retry " + (order.retry_attempt || 1) + " of " + String(order.retry_of).slice(0, 18);
+  }
+
+  function amendText(order) {
+    if (!order.amend_count) return "";
+    const bits = [];
+    if (order.amended_quantity !== null && order.amended_quantity !== undefined) {
+      bits.push("qty " + Number(order.amended_quantity).toLocaleString("en-IN"));
+    }
+    if (order.amended_limit_price !== null && order.amended_limit_price !== undefined) {
+      bits.push("limit " + num(order.amended_limit_price));
+    }
+    return "✎ amended" + (bits.length ? " → " + bits.join(", ") : "");
   }
 
   function slippageCell(order) {
@@ -101,10 +163,11 @@ const OrdersTab = (function () {
       : order.status === "CANCELLED"
         ? "cancelled locally"
         : order.status === "PENDING"
-          ? ageText(order)
+          ? esc((order.tag && order.tag.reason) || (order.tag && order.tag.kind) || "working")
           : esc((order.tag && order.tag.reason) || (order.tag && order.tag.kind) || "filled");
+    const notes = [lineageText(order), amendText(order)].filter(Boolean).join(" · ");
     return (
-      '<tr class="order-row ' + meta.cls + '">' +
+      '<tr class="order-row ' + meta.cls + (order.aging ? " order-row-" + order.aging : "") + '">' +
       "<td>" + clock(order.updated_ts || order.created_ts) + "</td>" +
       "<td>" + esc(order.runner || String(order.instance_id || "").slice(0, 8)) + "</td>" +
       '<td class="cell-name">' + esc(order.symbol) + "</td>" +
@@ -114,19 +177,28 @@ const OrdersTab = (function () {
       '<td class="num">' + num(order.avg_fill_price) + "</td>" +
       slippageCell(order) +
       '<td><span class="order-status">' + meta.dot + " " + esc(meta.label) + "</span></td>" +
-      '<td class="muted">' + detail + "</td>" +
-      "<td>" + (order.cancellable
+      ageCell(order) +
+      '<td class="muted">' + detail +
+        (notes ? '<div class="cell-sub">' + esc(notes) + "</div>" : "") + "</td>" +
+      '<td><div class="pos-actions">' + (order.modifiable
+        ? '<button class="row-btn" data-amend="' + esc(order.client_order_id) +
+          '" title="Amend this working order at the venue">✎ Amend</button>'
+        : "") + (order.cancellable
         ? '<button class="row-btn row-btn-stop" data-cancel="' + esc(order.client_order_id) +
           '" title="Cancel this working order">✕ Cancel</button>'
-        : '<span class="muted">—</span>') + "</td>" +
+        : (order.modifiable ? "" : '<span class="muted">—</span>')) + "</div></td>" +
       "</tr>"
     );
   }
 
   function visibleOrders() {
+    let rows = state.orders;
+    if (state.filters.agingOnly) {
+      rows = rows.filter((o) => o.aging === "warn" || o.aging === "alert");
+    }
     const q = String(state.filters.search || "").trim().toLowerCase();
-    if (!q) return state.orders;
-    return state.orders.filter((o) =>
+    if (!q) return rows;
+    return rows.filter((o) =>
       String(o.symbol || "").toLowerCase().includes(q) ||
       String(o.runner || "").toLowerCase().includes(q) ||
       String(o.instance_id || "").toLowerCase().includes(q) ||
@@ -152,8 +224,15 @@ const OrdersTab = (function () {
       dot("Worst slippage",
         (s.slippage_samples ? "+" + money(s.worst_slippage) : "—")) +
       (s.oldest_pending_age_s
-        ? dot("Oldest working", Math.round(s.oldest_pending_age_s) + "s",
-              s.oldest_pending_age_s > 60 ? "orders-stat-bad" : "orders-stat-warn")
+        ? dot("Oldest working",
+              (s.oldest_pending_coid ? String(s.oldest_pending_coid).slice(0, 12) + " · " : "") +
+              Math.round(s.oldest_pending_age_s) + "s",
+              s.aging_alert_count ? "orders-stat-bad"
+                : s.aging_warn_count ? "orders-stat-warn" : "")
+        : "") +
+      ((s.aging_warn_count || s.aging_alert_count)
+        ? dot("⏰ Aging", (s.aging_warn_count || 0) + " warn · " + (s.aging_alert_count || 0) + " alert",
+              s.aging_alert_count ? "orders-stat-bad" : "orders-stat-warn")
         : "");
   }
 
@@ -163,7 +242,9 @@ const OrdersTab = (function () {
     const rows = visibleOrders();
     if (!rows.length) {
       const why = state.orders.length
-        ? "No orders match the current filter."
+        ? (state.filters.agingOnly
+            ? "Nothing is aging — every working order is inside the normal window."
+            : "No orders match the current filter.")
         : "No orders in this scope yet — nothing has been routed through the ledger.";
       body.innerHTML = '<tr><td colspan="11" class="muted" style="padding:16px">' + why + "</td></tr>";
       return;
@@ -230,6 +311,98 @@ const OrdersTab = (function () {
     }
   }
 
+  // ---------------------------------------------------------- amend a working order
+
+  function openAmend(coid) {
+    const order = state.orders.find((o) => o.client_order_id === coid);
+    const modal = $("order-modify-modal");
+    if (!order || !modal) return;
+    state.amendTarget = order;
+    const context = $("order-modify-context");
+    if (context) {
+      context.innerHTML =
+        '<div class="pos-modal-line"><strong>' + esc(order.symbol) + "</strong> · " +
+        esc(order.side) + " " + num(order.quantity, 0) + " · " + esc(statusLabel(order)) +
+        "</div>" +
+        '<div class="pos-modal-line muted">working ' + ageText(order) +
+        " · venue order " + esc(String(order.broker_order_id || "?")) + "</div>" +
+        '<div class="pos-modal-line muted">coid ' + esc(order.client_order_id) + "</div>" +
+        (order.amend_count
+          ? '<div class="pos-modal-line muted">already amended ' + order.amend_count + "x</div>"
+          : "");
+    }
+    // Pre-fill with what the venue currently holds: an amend is usually a
+    // nudge, and retyping the current size invites typos.
+    const qty = $("order-modify-qty");
+    const price = $("order-modify-price");
+    if (qty) qty.value = String(Math.round(Number(order.quantity) || 0));
+    if (price) price.value = order.limit_price === null || order.limit_price === undefined
+      ? "" : String(order.limit_price);
+    modal.hidden = false;
+    if (qty) { try { qty.focus(); qty.select(); } catch (_e) { /* stub DOM */ } }
+  }
+
+  function closeAmend() {
+    const modal = $("order-modify-modal");
+    if (modal) modal.hidden = true;
+    state.amendTarget = null;
+  }
+
+  async function submitAmend() {
+    const order = state.amendTarget;
+    if (!order || state.amendBusy) return;
+    const rawQty = $("order-modify-qty") ? $("order-modify-qty").value : "";
+    const rawPrice = $("order-modify-price") ? $("order-modify-price").value : "";
+    if (rawQty === "" && rawPrice === "") {
+      toast("Nothing to amend — set a quantity or a limit price.", "error");
+      return;
+    }
+    // Send only what actually differs from the venue's current terms: the
+    // form is pre-filled, so re-sending the untouched field would make the
+    // venue process a change nobody asked for. It also makes "I typed an
+    // identical value" a no-op here instead of a pointless round trip.
+    const body = {};
+    if (rawQty !== "" && Number(rawQty) !== Number(order.quantity)) {
+      body.quantity = Number(rawQty);
+    }
+    const heldLimit = order.limit_price === null || order.limit_price === undefined
+      ? null : Number(order.limit_price);
+    if (rawPrice !== "" && Number(rawPrice) !== heldLimit) {
+      body.limit_price = Number(rawPrice);
+    }
+    if (body.quantity === undefined && body.limit_price === undefined) {
+      toast("The order already has those terms — nothing to amend.", "error");
+      return;
+    }
+    state.amendBusy = true;
+    try {
+      const res = await fetch(MODIFY_URL(order.client_order_id), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      let data = null;
+      try { data = await res.json(); } catch (_e) { data = {}; }
+      if (!res.ok || data.success === false) {
+        throw new Error((data && data.error) || ("HTTP " + res.status));
+      }
+      const terms = [];
+      if (data.order && data.order.quantity !== undefined) terms.push(num(data.order.quantity, 0) + " units");
+      if (data.order && data.order.limit_price) terms.push("limit " + num(data.order.limit_price));
+      toast("Amended at the venue: " + esc(order.symbol) + " → " +
+        (terms.length ? terms.join(", ") : "new terms"), "success");
+      closeAmend();
+      await refresh(true);
+      if (typeof state.onChanged === "function") state.onChanged(data);
+    } catch (err) {
+      // The venue refused: nothing changed locally, so the modal stays open
+      // and the operator keeps the terms they typed.
+      toast(err.message, "error");
+    } finally {
+      state.amendBusy = false;
+    }
+  }
+
   function bind() {
     const refreshBtn = $("orders-refresh");
     if (refreshBtn && !refreshBtn._ordersBound) {
@@ -260,16 +433,33 @@ const OrdersTab = (function () {
       });
       search._ordersBound = true;
     }
+    const agingOnly = $("orders-aging-only");
+    if (agingOnly && !agingOnly._ordersBound) {
+      agingOnly.addEventListener("change", () => {
+        state.filters.agingOnly = !!agingOnly.checked;
+        renderRows(); // already-loaded rows: no need to ask the server
+      });
+      agingOnly._ordersBound = true;
+    }
     const body = $("orders-body");
     if (body && !body._ordersBound) {
       body.addEventListener("click", (e) => {
-        const btn = e.target && e.target.closest ? e.target.closest("[data-cancel]") : null;
+        const target = e.target && e.target.closest ? e.target : null;
+        if (!target) return;
+        const amend = target.closest("[data-amend]");
+        if (amend) { openAmend(amend.dataset.amend); return; }
+        const btn = target.closest("[data-cancel]");
         if (!btn) return;
         if (typeof window !== "undefined" && window.confirm &&
             !window.confirm("Cancel this working order?")) return;
         cancelOrder(btn.dataset.cancel);
       });
       body._ordersBound = true;
+    }
+    const amendSubmit = $("order-modify-submit");
+    if (amendSubmit && !amendSubmit._ordersBound) {
+      amendSubmit.addEventListener("click", submitAmend);
+      amendSubmit._ordersBound = true;
     }
   }
 
@@ -303,7 +493,7 @@ const OrdersTab = (function () {
     refresh(false);
   }
 
-  return { init, refresh, noteTick, cancelOrder, _state: state };
+  return { init, refresh, noteTick, cancelOrder, submitAmend, openAmend, closeAmend, _state: state };
 })();
 
 if (typeof globalThis !== "undefined") globalThis.OrdersTab = OrdersTab;

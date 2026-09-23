@@ -81,7 +81,8 @@ curl -X POST localhost:5000/api/portfolio/test/breach -H 'Content-Type: applicat
 | GET | `/api/portfolio/positions?mode=` | Flat row per open position (equity + option structures) with its manual stop/target |
 | POST | `/api/portfolio/position/action` | `modify_stop_loss` / `clear_stop_loss` / `modify_target` / `clear_target` / `close_fraction` / `close_all` on one position |
 | GET | `/api/portfolio/orders?mode=&instance_id=&status=&limit=` | The order ledger, newest first + a summary strip (counts, slippage, oldest working age) |
-| POST | `/api/portfolio/orders/<coid>/cancel` | Cancel a still-PENDING order (404 unknown, 409 already terminal) |
+| POST | `/api/portfolio/orders/<coid>/cancel` | Cancel a still-PENDING order — **at the venue first** for a live order (404 unknown, 409 already terminal / venue refused) |
+| POST | `/api/portfolio/orders/<coid>/modify` | Amend a working order's quantity and/or limit price at the venue (409 for a paper/terminal/untracked order or a venue refusal) |
 
 ## Behavior changes & known caveats
 
@@ -157,6 +158,33 @@ The summary strip carries counts, average/worst slippage and the oldest working
 order's age; the tab badge (seeded from the SSE snapshot, so it works while the
 tab is closed) counts working + rejected orders. Rows are polled at 3 s only
 while the tab is visible.
+
+**Advanced order management (Phase 3).**
+
+| Feature | Behaviour |
+|---|---|
+| Amend a working order | `✎ Amend` (live orders only) → quantity and/or limit price. The **venue is asked first**; a refusal leaves local state untouched and is shown verbatim with the modal still open. The client order id, the original `requested_price` (slippage keeps measuring the *original* decision) and the fill history survive — an amend is not a cancel-and-replace. Only terms that actually differ are sent. |
+| Order aging alerts | A working order past **60 s** is `warn`, past **5 min** `alert`. The band ships with the row (`aging`, `age_s`), the row is tinted, the age cell is badged (⏰/🚨), the summary strip counts the bands, and the engine writes **one audit entry per band per order** — an alert that repeats every tick is noise an operator learns to ignore. Filter the tab with `⏰ Aging only`. |
+| Auto-retry on rejection | Opt-in per runner (`RunnerConfig.retry_policy`), **off by default**. A refused order that is *safe* to re-send (see below) is queued and retried on the next bars, up to `max_attempts`, no faster than `cooldown_s` and at most once per bar. Every attempt is its own audited ledger row carrying `retry_of` / `retry_attempt`, so the tab shows a lineage rather than duplicate mystery orders. |
+
+Auto-retry is deliberately narrow, because a retry loop is a way to discover a
+risk limit N times:
+
+* **Only retryable refusals are retried.** A paper failure leaves nothing at a
+  venue, so it is retryable. A *live* placement error is **not**: a timeout can
+  mean "accepted, acknowledgment lost", and re-sending there is how one intent
+  becomes two live orders. Those are blocked with `RETRY_REFUSED` and a
+  "reconcile before re-sending" note in the runner's signal log.
+* **The budget is finite.** `max_attempts=2` means at most three sends. A spent
+  budget is remembered (`order_retries.blocked`) so the next bar's identical
+  signal cannot quietly re-open it — a transition signal keeps firing while its
+  condition holds, which would otherwise make `max_attempts` meaningless.
+* **The block lifts two ways**: the strategy stops asking for that action (a
+  genuinely new decision), or `rearm_after_s` (default 300 s) expires, which
+  starts a *new* episode at a bounded rate instead of either giving up forever
+  on a long venue outage or hammering it.
+* Successful retries clear the block; `get_state()["order_retries"]` reports
+  `pending` / `blocked` / `raised` / `recovered` / `exhausted`.
 
 ---
 

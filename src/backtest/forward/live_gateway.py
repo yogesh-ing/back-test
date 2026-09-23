@@ -43,7 +43,7 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 
-from backtest.forward.paper_runner import OrderRequest
+from backtest.forward.paper_runner import OrderRefused, OrderRequest
 
 logger = logging.getLogger(__name__)
 
@@ -135,11 +135,18 @@ class LiveEquityGateway:
         )
         try:
             broker_order_id = str(self.broker.place_order(broker_order))
-        except Exception:
+        except Exception as exc:
             # Never leave a phantom working order — the venue refused, so
             # the local order dies with it and the runner sees the error.
+            # Retrying is the caller's decision and it is NOT safe by default:
+            # a timeout can mean "accepted, acknowledgment lost", and sending
+            # again there is how one intent becomes two live orders.
             self.ledger.cancel(coid)
-            raise
+            raise OrderRefused(
+                f"venue refused the placement: {exc.__class__.__name__}: {exc}",
+                client_order_id=coid,
+                retryable=False,
+            ) from exc
 
         order.broker_order_id = broker_order_id
         with self._lock:
@@ -372,3 +379,122 @@ class LiveEquityGateway:
     def working_coids(self) -> List[str]:
         with self._lock:
             return list(self._working)
+
+    def working_state(self, coid: str) -> Optional[Dict[str, Any]]:
+        """The working set's entry for ``coid`` (None when not working here)."""
+        with self._lock:
+            state = self._working.get(coid)
+            return dict(state) if state is not None else None
+
+    # ------------------------------------------------------------------ #
+    # Phase 3 — amending / cancelling a working order at the VENUE
+    # ------------------------------------------------------------------ #
+    #
+    # Both go to the broker first and only touch local state once the venue
+    # has agreed. The opposite order (mark cancelled locally, hope the venue
+    # follows) is how a "cancelled" order fills anyway: the fill arrives,
+    # finds no working state, and either gets silently dropped or — worse —
+    # booked against a book that already assumed the position was gone.
+
+    def _venue_handle(self, coid: str) -> Any:
+        """The ``BrokerOrder`` a modify/cancel needs (venue id included)."""
+        from backtest.brokers.base import BrokerOrder
+
+        order = self.ledger.get_order(coid)
+        state = self.working_state(coid)
+        if order is None:
+            raise KeyError(f"unknown order: {coid}")
+        if state is None:
+            raise ValueError(
+                f"order {coid} is not working at the venue — nothing to amend "
+                "or cancel (it may already have filled; reconcile before acting)"
+            )
+        return BrokerOrder(
+            broker_order_id=state["broker_order_id"],
+            client_order_id=coid,
+            symbol=state["symbol"],
+            side=state["side"],
+            quantity=int(order.quantity),
+            order_type="LIMIT" if order.limit_price else "MARKET",
+            limit_price=order.limit_price,
+            exchange=self.exchange,
+            product=self.product,
+        )
+
+    def cancel_working(self, coid: str) -> Dict[str, Any]:
+        """Cancel a working order at the venue, then locally.
+
+        Raises (without changing local state) when the venue refuses — a
+        rejected cancel means the order may still fill, and the operator must
+        see that instead of a green "cancelled" that is not true.
+        """
+        ctx = self._venue_handle(coid)
+        try:
+            self.broker.cancel_order(ctx)
+        except Exception as exc:
+            raise OrderRefused(
+                f"venue refused the cancel: {exc.__class__.__name__}: {exc}",
+                client_order_id=coid,
+                retryable=False,
+            ) from exc
+        if not self.ledger.cancel(coid):
+            raise ValueError(
+                f"order {coid} could not be cancelled locally after the venue "
+                "accepted — reconcile the book before trading further"
+            )
+        with self._lock:
+            self._working.pop(coid, None)
+        logger.info(
+            "[live] CANCELLED coid=%s broker_order=%s at the venue",
+            coid, ctx.broker_order_id,
+        )
+        return {"client_order_id": coid, "venue_cancelled": True}
+
+    def modify_working(
+        self,
+        coid: str,
+        quantity: Optional[float] = None,
+        limit_price: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Amend a working order at the venue, then mirror it locally.
+
+        The ledger row is only rewritten AFTER the venue accepted, so the two
+        can never claim different quantities for the same live order.
+        """
+        ctx = self._venue_handle(coid)
+        if quantity is not None:
+            new_qty = float(quantity)
+            if new_qty <= 0:
+                raise ValueError(f"amended quantity must be positive, got {new_qty!r}")
+            ctx.quantity = int(new_qty)
+        if limit_price is not None:
+            new_price = float(limit_price)
+            if new_price <= 0:
+                raise ValueError(f"amended limit price must be positive, got {new_price!r}")
+            ctx.limit_price = new_price
+            ctx.order_type = "LIMIT"
+        try:
+            self.broker.modify_order(ctx)
+        except Exception as exc:
+            raise OrderRefused(
+                f"venue refused the amendment: {exc.__class__.__name__}: {exc}",
+                client_order_id=coid,
+                retryable=False,
+            ) from exc
+
+        order = self.ledger.amend(coid, quantity=quantity, limit_price=limit_price)
+        with self._lock:
+            state = self._working.get(coid)
+            if state is not None:
+                state["quantity"] = float(order.quantity)
+        logger.info(
+            "[live] AMENDED coid=%s broker_order=%s → qty=%g limit=%s",
+            coid, ctx.broker_order_id, order.quantity, order.limit_price,
+        )
+        return {
+            "client_order_id": coid,
+            "venue_amended": True,
+            "quantity": order.quantity,
+            "limit_price": order.limit_price,
+            "amend_count": order.amend_count,
+        }

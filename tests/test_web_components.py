@@ -49,10 +49,14 @@ def test_forward_live_widgets_render():
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 @pytest.mark.parametrize(
-    "harness",
-    ["test_position_actions.mjs", "test_orders_tab.mjs"],
+    "harness,expected",
+    [
+        ("test_position_actions.mjs", 12),
+        # Phase 3 (amend / aging / retry lineage) added nine more.
+        ("test_orders_tab.mjs", 21),
+    ],
 )
-def test_live_order_management_components(harness):
+def test_live_order_management_components(harness, expected):
     """The positions-table actions and the Orders tab (Live Order Management).
 
     These are the app's money-moving controls: the harness pins that an action
@@ -70,7 +74,7 @@ def test_live_order_management_components(harness):
     assert (
         result.returncode == 0
     ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    assert "12 tests passed" in result.stdout
+    assert f"{expected} tests passed" in result.stdout
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")

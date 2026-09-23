@@ -1111,3 +1111,10 @@ body[data-active="portfolio"] .nav-link[data-key="portfolio"] {
 .order-row.order-pending td { background: rgba(245,158,11,.06); }
 .order-row.order-rejected td { background: rgba(239,68,68,.08); }
 .order-row.order-cancelled td { color: #94a3b8; }
+/* Order aging (Phase 3): a working order the venue has gone quiet on. The
+   row is tinted AND the age cell is badged, so the signal survives a
+   screenshot, a colour-blind reader and a greyscale print. */
+.order-row.order-row-warn td { background: rgba(245,158,11,.04); }
+.order-row.order-row-alert td { background: rgba(239,68,68,.07); }
+.order-aging-warn { color: var(--warning); font-weight: 600; }
+.order-aging-alert { color: var(--danger); font-weight: 700; }

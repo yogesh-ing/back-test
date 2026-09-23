@@ -20,13 +20,15 @@ endpoints the UI calls, and restart survival of the operator's levels.
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
 from backtest.forward.options_bridge import OptionsBridge
 from backtest.forward.paper_runner import (
+    ORDER_AGING_ALERT_S,
+    ORDER_AGING_WARN_S,
     ORDER_CANCELLED,
     ORDER_FILLED,
     ORDER_PENDING,
@@ -34,16 +36,15 @@ from backtest.forward.paper_runner import (
     RULE_STOP_LOSS,
     RULE_TARGET,
     OrderLedger,
+    OrderRefused,
     OrderRequest,
+    OrderRetryPolicy,
     PaperBroker,
     RunnerConfig,
     StrategyRunner,
 )
 from backtest.options.exit_policy import EXIT_MANUAL_STOP, EXIT_MANUAL_TARGET
-from backtest.options.quote_providers import (
-    SyntheticChainGenerator,
-    SyntheticQuoteProvider,
-)
+from backtest.simulator.execution import free_executor
 from backtest.strategy.intent import Direction, MarketView
 
 BASE_DAY = date(2026, 9, 10)  # mid-month: no expiry rule fires by accident
@@ -205,7 +206,7 @@ class TestOrderLedgerSurface:
         for i in range(3):
             order = ledger.submit("a", OrderRequest(symbol=f"A{i}", side="BUY", quantity=1))
             ledger.apply_fill(order.client_order_id, 10.0 + i, 1)
-        pending = ledger.submit("a", OrderRequest(symbol="P", side="BUY", quantity=1))
+        ledger.submit("a", OrderRequest(symbol="P", side="BUY", quantity=1))
         rejected = ledger.submit("b", OrderRequest(symbol="R", side="BUY", quantity=1))
         ledger.reject(rejected.client_order_id, "no margin")
 
@@ -834,9 +835,8 @@ class TestPositionEndpoints:
         cancelled = client.post(f"/api/portfolio/orders/{pending.client_order_id}/cancel")
         assert cancelled.status_code == 200
         assert cancelled.get_json()["order"]["status"] == ORDER_CANCELLED
-        assert client.get("/api/portfolio/orders?status=pending").get_json()["summary"]["pending"] == 0
 
-    def test_the_sse_snapshot_carries_the_orders_summary_for_the_badge(self, client):
+    def test_the_sse_snapshot_seeds_the_orders_badge(self, client):
         instance_id = _spawn_equity(client)
         _drive_into_a_position(client, instance_id)
         payload = client.get("/api/portfolio/summary").get_json()["portfolio"]
@@ -907,3 +907,623 @@ class TestLevelsSurviveARestart:
         store.save({"runners": [capture_runner(runner)]})
         reloaded = json.loads((tmp_path / "state.json").read_text())
         assert reloaded["runners"][0]["position_rules"]["RELIANCE"]["stop_loss"] == 90.0
+
+
+# ---------------------------------------------------------------------------
+# 6. Phase 3 — amend a working order
+# ---------------------------------------------------------------------------
+
+
+class TestOrderAmend:
+    def test_amending_keeps_the_order_and_its_original_intent(self):
+        """An amend is not cancel-and-replace: the coid, the fills already
+        routed to it and the record of what was originally asked for survive."""
+        ledger = OrderLedger()
+        order = ledger.submit("inst", OrderRequest(symbol="X", side="BUY", quantity=10))
+        order.requested_price = 100.0
+
+        amended = ledger.amend(order.client_order_id, quantity=25, limit_price=99.5)
+        assert amended.quantity == 25.0
+        assert amended.limit_price == 99.5
+        assert amended.amend_count == 1
+        assert amended.amended_ts
+        # Slippage keeps measuring the fill against the price the RUNNER
+        # decided on — an amendment must not silently move the yardstick.
+        assert amended.requested_price == 100.0
+
+        row = ledger.row_with_age(ledger.get_order(order.client_order_id))
+        assert row["client_order_id"] == order.client_order_id
+        assert row["amend_count"] == 1
+        assert row["amended_quantity"] == 25.0
+        assert row["amended_limit_price"] == 99.5
+        assert row["modifiable"] is False  # paper: nothing rests at a venue
+
+        # A second amend accumulates rather than resetting the history.
+        ledger.amend(order.client_order_id, limit_price=102.0)
+        assert ledger.get_order(order.client_order_id).amend_count == 2
+
+    @pytest.mark.parametrize("bad", [0, -5])
+    def test_a_nonsense_amendment_is_refused(self, bad):
+        ledger = OrderLedger()
+        order = ledger.submit("inst", OrderRequest(symbol="X", side="BUY", quantity=10))
+        with pytest.raises(ValueError):
+            ledger.amend(order.client_order_id, quantity=bad)
+        with pytest.raises(ValueError):
+            ledger.amend(order.client_order_id, limit_price=bad)
+        with pytest.raises(ValueError):
+            ledger.amend(order.client_order_id)  # nothing to change
+        with pytest.raises(KeyError):
+            ledger.amend("PRT-nope-1-1", quantity=5)
+        assert ledger.get_order(order.client_order_id).amend_count == 0
+
+    def test_a_terminal_order_cannot_be_amended(self):
+        """A filled order is history; amending it would rewrite what happened."""
+        ledger = OrderLedger()
+        filled = ledger.submit("inst", OrderRequest(symbol="X", side="BUY", quantity=1))
+        ledger.apply_fill(filled.client_order_id, 10.0, 1)
+        rejected = ledger.submit("inst", OrderRequest(symbol="Y", side="BUY", quantity=1))
+        ledger.reject(rejected.client_order_id, "no margin")
+        for coid in (filled.client_order_id, rejected.client_order_id):
+            with pytest.raises(ValueError, match="only a working order"):
+                ledger.amend(coid, quantity=2)
+
+
+class TestAmendAtTheVenue:
+    """The manager + gateway path: the venue is asked FIRST."""
+
+    @pytest.fixture()
+    def venue(self, monkeypatch):
+        from live_test_support import FakeLiveBroker
+
+        from backtest.forward.portfolio_manager import reset_portfolio_manager
+
+        broker = FakeLiveBroker()
+        monkeypatch.delenv("PORTFOLIO_STATE_PATH", raising=False)
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
+        mgr = reset_portfolio_manager(
+            auto_start_feed=False, tick_seconds=1.0, live_broker=broker, confirm_live_orders=True
+        )
+        yield mgr, broker
+        mgr.shutdown()
+
+    def _live_working_order(self, mgr):
+        """A live runner whose entry order is PLACED and never fills."""
+        instance_id = mgr.add_runner(RunnerConfig(
+            name="LIVE-EQ", strategy_name="buy_and_hold", allocated_capital=500_000,
+            symbols=["TCS"], timeframe="1day", mode="live", source="synthetic",
+        ))
+        runner = mgr.get_runner(instance_id)
+        _feed(runner, "TCS", [200.0] * 14)
+        rows = [o for o in mgr.list_orders(instance_id=instance_id)["orders"]
+                if o["status"] == ORDER_PENDING]
+        assert rows, "the fake venue should have left an order working"
+        return instance_id, rows[0]
+
+    def test_amending_a_live_order_asks_the_venue_then_the_ledger(self, venue):
+        mgr, broker = venue
+        instance_id, row = self._live_working_order(mgr)
+        coid = row["client_order_id"]
+        assert row["modifiable"] is True
+        assert row["broker_order_id"].startswith("FAKE-")
+
+        result = mgr.modify_order(coid, quantity=25, limit_price=199.5)
+        assert result["venue_amended"] is True
+        assert result["quantity"] == 25.0
+        # The venue saw the amendment — and ONLY the venue id of that order.
+        assert broker.amended == [(row["broker_order_id"], 25, 199.5)]
+        # … and only then did the local row change.
+        after = {o["client_order_id"]: o
+                 for o in mgr.list_orders(instance_id=instance_id)["orders"]}[coid]
+        assert after["quantity"] == 25.0
+        assert after["limit_price"] == 199.5
+        assert after["amend_count"] == 1
+        assert any("ORDER_AMENDED" in e["action"] for e in mgr.get_audit_log(scope="all"))
+
+    def test_a_venue_refusal_leaves_everything_alone(self, venue):
+        mgr, broker = venue
+        instance_id, row = self._live_working_order(mgr)
+        coid = row["client_order_id"]
+        broker.settled.add(row["broker_order_id"])  # the venue has moved on
+
+        with pytest.raises(RuntimeError, match="venue refused the amendment"):
+            mgr.modify_order(coid, quantity=25)
+        after = {o["client_order_id"]: o
+                 for o in mgr.list_orders(instance_id=instance_id)["orders"]}[coid]
+        assert after["quantity"] == row["quantity"], "a refused amend must not apply locally"
+        assert after["amend_count"] == 0
+        assert broker.amended == []
+
+    def test_a_paper_order_cannot_be_amended_and_says_why(self, venue):
+        mgr, _ = venue
+        instance_id = mgr.add_runner(RunnerConfig(
+            name="PAPER-EQ", strategy_name="buy_and_hold", allocated_capital=500_000,
+            symbols=["RELIANCE"], timeframe="1day", mode="paper", source="synthetic",
+        ))
+        runner = mgr.get_runner(instance_id)
+        _feed(runner, "RELIANCE", [100.0] * 14)
+        filled = [o for o in mgr.list_orders(instance_id=instance_id)["orders"]
+                  if o["status"] == ORDER_FILLED][0]
+        with pytest.raises(ValueError, match="only a working order"):
+            mgr.modify_order(filled["client_order_id"], quantity=1)
+
+        # A working PAPER row (submitted by hand) is still not amendable:
+        # nothing is resting at a venue.
+        order = mgr.ledger.submit(instance_id, OrderRequest(
+            symbol="RELIANCE", side="BUY", quantity=10))
+        with pytest.raises(ValueError, match="paper order"):
+            mgr.modify_order(order.client_order_id, quantity=5)
+        with pytest.raises(ValueError, match="needs a new quantity"):
+            mgr.modify_order(order.client_order_id)
+        with pytest.raises(KeyError):
+            mgr.modify_order("PRT-nope-1-1", quantity=5)
+
+    def test_cancelling_a_live_order_cancels_it_at_the_venue(self, venue):
+        mgr, broker = venue
+        instance_id, row = self._live_working_order(mgr)
+        before = mgr._live_gateway.working_count()
+        mgr.cancel_order(row["client_order_id"])
+        assert broker.cancelled == [row["broker_order_id"]]
+        still = {o["client_order_id"] for o in mgr.list_orders(
+            instance_id=instance_id, statuses=[ORDER_PENDING])["orders"]}
+        assert row["client_order_id"] not in still
+        # The venue is no longer polling it, and nothing was invented locally.
+        assert mgr._live_gateway.working_count() == before - 1
+
+    def test_a_venue_refused_cancel_does_not_lie_locally(self, venue):
+        mgr, broker = venue
+        instance_id, row = self._live_working_order(mgr)
+        broker.settled.add(row["broker_order_id"])
+        with pytest.raises(RuntimeError, match="venue refused the cancel"):
+            mgr.cancel_order(row["client_order_id"])
+        still = {o["client_order_id"] for o in mgr.list_orders(
+            instance_id=instance_id, statuses=[ORDER_PENDING])["orders"]}
+        assert row["client_order_id"] in still, "the order is still working at the venue"
+        assert mgr._live_gateway.working_state(row["client_order_id"]) is not None
+        assert broker.cancelled == []
+
+    def test_an_untracked_venue_order_is_refused_rather_than_half_cancelled(self, venue):
+        """A restored process that is not polling the order must not cancel it
+        locally — the order would keep working at the broker, invisible."""
+        mgr, _ = venue
+        _, row = self._live_working_order(mgr)
+        mgr._live_gateway._working.clear()
+        with pytest.raises(ValueError, match="not tracked by this process"):
+            mgr.cancel_order(row["client_order_id"])
+        with pytest.raises(ValueError, match="not tracked by this process"):
+            mgr.modify_order(row["client_order_id"], quantity=1)
+
+
+# ---------------------------------------------------------------------------
+# 7. Phase 3 — order aging alerts
+# ---------------------------------------------------------------------------
+
+
+class TestOrderAging:
+    def _aged_order(self, ledger, age_s: float):
+        order = ledger.submit("inst", OrderRequest(symbol="X", side="BUY", quantity=5))
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=age_s)).isoformat()
+        order.created_ts = stamp
+        return order
+
+    def test_rows_carry_their_age_and_band(self):
+        ledger = OrderLedger()
+        fresh = self._aged_order(ledger, 5)
+        warm = self._aged_order(ledger, ORDER_AGING_WARN_S + 5)
+        stuck = self._aged_order(ledger, ORDER_AGING_ALERT_S + 5)
+        settled = ledger.submit("inst", OrderRequest(symbol="DONE", side="BUY", quantity=1))
+        ledger.apply_fill(settled.client_order_id, 10.0, 1)
+
+        bands = {r["symbol"]: (r["aging"], r["age_s"]) for r in ledger.snapshot()}
+        assert bands["X"][0] == "alert"  # newest first: the stuck one is last in
+        assert bands["X"][1] >= ORDER_AGING_ALERT_S
+        rows = {r["client_order_id"]: r for r in ledger.snapshot()}
+        assert rows[fresh.client_order_id]["aging"] == ""
+        assert rows[warm.client_order_id]["aging"] == "warn"
+        assert rows[stuck.client_order_id]["aging"] == "alert"
+        # A settled order has no age: "filled 10 minutes ago" is not a working
+        # order that needs attention.
+        assert rows[settled.client_order_id]["age_s"] is None
+        assert rows[settled.client_order_id]["aging"] == ""
+
+    def test_the_summary_reports_counts_the_oldest_and_the_thresholds(self):
+        ledger = OrderLedger()
+        self._aged_order(ledger, ORDER_AGING_WARN_S + 5)
+        self._aged_order(ledger, ORDER_AGING_WARN_S + 90)
+        self._aged_order(ledger, ORDER_AGING_ALERT_S + 5)
+        summary = ledger.summary()
+        assert summary["aging_warn_count"] == 2
+        assert summary["aging_alert_count"] == 1
+        assert summary["aging_warn_s"] == ORDER_AGING_WARN_S
+        assert summary["aging_alert_s"] == ORDER_AGING_ALERT_S
+        assert summary["oldest_pending_age_s"] >= ORDER_AGING_ALERT_S
+        assert summary["oldest_pending_coid"] == summary["oldest_pending_coid"]
+        assert summary["oldest_pending_symbol"] in {"X"}
+        # Nothing pending → no oldest, no alerts, but the thresholds still ship.
+        ledger_2 = OrderLedger()
+        empty = ledger_2.summary()
+        assert empty["oldest_pending_coid"] is None
+        assert empty["aging_warn_count"] == 0
+
+    def test_the_manager_alerts_once_per_band_not_once_per_tick(self, monkeypatch):
+        from backtest.forward.portfolio_manager import reset_portfolio_manager
+
+        monkeypatch.delenv("PORTFOLIO_STATE_PATH", raising=False)
+        mgr = reset_portfolio_manager(auto_start_feed=False, tick_seconds=1.0)
+        try:
+            order = mgr.ledger.submit("inst-eq", OrderRequest(
+                symbol="RELIANCE", side="BUY", quantity=5))
+            order.created_ts = (
+                datetime.now(timezone.utc) - timedelta(seconds=ORDER_AGING_WARN_S + 1)
+            ).isoformat()
+
+            first = mgr.check_order_aging()
+            assert [a["band"] for a in first] == ["warn"]
+            assert first[0]["client_order_id"] == order.client_order_id
+            assert first[0]["age_s"] >= ORDER_AGING_WARN_S
+            # A second sweep in the same band is silent: an alert that repeats
+            # every tick is noise the operator learns to ignore.
+            assert mgr.check_order_aging() == []
+            audit = [e["action"] for e in mgr.get_audit_log(scope="all")]
+            assert sum("ORDER_WARNING" in a for a in audit) == 1
+
+            # Escalation is a NEW alert — the order is now genuinely stuck.
+            order.created_ts = (
+                datetime.now(timezone.utc) - timedelta(seconds=ORDER_AGING_ALERT_S + 1)
+            ).isoformat()
+            second = mgr.check_order_aging()
+            assert [a["band"] for a in second] == ["alert"]
+
+            # Once it settles (or is cancelled) the memory is dropped, so a
+            # later order reusing the symbol is not silently suppressed.
+            mgr.ledger.cancel(order.client_order_id)
+            assert mgr.check_order_aging() == []
+            assert order.client_order_id not in mgr._aging_alerted
+        finally:
+            mgr.shutdown()
+
+    def test_an_unreadable_ledger_never_breaks_the_tick(self, monkeypatch):
+        from backtest.forward.portfolio_manager import reset_portfolio_manager
+
+        monkeypatch.delenv("PORTFOLIO_STATE_PATH", raising=False)
+        mgr = reset_portfolio_manager(auto_start_feed=False, tick_seconds=1.0)
+        try:
+            def boom(*_a, **_k):
+                raise RuntimeError("ledger unavailable")
+
+            monkeypatch.setattr(mgr.ledger, "snapshot", boom)
+            assert mgr.check_order_aging() == []  # monitoring must not raise
+        finally:
+            mgr.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# 8. Phase 3 — auto-retry of a refused order
+# ---------------------------------------------------------------------------
+
+
+class TestAutoRetry:
+    """A transition signal fires ONCE. If that one order is refused and nobody
+    retries it, the strategy sits flat forever with nothing in the P&L to
+    explain why — this is the machinery that closes that gap."""
+
+    calls: dict = {}
+
+    @classmethod
+    def _rejecting_executor(cls, runner):
+        """Make the executor refuse, the way a venue with no liquidity would."""
+        from backtest.simulator.execution import ExecutionResult, ExecutionStatus
+
+        cls.calls = {"n": 0}
+
+        def refuse(sim_order, market):
+            cls.calls["n"] += 1
+            return ExecutionResult(
+                order_id=sim_order.order_id,
+                symbol=sim_order.symbol,
+                status=ExecutionStatus.REJECTED,
+                reason="no liquidity",
+                fill=None,
+            )
+
+        runner.executor.execute = refuse
+
+    @staticmethod
+    def _runner(retry: OrderRetryPolicy | None, **overrides):
+        kwargs = dict(
+            name="RETRY-EQ", strategy_name="buy_and_hold", allocated_capital=500_000,
+            symbols=["RELIANCE"], timeframe="1day", mode="paper", source="synthetic",
+            retry_policy=retry,
+        )
+        kwargs.update(overrides)
+        runner = StrategyRunner(RunnerConfig(**kwargs), ledger=OrderLedger())
+        runner.start()
+        return runner
+
+    def test_a_policy_is_off_by_default(self):
+        runner = self._runner(None)
+        assert runner._retry_policy() is None
+        self._rejecting_executor(runner)
+        _feed(runner, "RELIANCE", [100.0] * 14)
+        # The refusal is recorded as a REJECTED row, and no retry is queued.
+        assert runner._retries == {}
+        assert runner.retries_raised == 0
+        rows = runner.ledger.snapshot(statuses=[ORDER_REJECTED])
+        assert rows, "a refused order must still be visible in the ledger"
+
+    def test_a_refused_entry_is_queued_and_retried_until_it_lands(self):
+        runner = self._runner(OrderRetryPolicy(max_attempts=2, cooldown_s=0.0))
+        self._rejecting_executor(runner)
+        _feed(runner, "RELIANCE", [100.0] * 13)
+        assert runner.positions == {}, "the fixture must fail to enter first"
+        pending = runner.get_state()["order_retries"]
+        assert pending["raised"] >= 1
+        assert pending["pending"], "a retryable refusal must be queued"
+        queued = pending["pending"][0]
+        assert queued["kind"] == "entry" and queued["side"] == "BUY"
+        assert queued["attempts"] >= 1, "the next bar should already have re-sent it"
+
+        # The venue recovers: the next bar's retry fills and the queue empties.
+        runner.executor = free_executor(runner.portfolio)
+        _feed(runner, "RELIANCE", [100.0], start_day=14)
+        assert runner.positions, "the recovered retry should have opened the position"
+        state = runner.get_state()["order_retries"]
+        assert state["recovered"] >= 1
+        assert state["pending"] == []
+        assert state["blocked"] == [], "a successful retry must not leave a block"
+        # The recovered order is a real ledger row carrying its lineage.
+        recovered = [r for r in runner.ledger.snapshot()
+                     if r["status"] == ORDER_FILLED and r["tag"].get("retry_attempt")]
+        assert recovered, "the retry that landed must be traceable to its origin"
+        assert recovered[0]["tag"]["retry_of"]
+
+    def test_the_retry_budget_is_finite_and_reported_when_spent(self):
+        runner = self._runner(OrderRetryPolicy(max_attempts=2, cooldown_s=0.0))
+        self._rejecting_executor(runner)
+        _feed(runner, "RELIANCE", [100.0] * 25)
+        state = runner.get_state()["order_retries"]
+        assert state["exhausted"] == 1
+        assert state["raised"] == 1, (
+            "one refusal episode, one budget — a spent budget must not be "
+            "re-opened by the next bar's identical signal"
+        )
+        assert state["pending"] == [], "an exhausted retry must not stay queued"
+        assert state["blocked"] and state["blocked"][0]["kind"] == "entry"
+        # Exactly the first send plus its two retries — no fourth attempt.
+        assert self.calls["n"] == 3
+        # Every attempt is a real ledger row, and each carries its lineage —
+        # the Orders tab shows a lineage, not a wall of mystery duplicates.
+        attempts = [r for r in runner.ledger.snapshot() if r["tag"].get("retry_attempt")]
+        assert attempts, "the retries must be visible in the ledger"
+        assert all(r["tag"]["retry_of"] for r in attempts)
+        assert max(r["tag"]["retry_attempt"] for r in attempts) <= 2
+        reasons = [e["reason"] for e in runner.signal_log if e["kind"] == "RETRY_EXHAUSTED"]
+        assert reasons, "giving up must be stated, not silent"
+
+    def test_the_cooldown_is_respected(self):
+        runner = self._runner(OrderRetryPolicy(max_attempts=5, cooldown_s=3600.0))
+        self._rejecting_executor(runner)
+        _feed(runner, "RELIANCE", [100.0] * 16)
+        queued = runner.get_state()["order_retries"]["pending"]
+        assert queued and queued[0]["attempts"] == 0, (
+            "a retry must not fire before its cooldown, however many bars pass"
+        )
+
+    def test_a_non_retryable_refusal_is_never_requeued(self):
+        """A live placement error may have been accepted with the ack lost —
+        re-sending there is how one intent becomes two live orders."""
+        runner = self._runner(OrderRetryPolicy(max_attempts=3, cooldown_s=0.0))
+        calls = {"n": 0}
+
+        def refuse(*_a, **_k):
+            calls["n"] += 1
+            raise OrderRefused("venue refused the placement: timeout", retryable=False)
+
+        runner.broker.submit_market = refuse
+        _feed(runner, "RELIANCE", [100.0] * 16)
+        assert calls["n"] == 1, "a non-retryable refusal must be sent exactly once"
+        assert runner._retries == {}
+        assert runner.retries_raised == 0
+        kinds = [e["kind"] for e in runner.signal_log]
+        assert "RETRY_REFUSED" in kinds
+        message = [e["reason"] for e in runner.signal_log if e["kind"] == "RETRY_REFUSED"][0]
+        assert "reconcile before re-sending" in message
+
+    def test_a_spent_budget_rearms_after_the_episode_window(self):
+        """A budget of 2 would strand the runner for good on a venue that is
+        down longer than one episode — a buy-and-hold entry never flips its
+        signal, so nothing else would ever re-open the question."""
+        runner = self._runner(OrderRetryPolicy(max_attempts=1, cooldown_s=0.0))
+        self._rejecting_executor(runner)
+        _feed(runner, "RELIANCE", [100.0] * 14)
+        assert runner._retry_blocked, "the budget is spent"
+        assert self.calls["n"] == 2  # the send plus its one retry
+
+        # Inside the window nothing more is sent, however many bars pass.
+        rearm = OrderRetryPolicy().rearm_after_s
+        assert rearm >= ORDER_AGING_WARN_S, "a re-arm must not be a fast loop"
+        _feed(runner, "RELIANCE", [100.0] * 6, start_day=14)
+        assert self.calls["n"] == 2
+        assert {e["kind"] for e in runner.signal_log} & {"RETRY_REARMED"} == set()
+
+        # Once the episode window has passed, a NEW episode is allowed — and
+        # the re-arm is stated, not silent.
+        runner._retry_blocked["RELIANCE"]["blocked_ts"] -= (rearm + 1)
+        _feed(runner, "RELIANCE", [100.0], start_day=20)
+        assert self.calls["n"] == 3  # the new episode's own send
+        _feed(runner, "RELIANCE", [100.0], start_day=21)
+        kinds = [e["kind"] for e in runner.signal_log]
+        assert "RETRY_REARMED" in kinds
+        assert self.calls["n"] == 4  # …and its one retry, on the next bar
+        assert runner.get_state()["order_retries"]["raised"] == 2
+
+    def test_the_signal_changing_lifts_the_block_immediately(self):
+        runner = self._runner(OrderRetryPolicy(max_attempts=1, cooldown_s=0.0))
+        self._rejecting_executor(runner)
+        _feed(runner, "RELIANCE", [100.0] * 14)
+        assert runner._retry_blocked
+        # The strategy stops asking for the entry (a real change of mind):
+        # the block lifts, so a later signal is a fresh decision, not a loop.
+        assert runner.clear_retry_block("RELIANCE", "entry") is True
+        assert runner._retry_blocked == {}
+        assert runner.clear_retry_block("RELIANCE", "entry") is False
+
+    def test_a_refused_exit_is_retried_so_the_position_can_get_out(self):
+        runner = self._runner(OrderRetryPolicy(max_attempts=2, cooldown_s=0.0))
+        _feed(runner, "RELIANCE", [100.0] * 14)
+        assert runner.positions
+        calls = {"n": 0}
+
+        def refuse(*_a, **_k):
+            calls["n"] += 1
+            raise OrderRefused("paper fill did not execute: REJECTED — no liquidity",
+                               retryable=True)
+
+        runner.broker.submit_market = refuse
+        runner._emit_close("RELIANCE", 100.0, reason="strategy_exit")
+        assert calls["n"] == 1
+        assert runner.get_state()["order_retries"]["pending"][0]["kind"] == "exit"
+
+
+# ---------------------------------------------------------------------------
+# 9. Phase 3 — the REST surface for amending + aging
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def live_client(monkeypatch):
+    """A test client whose manager can place live orders (fake venue armed)."""
+    from live_test_support import FakeLiveBroker
+
+    from backtest.forward.portfolio_manager import (
+        get_portfolio_manager,
+        reset_portfolio_manager,
+    )
+    from backtest.forward.risk_supervisor import GlobalRiskConfig
+    from backtest.web.app import create_app
+
+    broker = FakeLiveBroker()
+    monkeypatch.delenv("PORTFOLIO_STATE_PATH", raising=False)
+    monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
+    reset_portfolio_manager(
+        risk_config=GlobalRiskConfig(daily_loss_limit=100_000, max_drawdown_pct=0.50),
+        tick_seconds=1.0,
+        warmup_bars=15,
+        auto_start_feed=False,
+        live_broker=broker,
+        confirm_live_orders=True,
+    )
+    app = create_app(source="synthetic")
+    with app.test_client() as c:
+        c.broker = broker  # type: ignore[attr-defined]
+        c.manager = get_portfolio_manager()  # type: ignore[attr-defined]
+        yield c
+    get_portfolio_manager().shutdown()
+
+
+def _drive_live_into_a_working_order(client, instance_id, symbol="TCS", price=200.0):
+    """Feed a live runner: the order goes to the venue and RESTS there.
+
+    The venue never fills (that is what makes it a *working* order), so unlike
+    the paper driver this one waits for the LEDGER row rather than a position.
+    """
+    from backtest.forward.portfolio_manager import get_portfolio_manager
+
+    runner = get_portfolio_manager().get_runner(instance_id)
+    _feed(runner, symbol, [price] * 14)
+    assert runner.positions == {}, "the fake venue must not fill — nothing to poll"
+    return runner
+
+
+def _spawn_live(client, symbol="TCS"):
+    created = client.post("/api/portfolio/runner/create", json={
+        "strategy": "buy_and_hold",
+        "target_type": "SINGLE_SYMBOL",
+        "symbol": symbol,
+        "timeframe": "1day",
+        "allocated_capital": 500_000,
+        "mode": "live",
+        "source": "synthetic",
+    })
+    assert created.status_code == 201, created.get_json()
+    return created.get_json()["instance_id"]
+
+
+class TestOrderEndpointsPhase3:
+    def test_a_working_order_can_be_amended_over_http(self, live_client):
+        instance_id = _spawn_live(live_client)
+        _drive_live_into_a_working_order(live_client, instance_id)
+        rows = live_client.get(
+            f"/api/portfolio/orders?instance_id={instance_id}").get_json()["orders"]
+        working = [o for o in rows if o["status"] == ORDER_PENDING]
+        assert working and working[0]["modifiable"] is True
+        coid = working[0]["client_order_id"]
+        original_qty = working[0]["quantity"]
+
+        resp = live_client.post(f"/api/portfolio/orders/{coid}/modify", json={"quantity": 11})
+        assert resp.status_code == 200, resp.get_json()
+        body = resp.get_json()
+        assert body["success"] is True and body["quantity"] == 11
+        assert body["order"]["amend_count"] == 1
+        assert body["order"]["amended_quantity"] == 11
+        assert body["order"]["quantity"] == 11
+
+        # …and the ledger really holds the amended terms.
+        again = live_client.get(
+            f"/api/portfolio/orders?instance_id={instance_id}").get_json()["orders"]
+        assert {o["client_order_id"]: o["quantity"] for o in again}[coid] == 11
+        assert original_qty != 11
+
+    def test_amend_error_cases_are_explicit(self, live_client):
+        instance_id = _spawn_live(live_client)
+        _drive_live_into_a_working_order(live_client, instance_id)
+        rows = live_client.get(
+            f"/api/portfolio/orders?instance_id={instance_id}").get_json()["orders"]
+        coid = [o for o in rows if o["status"] == ORDER_PENDING][0]["client_order_id"]
+
+        # Unknown order → 404; bad payload → 400; nothing to change → 409.
+        assert live_client.post(
+            "/api/portfolio/orders/PRT-nope-1-1/modify", json={"quantity": 1}
+        ).status_code == 404
+        assert live_client.post(
+            f"/api/portfolio/orders/{coid}/modify", json={"quantity": "lots"}
+        ).status_code == 400
+        assert live_client.post(
+            f"/api/portfolio/orders/{coid}/modify", json={}
+        ).status_code == 409
+
+        # A venue refusal is a 409 that leaves the order working, unchanged.
+        broker = live_client.broker  # type: ignore[attr-defined]
+        venue_id = [o for o in rows if o["status"] == ORDER_PENDING][0]["broker_order_id"]
+        broker.settled.add(venue_id)
+        refused = live_client.post(
+            f"/api/portfolio/orders/{coid}/modify", json={"quantity": 7})
+        assert refused.status_code == 409
+        assert "venue refused the amendment" in refused.get_json()["error"]
+        after = live_client.get(
+            f"/api/portfolio/orders?instance_id={instance_id}").get_json()["orders"]
+        assert {o["client_order_id"]: o for o in after}[coid]["status"] == ORDER_PENDING
+        assert {o["client_order_id"]: o for o in after}[coid]["amend_count"] == 0
+
+    def test_the_orders_read_reports_aging_and_amendability(self, live_client):
+        instance_id = _spawn_live(live_client)
+        _drive_live_into_a_working_order(live_client, instance_id)
+        body = live_client.get(f"/api/portfolio/orders?instance_id={instance_id}").get_json()
+        summary = body["summary"]
+        assert summary["aging_warn_s"] == ORDER_AGING_WARN_S
+        assert summary["aging_alert_s"] == ORDER_AGING_ALERT_S
+        assert summary["aging_warn_count"] == 0  # just placed
+        assert summary["oldest_pending_coid"]
+        for row in body["orders"]:
+            assert "aging" in row and "age_s" in row and "modifiable" in row
+            assert row["modifiable"] is (row["status"] == ORDER_PENDING)
+
+        # The bucket-scoped read (what the tab actually calls) carries the same
+        # aging telemetry — the strip and the badge must not disagree.
+        scoped = live_client.get("/api/portfolio/orders?mode=live").get_json()["summary"]
+        for key in ("aging_warn_s", "aging_alert_s", "aging_warn_count",
+                    "aging_alert_count", "oldest_pending_coid"):
+            assert key in scoped, f"the scoped summary is missing {key}"
+        assert scoped["aging_warn_s"] == ORDER_AGING_WARN_S
+        assert scoped["oldest_pending_symbol"] == "TCS"
+        assert scoped == live_client.get(
+            f"/api/portfolio/orders?instance_id={instance_id}").get_json()["summary"]

@@ -915,6 +915,41 @@ def cancel_order(client_order_id: str) -> Tuple[Response, int]:
     return jsonify({"success": True, "order": row}), 200
 
 
+@portfolio_bp.post("/api/portfolio/orders/<client_order_id>/modify")
+def modify_order(client_order_id: str) -> Tuple[Response, int]:
+    """Amend a working order (Phase 3): new quantity and/or limit price.
+
+    Only a live working order can be amended — a paper order fills or rejects
+    in the same call, so 409 with that explanation is the honest answer rather
+    than a 200 on an amendment that applies to nothing.
+    """
+    payload = request.get_json(silent=True) or {}
+    raw_qty = payload.get("quantity", payload.get("qty"))
+    raw_price = payload.get("limit_price", payload.get("price"))
+    quantity = None
+    limit_price = None
+    try:
+        if raw_qty is not None:
+            quantity = float(raw_qty)
+        if raw_price is not None:
+            limit_price = float(raw_price)
+    except (TypeError, ValueError):
+        return _error("quantity/limit_price must be numbers")
+    try:
+        result = _manager().modify_order(
+            client_order_id, quantity=quantity, limit_price=limit_price
+        )
+    except KeyError as exc:
+        return _error(str(exc), 404)
+    except (ValueError, RuntimeError) as exc:
+        return _error(str(exc), 409)
+    log.info(
+        "order %s amended (qty=%s limit=%s)",
+        client_order_id, result.get("quantity"), result.get("limit_price"),
+    )
+    return jsonify({"success": True, **result}), 200
+
+
 # ---------------------------------------------------------------------------
 # SSE stream
 # ---------------------------------------------------------------------------

@@ -140,7 +140,41 @@ POSITION_RULE_FIELDS = (RULE_STOP_LOSS, RULE_TARGET)
 
 MAX_LEDGER_ORDERS = 100_000  # ring-fence memory in long runs
 
+#: Order-aging thresholds (Phase 3, "order aging alerts"). A working order is
+#: normal for a few seconds and a problem after a minute: on a 1-minute
+#: validator fleet an order that is still PENDING after a bar has been seen
+#: means the venue is not answering, not that it is about to fill. WARN is
+#: "look at it", ALERT is "this is stuck — cancel or reconcile".
+ORDER_AGING_WARN_S = 60.0
+ORDER_AGING_ALERT_S = 300.0
+
 _ORDER_SEQ = itertools.count(1)
+
+
+class OrderRefused(RuntimeError):
+    """A send that did not become a working order (Phase 3).
+
+    Carries the pieces the retry path and the Orders tab need to act on a
+    failure instead of just logging it: which ledger row died, why, and
+    whether re-sending is SAFE.
+
+    ``retryable`` is a statement about the venue's state, not about the
+    error's severity: paper failures are retryable (nothing left the process),
+    while a live placement failure is not — a venue error can mean the order
+    was accepted and the acknowledgment was lost, and re-sending into that
+    ambiguity is how one intent becomes two live orders.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        client_order_id: Optional[str] = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.client_order_id = client_order_id
+        self.retryable = bool(retryable)
+        self.reason = str(message)
 
 
 @dataclass
@@ -191,6 +225,23 @@ class Order:
     #: Last status transition timestamp (fill/cancel/reject) — lets the UI
     #: show "pending for 42s" instead of a lone creation time.
     updated_ts: Optional[str] = None
+    # -- Phase 3: amending a working order --------------------------------
+    #: How many times the order was amended while working. An amended order
+    #: is still the SAME order — cancel and replace would lose the venue id
+    #: and the audit trail of what was originally asked for.
+    amend_count: int = 0
+    #: The amended quantity/limit the venue now holds (None = as originally
+    #: sent). ``requested_price`` deliberately stays the price the runner
+    #: DECIDED on, so slippage keeps measuring the fill against the original
+    #: instruction and never shifts under the operator's feet.
+    amended_quantity: Optional[float] = None
+    amended_limit_price: Optional[float] = None
+    amended_ts: Optional[str] = None
+    #: Retry lineage (Phase 3 auto-retry): the coid of the attempt this order
+    #: re-placed, and which attempt it is. Kept in ``tag`` as well so it
+    #: survives the ledger's row → dict conversion without a schema change.
+    retry_of: Optional[str] = None
+    retry_attempt: int = 0
 
 
 @dataclass
@@ -298,6 +349,55 @@ class OrderLedger:
             order.reject_reason = str(reason or "rejected")
             order.updated_ts = datetime.now(timezone.utc).isoformat()
             return True
+
+    def amend(
+        self,
+        client_order_id: str,
+        quantity: Optional[float] = None,
+        limit_price: Optional[float] = None,
+    ) -> Order:
+        """Amend a PENDING order in place; returns the updated order.
+
+        An amend is not a cancel-and-replace: the venue order id, the client
+        order id and the record of what was originally asked for all survive,
+        so "what did I send, and what did I change it to?" stays answerable.
+
+        ``requested_price`` is deliberately NOT rewritten — slippage keeps
+        measuring the fill against the price the runner decided on. If the
+        operator's amend is what should be measured, that is a different
+        question ("did my amendment help?"), not this one.
+
+        Raises ``KeyError`` for an unknown id and ``ValueError`` when the order
+        is already terminal (a filled order is history; amending it would be a
+        lie about what happened).
+        """
+        with self._lock:
+            order = self._orders.get(client_order_id)
+            if order is None:
+                raise KeyError(f"unknown order: {client_order_id}")
+            if order.status != ORDER_PENDING:
+                raise ValueError(
+                    f"order {client_order_id} is {order.status} — only a working "
+                    "order can be amended"
+                )
+            if quantity is None and limit_price is None:
+                raise ValueError("amend needs a new quantity and/or limit price")
+            if quantity is not None:
+                new_qty = float(quantity)
+                if new_qty <= 0:
+                    raise ValueError(f"amended quantity must be positive, got {new_qty!r}")
+                order.quantity = new_qty
+                order.amended_quantity = new_qty
+            if limit_price is not None:
+                new_price = float(limit_price)
+                if new_price <= 0:
+                    raise ValueError(f"amended limit price must be positive, got {new_price!r}")
+                order.limit_price = new_price
+                order.amended_limit_price = new_price
+            order.amend_count += 1
+            order.amended_ts = datetime.now(timezone.utc).isoformat()
+            order.updated_ts = order.amended_ts
+            return order
 
     def apply_fill(
         self,
@@ -438,7 +538,41 @@ class OrderLedger:
             "tag": dict(order.tag),
             "broker_order_id": order.broker_order_id,
             "cancellable": order.status == ORDER_PENDING,
+            # Phase 3: only a LIVE working order can be amended — a paper order
+            # fills or rejects synchronously, so there is nothing resting at a
+            # venue to amend. The server decides this, not the UI.
+            "modifiable": order.status == ORDER_PENDING and order.broker_order_id is not None,
+            "amend_count": order.amend_count,
+            "amended_quantity": order.amended_quantity,
+            "amended_limit_price": order.amended_limit_price,
+            "amended_ts": order.amended_ts,
+            "retry_of": order.retry_of,
+            "retry_attempt": order.retry_attempt,
         }
+
+    @staticmethod
+    def aging_band(age_s: float, pending: bool = True) -> str:
+        """``"warn"`` / ``"alert"`` / ``""`` for a working order's age."""
+        if not pending:
+            return ""
+        if age_s >= ORDER_AGING_ALERT_S:
+            return "alert"
+        if age_s >= ORDER_AGING_WARN_S:
+            return "warn"
+        return ""
+
+    def row_with_age(self, order: Order) -> Dict[str, Any]:
+        """One ledger row plus its derived age band (the Orders tab's row).
+
+        Computed here rather than in the browser so the row the page renders
+        and the row the manager alerts on can never disagree about whether an
+        order is stuck.
+        """
+        row = self.order_to_dict(order)
+        age = self.age_seconds(order.created_ts) if order.status == ORDER_PENDING else 0.0
+        row["age_s"] = round(age, 1) if order.status == ORDER_PENDING else None
+        row["aging"] = self.aging_band(age, order.status == ORDER_PENDING)
+        return row
 
     def snapshot(
         self,
@@ -460,7 +594,7 @@ class OrderLedger:
             ]
             orders = [o for o in orders if not wanted or o.status.upper() in wanted]
             orders.sort(key=lambda o: (o.created_ts, o.client_order_id), reverse=True)
-            rows = [self.order_to_dict(o) for o in orders[: max(0, int(limit))]]
+            rows = [self.row_with_age(o) for o in orders[: max(0, int(limit))]]
         return rows
 
     def summary(self, instance_id: Optional[str] = None) -> Dict[str, Any]:
@@ -480,11 +614,14 @@ class OrderLedger:
                 counts[order.status] = counts.get(order.status, 0) + 1
             slips = [o.slippage for o in orders if o.slippage is not None]
             slip_pcts = [o.slippage_pct for o in orders if o.slippage_pct is not None]
-            pending_age = [
-                self.age_seconds(o.created_ts)
-                for o in orders
-                if o.status == ORDER_PENDING
-            ]
+            pending = [o for o in orders if o.status == ORDER_PENDING]
+            pending_age = [self.age_seconds(o.created_ts) for o in pending]
+            oldest = max(pending, key=lambda o: self.age_seconds(o.created_ts), default=None)
+            bands = {coid: 0 for coid in ("warn", "alert")}
+            for order in pending:
+                band = self.aging_band(self.age_seconds(order.created_ts))
+                if band:
+                    bands[band] += 1
         return {
             "total": len(orders),
             "pending": counts.get(ORDER_PENDING, 0),
@@ -498,6 +635,15 @@ class OrderLedger:
             "worst_slippage": round(max(slips), 6) if slips else 0.0,
             "slippage_samples": len(slips),
             "oldest_pending_age_s": round(max(pending_age), 1) if pending_age else 0.0,
+            # Order aging (Phase 3): the thresholds travel with the data so the
+            # strip, the rows and the manager's alerts share one definition of
+            # "stuck" instead of three approximations of it.
+            "aging_warn_s": ORDER_AGING_WARN_S,
+            "aging_alert_s": ORDER_AGING_ALERT_S,
+            "aging_warn_count": bands["warn"],
+            "aging_alert_count": bands["alert"],
+            "oldest_pending_coid": oldest.client_order_id if oldest is not None else None,
+            "oldest_pending_symbol": oldest.symbol if oldest is not None else None,
         }
 
     @staticmethod
@@ -590,10 +736,30 @@ class PaperBroker:
             strategy_name=runner.config.strategy_name,
             client_order_id=order.client_order_id,
         )
-        sim_order.validate()
-        sim_order.submit()
+        # Everything from here on can refuse: a bad ticket, a frozen book, an
+        # executor that will not fill. The ledger row was already written, so
+        # each failure mode MUST terminate it — an order that never reached the
+        # venue and never got refused shows up as "still working" forever.
+        try:
+            sim_order.validate()
+            sim_order.submit()
+            result = runner.executor.execute(
+                sim_order, {"bid": price, "ask": price, "last": price}
+            )
+        except Exception as exc:  # noqa: BLE001 — every refusal is a refusal
+            reason = (
+                f"paper order refused before the venue: "
+                f"{exc.__class__.__name__}: {exc}"
+            )
+            self.ledger.reject(order.client_order_id, reason)
+            raise OrderRefused(
+                reason,
+                client_order_id=order.client_order_id,
+                # Nothing left this process, and the ticket is re-derivable
+                # from the runner's own state — a bounded retry is safe.
+                retryable=True,
+            ) from exc
 
-        result = runner.executor.execute(sim_order, {"bid": price, "ask": price, "last": price})
         fill = result.fill
         if fill is None:
             # Terminal, not working: the venue (here, the executor) refused.
@@ -601,7 +767,7 @@ class PaperBroker:
             # forever, hiding the failure that the operator needs to retry.
             reason = f"paper fill did not execute: {result.status} — {result.reason}"
             self.ledger.reject(order.client_order_id, reason)
-            raise RuntimeError(reason)
+            raise OrderRefused(reason, client_order_id=order.client_order_id, retryable=True)
         runner.portfolio.add_order(sim_order)
 
         return self.ledger.apply_fill(
@@ -637,6 +803,46 @@ OPTION_MTM_LOG_EVERY = 5
 
 
 @dataclass
+class OrderRetryPolicy:
+    """Auto-retry for an order the venue refused (Phase 3) — OFF by default.
+
+    Why this exists: a strategy's signal is *transition-based* (it fires on
+    ``0→1``, not on every bar). If that one order is refused, the position
+    never opens even though the reason for opening has not changed — the
+    runner just sits flat, and nothing in the P&L explains why. A bounded
+    retry is what turns "the strategy decided" into "the book followed".
+
+    Why it is bounded and off by default: a retry loop that never gives up is
+    a way to discover a risk limit N times. Every attempt is a fresh order
+    with a fresh client order id, all audited, and the lineage (``retry_of``,
+    ``retry_attempt``) rides on the order's tag so the Orders tab shows what
+    happened instead of N mysterious duplicates.
+
+    ``max_attempts`` counts retries AFTER the first failure: 2 means up to
+    three sends in total. ``cooldown_s`` is a floor between attempts (bars
+    arrive at whatever cadence the feed runs at, so a retry is only pumped
+    when the cooldown has genuinely elapsed).
+    """
+
+    max_attempts: int = 0
+    cooldown_s: float = 5.0
+    #: How long a SPENT budget stays spent before a new episode may start.
+    #: Without this, a venue outage that outlasts one episode strands the
+    #: runner flat forever whenever the strategy's signal never flips (a
+    #: buy-and-hold entry never "changes its mind"). With it, the runner keeps
+    #: trying at a slow, bounded, audited cadence instead of either giving up
+    #: permanently or hammering the venue.
+    rearm_after_s: float = 300.0
+    #: Which order kinds may be retried. An exit is a de-risking action, and a
+    #: refused exit is the one case where retrying matters most; entries are
+    #: included for the transition-signal reason above.
+    kinds: tuple = ("entry", "exit")
+
+    def allows(self, kind: str) -> bool:
+        return self.max_attempts > 0 and str(kind) in self.kinds
+
+
+@dataclass
 class RunnerConfig:
     """Spawn configuration for a runner (validated on construction)."""
 
@@ -668,6 +874,8 @@ class RunnerConfig:
     playbook_id: Optional[str] = None
     playbook_version: Optional[int] = None
     playbook_snapshot: Optional[Dict[str, Any]] = None
+    # Phase 3: bounded auto-retry for a refused order (None/0 attempts = off).
+    retry_policy: Optional[OrderRetryPolicy] = None
 
     def __post_init__(self) -> None:
         self.name = str(self.name).strip()
@@ -830,6 +1038,23 @@ class StrategyRunner:
         # bridge owns the per-bar mark that arms them; ``position_rules_view``
         # merges both so the dashboard sees one shape.
         self.position_rules: Dict[str, Dict[str, Optional[float]]] = {}
+
+        # -- order auto-retry (Phase 3) --------------------------------------
+        # ``{symbol: {side, qty, kind, attempts, last_ts, retry_of, reason}}``
+        # — the most recent refused intent per symbol. One pending retry per
+        # symbol on purpose: the strategy's LATEST intent is the one worth
+        # re-sending, and a queue of stale ones would trade a view the
+        # strategy has already left.
+        self._retries: Dict[str, Dict[str, Any]] = {}
+        #: ``{symbol: {"side", "kind"}}`` — intents whose retry budget was spent.
+        #: A transition signal keeps firing while its condition holds, so
+        #: without this the very next bar would open a fresh budget and the
+        #: "bounded" policy would retry forever. Cleared as soon as the
+        #: strategy stops asking for that action (a genuinely new decision).
+        self._retry_blocked: Dict[str, Dict[str, Any]] = {}
+        self.retries_raised: int = 0
+        self.retries_recovered: int = 0
+        self.retries_exhausted: int = 0
 
         self._lock = threading.RLock()
         self.ledger.register_handler(self.instance_id, self.on_fill)
@@ -1507,6 +1732,10 @@ class StrategyRunner:
                 # asked for can never be immediately undone by a same-bar
                 # re-entry the strategy was about to make anyway.
                 self._check_position_rules(symbol, price)
+                # Phase 3: a refused order gets its next attempt here, on the
+                # bar clock — after the strategy and the levels, so a retry can
+                # never jump ahead of a decision made on the same bar.
+                self._pump_retries(symbol, price, ts)
                 # Pool mode defers the basket scan to :meth:`on_tick_end`
                 # (once per tick instead of once per symbol event — O(n) vs O(n^2)).
 
@@ -1776,6 +2005,14 @@ class StrategyRunner:
     ) -> None:
         held = symbol in self.positions
 
+        # A spent retry budget lifts as soon as the strategy stops asking for
+        # that action: the signal becoming a NEW decision (flat again, or the
+        # other way) is what makes another attempt legitimate.
+        if signal != 1:
+            self.clear_retry_block(symbol, "entry")
+        if signal == 1:
+            self.clear_retry_block(symbol, "exit")
+
         if signal == 1 and not held:
             if self.status != STATUS_RUNNING:
                 self._log_signal(symbol, "BLOCKED", 1, price, f"entry blocked while {self.status}")
@@ -1815,6 +2052,209 @@ class StrategyRunner:
             qty = float(int(qty))
         return round(qty, 6)
 
+    # -- auto-retry (Phase 3) ----------------------------------------------
+
+    def _retry_policy(self) -> Optional[OrderRetryPolicy]:
+        policy = self.config.retry_policy
+        return policy if policy is not None and policy.max_attempts > 0 else None
+
+    def clear_retry_block(self, symbol: str, kind: Optional[str] = None) -> bool:
+        """Lift a spent-budget block (the strategy changed its mind).
+
+        Called automatically when the signal stops asking for the blocked
+        action; exposed so an operator can also clear it deliberately.
+        """
+        blocked = self._retry_blocked.get(symbol)
+        if blocked is None or (kind is not None and blocked["kind"] != kind):
+            return False
+        self._retry_blocked.pop(symbol, None)
+        self._log_signal(
+            symbol, "RETRY_REARMED", 0, self.last_price.get(symbol),
+            f"{blocked['kind']} retry budget re-armed (the signal changed)",
+        )
+        return True
+
+    def _retry_owns(self, symbol: str, kind: str) -> bool:
+        """True when an intent is already spoken for — queued OR spent.
+
+        Queued: the strategy's own re-signal would race the pump and send the
+        order twice. Spent: the budget is gone, so a fresh send on the next bar
+        is the unbounded loop ``max_attempts`` exists to prevent.
+        """
+        pending = self._retries.get(symbol)
+        if pending is not None and pending["kind"] == kind:
+            return True
+        blocked = self._retry_blocked.get(symbol)
+        if blocked is not None and blocked["kind"] == kind:
+            policy = self._retry_policy()
+            rearm = float(policy.rearm_after_s) if policy is not None else float("inf")
+            if time.time() - float(blocked.get("blocked_ts", 0.0)) < rearm:
+                return True
+            # The episode has expired: a new one may start (fresh budget),
+            # which is a retry at a bounded RATE rather than no retry at all.
+            self._retry_blocked.pop(symbol, None)
+            self._log_signal(
+                symbol, "RETRY_REARMED", 0, self.last_price.get(symbol),
+                f"{blocked['kind']} retry budget re-armed after "
+                f"{rearm:g}s — starting a new {policy.max_attempts}-attempt episode",
+            )
+        return False
+
+    def _queue_retry(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        kind: str,
+        exc: Exception,
+        now_ts: Optional[float] = None,
+        bar_ts: Optional[str] = None,
+    ) -> bool:
+        """Remember a refused order so a later bar can re-send it.
+
+        Only refusals that are SAFE to re-send are queued (see
+        :class:`OrderRefused`): a paper failure leaves nothing at a venue,
+        while a live placement error may have been accepted with the
+        acknowledgment lost — re-sending there is how one intent becomes two
+        live orders, so it is refused with an explicit reason instead.
+        """
+        policy = self._retry_policy()
+        if policy is None or not policy.allows(kind):
+            return False
+        retryable = getattr(exc, "retryable", False)
+        coid = getattr(exc, "client_order_id", None)
+        blocked = self._retry_blocked.get(symbol)
+        if blocked is not None and blocked["side"] == side and blocked["kind"] == kind:
+            # This intent already spent its budget. Re-arming on the next bar
+            # would make max_attempts meaningless — the signal stays on until
+            # the position exists, which is exactly what is not happening.
+            return False
+        existing = self._retries.get(symbol)
+        if existing is not None and existing["side"] == side and existing["kind"] == kind:
+            # The strategy re-signalled the same intent while its retry is
+            # still in flight (a transition signal keeps firing while flat).
+            # That is NOT a new failure: refreshing the entry must keep the
+            # attempt count and the cooldown anchor, or the budget resets every
+            # bar and an infinite retry loop hides inside a bounded policy.
+            existing["qty"] = float(qty)
+            existing["reason"] = str(exc)
+            return False
+        if not retryable:
+            # Not just "don't retry" — don't let the next bar's identical
+            # signal quietly do the re-send this refused. The block lifts when
+            # the strategy's ask changes, so a human can also reconcile and
+            # let the signal fire again.
+            self._retry_blocked[symbol] = {
+                "side": side, "kind": kind, "reason": str(exc),
+                "needs_reconcile": True, "blocked_ts": time.time(),
+            }
+            self._log_signal(
+                symbol, "RETRY_REFUSED", 0, self.last_price.get(symbol),
+                f"{kind} refused and NOT retried ({exc}) — the venue may still "
+                "hold the order; reconcile before re-sending",
+            )
+            return False
+        self._retries[symbol] = {
+            "side": side,
+            "qty": float(qty),
+            "kind": kind,
+            "attempts": 0,
+            "cooldown_s": float(policy.cooldown_s),
+            "last_ts": float(now_ts if now_ts is not None else time.time()),
+            "retry_of": coid,
+            "reason": str(exc),
+            # The bar this intent was refused ON. One attempt per bar even at
+            # cooldown 0, so a retry can never fire inside the same bar that
+            # produced the signal it is retrying.
+            "bar_ts": bar_ts,
+        }
+        self.retries_raised += 1
+        self._log_signal(
+            symbol, "RETRY_QUEUED", 1 if side == SIDE_BUY else 0,
+            self.last_price.get(symbol),
+            f"{kind} refused ({exc}) — will retry up to "
+            f"{policy.max_attempts}x, first after {policy.cooldown_s:g}s",
+        )
+        return True
+
+    def _pump_retries(self, symbol: str, price: float, ts: str) -> None:
+        """Re-send a queued retry once its cooldown has elapsed.
+
+        Called per bar (from the same place the strategy gets its say), so a
+        retry rides the market clock rather than a wall-clock timer — the two
+        only agree when the feed runs in real time.
+        """
+        policy = self._retry_policy()
+        pending = self._retries.get(symbol)
+        if policy is None or pending is None:
+            return
+        if pending.get("bar_ts") == ts:
+            return  # this bar already had its attempt
+        now = time.time()
+        if now - float(pending["last_ts"]) < float(pending["cooldown_s"]):
+            return
+        pending["bar_ts"] = ts
+
+        attempt = int(pending["attempts"]) + 1
+        if attempt > policy.max_attempts:
+            self._retries.pop(symbol, None)
+            self._retry_blocked[symbol] = {
+                "side": pending["side"], "kind": pending["kind"],
+                "reason": pending["reason"], "blocked_ts": time.time(),
+            }
+            self.retries_exhausted += 1
+            self._log_signal(
+                symbol, "RETRY_EXHAUSTED", 1 if pending["side"] == SIDE_BUY else 0, price,
+                f"{pending['kind']} still refused after {policy.max_attempts} "
+                f"retries (last: {pending['reason']}) — giving up; the book "
+                "stays as it is until something changes",
+            )
+            return
+
+        pending["attempts"] = attempt
+        pending["last_ts"] = now
+        tag = {
+            "runner": self.config.name,
+            "kind": pending["kind"],
+            "retry_attempt": attempt,
+            "retry_of": pending["retry_of"],
+            "retry_reason": pending["reason"],
+        }
+        try:
+            fill = self.broker.submit_market(
+                self.instance_id, symbol, pending["side"], pending["qty"], price, ts=ts, tag=tag
+            )
+        except Exception as exc:  # noqa: BLE001 — the next bar tries again
+            pending["reason"] = str(exc)
+            if not getattr(exc, "retryable", False):
+                # The situation stopped being retryable (e.g. cash ran out,
+                # or the venue started refusing live). Stop, and say why —
+                # a retry that cannot succeed must not burn the budget.
+                self._retries.pop(symbol, None)
+                self._retry_blocked[symbol] = {
+                    "side": pending["side"], "kind": pending["kind"],
+                    "reason": str(exc), "blocked_ts": time.time(),
+                }
+                self.retries_exhausted += 1
+                self._log_signal(
+                    symbol, "RETRY_EXHAUSTED", 1 if pending["side"] == SIDE_BUY else 0, price,
+                    f"retry refused as non-retryable ({exc}) — stopping",
+                )
+            return
+
+        self._retries.pop(symbol, None)
+        self._retry_blocked.pop(symbol, None)
+        self.retries_recovered += 1
+        placed = isinstance(fill, FillEvent)
+        self._log_signal(
+            symbol,
+            "ENTRY" if pending["kind"] == "entry" else "EXIT",
+            1 if pending["side"] == SIDE_BUY else 0,
+            price if not placed else fill.price,
+            f"RETRY {attempt}/{policy.max_attempts} of {pending['kind']} accepted"
+            + (f" @ {fill.price:.2f}" if placed else " (placed at the venue)"),
+        )
+
     def _emit_entry(
         self,
         symbol: str,
@@ -1823,6 +2263,10 @@ class StrategyRunner:
         side: str = SIDE_BUY,
         score: Optional[float] = None,
     ) -> None:
+        if self._retry_owns(symbol, "entry"):
+            # A retry for this exact intent is already queued; sending again
+            # here would duplicate the order the pump is about to re-send.
+            return
         qty = self._position_size(price)
         if qty <= 0:
             self._log_signal(
@@ -1842,6 +2286,7 @@ class StrategyRunner:
         except Exception as exc:  # noqa: BLE001
             self.error = str(exc)
             logger.exception("Entry order failed for %s: %s", symbol, exc)
+            self._queue_retry(symbol, side, qty, "entry", exc, bar_ts=ts)
             return
         score_part = f" | pool rank score {score:+.4f}" if score is not None else ""
         reason = f"BUY signal{score_part}"
@@ -1862,6 +2307,12 @@ class StrategyRunner:
         pos = self.positions.get(symbol)
         if pos is None:
             return
+        if self._retry_owns(symbol, "exit") and reason not in (
+            "manual_close", "manual_stop_loss", "manual_target",
+        ):
+            # The queued retry owns the exit. A manual close is an explicit
+            # operator instruction and always gets its own attempt.
+            return
         try:
             fill = self.broker.submit_market(
                 self.instance_id,
@@ -1875,6 +2326,7 @@ class StrategyRunner:
         except Exception as exc:  # noqa: BLE001
             self.error = str(exc)
             logger.exception("Exit order failed for %s: %s", symbol, exc)
+            self._queue_retry(symbol, SIDE_SELL, pos["qty"], "exit", exc, bar_ts=ts)
             return
         if not isinstance(fill, FillEvent):
             self._log_signal(
@@ -2137,6 +2589,30 @@ class StrategyRunner:
                 # positions table can render both kinds.
                 "positions_detail": self.positions_detail(),
                 "position_rules": self.position_rules_view(),
+                # Phase 3: refused orders waiting for their next attempt. The
+                # dashboard shows this so "the strategy went quiet" and "the
+                # venue keeps saying no" are distinguishable at a glance.
+                "order_retries": {
+                    "pending": [
+                        {
+                            "symbol": sym,
+                            "side": entry["side"],
+                            "quantity": entry["qty"],
+                            "kind": entry["kind"],
+                            "attempts": entry["attempts"],
+                            "retry_of": entry["retry_of"],
+                            "reason": entry["reason"],
+                        }
+                        for sym, entry in sorted(self._retries.items())
+                    ],
+                    "blocked": [
+                        {"symbol": sym, **entry}
+                        for sym, entry in sorted(self._retry_blocked.items())
+                    ],
+                    "raised": self.retries_raised,
+                    "recovered": self.retries_recovered,
+                    "exhausted": self.retries_exhausted,
+                },
             }
 
     def get_detail(self) -> Dict[str, Any]:

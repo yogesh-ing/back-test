@@ -165,6 +165,26 @@ const LOSING_SIDE = order({
     avg_fill_price: 1498.5,
 });
 
+//: A live order resting at a venue — the only thing that can be amended.
+const WORKING_LIVE = order({
+    client_order_id: "PRT-live-1-9",
+    instance_id: "inst-live",
+    symbol: "SBIN",
+    quantity: 50,
+    limit_price: 780.0,
+    status: "PENDING",
+    avg_fill_price: null,
+    slippage: null,
+    slippage_pct: null,
+    filled_qty: 0,
+    cancellable: true,
+    modifiable: true,
+    broker_order_id: "FAKE-7",
+    age_s: 12.0,
+    aging: "",
+    created_ts: "2026-09-23T09:45:00+00:00",
+});
+
 const SUMMARY = {
     total: 4, pending: 1, filled: 2, cancelled: 0, rejected: 1,
     status_counts: { FILLED: 2, PENDING: 1, REJECTED: 1 }, fills: 2,
@@ -188,7 +208,9 @@ function fresh() {
     OT._state.summary = null;
     OT._state.lastFetch = 0;
     OT._state.inFlight = false;
-    OT._state.filters = { status: "", search: "", limit: 100 };
+    OT._state.filters = { status: "", search: "", limit: 100, agingOnly: false };
+    OT._state.amendTarget = null;
+    OT._state.amendBusy = false;
     el("orders-body").innerHTML = "";
     el("orders-summary").innerHTML = "";
     el("orders-tab-badge").hidden = true;
@@ -196,6 +218,11 @@ function fresh() {
     el("orders-search").value = "";
     el("orders-status").value = "";
     el("orders-limit").value = "100";
+    el("orders-aging-only").checked = false;
+    el("order-modify-qty").value = "";
+    el("order-modify-price").value = "";
+    el("order-modify-context").innerHTML = "";
+    el("order-modify-modal").hidden = true;
     el("tab-orders").hidden = true;
     OT.init({ mode: "paper", toast: (message, kind) => toasts.push({ m: message, k: kind }), onChanged: () => changed.push(true) });
 }
@@ -395,6 +422,166 @@ await test("the empty state says which emptiness it is", async () => {
     el("orders-search").value = "NOTHING-MATCHES";
     el("orders-search").fire("input");
     assert.ok(bodyHtml().includes("No orders match the current filter"));
+});
+
+await test("an aging order is badged, banded and its age comes from the server", async () => {
+    fresh();
+    const warm = { ...WORKING_LIVE, age_s: 95.4, aging: "warn" };
+    const stuck = { ...WORKING_LIVE, client_order_id: "PRT-live-1-10", symbol: "ITC",
+                    age_s: 640.0, aging: "alert" };
+    serve([warm, stuck, FILLED]);
+    await OT.refresh(true);
+    const html = bodyHtml();
+
+    // The server's age is what is shown (not a client guess), in the compact
+    // form a table wants: 95s reads as "2m".
+    assert.ok(html.includes(">⏰ 2m<"), html.slice(0, 600));
+    assert.ok(html.includes(">🚨 11m<"), "the alert band gets its own icon");
+    // … and the band drives the row class, so the CSS can colour it.
+    assert.ok(html.includes("order-row order-pending order-row-warn"));
+    assert.ok(html.includes("order-row order-pending order-row-alert"));
+    assert.ok(html.includes("order-aging-warn") && html.includes("order-aging-alert"));
+    // Exactly the two working orders carry a band; a settled order has no
+    // age at all ("filled 10 minutes ago" is not a thing worth a column).
+    assert.equal((html.match(/order-aging-/g) || []).length, 2);
+    const filledRow = html.slice(html.indexOf(">RELIANCE</td>"), html.indexOf(">RELIANCE</td>") + 400);
+    assert.ok(filledRow.includes('<td class="num muted">—</td>'), filledRow);
+});
+
+await test("the aging-only filter is a client filter over loaded rows", async () => {
+    fresh();
+    serve([{ ...WORKING_LIVE, age_s: 95.4, aging: "warn" }, WORKING_LIVE, FILLED]);
+    await OT.refresh(true);
+    const before = requests.length;
+
+    el("orders-aging-only").checked = true;
+    el("orders-aging-only").fire("change");
+    await settle();
+    assert.equal(requests.length, before, "filtering must not refetch");
+    assert.ok(bodyHtml().includes("SBIN"), "the aging order survives");
+    assert.equal((bodyHtml().match(/<tr class="order-row/g) || []).length, 1,
+                 "only the aging order is listed");
+
+    // …and when nothing is aging, the empty state says THAT, not "no match".
+    fresh();
+    serve([WORKING_LIVE]);
+    await OT.refresh(true);
+    el("orders-aging-only").checked = true;
+    el("orders-aging-only").fire("change");
+    await settle();
+    assert.ok(bodyHtml().includes("Nothing is aging"), bodyHtml());
+});
+
+await test("the aging count reaches the summary strip", async () => {
+    fresh();
+    serve([WORKING_LIVE], { ...SUMMARY, pending: 1, aging_warn_count: 1, aging_alert_count: 0,
+                            oldest_pending_age_s: 95.0, oldest_pending_coid: "PRT-live-1-9" });
+    await OT.refresh(true);
+    const summary = el("orders-summary").innerHTML;
+    assert.ok(summary.includes("⏰ Aging"), summary);
+    assert.ok(summary.includes("1 warn · 0 alert"));
+    assert.ok(summary.includes("orders-stat-warn"));
+
+    serve([FILLED], { ...SUMMARY, pending: 0, aging_warn_count: 0, aging_alert_count: 2 });
+    await OT.refresh(true);
+    assert.ok(el("orders-summary").innerHTML.includes("orders-stat-bad"),
+              "an alert outranks a warn");
+});
+
+await test("only a venue order gets the Amend button", async () => {
+    fresh();
+    serve([WORKING_LIVE, PENDING]);   // PENDING here is the paper-order fixture
+    await OT.refresh(true);
+    const html = bodyHtml();
+    assert.ok(html.includes('data-amend="PRT-live-1-9"'));
+    assert.ok(!html.includes('data-amend="PRT-live-1-7"'),
+              "a simulated working order cannot be amended — the server says so");
+    // Both are still cancellable; amend is additive, not a replacement.
+    assert.ok(html.includes('data-cancel="PRT-live-1-7"'));
+    assert.ok(html.includes('data-cancel="PRT-live-1-9"'));
+});
+
+await test("amending posts only the changed terms, to that order's own url", async () => {
+    fresh();
+    serve([WORKING_LIVE]);
+    await OT.refresh(true);
+    const before = requests.length;
+
+    const button = { dataset: { amend: "PRT-live-1-9" } };
+    button.closest = (sel) => (sel === "[data-amend]" ? button : null);
+    el("orders-body").fire("click", { target: button });
+    assert.equal(el("order-modify-modal").hidden, false);
+    // Pre-filled with what the venue holds, and the context names the order.
+    assert.equal(el("order-modify-qty").value, "50");
+    assert.equal(el("order-modify-price").value, "780");
+    assert.ok(el("order-modify-context").innerHTML.includes("SBIN"));
+    assert.ok(el("order-modify-context").innerHTML.includes("FAKE-7"));
+
+    el("order-modify-qty").value = "25";
+    el("order-modify-submit").fire("click");
+    await settle();
+
+    const amend = requests.slice(before).find((r) => r.url.includes("/modify"));
+    assert.ok(amend, "no amend request went out");
+    assert.equal(amend.url, "/api/portfolio/orders/PRT-live-1-9/modify");
+    assert.equal(amend.opts.method, "POST");
+    assert.deepEqual(JSON.parse(amend.opts.body), { quantity: 25 },
+                     "an untouched limit price must not be re-sent as a change");
+    assert.equal(el("order-modify-modal").hidden, true);
+    assert.ok(lastToast().m.includes("Amended"), lastToast().m);
+});
+
+await test("a no-op amend is refused without troubling the venue", async () => {
+    fresh();
+    serve([WORKING_LIVE]);
+    await OT.refresh(true);
+    const before = requests.length;
+    OT.openAmend("PRT-live-1-9");
+    el("order-modify-submit").fire("click");   // qty 50 / limit 780 = unchanged
+    await settle();
+    assert.equal(requests.length, before, "an identical amend must not be sent");
+    assert.equal(lastToast().k, "error");
+    assert.ok(lastToast().m.includes("nothing to amend"));
+    assert.equal(el("order-modify-modal").hidden, false);
+});
+
+await test("a venue refusal keeps the modal open and changes nothing", async () => {
+    fresh();
+    respond = (url) => (url.includes("/modify")
+        ? { ok: false, status: 409,
+            json: async () => ({ success: false,
+                error: "venue refused the amendment: RuntimeError: venue has no open order 'FAKE-7' to amend" }) }
+        : { ok: true, status: 200, json: async () => ({ success: true, orders: [WORKING_LIVE], summary: SUMMARY }) });
+    await OT.refresh(true);
+    const before = requests.filter((r) => r.url.includes("/modify")).length;
+
+    OT.openAmend("PRT-live-1-9");
+    el("order-modify-qty").value = "10";
+    el("order-modify-submit").fire("click");
+    await settle();
+
+    assert.equal(lastToast().k, "error");
+    assert.ok(lastToast().m.includes("venue refused the amendment"), lastToast().m);
+    assert.equal(el("order-modify-modal").hidden, false,
+                 "the operator keeps the terms they typed");
+    assert.equal(requests.filter((r) => r.url.includes("/modify")).length, before + 1);
+    assert.equal(changed.length, 0, "a refused amend must not claim the book moved");
+});
+
+await test("an amended order shows its amend history, not a mystery duplicate", async () => {
+    fresh();
+    serve([{ ...WORKING_LIVE, amend_count: 2, amended_quantity: 25, amended_limit_price: 785.5 }]);
+    await OT.refresh(true);
+    const html = bodyHtml();
+    assert.ok(html.includes("✎ amended → qty 25, limit 785.50"), html.slice(0, 900));
+});
+
+await test("a retried order says which attempt it is", async () => {
+    fresh();
+    serve([{ ...FILLED, retry_of: "PRT-live-1-3", retry_attempt: 2 }]);
+    await OT.refresh(true);
+    const html = bodyHtml();
+    assert.ok(html.includes("↻ retry 2 of PRT-live-1-3"), html.slice(0, 700));
 });
 
 if (process.exitCode) {

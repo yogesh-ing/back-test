@@ -33,6 +33,8 @@ from backtest.forward.state_store import (
     restore_runner,
 )
 from backtest.forward.paper_runner import (
+    ORDER_AGING_ALERT_S,
+    ORDER_AGING_WARN_S,
     ORDER_CANCELLED,
     ORDER_FILLED,
     ORDER_PENDING,
@@ -164,6 +166,9 @@ class PortfolioManager:
         self._injected_live_broker = live_broker
         self._confirm_live_orders = bool(confirm_live_orders)
         self._live_gateway: Optional[Any] = None
+        #: Phase 3 order-aging alerts: coid → the bands already announced, so
+        #: each working order is reported once per band instead of every tick.
+        self._aging_alerted: Dict[str, set] = {}
         self._state_store = (
             PortfolioStateStore(state_path) if state_path else None
         )
@@ -894,6 +899,15 @@ class PortfolioManager:
             "status_counts": {}, "fills": 0, "avg_slippage": 0.0,
             "avg_slippage_pct": 0.0, "worst_slippage": 0.0,
             "slippage_samples": 0, "oldest_pending_age_s": 0.0,
+            # Phase 3 order aging. Shipped on BOTH summary paths (scoped and
+            # whole-ledger) so the Orders tab's badge and strip cannot show
+            # different aging counts than the rows they sit above.
+            "aging_warn_s": ORDER_AGING_WARN_S,
+            "aging_alert_s": ORDER_AGING_ALERT_S,
+            "aging_warn_count": 0,
+            "aging_alert_count": 0,
+            "oldest_pending_coid": None,
+            "oldest_pending_symbol": None,
         }
         slips: List[float] = []
         slips_pct: List[float] = []
@@ -915,10 +929,14 @@ class PortfolioManager:
                 if row.get("slippage_pct") is not None:
                     slips_pct.append(float(row["slippage_pct"]))
                 if row.get("status") == ORDER_PENDING:
-                    totals["oldest_pending_age_s"] = max(
-                        totals["oldest_pending_age_s"],
-                        self.ledger.age_seconds(row.get("created_ts")),
-                    )
+                    age = self.ledger.age_seconds(row.get("created_ts"))
+                    if age >= totals["oldest_pending_age_s"]:
+                        totals["oldest_pending_age_s"] = age
+                        totals["oldest_pending_coid"] = row.get("client_order_id")
+                        totals["oldest_pending_symbol"] = row.get("symbol")
+                    band = self.ledger.aging_band(age)
+                    if band:
+                        totals[f"aging_{band}_count"] += 1
         counts = totals["status_counts"]
         totals["pending"] = counts.get(ORDER_PENDING, 0)
         totals["filled"] = counts.get(ORDER_FILLED, 0)
@@ -931,6 +949,75 @@ class PortfolioManager:
         totals["worst_slippage"] = round(max(slips), 6) if slips else 0.0
         totals["oldest_pending_age_s"] = round(totals["oldest_pending_age_s"], 1)
         return totals
+
+    def check_order_aging(self) -> List[Dict[str, Any]]:
+        """Raise an alert for every working order that has aged past a band.
+
+        An aged order is the quietest failure in a trading system: nothing
+        throws, the book simply never moves, and the operator's attention is
+        on the P&L rather than on the absence of a fill. This sweep gives each
+        order ONE alert per band (warn, then alert) — an alert that repeats
+        every tick is noise the operator learns to ignore, which is worse than
+        no alert at all.
+
+        Returns the alerts raised by this call. Never raises: it runs inside
+        the tick loop, where a monitoring failure must not stop trading.
+        """
+        raised: List[Dict[str, Any]] = []
+        try:
+            rows = self.ledger.snapshot(statuses=[ORDER_PENDING], limit=1000)
+        except Exception:  # noqa: BLE001 — monitoring never breaks the tick
+            logger.exception("order-aging sweep could not read the ledger")
+            return raised
+        live: set = set()
+        for row in rows:
+            coid = row.get("client_order_id")
+            band = row.get("aging") or ""
+            live.add(coid)
+            if not band:
+                continue
+            seen = self._aging_alerted.setdefault(coid, set())
+            if band in seen:
+                continue
+            seen.add(band)
+            runner = self._runners.get(row.get("instance_id"))
+            bucket = self._runner_bucket(runner) if runner is not None else "paper"
+            age = float(row.get("age_s") or 0.0)
+            alert = {
+                "client_order_id": coid,
+                "instance_id": row.get("instance_id"),
+                "symbol": row.get("symbol"),
+                "side": row.get("side"),
+                "quantity": row.get("quantity"),
+                "age_s": age,
+                "band": band,
+                "scope": bucket,
+            }
+            raised.append(alert)
+            level = logging.WARNING if band == "alert" else logging.INFO
+            logger.log(
+                level,
+                "[orders] %s aged %gs (%s %s x%g) — still working, coid=%s",
+                band.upper(), age, row.get("side"), row.get("symbol"),
+                float(row.get("quantity") or 0.0), coid,
+            )
+            try:
+                self._audit_log(
+                    f"ORDER_{band.upper()}ING · {row.get('symbol')}",
+                    scope=bucket,
+                    instance_id=row.get("instance_id"),
+                    detail=(
+                        f"coid={coid} working {age:.0f}s without a fill "
+                        f"({row.get('side')} {float(row.get('quantity') or 0):g})"
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — an audit hiccup is not a trade
+                logger.exception("order-aging audit failed for %s", coid)
+        # Forget orders that filled/cancelled so a later, second-order problem
+        # (same symbol, new coid) is not suppressed by a stale memory.
+        for coid in [c for c in self._aging_alerted if c not in live]:
+            self._aging_alerted.pop(coid, None)
+        return raised
 
     def _orders_summary_for(self, mode: Optional[str] = None) -> Dict[str, Any]:
         """Ledger summary scoped to one bucket (whole ledger when unscoped).
@@ -951,6 +1038,11 @@ class PortfolioManager:
         Only PENDING orders can be cancelled — a filled order is history, and
         pretending otherwise in the UI would be a lie. Raises ``KeyError`` for
         an unknown id and ``ValueError`` when the order is already terminal.
+
+        A LIVE working order is cancelled **at the venue first**: marking it
+        cancelled locally while it still rests at the broker is how a position
+        opens after the operator was told the order was dead. If the venue
+        refuses, the refusal propagates and nothing changes locally.
         """
         order = self.ledger.get_order(client_order_id)
         if order is None:
@@ -960,17 +1052,91 @@ class PortfolioManager:
                 f"order {client_order_id} is {order.status} — only PENDING orders can be cancelled"
             )
         runner = self._runners.get(order.instance_id)
-        if not self.ledger.cancel(client_order_id):
+        at_venue = ""
+        if order.broker_order_id is not None:
+            gateway = self._live_gateway
+            if gateway is None or gateway.working_state(client_order_id) is None:
+                # The venue order exists but this process is not tracking it
+                # (restored state, or the gateway was rebuilt). Cancelling
+                # locally would leave it live at the broker.
+                raise ValueError(
+                    f"order {client_order_id} is working at the venue "
+                    f"({order.broker_order_id}) but is not tracked by this process — "
+                    "reconcile with the broker before cancelling"
+                )
+            gateway.cancel_working(client_order_id)
+            at_venue = f" at venue {order.broker_order_id}"
+        elif not self.ledger.cancel(client_order_id):
             raise ValueError(f"order {client_order_id} could not be cancelled")
         bucket = self._runner_bucket(runner) if runner is not None else "paper"
         self._audit_log(
             f"ORDER_CANCELLED · {order.symbol}",
             scope=bucket,
             instance_id=order.instance_id,
-            detail=f"coid={client_order_id} (was {order.quantity:g} {order.side})",
+            detail=f"coid={client_order_id} (was {order.quantity:g} {order.side}){at_venue}",
         )
         self._persist_state()
-        return self.ledger.order_to_dict(self.ledger.get_order(client_order_id))
+        return self.ledger.row_with_age(self.ledger.get_order(client_order_id))
+
+    def modify_order(
+        self,
+        client_order_id: str,
+        quantity: Optional[float] = None,
+        limit_price: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Amend a working order (Phase 3); audited like every other control.
+
+        Only a LIVE working order can be amended: a paper order fills or
+        rejects within the same call, so there is never anything resting to
+        change. Saying so is more useful than accepting an amendment that
+        silently applies to nothing.
+
+        Raises ``KeyError`` for an unknown id, ``ValueError`` for a terminal or
+        paper order / a nonsense value, and ``OrderRefused`` when the venue
+        refuses the amendment (nothing changes locally in that case).
+        """
+        order = self.ledger.get_order(client_order_id)
+        if order is None:
+            raise KeyError(f"unknown order: {client_order_id}")
+        if order.status != ORDER_PENDING:
+            raise ValueError(
+                f"order {client_order_id} is {order.status} — only a working order "
+                "can be amended"
+            )
+        if quantity is None and limit_price is None:
+            raise ValueError("modify needs a new quantity and/or limit price")
+        runner = self._runners.get(order.instance_id)
+        bucket = self._runner_bucket(runner) if runner is not None else "paper"
+        gateway = self._live_gateway
+        if order.broker_order_id is None:
+            raise ValueError(
+                f"order {client_order_id} is a paper order — it fills or rejects "
+                "immediately, so there is nothing at a venue to amend; cancel it "
+                "and let the strategy re-arm"
+            )
+        if gateway is None or gateway.working_state(client_order_id) is None:
+            raise ValueError(
+                f"order {client_order_id} is working at the venue "
+                f"({order.broker_order_id}) but is not tracked by this process — "
+                "reconcile with the broker before amending"
+            )
+
+        before = (order.quantity, order.limit_price)
+        result = gateway.modify_working(
+            client_order_id, quantity=quantity, limit_price=limit_price
+        )
+        after = (result["quantity"], result["limit_price"])
+        self._audit_log(
+            f"ORDER_AMENDED · {order.symbol}",
+            scope=bucket,
+            instance_id=order.instance_id,
+            detail=(
+                f"coid={client_order_id} qty {before[0]:g}→{after[0]:g} "
+                f"limit {before[1]}→{after[1]}"
+            ),
+        )
+        self._persist_state()
+        return {**result, "order": self.ledger.row_with_age(self.ledger.get_order(client_order_id))}
 
     def pause_all(self, mode: Optional[str] = None) -> int:
         """Pause runners. ``mode=None`` pauses all; mode='paper'|'live' pauses only that bucket."""
@@ -1378,6 +1544,11 @@ class PortfolioManager:
             self.tick_index += 1
             for runner in self._runners.values():
                 runner.on_tick_end(tick_ts)
+            # Phase 3: an order that has been working for a minute without a
+            # fill is the quietest failure mode there is — nothing throws, the
+            # book just never moves. Sweep once per tick (the ledger only
+            # reports a band once per order, so this is not spam).
+            self.check_order_aging()
             self._evaluate_risk()
             # V2: bounded save rate. The %60 was tuned for 1s synthetic ticks
             # (one save/min); the live mStock feed ticks once per SWEEP (60s),

@@ -40,11 +40,11 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 ```
 
 ## Test Status
-- ✅ 2682 passed, 4 skipped (mStock credentials) — `PYTHONPATH=src pytest tests/ -q`
-  (as of 2026-09-23, post Live Order Management; the count drifts with each refactor ticket)
-- ✅ 60 JS behaviour assertions across 6 Node harnesses (`tests/js/*.mjs`) — the two new
-  ones drive the positions-table actions and the Orders tab in a stub DOM
-  (`tests/test_web_components.py` runs them; they are skipped when node is absent)
+- ✅ 2712 passed, 4 skipped (mStock credentials) — `PYTHONPATH=src pytest tests/ -q`
+  (as of 2026-09-23, post Live Order Management Phase 3; the count drifts per ticket)
+- ✅ 69 JS behaviour assertions across 6 Node harnesses (`tests/js/*.mjs`) — the two new
+  ones drive the positions-table actions and the Orders tab (incl. amend + aging) in a
+  stub DOM (`tests/test_web_components.py` runs them; skipped when node is absent)
 - ⚠ Sandbox note: rebuild the venv each session —
   `python3 -m venv /home/user/.venv && /home/user/.venv/bin/pip install -q -r requirements.txt pytest-cov flake8`
 
@@ -66,7 +66,7 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 | cli.py | All 5 commands wired | ✅ Complete |
 | forward/portfolio_manager.py | Command center: runners/buckets/breakers + positions/orders read + manual position actions | ✅ LOM (2026-09-23) |
 | web/static/js/components/position_actions.js | Positions-table action buttons + their modals | ✅ LOM (2026-09-23) |
-| web/static/js/components/orders_tab.js | Orders tab: ledger rows, slippage, cancel, badge | ✅ LOM (2026-09-23) |
+| web/static/js/components/orders_tab.js | Orders tab: ledger rows, slippage, cancel, badge, amend + aging (Phase 3) | ✅ LOM (2026-09-23) |
 
 ## Known Limitations
 - Timeframe is cosmetic on synthetic/CSV sources (daily bars only) — see gap G6 / U2
@@ -89,8 +89,15 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 - Enhanced the positions tab (flat rows across runners, equity + option structures) with
   an **Actions** column: Modify SL / Modify Target / Close 50% / Close All → modals →
   `POST /api/portfolio/position/action`.
-- Added a sibling **Orders** tab: `GET /api/portfolio/orders` + `POST .../<coid>/cancel`,
+- Added a sibling **Orders** tab: `GET /api/portfolio/orders`, `POST .../<coid>/cancel`,
   status filters, slippage (adverse-positive per unit), order aging on PENDING rows.
+- **Phase 3 (advanced order management):** amend a working order at its venue
+  (`POST .../<coid>/modify` — quantity/limit, venue asked first, original terms and coid
+  preserved), order-aging bands (warn 60s / alert 5min, one audit entry per band) and
+  bounded opt-in **auto-retry** of refusals (`RunnerConfig.retry_policy`; live placement
+  errors are never auto-resent — a lost acknowledgment can mean the order already exists).
+  Closing a live order goes through the venue too: a locally-cancelled order that still
+  rests at the broker is how a position opens after the operator was told it was dead.
 - Manual levels are prices (share price / net premium per unit), validated server-side
   against the live mark, checked on every bar and on stress markdowns; option structures
   close atomically. A live close returns `placed`, never a fake fill.

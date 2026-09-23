@@ -218,6 +218,9 @@
                     </select>
                     <input id="orders-search" class="input" type="text"
                            placeholder="Filter symbol / instance…" autocomplete="off">
+                    <label class="pos-check" title="Show only working orders past the aging thresholds">
+                        <input id="orders-aging-only" type="checkbox"> ⏰ Aging only
+                    </label>
                     <select id="orders-limit" class="input input-select" style="min-width:80px;">
                         <option value="50">50</option>
                         <option value="100" selected>100</option>
@@ -240,11 +243,12 @@
                         <th class="num">Filled @</th>
                         <th class="num">Slippage</th>
                         <th>Status</th>
+                        <th>Age</th>
                         <th>Detail</th>
                         <th>Action</th>
                     </tr></thead>
                     <tbody id="orders-body">
-                        <tr><td colspan="11" class="muted" style="padding:16px">Open the tab or press
+                        <tr><td colspan="12" class="muted" style="padding:16px">Open the tab or press
                             Refresh to load the order ledger.</td></tr>
                     </tbody>
                 </table>
@@ -252,7 +256,13 @@
             <div class="muted pos-footnote">
                 Orders are the execution ledger (equity + paper routing). Option structures execute as a
                 unit on the strategy's own option book — their entries, exits and blocks are on the runner
-                signals and the <strong>Aggregated Trades</strong> tab.
+                signals and the <strong>Aggregated Trades</strong> tab.<br>
+                <strong>⏰ Order aging:</strong> a working order past
+                <span class="muted">60s</span> is flagged <em>warn</em>, past
+                <span class="muted">5min</span> <em>alert</em> — the engine writes one audit entry per
+                band, because an order that never fills is the quietest failure there is. Only orders at a
+                <strong>venue</strong> can be amended; a simulated order fills or rejects in the same call,
+                so use Cancel and let the strategy re-arm.
             </div>
         </div>
         <div class="tab-panel" id="tab-risk" hidden>
@@ -582,6 +592,36 @@
         <div class="modal-foot">
             <button class="btn btn-ghost" data-close="pos-partial-modal" type="button">Cancel</button>
             <button id="pos-partial-submit" class="btn btn-primary" type="button">Close Fraction</button>
+        </div>
+    </div>
+</div>
+
+<!-- Amend a working order (Phase 3) -->
+<div id="order-modify-modal" class="modal-overlay" hidden>
+    <div class="modal modal-sm">
+        <div class="modal-head">
+            <h3>✎ Amend Working Order</h3>
+            <button class="modal-close" data-close="order-modify-modal" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+            <div id="order-modify-context" class="pos-modal-context"></div>
+            <div class="form-row">
+                <label>New quantity <span class="muted">(blank = leave as is)</span></label>
+                <input id="order-modify-qty" class="input" type="number" step="1" min="1">
+            </div>
+            <div class="form-row">
+                <label>New limit price <span class="muted">(blank = leave as is)</span></label>
+                <input id="order-modify-price" class="input" type="number" step="0.05" min="0.05">
+            </div>
+            <p class="muted pos-modal-note">
+                The venue is asked <strong>first</strong> — if it refuses, nothing changes here. An amended
+                order keeps its client order id, so filled quantity, slippage and the audit trail continue
+                on the same order instead of starting a new one.
+            </p>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-ghost" data-close="order-modify-modal" type="button">Cancel</button>
+            <button id="order-modify-submit" class="btn btn-primary" type="button">Amend Order</button>
         </div>
     </div>
 </div>

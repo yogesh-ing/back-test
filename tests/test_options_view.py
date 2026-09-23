@@ -525,6 +525,14 @@ def test_components_are_loaded_and_used():
     for call in ("buttonCell", "PositionActions.rows", "PositionActions.init",
                  "OrdersTab.init", "OrdersTab.refresh", "OrdersTab.noteTick"):
         assert call in portfolio, f"positions/orders UI does not use {call}"
+
+    # Phase 3 client surface: the amend POST and the aging filter live in the
+    # Orders component, driven from the ids the template promises.
+    orders_tab = (REPO_ROOT / "src/backtest/web/static/js/components/orders_tab.js").read_text(
+        encoding="utf-8"
+    )
+    for token in ("/modify", "orders-aging-only", "data-amend", "aging_alert_count"):
+        assert token in orders_tab, f"the Orders tab is missing {token}"
     # …and the action buttons are a real cell in the positions table.
     assert "positionActionsCell(row)" in portfolio
 
@@ -555,13 +563,17 @@ def test_the_action_surface_carries_its_handles():
     for token in ('data-tab="orders"', 'id="orders-tab-badge"', 'id="tab-orders"',
                   'id="orders-body"', 'id="orders-summary"', 'id="orders-status"',
                   'id="orders-limit"', 'id="orders-search"', 'id="orders-refresh"',
+                  'id="orders-aging-only"',
                   'id="aggregate-positions"', 'id="pos-search"', 'id="pos-rules-only"',
                   'id="pos-summary"', 'id="pos-footnote"'):
         assert token in center, f"command center is missing {token}"
     for control in ("pos-sl-modal", "pos-sl-value", "pos-sl-submit", "pos-sl-clear",
                     "pos-target-modal", "pos-target-value", "pos-target-submit",
                     "pos-target-clear", "pos-partial-modal", "pos-partial-value",
-                    "pos-partial-submit", "pos-closeall-modal", "pos-closeall-confirm"):
+                    "pos-partial-submit", "pos-closeall-modal", "pos-closeall-confirm",
+                    # Phase 3: amending a working order.
+                    "order-modify-modal", "order-modify-context", "order-modify-qty",
+                    "order-modify-price", "order-modify-submit"):
         assert 'id="' + control + '"' in center, f"missing control {control}"
     # The Actions column is a header the operator can see, not just markup that
     # only appears inside rows.
@@ -572,7 +584,9 @@ def test_the_action_and_order_styles_exist():
     css = (REPO_ROOT / "src/backtest/web/static/css/app.css").read_text(encoding="utf-8")
     for cls in (".pos-actions", ".pos-modal-context", ".pos-modal-line",
                 ".pos-fraction-row", ".pos-row-stale", ".opt-leg-row",
-                ".orders-summary", ".orders-stat", ".order-status", ".tab-badge"):
+                ".orders-summary", ".orders-stat", ".order-status", ".tab-badge",
+                ".order-row-warn", ".order-row-alert", ".order-aging-warn",
+                ".order-aging-alert"):
         assert cls in css, f"missing style {cls}"
     # Adverse slippage must read as a loss, and a working order must be visible.
     assert ".order-row.order-pending" in css

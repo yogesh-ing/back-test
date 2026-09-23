@@ -77,7 +77,9 @@ Runner matrix + bucket metrics over the SSE snapshot, with the trading tabs:
   with age and a cancel button, FILLED with requested-vs-filled price and
   adverse-positive slippage, REJECTED with its reason, CANCELLED. Polled at 3 s
   while visible; the tab badge counts working + rejected orders from the SSE
-  snapshot.
+  snapshot. Phase 3 adds a `✎ Amend` action on order resting at a venue
+  (quantity / limit price, venue-first), `⏰ Aging only` filtering, and age
+  bands (warn 60 s / alert 5 min) rendered as tinted rows and badged age cells.
 
 Behaviours are pinned in a stub DOM by `tests/js/test_position_actions.mjs` and
 `tests/js/test_orders_tab.mjs` (see `docs/PORTFOLIO-CENTER.md`).
