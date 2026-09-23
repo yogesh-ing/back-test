@@ -40,9 +40,11 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 ```
 
 ## Test Status
-- ✅ 1582 passed, 4 skipped (mStock credentials) — `PYTHONPATH=src pytest tests/ -q`
-  (as of 2026-08-31, post-F-01; the count drifts with each refactor ticket)
-- ✅ 36 JS behaviour assertions across 4 Node harnesses (`tests/js/*.mjs`)
+- ✅ 2682 passed, 4 skipped (mStock credentials) — `PYTHONPATH=src pytest tests/ -q`
+  (as of 2026-09-23, post Live Order Management; the count drifts with each refactor ticket)
+- ✅ 60 JS behaviour assertions across 6 Node harnesses (`tests/js/*.mjs`) — the two new
+  ones drive the positions-table actions and the Orders tab in a stub DOM
+  (`tests/test_web_components.py` runs them; they are skipped when node is absent)
 - ⚠ Sandbox note: rebuild the venv each session —
   `python3 -m venv /home/user/.venv && /home/user/.venv/bin/pip install -q -r requirements.txt pytest-cov flake8`
 
@@ -62,10 +64,16 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 | mstock.py | API client + data normalization | ✅ Complete |
 | preflight.py | DNS/HTTPS/auth checks | ✅ Complete |
 | cli.py | All 5 commands wired | ✅ Complete |
+| forward/portfolio_manager.py | Command center: runners/buckets/breakers + positions/orders read + manual position actions | ✅ LOM (2026-09-23) |
+| web/static/js/components/position_actions.js | Positions-table action buttons + their modals | ✅ LOM (2026-09-23) |
+| web/static/js/components/orders_tab.js | Orders tab: ledger rows, slippage, cancel, badge | ✅ LOM (2026-09-23) |
 
 ## Known Limitations
 - Timeframe is cosmetic on synthetic/CSV sources (daily bars only) — see gap G6 / U2
-- Command-center (portfolio) state is in-memory only (V1; "persistence V2")
+- Command-center state persists (`PORTFOLIO_STATE_PATH`): configs/book/anchors/manual levels
+  round-trip and runners restore PAUSED. Two deliberate exceptions: breaker latches are not
+  re-armed on boot (session-scoped), and ledger orders are not persisted (the Orders tab
+  starts empty after a restart)
 - **Live broker fills still open** (findings F-12): bucket UI + mode/source tags done
   (P4.1), but `BrokerFillProvider` + `MStockLiveFeed` wiring, `poll_fill` in the broker
   ABC, and bucket-level risk anchors remain
@@ -76,6 +84,17 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 2. Add portfolio/runner state persistence across restarts (V2)
 3. Test mStock auth with real credentials
 4. Finish the docs pass for `instructions/ARCHITECTURE-BLUEPRINT.md` (see its top banner)
+
+## Live Order Management (2026-09-23)
+- Enhanced the positions tab (flat rows across runners, equity + option structures) with
+  an **Actions** column: Modify SL / Modify Target / Close 50% / Close All → modals →
+  `POST /api/portfolio/position/action`.
+- Added a sibling **Orders** tab: `GET /api/portfolio/orders` + `POST .../<coid>/cancel`,
+  status filters, slippage (adverse-positive per unit), order aging on PENDING rows.
+- Manual levels are prices (share price / net premium per unit), validated server-side
+  against the live mark, checked on every bar and on stress markdowns; option structures
+  close atomically. A live close returns `placed`, never a fake fill.
+- Endpoints, semantics and the two tabs: `docs/PORTFOLIO-CENTER.md`.
 
 ## Build Dependencies
 Python 3.10+, pandas, numpy, requests, python-dotenv, matplotlib, pytest

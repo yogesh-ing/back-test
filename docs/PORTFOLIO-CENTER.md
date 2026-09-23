@@ -77,7 +77,11 @@ curl -X POST localhost:5000/api/portfolio/test/breach -H 'Content-Type: applicat
 | POST | `/api/portfolio/control/<action>` | `pause_all` / `resume_all` / `stop_all` / `emergency_flatten` / `reset_breaker` |
 | POST | `/api/portfolio/emergency_stop` | Global emergency flatten + halt |
 | POST | `/api/portfolio/test/breach` | Simulated crash (circuit-breaker test) |
-| GET | `/api/portfolio/stream` | SSE — JSON snapshot every second (bucket-scoped when on a bucket page) |
+| GET | `/api/portfolio/stream` | SSE — JSON snapshot every second (bucket-scoped when on a bucket page), carries `positions` + `orders_summary` |
+| GET | `/api/portfolio/positions?mode=` | Flat row per open position (equity + option structures) with its manual stop/target |
+| POST | `/api/portfolio/position/action` | `modify_stop_loss` / `clear_stop_loss` / `modify_target` / `clear_target` / `close_fraction` / `close_all` on one position |
+| GET | `/api/portfolio/orders?mode=&instance_id=&status=&limit=` | The order ledger, newest first + a summary strip (counts, slippage, oldest working age) |
+| POST | `/api/portfolio/orders/<coid>/cancel` | Cancel a still-PENDING order (404 unknown, 409 already terminal) |
 
 ## Behavior changes & known caveats
 
@@ -94,8 +98,12 @@ curl -X POST localhost:5000/api/portfolio/test/breach -H 'Content-Type: applicat
   per-buffer signal evaluation and are unaffected.
 - **Fill timing vs backtest (P1.5):** backtest ≈ forward only on **gapless** bars
   (`open[t] == close[t-1]`); on real gapped data the two anchors differ by design.
-- **In-memory only:** runners/manager state survives a page refresh, not a process
-  restart (documented V1; persistence is V2).
+- **State persistence (V2, 2026-09-23):** runner configs, books, anchors and manual
+  stop/target levels round-trip through `PORTFOLIO_STATE_PATH`; a restored runner comes
+  back **PAUSED** (fail-closed). Two deliberate exceptions: breaker latches are written
+  but **not re-armed** on boot (a halt guards one session's P&L — a restored latch trapped
+  the dashboard in a permanent "🔴 HALTED"), and **ledger orders are not persisted**, so the
+  Orders tab starts empty after a restart and fills the moment new orders route through.
 - **Paper vs live:** `mode=paper` = simulated fills everywhere; `mode=live` buckets
   are wired for tags/UI but **live broker fills are still open** (findings F-12 —
   `BrokerFillProvider` + `MStockLiveFeed` exist but the forward-engine wiring and
@@ -110,6 +118,45 @@ PYTHONPATH=src python benchmarks/benchmark_portfolio.py
 
 50-runner benchmark: ~311 ms/tick, 1,287 fills with **0** cross-contamination,
 ~130 MB RSS (2.6 MB/runner); breaker halt measured at ~15 ms (budget < 500 ms).
+
+---
+
+## Live Order Management (the two trading tabs)
+
+The Command Center answers "what am I holding" and "did my order fill" with two
+separate tabs — the positions tab was **enhanced**, the Orders tab is new, and
+every other tab is untouched.
+
+**Open Positions** — one flat row per open position across runners (an option
+structure is one net row, with its legs listed underneath). Each row carries its
+side, size, entry, mark, P&L, the **Target** and **Stop** levels when armed, net
+Δ/Θ for option structures, and an **Actions** column:
+
+| Button | Sends | Notes |
+|---|---|---|
+| 🛑 SL | `modify_stop_loss` | Refused if it would fire immediately; Clear level disarms |
+| 🎯 TP | `modify_target` | Same validation on the other side of the mark |
+| ◐ 50% | `close_fraction` | Equity only — an option structure closes atomically, so it is pinned to 100% |
+| ✕ All | `close_all` | Full exit at market |
+
+Levels are **prices**, not percentages: the share price for an equity position,
+the **net premium per unit** for an option structure (for a credit structure the
+stop sits above the mark and the target below — the engine derives the side). They
+are evaluated on every bar **and** on every mark move, so a manual stop exits at
+market even if the strategy never trades again; the strategy's own exit policy
+still runs, and whichever fires first wins. On a live runner "close" can only be
+**placed** at the venue (`status: "placed"`, a client order id, no fill yet) — the
+UI says so instead of claiming the position is closed.
+
+**Orders** — the engine's own `OrderLedger`, not a second bookkeeping layer:
+PENDING (with age, and the only cancel button in the app), FILLED (requested vs
+filled price), REJECTED (with the venue/engine reason — a paper order that cannot
+fill is rejected, it never rests forever), CANCELLED. Slippage is
+**adverse-positive per unit** (+₹2 means the fill cost money, whichever side).
+The summary strip carries counts, average/worst slippage and the oldest working
+order's age; the tab badge (seeded from the SSE snapshot, so it works while the
+tab is closed) counts working + rejected orders. Rows are polled at 3 s only
+while the tab is visible.
 
 ---
 

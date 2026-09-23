@@ -47,6 +47,12 @@ if "silent_option_fixture" not in _registry._REGISTRY:
         """
 
         name = "silent_option_fixture"
+        # Option-kind strategies must declare the instruments they may trade
+        # (2026-09-22 contract, enforced by tests/test_strategy_conformance).
+        # The fixture trades NIFTY only, and it is registered in the process-wide
+        # catalogue — an undeclared entry here broke the conformance gate for
+        # every later test in the same pytest session.
+        eligible_instruments = ["NIFTY", "BANKNIFTY"]
 
         def generate_signals(self, candles):
             import pandas as pd
@@ -509,6 +515,19 @@ def test_components_are_loaded_and_used():
                  "OptionView.positionsCell", "OptionView.openStructures"):
         assert call in portfolio, f"matrix does not use {call}"
 
+    # Live Order Management (2026-09-23): the positions table's action modals
+    # and the Orders tab are two more globally-loaded components. Both format
+    # money through currency.js, so they must load after it — and the page
+    # renderer must actually call them, or the buttons render dead.
+    for component in ("js/components/position_actions.js", "js/components/orders_tab.js"):
+        assert component in base, f"{component} is not loaded"
+        assert base.index("currency.js") < base.index(component), f"{component} before currency.js"
+    for call in ("buttonCell", "PositionActions.rows", "PositionActions.init",
+                 "OrdersTab.init", "OrdersTab.refresh", "OrdersTab.noteTick"):
+        assert call in portfolio, f"positions/orders UI does not use {call}"
+    # …and the action buttons are a real cell in the positions table.
+    assert "positionActionsCell(row)" in portfolio
+
     deep_dive = (REPO_ROOT / "src/backtest/web/static/js/deep_dive.js").read_text(encoding="utf-8")
     for call in ("OptionView.bookStats", "OptionView.structureRows",
                  "OptionView.exitReasonLabel", "OptionView.isOptionTrade"):
@@ -520,3 +539,41 @@ def test_option_columns_have_styles():
     assert ".badge-option" in css
     assert ".dd-stats-4" in css
     assert ".opt-total" in css
+
+
+def test_the_action_surface_carries_its_handles():
+    """The DOM contract PositionActions / OrdersTab are wired against.
+
+    The components resolve rows and modals by id at click time (no per-row
+    listeners), so a renamed id fails silently in the browser — pin the handles
+    the templates promise: the positions table's tbody, the four action modals
+    with their submit buttons, and the Orders tab's filter/readout elements.
+    """
+    center = (REPO_ROOT / "src/backtest/web/templates/_portfolio_center.html").read_text(
+        encoding="utf-8"
+    )
+    for token in ('data-tab="orders"', 'id="orders-tab-badge"', 'id="tab-orders"',
+                  'id="orders-body"', 'id="orders-summary"', 'id="orders-status"',
+                  'id="orders-limit"', 'id="orders-search"', 'id="orders-refresh"',
+                  'id="aggregate-positions"', 'id="pos-search"', 'id="pos-rules-only"',
+                  'id="pos-summary"', 'id="pos-footnote"'):
+        assert token in center, f"command center is missing {token}"
+    for control in ("pos-sl-modal", "pos-sl-value", "pos-sl-submit", "pos-sl-clear",
+                    "pos-target-modal", "pos-target-value", "pos-target-submit",
+                    "pos-target-clear", "pos-partial-modal", "pos-partial-value",
+                    "pos-partial-submit", "pos-closeall-modal", "pos-closeall-confirm"):
+        assert 'id="' + control + '"' in center, f"missing control {control}"
+    # The Actions column is a header the operator can see, not just markup that
+    # only appears inside rows.
+    assert "Actions" in center
+
+
+def test_the_action_and_order_styles_exist():
+    css = (REPO_ROOT / "src/backtest/web/static/css/app.css").read_text(encoding="utf-8")
+    for cls in (".pos-actions", ".pos-modal-context", ".pos-modal-line",
+                ".pos-fraction-row", ".pos-row-stale", ".opt-leg-row",
+                ".orders-summary", ".orders-stat", ".order-status", ".tab-badge"):
+        assert cls in css, f"missing style {cls}"
+    # Adverse slippage must read as a loss, and a working order must be visible.
+    assert ".order-row.order-pending" in css
+    assert ".order-row.order-rejected" in css

@@ -93,6 +93,11 @@
     <script src="{{ url_for('static', filename='js/components/currency.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/option_config.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/option_view.js') }}"></script>
+    <!-- Live Order Management: the positions table's action modals and the
+         Orders tab. Loaded globally (like the other components) because every
+         page that includes _portfolio_center.html renders both. -->
+    <script src="{{ url_for('static', filename='js/components/position_actions.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/orders_tab.js') }}"></script>
     <script src="{{ url_for('static', filename='js/session_state.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/toast.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/loader.js') }}"></script>

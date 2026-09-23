@@ -21,8 +21,11 @@ fix, following the house pattern (the walk-forward runner's ``save_state`` /
 
 Restore semantics (fail-closed): a runner persisted as RUNNING comes back
 **PAUSED** — after a crash/restart nothing trades until a human resumes it.
-The book, capital, anchors and breaker latches are exactly as left; only
-*who acts next* requires an explicit resume.
+The book, capital and anchors are exactly as left; only *who acts next*
+requires an explicit resume. Breaker latches are the one exception: they are
+written to the file but deliberately not re-armed, because a halt guards a
+session's P&L and a restored latch trapped the dashboard in a permanent
+"🔴 HALTED" (see ``PortfolioManager._apply_state_payload``).
 """
 
 from __future__ import annotations
@@ -351,7 +354,17 @@ def capture_runner(runner: Any) -> Dict[str, Any]:
         "last_option_pnl": runner.last_option_pnl,
         "closed_trades_cache": list(runner.closed_trades_cache)[-_HISTORY_TAIL:],
         "equity_curve": list(runner.equity_curve)[-_HISTORY_TAIL:],
+        # Live Order Management: an operator's stop/target is protection the
+        # human set deliberately — losing it to a restart would re-open the
+        # exact risk the stop was there to cap.
+        "position_rules": {
+            key: dict(levels)
+            for key, levels in (getattr(runner, "position_rules", {}) or {}).items()
+        },
     }
+    bridge = getattr(runner, "options_bridge", None)
+    if bridge is not None:
+        snapshot["bridge_manual_rules"] = bridge.manual_rules()
     if runner.options_bridge is not None:
         snapshot["bridge"] = capture_bridge(runner.options_bridge)
     # F-12: live gateway working orders — a restart re-arms POLLING for the
@@ -389,9 +402,39 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
     runner.closed_trades_cache = list(snapshot.get("closed_trades_cache", []))
     runner.equity_curve = list(snapshot.get("equity_curve", []))
     runner.error = snapshot.get("error")
+    # Live Order Management: restore the operator's stops/targets. Levels whose
+    # position no longer exists are dropped — a stop with nothing to protect is
+    # a trap for the next trade.
+    restored_rules: Dict[str, Dict[str, Any]] = {}
+    for key, levels in (snapshot.get("position_rules") or {}).items():
+        if not isinstance(levels, dict):
+            continue
+        clean = {
+            field: (float(value) if value is not None else None)
+            for field, value in levels.items()
+            if field in ("stop_loss", "target")
+        }
+        if any(value is not None for value in clean.values()):
+            restored_rules[str(key)] = clean
+    runner.position_rules = {
+        key: levels for key, levels in restored_rules.items() if key in restored.positions
+    }
 
     if runner.options_bridge is not None and snapshot.get("bridge"):
         restore_bridge(runner.options_bridge, snapshot["bridge"])
+    bridge_levels = snapshot.get("bridge_manual_rules") or {}
+    if runner.options_bridge is not None and runner.options_bridge.open_structure_id:
+        stop_loss = bridge_levels.get("stop_loss")
+        target = bridge_levels.get("target")
+        if stop_loss is not None or target is not None:
+            try:
+                runner.options_bridge.set_manual_rule(stop_loss=stop_loss, target=target)
+            except ValueError:
+                # Levels can be stale relative to the restored mark (the book
+                # moved while the process was down). Dropping them is the
+                # fail-safe: a level that cannot be armed must not be reported
+                # as armed.
+                runner.options_bridge.clear_manual_rules()
 
     gateway_state = snapshot.get("live_gateway")
     restore_gateway = getattr(runner.broker, "restore_state", None)

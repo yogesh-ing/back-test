@@ -48,6 +48,32 @@ def test_forward_live_widgets_render():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+@pytest.mark.parametrize(
+    "harness",
+    ["test_position_actions.mjs", "test_orders_tab.mjs"],
+)
+def test_live_order_management_components(harness):
+    """The positions-table actions and the Orders tab (Live Order Management).
+
+    These are the app's money-moving controls: the harness pins that an action
+    carries the row's own identity, that a server refusal is shown verbatim
+    instead of closing the modal, that a live order only *placed* at the venue
+    never reads as filled, and that slippage stays adverse-positive.
+    """
+    result = subprocess.run(
+        ["node", str(_REPO_ROOT / "tests" / "js" / harness)],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "12 tests passed" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_trade_table_is_container_scoped():
     """Two tables on one page must keep their own sort/page state (G13 remnant)."""
     script = """

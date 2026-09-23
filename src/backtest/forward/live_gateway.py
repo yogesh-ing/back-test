@@ -118,6 +118,9 @@ class LiveEquityGateway:
             OrderRequest(symbol=symbol, side=side, quantity=quantity, tag=tag or {}),
         )
         coid = order.client_order_id
+        # The price the runner decided on — with the venue's real fill later
+        # polled in, this is what makes live slippage measurable.
+        order.requested_price = float(fill_price)
 
         from backtest.brokers.base import BrokerOrder
 

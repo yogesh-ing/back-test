@@ -67,15 +67,32 @@ EXIT_STOP_LOSS = "stop_loss"
 EXIT_TAKE_PROFIT = "take_profit"
 #: Held for ``max_bars`` bars.
 EXIT_TIME_STOP = "time_stop"
+#: The structure mark hit a stop the OPERATOR set from the dashboard
+#: (Live Order Management). Never produced by the config policy — the bridge
+#: owns it, because a human's level beats the config's.
+EXIT_MANUAL_STOP = "manual_stop_loss"
+#: The structure mark hit an operator-set target.
+EXIT_MANUAL_TARGET = "manual_target"
 #: Squared off ``min_days_to_expiry`` before expiry (the established
 #: pre-expiry market-close reason — see ``options/expiry.py``).
 EXIT_DTE = "auto_square_off"
 
 #: Reasons that are purely mechanical (no view needed) — a pool runner that
-#: never routes views to the bridge can still honour these.
-RISK_REASONS = frozenset({EXIT_STOP_LOSS, EXIT_TAKE_PROFIT, EXIT_TIME_STOP, EXIT_DTE})
+#: never routes views to the bridge can still honour these. Operator-set
+#: levels are mechanical too: they must fire on a viewless bar.
+RISK_REASONS = frozenset(
+    {
+        EXIT_STOP_LOSS,
+        EXIT_TAKE_PROFIT,
+        EXIT_TIME_STOP,
+        EXIT_DTE,
+        EXIT_MANUAL_STOP,
+        EXIT_MANUAL_TARGET,
+    }
+)
 
-#: Every reason a policy can emit.
+#: Every reason a policy can emit (plus the two operator-set levels the
+#: bridge emits directly).
 EXIT_REASONS = frozenset(
     {
         EXIT_SIGNAL_FLIP,
@@ -84,6 +101,8 @@ EXIT_REASONS = frozenset(
         EXIT_TAKE_PROFIT,
         EXIT_TIME_STOP,
         EXIT_DTE,
+        EXIT_MANUAL_STOP,
+        EXIT_MANUAL_TARGET,
     }
 )
 

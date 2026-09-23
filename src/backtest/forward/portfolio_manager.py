@@ -33,6 +33,12 @@ from backtest.forward.state_store import (
     restore_runner,
 )
 from backtest.forward.paper_runner import (
+    ORDER_CANCELLED,
+    ORDER_FILLED,
+    ORDER_PENDING,
+    ORDER_REJECTED,
+    RULE_STOP_LOSS,
+    RULE_TARGET,
     STATUS_PAUSED,
     STATUS_RUNNING,
     STATUS_STOPPED,
@@ -680,6 +686,291 @@ class PortfolioManager:
                 pass
             self._persist_state()
             return state
+
+    # ------------------------------------------------------------------ #
+    # Live Order Management (2026-09-23)
+    # ------------------------------------------------------------------ #
+    #
+    # Two surfaces the command center reads/writes:
+    #
+    # * **positions** — one flat, action-ready row per open position across
+    #   runners (equity tickets AND option structures), so the positions table
+    #   stops being a runner-summary and shows what is actually held.
+    # * **orders** — the ledger's order flow (pending / filled / cancelled /
+    #   rejected) with real slippage, so "did my order fill?" has an answer.
+    #
+    # Every write goes through here (not straight from the API) so it lands in
+    # the audit log, honours the bucket scope, and persists the state file.
+
+    def list_positions(self, mode: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Flat rows for every open position, optionally bucket-scoped.
+
+        ``stale`` marks a row whose runner is not RUNNING: the P&L is a frozen
+        last mark rather than a live one. The row is still returned — an
+        operator must be able to close, stop or target a paused runner's
+        position — but the UI can label it instead of implying it is live.
+        """
+        if mode is not None:
+            mode = str(mode).strip().lower()
+            if mode not in VALID_INSTANCE_MODES:
+                raise ValueError(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
+        with self._lock:
+            runners = [
+                r for r in self._runners.values()
+                if mode is None or self._runner_bucket(r) == mode
+            ]
+        rows: List[Dict[str, Any]] = []
+        for runner in runners:
+            base = {
+                "instance_id": runner.instance_id,
+                "runner": runner.config.name,
+                "strategy_name": runner.config.strategy_name,
+                "mode": runner.config.mode,
+                "source": runner.config.source,
+                "status": runner.status,
+                "stale": runner.status != STATUS_RUNNING,
+                "target_label": runner.target_label,
+            }
+            try:
+                for row in runner.positions_detail():
+                    rows.append({**base, **row})
+            except Exception:  # noqa: BLE001 — one bad book must not blank the table
+                logger.exception("positions_detail failed for %s", runner.instance_id[:8])
+            summary = runner.options_summary() or {}
+            for row in summary.get("open_structures_detail") or []:
+                rows.append(
+                    {
+                        **base,
+                        "position_key": row.get("position_key") or row.get("structure_id"),
+                        "kind": "option",
+                        "symbol": row.get("symbol"),
+                        "label": row.get("label"),
+                        "side": row.get("side"),
+                        "qty": row.get("qty"),
+                        "units": row.get("units"),
+                        "entry_price": row.get("entry_price"),
+                        "current_price": row.get("current_price"),
+                        "unrealized_pnl": row.get("unrealized_pnl"),
+                        "pnl_pct": row.get("open_pnl_pct"),
+                        "entry_ts": row.get("entry_ts"),
+                        "stop_loss": row.get("stop_loss"),
+                        "target": row.get("target"),
+                        "structure_type": row.get("structure_type"),
+                        "strikes": row.get("strikes"),
+                        "expiry": row.get("expiry"),
+                        "bars_held": row.get("bars_held"),
+                        "net_delta": row.get("net_delta"),
+                        "net_theta": row.get("net_theta"),
+                        "greeks_source": row.get("greeks_source"),
+                        "legs": row.get("legs_detail") or [],
+                        # Multi-leg structures close atomically (V1).
+                        "can_partial_close": False,
+                    }
+                )
+        return rows
+
+    def position_action(self, instance_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply one manual action to one position and audit it.
+
+        ``action`` ∈ ``modify_stop_loss`` | ``modify_target`` |
+        ``clear_stop_loss`` | ``clear_target`` | ``close_fraction`` |
+        ``close_all``. Raises ``KeyError`` for an unknown runner/position and
+        ``ValueError`` for a bad level or fraction — the API maps those onto
+        404 / 409 so the UI can show the reason verbatim.
+        """
+        action = str(payload.get("action", "")).strip().lower()
+        key = str(payload.get("position_key") or payload.get("symbol") or "").strip()
+        with self._lock:
+            runner = self._runners.get(instance_id)
+            if runner is None:
+                raise KeyError(f"unknown runner: {instance_id}")
+            if not key:
+                raise ValueError("position_key (or symbol) is required")
+
+            if action in ("modify_stop_loss", "modify_target"):
+                field = RULE_STOP_LOSS if action.endswith("stop_loss") else RULE_TARGET
+                value = payload.get("value", payload.get("price"))
+                if value is None:
+                    raise ValueError(f"{action} needs a 'value' price")
+                result = runner.set_position_rule(key, field, value)
+            elif action in ("clear_stop_loss", "clear_target"):
+                field = RULE_STOP_LOSS if action.endswith("stop_loss") else RULE_TARGET
+                result = runner.set_position_rule(key, field, None)
+            elif action == "close_fraction":
+                result = runner.close_position(key, payload.get("fraction", 0.5))
+            elif action in ("close_all", "close_position"):
+                result = runner.close_position(key, 1.0)
+            else:
+                raise ValueError(f"unknown position action: {action}")
+
+            bucket = self._runner_bucket(runner)
+            detail = (
+                f"{action} {key}"
+                + (f" = {result.get('value')}" if result.get("value") is not None else "")
+                + (f" qty={result.get('qty_closed')}" if result.get("qty_closed") else "")
+            )
+            self._audit_log(
+                f"MANUAL_{action.upper()} · {runner.config.name}",
+                scope=bucket,
+                instance_id=instance_id,
+                detail=detail,
+            )
+            self._persist_state()
+        result["runner"] = runner.get_state()
+        return result
+
+    def list_orders(
+        self,
+        mode: Optional[str] = None,
+        instance_id: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        """The ledger's order flow + a summary strip (Orders tab).
+
+        Scope rules: an explicit ``instance_id`` wins; otherwise ``mode``
+        narrows to that bucket's runners; otherwise the whole ledger. Orders
+        are only attributed to a bucket through their runner, so a ledger row
+        whose runner was removed simply stops appearing — it is not silently
+        reassigned.
+        """
+        if mode is not None:
+            mode = str(mode).strip().lower()
+            if mode not in VALID_INSTANCE_MODES:
+                raise ValueError(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
+        try:
+            limit = max(1, min(int(limit), 1000))
+        except (TypeError, ValueError):
+            limit = 200
+        with self._lock:
+            if instance_id:
+                if instance_id not in self._runners:
+                    raise KeyError(f"unknown runner: {instance_id}")
+                instances = [instance_id]
+            elif mode is not None:
+                instances = [r.instance_id for r in self._bucket_runners(mode)]
+            else:
+                instances = None  # no filter — the whole ledger
+
+            if instances is None:
+                orders = self.ledger.snapshot(statuses=statuses, limit=limit)
+                summary = self.ledger.summary()
+            else:
+                orders, summary = [], None
+                # Fetch newest-first from the ledger, then keep only the
+                # in-scope rows, so the limit never hides a scoped order
+                # behind unrelated traffic.
+                for coid_owner in list(instances):
+                    rows = self.ledger.snapshot(
+                        instance_id=coid_owner, statuses=statuses, limit=limit
+                    )
+                    orders.extend(rows)
+                orders.sort(
+                    key=lambda o: (o.get("created_ts") or "", o["client_order_id"]),
+                    reverse=True,
+                )
+                orders = orders[:limit]
+                summary = self._scoped_orders_summary(instances)
+
+            labels = {
+                r.instance_id: {
+                    "runner": r.config.name,
+                    "strategy_name": r.config.strategy_name,
+                    "mode": r.config.mode,
+                    "symbols": list(r.config.symbols),
+                }
+                for r in self._runners.values()
+            }
+        for row in orders:
+            row["runner"] = labels.get(row["instance_id"], {}).get("runner")
+            row["strategy_name"] = labels.get(row["instance_id"], {}).get("strategy_name")
+            row["mode"] = labels.get(row["instance_id"], {}).get("mode")
+        return {"orders": orders, "summary": summary}
+
+    def _scoped_orders_summary(self, instances: List[str]) -> Dict[str, Any]:
+        """Ledger summary restricted to a set of runners."""
+        totals: Dict[str, Any] = {
+            "total": 0, "pending": 0, "filled": 0, "cancelled": 0, "rejected": 0,
+            "status_counts": {}, "fills": 0, "avg_slippage": 0.0,
+            "avg_slippage_pct": 0.0, "worst_slippage": 0.0,
+            "slippage_samples": 0, "oldest_pending_age_s": 0.0,
+        }
+        slips: List[float] = []
+        slips_pct: List[float] = []
+        for instance_id in instances:
+            rows = self.ledger.snapshot(instance_id=instance_id, limit=1000)
+            for row in rows:
+                totals["total"] += 1
+                # Statuses are stored upper-case (ORDER_PENDING & co). Lower-
+                # casing the key here made every scoped count read 0 while the
+                # unscoped ledger summary read the truth — the same order,
+                # two different answers depending on the tab's scope.
+                status = str(row.get("status", "")).upper()
+                if status in totals["status_counts"]:
+                    totals["status_counts"][status] += 1
+                else:
+                    totals["status_counts"][status] = 1
+                if row.get("slippage") is not None:
+                    slips.append(float(row["slippage"]))
+                if row.get("slippage_pct") is not None:
+                    slips_pct.append(float(row["slippage_pct"]))
+                if row.get("status") == ORDER_PENDING:
+                    totals["oldest_pending_age_s"] = max(
+                        totals["oldest_pending_age_s"],
+                        self.ledger.age_seconds(row.get("created_ts")),
+                    )
+        counts = totals["status_counts"]
+        totals["pending"] = counts.get(ORDER_PENDING, 0)
+        totals["filled"] = counts.get(ORDER_FILLED, 0)
+        totals["cancelled"] = counts.get(ORDER_CANCELLED, 0)
+        totals["rejected"] = counts.get(ORDER_REJECTED, 0)
+        totals["fills"] = totals["filled"]
+        totals["slippage_samples"] = len(slips)
+        totals["avg_slippage"] = round(sum(slips) / len(slips), 6) if slips else 0.0
+        totals["avg_slippage_pct"] = round(sum(slips_pct) / len(slips_pct), 8) if slips_pct else 0.0
+        totals["worst_slippage"] = round(max(slips), 6) if slips else 0.0
+        totals["oldest_pending_age_s"] = round(totals["oldest_pending_age_s"], 1)
+        return totals
+
+    def _orders_summary_for(self, mode: Optional[str] = None) -> Dict[str, Any]:
+        """Ledger summary scoped to one bucket (whole ledger when unscoped).
+
+        Both read paths use this: the REST ``/orders`` call and the SSE
+        snapshot that seeds the Orders-tab badge. They must agree, or the
+        badge nudges about work the page cannot show.
+        """
+        if mode is None:
+            return self.ledger.summary()
+        return self._scoped_orders_summary(
+            [r.instance_id for r in self._bucket_runners(mode)]
+        )
+
+    def cancel_order(self, client_order_id: str) -> Dict[str, Any]:
+        """Cancel a still-pending order; audited like every other control.
+
+        Only PENDING orders can be cancelled — a filled order is history, and
+        pretending otherwise in the UI would be a lie. Raises ``KeyError`` for
+        an unknown id and ``ValueError`` when the order is already terminal.
+        """
+        order = self.ledger.get_order(client_order_id)
+        if order is None:
+            raise KeyError(f"unknown order: {client_order_id}")
+        if order.status != ORDER_PENDING:
+            raise ValueError(
+                f"order {client_order_id} is {order.status} — only PENDING orders can be cancelled"
+            )
+        runner = self._runners.get(order.instance_id)
+        if not self.ledger.cancel(client_order_id):
+            raise ValueError(f"order {client_order_id} could not be cancelled")
+        bucket = self._runner_bucket(runner) if runner is not None else "paper"
+        self._audit_log(
+            f"ORDER_CANCELLED · {order.symbol}",
+            scope=bucket,
+            instance_id=order.instance_id,
+            detail=f"coid={client_order_id} (was {order.quantity:g} {order.side})",
+        )
+        self._persist_state()
+        return self.ledger.order_to_dict(self.ledger.get_order(client_order_id))
 
     def pause_all(self, mode: Optional[str] = None) -> int:
         """Pause runners. ``mode=None`` pauses all; mode='paper'|'live' pauses only that bucket."""
@@ -1385,6 +1676,17 @@ class PortfolioManager:
                 "capability": capability,
                 # Step 1: dashboard book embedded — portfolio renders per-structure option trades
                 "dashboard_book": dashboard_book,
+                # Live Order Management (2026-09-23): one flat row per open
+                # position across runners, so the positions table renders
+                # holdings (with their stop/target and the actions key) from
+                # the same 1 Hz snapshot as everything else instead of
+                # re-deriving them per render.
+                "positions": self.list_positions(mode),
+                # Scoped like the positions above and the REST read: the badge
+                # is seeded from this snapshot, so a paper page counting live
+                # traffic would nudge the operator about an order they cannot
+                # see (or cancel) from that page.
+                "orders_summary": self._orders_summary_for(mode),
             }
 
     def get_runner_detail(self, instance_id: str) -> Dict[str, Any]:
