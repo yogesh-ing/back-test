@@ -30,6 +30,9 @@ class MomentumBurst(Strategy):
     """Buy ATM call/put when the last bar moves ±threshold% (draft #1)."""
 
     name = "momentum_burst"
+    # 2026-09-22: instrument eligibility (spawn-form dropdown + create-API
+    # enforcement). Index strategies trade the FNO index set.
+    eligible_instruments = ["NIFTY", "BANKNIFTY"]
     description = (
         "Draft #1 adapted: last-bar move beyond +-threshold% emits a "
         "BULLISH/BEARISH view (ATM long call/put via the playbook)."

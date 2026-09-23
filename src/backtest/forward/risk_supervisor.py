@@ -57,6 +57,38 @@ class GlobalRiskConfig:
         if self.breach_mode not in (HALT_PAUSE, HALT_FLATTEN):
             raise ValueError(f"breach_mode must be {HALT_PAUSE} or {HALT_FLATTEN}")
 
+    def update_limits(self, values: Dict[str, Any]) -> List[str]:
+        """Apply a validated partial update and return the changed fields.
+
+        The sanctioned path for mutating a live ``GlobalRiskConfig`` (the
+        risk-config API). Validate-first, commit-after: the current values
+        plus the update go through the ``GlobalRiskConfig`` constructor —
+        any invalid field raises ``ValueError`` and the live config is left
+        untouched. Unknown keys raise (typo-detection) instead of being
+        silently assigned as new attributes.
+        """
+        import dataclasses as _dc
+
+        if not isinstance(values, dict):
+            raise ValueError("values must be a dict")
+        known = {f.name for f in _dc.fields(GlobalRiskConfig)}
+        unknown = set(values) - known
+        if unknown:
+            raise ValueError(f"unknown global risk config field(s): {sorted(unknown)}")
+
+        current = {name: getattr(self, name) for name in known}
+        candidate = dict(current)
+        candidate.update(values)
+        GlobalRiskConfig(**candidate)  # raises on any invalid field
+
+        changed = []
+        for name, value in values.items():
+            new_value = getattr(GlobalRiskConfig(**{**current, name: value}), name)
+            if getattr(self, name) != new_value:
+                changed.append(name)
+            setattr(self, name, new_value)
+        return changed
+
 
 @dataclass
 class RiskReport:

@@ -94,21 +94,15 @@ def _seed_two_structures() -> None:
 # ---------------------------------------------------------------------------
 
 class TestOptionsPage:
-    def test_page_renders(self, client):
+    def test_page_is_gone(self, client):
+        """GAP-3 resolved 2026-09-22: owner chose REMOVE. The manual Options
+        page is deleted; the URL returns 404 and the nav link is gone."""
         resp = client.get("/options")
-        assert resp.status_code == 200
-        html = resp.get_data(as_text=True)
-        assert "Options Trading" in html
+        assert resp.status_code == 404
 
-    def test_page_has_greeks_card(self, client):
-        html = client.get("/options").get_data(as_text=True)
-        assert "Portfolio Greeks" in html
-        assert "gk-delta" in html
-
-    def test_nav_link_present(self, client):
-        html = client.get("/options").get_data(as_text=True)
-        assert 'href="/options"' in html
-        assert 'data-key="options"' in html
+    def test_nav_link_removed(self, client):
+        html = client.get("/portfolio").get_data(as_text=True)
+        assert 'href="/options"' not in html
 
 
 # ---------------------------------------------------------------------------

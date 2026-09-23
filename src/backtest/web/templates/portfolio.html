@@ -36,6 +36,8 @@
         <a class="card bucket-card" href="/portfolio/{{ mode }}" data-bucket="{{ mode }}" id="bucket-card-{{ mode }}">
             <div class="bucket-name">{{ "🔴 " if mode == "live" else "📄 " }}{{ mode | upper }}</div>
             <div class="bucket-row"><span>Instances</span><strong>{{ b.count }}</strong></div>
+            <div class="bucket-row"><span>Running</span><strong id="bucket-running-{{ mode }}">{{ b.running }}</strong></div>
+            <div class="bucket-row"><span>Open positions</span><strong id="bucket-openpos-{{ mode }}">{{ b.open_positions }}</strong></div>
             <div class="bucket-row"><span>Allocated</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.allocated) }}</strong></div>
             <div class="bucket-row"><span>Equity</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.equity) }}</strong></div>
             <div class="bucket-row"><span>Daily P&amp;L</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.daily_pnl) }}</strong></div>

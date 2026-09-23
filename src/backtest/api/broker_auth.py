@@ -200,6 +200,27 @@ def probe_historical() -> tuple:
         return jsonify({"success": False, "error": "probe failed"}), 500
 
 
+@broker_auth_bp.get("/api/broker/session-token")
+def session_token_bridge() -> tuple:
+    """LOCALHOST-ONLY bridge: hand the live session token to first-party
+    background scripts on the same machine (chain-snapshot recorder, bar
+    fetcher). The script processes can't see the web app's in-memory session
+    and the persisted token file goes stale after every re-login — the
+    2026-09-23 chain-capture failure. Bound-check: refuse anything that is
+    not a loopback request (defence in depth — the dev server binds
+    127.0.0.1 anyway).
+    """
+    from flask import request as _req
+
+    remote = str(_req.remote_addr or "")
+    if remote not in ("127.0.0.1", "::1", "localhost"):
+        return jsonify({"success": False, "error": "local only"}), 403
+    token = get_session_manager().get_active_session_token()
+    if not token:
+        return jsonify({"success": False, "error": "no active session"}), 404
+    return jsonify({"token": token}), 200
+
+
 @broker_auth_bp.get("/api/broker/probe-quote")
 def probe_quote() -> tuple:
     """TEMP DEBUG (2026-09-18): probe the quote/ohlc + quote/ltp endpoints

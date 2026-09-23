@@ -135,6 +135,12 @@ class Strategy(ABC):
     params: dict[str, Any] = {}
     stop_loss: float | None = None
     take_profit: float | None = None
+    # Instrument eligibility (2026-09-22): ``None`` = trades any symbol the
+    # user picks (equity defaults). A list restricts spawn to exactly these
+    # underlyings — the spawn form renders a dropdown instead of free text
+    # and the runner/create API enforces the same set (defense in depth).
+    # Option strategies declare the indexes their chain source supports.
+    eligible_instruments: list[str] | None = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

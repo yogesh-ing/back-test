@@ -117,9 +117,12 @@ def _load(dir_: Path, filename: str):
 
 
 class TestBuiltIns:
-    # The six canonical built-ins (exact-name check, NOT registry size: any
+    # The canonical built-ins (exact-name check, NOT registry size: any
     # test module that defines a Strategy subclass pollutes the global
-    # registry, so counting entries is order-dependent).
+    # registry, so counting entries is order-dependent). The 2026-09-22
+    # stress-test batch (momentum_roc, bollinger_reversion, macd_trend,
+    # ema_pullback) diversifies the multi-strategy portfolio used to
+    # validate the risk module.
     BUILTINS = (
         "buy_and_hold",
         "donchian_breakout",
@@ -127,6 +130,10 @@ class TestBuiltIns:
         "rsi_reversion",
         "sma_crossover",
         "directional_options",
+        "momentum_roc",
+        "bollinger_reversion",
+        "macd_trend",
+        "ema_pullback",
     )
 
     def test_all_six_builtins_pass_the_battery(self):
@@ -140,6 +147,7 @@ class TestBuiltIns:
         assert signal_kind(get_strategy("directional_options")) == "option"
         equity = (
             "buy_and_hold", "donchian_breakout", "price_move", "rsi_reversion", "sma_crossover",
+            "momentum_roc", "bollinger_reversion", "macd_trend", "ema_pullback",
         )
         for name in equity:
             assert signal_kind(get_strategy(name)) == "equity", name
@@ -153,6 +161,26 @@ class TestBuiltIns:
             assert entry["signal_kind"] in ("equity", "option")
             for spec in entry["params"].values():
                 assert spec.get("label"), entry["name"]
+
+    def test_option_strategies_must_declare_eligible_instruments(self):
+        """2026-09-22 contract: an option-kind strategy MUST declare
+        ``eligible_instruments`` — the spawn form renders them as a dropdown
+        and runner/create enforces them. Without the declaration the form
+        falls back to free text and the wrong-instrument confusion returns.
+        Equity strategies default to ``None`` (open), which is fine."""
+        from backtest.strategy.registry import get_all, signal_kind
+
+        for name in list_strategies():
+            cls = get_strategy(name)
+            if signal_kind(cls) == "option":
+                eligible = getattr(cls, "eligible_instruments", None)
+                assert isinstance(eligible, list) and eligible, (
+                    f"option strategy {name!r} must declare a non-empty "
+                    "eligible_instruments list (e.g. ['NIFTY', 'BANKNIFTY'])"
+                )
+                assert all(str(i).strip() for i in eligible), (
+                    f"option strategy {name!r} has blank eligible_instruments entries"
+                )
 
 
 # ---------------------------------------------------------------------------

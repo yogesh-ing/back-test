@@ -25,20 +25,6 @@
     <!-- Concentration warnings -->
     <div id="warning-banner" class="warning-banner" hidden></div>
 
-    <!-- Dashboard book alert — shows when manual option trades exist -->
-    <div id="dashboard-book-banner" class="card" hidden style="padding: 12px 16px; margin-bottom: 12px; border-left: 4px solid #f59e0b; background: rgba(245,158,11,0.08);">
-        <div style="display:flex; justify-content:space-between; align-items:center;">
-            <div>
-                <strong>📦 Manual Options Book</strong> — <span id="db-book-count">0 structures</span> from Options tab (legacy).
-                <span class="muted">These are now visible here and will be flattened by Emergency Flatten. Migrate to Playbooks for reusable configs.</span>
-            </div>
-            <div style="display:flex; gap:8px;">
-                <button id="btn-view-dashboard-book" class="btn btn-small" type="button">View</button>
-                <button id="btn-flatten-dashboard-book" class="btn btn-small btn-warn" type="button">Flatten Manual Book</button>
-            </div>
-        </div>
-    </div>
-
     <!-- Header / global metrics -->
     <div class="card pcc-header">
         <div class="pcc-title-row">
@@ -47,6 +33,7 @@
                 <div class="pcc-conn">
                     <span id="feed-dot" class="feed-dot">🟢</span>
                     <span id="feed-label">Feed: connecting…</span>
+                    <span id="bar-countdown" class="muted" style="margin-left:10px; font-size:.75rem;"></span>
                 </div>
             </div>
             <div class="pcc-actions">
@@ -154,7 +141,6 @@
             <button class="tab" data-tab="risk" type="button">🛡️ Risk Board</button>
             <button class="tab" data-tab="aggregated-trades" type="button">📊 Aggregated Trades</button>
             <button class="tab" data-tab="playbooks" type="button">📚 Playbooks (Option Plug-and-Play)</button>
-            <button class="tab" data-tab="dashboard-book" type="button">📦 Manual Options Book</button>
             <button class="tab" data-tab="log" type="button">Master Audit Log</button>
         </div>
         <div class="tab-panel" id="tab-equity">
@@ -305,16 +291,6 @@
             </div>
             <div id="playbooks-list" class="playbooks-grid">Loading playbooks…</div>
         </div>
-        <div class="tab-panel" id="tab-dashboard-book" hidden>
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-                <div>
-                    <h3 style="margin:0;">Manual Options Book (Legacy — from Options tab)</h3>
-                    <div class="muted">This is the second book that was invisible before. Now merged — visible here, flattened by Emergency Flatten.</div>
-                </div>
-                <button id="btn-refresh-dashboard-book" class="btn btn-small" type="button">Refresh</button>
-            </div>
-            <div id="dashboard-book-content">Loading…</div>
-        </div>
         <div class="tab-panel" id="tab-log" hidden>
             <div id="audit-log" class="audit-log"></div>
         </div>
@@ -341,7 +317,7 @@
         <div class="modal-body">
             <div class="form-row">
                 <label>Instance name (optional)</label>
-                <input id="spawn-name" class="input" type="text" placeholder="e.g. RSI-RELIANCE-1H">
+                <input id="spawn-name" class="input" type="text" placeholder="auto: strategy·instrument·timeframe (e.g. macd_trend·RELIANCE·1hour)">
             </div>
             <div class="form-row">
                 <label>Strategy</label>
@@ -398,8 +374,15 @@
             </small>
             <div class="two-col">
                 <div class="form-row" id="spawn-symbol-row">
-                    <label>Symbol</label>
+                    <label>Instrument</label>
+                    <!-- Restricted strategies (eligible_instruments) get a dropdown;
+                         open strategies keep free text. JS swaps the element in place. -->
+                    <select id="spawn-symbol-select" class="input input-select" hidden></select>
                     <input id="spawn-symbol" class="input" type="text" placeholder="RELIANCE" value="RELIANCE">
+                </div>
+                <div class="form-row" id="spawn-lots-row" hidden>
+                    <label>Lots per leg (options)</label>
+                    <input id="spawn-lots" class="input" type="number" value="1" min="1" max="100">
                 </div>
                 <div class="form-row" id="spawn-universe-row" hidden>
                     <label>Universe / Pool</label>

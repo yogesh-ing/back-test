@@ -94,6 +94,24 @@ class TestFlush:
         assert "long_call" in rows[0]["symbol"]
         assert float(rows[0]["net_pnl"]) == pytest.approx(58.5)
 
+    def test_synthetic_source_runner_never_persists(self, db):
+        """Owner decision 2026-09-22: fake-data fills stay OUT of the permanent
+        DB — synthetic/replay trades would pollute the real trade history."""
+        p = LiveTradePersister(db)
+        for source in ("synthetic", "replay"):
+            runner = _FakeRunner([_trade()], instance_id=f"inst-{source}")
+            runner.config.source = source
+            assert p.flush_runner(runner) == 0
+        rows = db.fetch_all("SELECT symbol FROM trades")
+        assert rows == []
+
+    def test_mstock_source_runner_persists(self, db):
+        """Real market data (mstock) trades DO persist."""
+        p = LiveTradePersister(db)
+        runner = _FakeRunner([_trade()])
+        runner.config.source = "mstock"
+        assert p.flush_runner(runner) == 1
+
     def test_no_duplicates_on_second_flush(self, db):
         p = LiveTradePersister(db)
         runner = _FakeRunner([_trade()])

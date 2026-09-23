@@ -24,7 +24,8 @@ from backtest.data.universe import (
 from backtest.forward.paper_runner import TARGET_POOL, TARGET_SINGLE, RunnerConfig
 from backtest.forward.portfolio_manager import get_portfolio_manager
 from backtest.logging_config import get_logger
-from backtest.simulator.bucket_risk import BUCKET_RISK_LIMITS
+from backtest.simulator.bucket_risk import BUCKET_RISK_LIMITS, update_bucket_limits
+from backtest.simulator.errors import SimulatorError
 
 portfolio_bp = Blueprint("portfolio_api", __name__)
 log = get_logger(__name__)
@@ -428,6 +429,14 @@ def risk_config_view() -> Tuple[Response, int]:
 
 @portfolio_bp.post("/api/portfolio/risk/config")
 def risk_config_save() -> Tuple[Response, int]:
+    """Persist risk-config changes through the validated update paths.
+
+    Global limits go through ``GlobalRiskConfig.update_limits`` and bucket
+    limits through ``update_bucket_limits`` — raw attribute writes bypass
+    the dataclass validation and can silently install impossible limits
+    (or, worse, weaken the live bucket's source gate). Invalid input gets a
+    400 and NOTHING is changed.
+    """
     data = request.get_json(silent=True) or {}
     mgr = _manager()
     updated = {}
@@ -435,56 +444,57 @@ def risk_config_save() -> Tuple[Response, int]:
     if "global" in data and isinstance(data["global"], dict):
         g = data["global"]
         try:
-            sup = mgr.supervisor
-            cfg = sup.config
-            if "daily_loss_limit" in g:
-                cfg.daily_loss_limit = float(g["daily_loss_limit"])
-            if "max_drawdown_pct" in g:
-                cfg.max_drawdown_pct = float(g["max_drawdown_pct"])
-            if "max_leverage" in g:
-                cfg.max_leverage = float(g["max_leverage"])
-            if "breach_mode" in g:
-                cfg.breach_mode = str(g["breach_mode"])
-            if "correlation_warning_threshold" in g:
-                cfg.correlation_warning_threshold = int(
-                    g["correlation_warning_threshold"]
-                )
-            updated["global"] = True
-            log.info("risk config global updated: %s", g)
+            changed = mgr.supervisor.config.update_limits(g)
+            updated["global"] = changed
+            log.info("risk config global updated: %s (changed: %s)", g, changed)
             try:
                 mgr._audit_log(
-                    "RISK_CONFIG_UPDATE", scope="all", detail=f"global={g}"
+                    "RISK_CONFIG_UPDATE", scope="all", detail=f"global={changed or g}"
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — audit is best-effort, save already succeeded
                 pass
+        except (ValueError, TypeError) as exc:
+            return _error(f"invalid global risk config: {exc}", 400)
         except Exception as exc:
             return _error(f"failed to update global config: {exc}", 500)
+        finally:
+            try:
+                mgr.persist_risk_config()
+            except Exception:  # noqa: BLE001 — a config persist must never 500 the API
+                pass
 
     if "buckets" in data and isinstance(data["buckets"], dict):
         try:
+            changed_buckets = {}
             for mode, lim in data["buckets"].items():
                 if mode not in BUCKET_RISK_LIMITS:
-                    continue
-                cur = BUCKET_RISK_LIMITS[mode]
-                if "max_position_pct" in lim:
-                    cur.max_position_pct = float(lim["max_position_pct"])
-                if "max_position_value" in lim:
-                    cur.max_position_value = float(lim["max_position_value"])
-                if "max_positions" in lim:
-                    cur.max_positions = int(lim["max_positions"])
-                if "allowed_sources" in lim:
-                    cur.allowed_sources = list(lim["allowed_sources"])
-            updated["buckets"] = list(data["buckets"].keys())
-            log.info("risk config buckets updated: %s", list(data["buckets"].keys()))
+                    return _error(
+                        f"unknown risk bucket {mode!r} (expected paper|live)", 400
+                    )
+                if not isinstance(lim, dict):
+                    return _error(f"bucket {mode!r} payload must be an object", 400)
+                changed_buckets[mode] = update_bucket_limits(mode, lim)
+            updated["buckets"] = changed_buckets
+            log.info(
+                "risk config buckets updated: %s",
+                {k: v for k, v in changed_buckets.items()},
+            )
             try:
                 keys = list(data["buckets"].keys())
                 mgr._audit_log(
                     "RISK_BUCKET_UPDATE", scope="all", detail=f"buckets={keys}"
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — audit is best-effort, save already succeeded
                 pass
+        except (ValueError, TypeError, SimulatorError) as exc:
+            return _error(f"invalid bucket risk config: {exc}", 400)
         except Exception as exc:
             return _error(f"failed to update buckets: {exc}", 500)
+        finally:
+            try:
+                mgr.persist_risk_config()
+            except Exception:  # noqa: BLE001 — a config persist must never 500 the API
+                pass
 
     return jsonify({"success": True, "updated": updated}), 200
 
@@ -525,10 +535,24 @@ def create_runner() -> Tuple[Response, int]:
 
     if not name:
         kind = universe_id or symbols[0]
-        name = f"{strategy_name} · {kind}"
+        tf = str(data.get("timeframe", "1hour"))
+        name = f"{strategy_name}·{kind}·{tf}"
 
     params = data.get("params") or {}
     instrument = data.get("instrument") or {"type": "equity"}
+    # Lots-per-leg: clamp here too so a bad client value can't produce a
+    # nonsense multiplier on every leg (fail-closed sizing rule).
+    if (
+        isinstance(instrument, dict)
+        and isinstance(instrument.get("expression"), dict)
+        and "quantity" in instrument["expression"]
+    ):
+        try:
+            instrument["expression"]["quantity"] = max(
+                1, min(int(instrument["expression"]["quantity"]), 100)
+            )
+        except (TypeError, ValueError):
+            instrument["expression"]["quantity"] = 1
     if (
         isinstance(instrument, dict)
         and str(instrument.get("type", "equity")).lower() == "option"
@@ -543,8 +567,28 @@ def create_runner() -> Tuple[Response, int]:
         and target_type == TARGET_SINGLE
     ):
         underlyings = {str(s).strip().upper() for s in (symbols or [])}
-        if not underlyings or not underlyings <= {"NIFTY", "BANKNIFTY"}:
-            return _error("Option strategies trade an index — pick NIFTY/BANKNIFTY")
+        # 2026-09-22: eligibility comes from the STRATEGY's declared
+        # eligible_instruments when it declares one; strategies that don't
+        # declare fall back to the index default. Declaring eligibility can
+        # only NARROW the allowed set, never widen it (an option runner on
+        # RELIANCE is still nonsense even if the strategy is open).
+        from backtest.strategy.registry import get_strategy
+
+        try:
+            strat_cls = get_strategy(strategy_name)
+            eligible = getattr(strat_cls, "eligible_instruments", None)
+        except KeyError:
+            eligible = None
+        allowed = (
+            {str(i).strip().upper() for i in eligible}
+            if eligible
+            else {"NIFTY", "BANKNIFTY"}
+        )
+        if not underlyings or not underlyings <= allowed:
+            return _error(
+                f"Option strategies trade an index — pick {'/'.join(sorted(allowed))}"
+                + (f" ({strategy_name} is restricted to {sorted(allowed)})" if eligible else "")
+            )
 
     try:
         config = RunnerConfig(

@@ -35,6 +35,9 @@ class TimeAlternator(Strategy):
     """Alternate ATM call/put every N bars (draft #3, deterministic form)."""
 
     name = "time_alternator"
+    # 2026-09-22: instrument eligibility (spawn-form dropdown + create-API
+    # enforcement). Index strategies trade the FNO index set.
+    eligible_instruments = ["NIFTY", "BANKNIFTY"]
     description = (
         "Draft #3 adapted: alternates BULLISH/BEARISH by bar parity — a "
         "high-turnover mechanics validator that must trade often and "

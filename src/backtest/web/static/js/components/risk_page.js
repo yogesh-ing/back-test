@@ -130,7 +130,7 @@
         <div class="risk-config-row"><label>Daily Loss Limit (${fmtMoney(1)})</label><input id="cfg-daily-loss" type="range" min="1000" max="100000" step="1000" value="${g.daily_loss_limit || 50000}" class="risk-slider"><span id="cfg-daily-loss-val">${fmtMoney(g.daily_loss_limit || 50000)}</span></div>
         <div class="risk-config-row"><label>Max Drawdown %</label><input id="cfg-drawdown" type="range" min="1" max="50" step="1" value="${(g.max_drawdown_pct || 0.25)*100}" class="risk-slider"><span id="cfg-drawdown-val">${pct(g.max_drawdown_pct || 0.25)}</span></div>
         <div class="risk-config-row"><label>Max Leverage</label><input id="cfg-leverage" type="range" min="1" max="5" step="0.1" value="${g.max_leverage || 1}" class="risk-slider"><span id="cfg-leverage-val">${g.max_leverage || 1}x</span></div>
-        <div class="risk-config-row"><label>Breach Mode</label><select id="cfg-breach-mode" class="input input-select"><option value="PAUSE_AND_HOLD" ${g.breach_mode==="PAUSE_AND_HOLD"?"selected":""}>Pause & Hold</option><option value="FLATTEN_AND_HALT" ${g.breach_mode==="FLATTEN_AND_HALT"?"selected":""}>Flatten & Halt</option></select><span></span></div>
+        <div class="risk-config-row"><label>Breach Mode</label><select id="cfg-breach-mode" class="input input-select"><option value="PAUSE_AND_HOLD" ${g.breach_mode==="PAUSE_AND_HOLD"?"selected":""}>Pause & Hold</option>      <option value="EMERGENCY_FLATTEN" ${g.breach_mode==="EMERGENCY_FLATTEN"?"selected":""}>Flatten & Halt</option></select><span></span></div>
         <div class="risk-config-row"><label>Correlation Warn Threshold</label><input id="cfg-corr" type="range" min="1" max="10" step="1" value="${g.correlation_warning_threshold || 3}" class="risk-slider"><span id="cfg-corr-val">${g.correlation_warning_threshold || 3}</span></div>
       `;
       // Bind live updates
@@ -148,7 +148,7 @@
           <strong>${mode.toUpperCase()}</strong>
           <div class="risk-config-row"><label>Max Position %</label><input data-bucket="${mode}" data-field="max_position_pct" type="range" min="1" max="100" step="1" value="${(lim.max_position_pct||0.1)*100}" class="risk-slider"><span>${pct(lim.max_position_pct||0.1)}</span></div>
           <div class="risk-config-row"><label>Max Position Value</label><input data-bucket="${mode}" data-field="max_position_value" type="number" value="${lim.max_position_value||10000}" class="input" style="max-width:140px;"><span>${fmtMoney(lim.max_position_value||0)}</span></div>
-          <div class="risk-config-row"><label>Max Positions</label><input data-bucket="${mode}" data-field="max_positions" type="number" min="1" max="100" value="${lim.max_positions||5}" class="input" style="max-width:100px;"><span></span></div>
+          <div class="risk-config-row"><label>Max Open Positions</label><input data-bucket="${mode}" data-field="max_open_positions" type="number" min="1" max="100" value="${lim.max_open_positions||''}" class="input" style="max-width:100px;"><span></span></div>
         </div>
       `).join("");
     }
@@ -169,9 +169,9 @@
   function applyPreset(preset) {
     if (!currentConfig) return;
     const presets = {
-      conservative: { daily_loss_limit: 20000, max_drawdown_pct: 0.1, max_leverage: 1, correlation_warning_threshold: 2, bucket: { max_position_pct: 0.05, max_positions: 3 } },
-      balanced: { daily_loss_limit: 50000, max_drawdown_pct: 0.25, max_leverage: 1.5, correlation_warning_threshold: 3, bucket: { max_position_pct: 0.1, max_positions: 5 } },
-      aggressive: { daily_loss_limit: 100000, max_drawdown_pct: 0.4, max_leverage: 3, correlation_warning_threshold: 5, bucket: { max_position_pct: 0.2, max_positions: 10 } },
+      conservative: { daily_loss_limit: 20000, max_drawdown_pct: 0.1, max_leverage: 1, correlation_warning_threshold: 2, bucket: { max_position_pct: 0.05, max_open_positions: 3 } },
+      balanced: { daily_loss_limit: 50000, max_drawdown_pct: 0.25, max_leverage: 1.5, correlation_warning_threshold: 3, bucket: { max_position_pct: 0.1, max_open_positions: 5 } },
+      aggressive: { daily_loss_limit: 100000, max_drawdown_pct: 0.4, max_leverage: 3, correlation_warning_threshold: 5, bucket: { max_position_pct: 0.2, max_open_positions: 10 } },
     };
     const p = presets[preset];
     if (!p) return;
@@ -215,7 +215,7 @@
       const field = el.dataset.field;
       if (!buckets[mode]) buckets[mode] = {};
       buckets[mode][field] = el.type === "range" ? parseFloat(el.value)/100 : parseFloat(el.value);
-      if (field === "max_position_value" || field === "max_positions") buckets[mode][field] = parseFloat(el.value);
+      if (field === "max_position_value" || field === "max_open_positions") buckets[mode][field] = parseFloat(el.value);
     });
     try {
       await fetchJSON("/api/portfolio/risk/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ buckets }) });

@@ -277,123 +277,6 @@
       });
   }
 
-  // Dashboard book rendering (merged second book)
-  async function loadDashboardBook() {
-    const container = $("dashboard-book-content");
-    const banner = $("dashboard-book-banner");
-    const countEl = $("db-book-count");
-
-    if (!container) return;
-
-    try {
-      // Get from portfolio summary (already merged)
-      const summaryRes = await fetch("/api/portfolio/summary");
-      const summaryData = await summaryRes.json();
-      const portfolio = summaryData.portfolio || summaryData;
-      const dbBook = portfolio.dashboard_book;
-
-      if (!dbBook || !dbBook.exists) {
-        container.innerHTML = '<p class="muted">No manual options book — the legacy Options tab book is empty or never created. All option trading now happens via Portfolio runners (playbooks).</p>';
-        if (banner) banner.hidden = true;
-        return;
-      }
-
-      // Show banner if book has positions
-      if (banner && countEl) {
-        if (dbBook.open_structures > 0) {
-          banner.hidden = false;
-          countEl.textContent = `${dbBook.open_structures} structure(s), ${dbBook.open_positions} leg(s) — Equity ₹${Math.round(dbBook.equity).toLocaleString("en-IN")}`;
-        } else {
-          banner.hidden = true;
-        }
-      }
-
-      const structures = dbBook.structures || [];
-      const positions = dbBook.positions || [];
-
-      if (!structures.length) {
-        container.innerHTML = `
-          <p class="muted">Manual book is flat — no open structures.</p>
-          <div class="muted" style="font-size:12px;">
-            Capital: ₹${Math.round(dbBook.capital).toLocaleString("en-IN")} ·
-            Equity: ₹${Math.round(dbBook.equity).toLocaleString("en-IN")} ·
-            Realized: ₹${Math.round(dbBook.realized_pnl).toLocaleString("en-IN")} ·
-            Unrealized: ₹${Math.round(dbBook.unrealized_pnl).toLocaleString("en-IN")}
-          </div>
-        `;
-        return;
-      }
-
-      container.innerHTML = `
-        <div style="margin-bottom:12px;" class="muted">
-          Capital: ₹${Math.round(dbBook.capital).toLocaleString("en-IN")} ·
-          Equity: ₹${Math.round(dbBook.equity).toLocaleString("en-IN")} ·
-          Realized: ₹${Math.round(dbBook.realized_pnl).toLocaleString("en-IN")} ·
-          Unrealized: ₹${Math.round(dbBook.unrealized_pnl).toLocaleString("en-IN")} ·
-          Quote source: ${dbBook.quote_source || "unknown"}
-        </div>
-        <table class="matrix-table">
-          <thead>
-            <tr><th>Structure</th><th>Type</th><th>Underlying</th><th>Expiry</th><th>Legs</th><th>Entry Cost</th><th>Unrealized</th><th>Actions</th></tr>
-          </thead>
-          <tbody>
-            ${structures.map(s => `
-              <tr>
-                <td><strong>${s.structure_id.slice(0,8)}</strong></td>
-                <td>${esc(s.structure_type)}</td>
-                <td>${esc(s.underlying)}</td>
-                <td>${esc(s.expiry || "—")}</td>
-                <td>${s.leg_count}</td>
-                <td>₹${Math.round(s.total_entry_cost).toLocaleString("en-IN")}</td>
-                <td style="color:${s.total_unrealized_pnl >= 0 ? "#10b981" : "#ef4444"}">₹${Math.round(s.total_unrealized_pnl).toLocaleString("en-IN")}</td>
-                <td><button class="btn btn-small btn-close-db-structure" data-id="${esc(s.structure_id)}" type="button">Close</button></td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-        <h4 style="margin-top:16px;">Legs</h4>
-        <table class="matrix-table">
-          <thead><tr><th>Symbol</th><th>Side</th><th>Strike</th><th>Type</th><th>Qty</th><th>Entry</th><th>LTP</th><th>P&L</th></tr></thead>
-          <tbody>
-            ${positions.map(p => `
-              <tr>
-                <td><strong>${esc(p.trading_symbol)}</strong></td>
-                <td>${esc(p.side)}</td>
-                <td>${esc(p.strike)}</td>
-                <td>${esc(p.option_type)}</td>
-                <td>${p.quantity} × ${p.lot_size}</td>
-                <td>₹${p.entry_price.toFixed(2)}</td>
-                <td>₹${p.current_price.toFixed(2)}</td>
-                <td style="color:${p.unrealized_pnl >= 0 ? "#10b981" : "#ef4444"}">₹${Math.round(p.unrealized_pnl).toLocaleString("en-IN")}</td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      `;
-
-      // Wire close buttons
-      container.querySelectorAll(".btn-close-db-structure").forEach(btn => {
-        btn.addEventListener("click", async () => {
-          if (!confirm(`Close structure ${btn.dataset.id.slice(0,8)}?`)) return;
-          btn.disabled = true;
-          try {
-            const resp = await fetch(`/api/options/structures/${btn.dataset.id}/close`, { method: "POST" });
-            const out = await resp.json();
-            if (!resp.ok) throw new Error(out.error || "Close failed");
-            if (window.showToast) window.showToast(`Closed — P&L ₹${Math.round(out.realized_pnl).toLocaleString("en-IN")}`, "success");
-            loadDashboardBook();
-          } catch (e) {
-            if (window.showToast) window.showToast(e.message, "error");
-            btn.disabled = false;
-          }
-        });
-      });
-
-    } catch (e) {
-      container.innerHTML = `<div class="card-error">Failed to load dashboard book: ${esc(e.message)}</div>`;
-    }
-  }
-
   // Boot
   document.addEventListener("DOMContentLoaded", () => {
     // Playbooks tab
@@ -405,55 +288,9 @@
       });
     }
 
-    // Dashboard book tab
-    const dbTab = document.querySelector('[data-tab="dashboard-book"]');
-    if (dbTab) {
-      dbTab.addEventListener("click", () => {
-        setTimeout(loadDashboardBook, 50);
-      });
-    }
-
     // Buttons
     const createBtn = $("btn-create-playbook");
     if (createBtn) createBtn.addEventListener("click", openCreatePlaybookModal);
-
-    const refreshDbBtn = $("btn-refresh-dashboard-book");
-    if (refreshDbBtn) refreshDbBtn.addEventListener("click", loadDashboardBook);
-
-    const viewDbBtn = $("btn-view-dashboard-book");
-    if (viewDbBtn) {
-      viewDbBtn.addEventListener("click", () => {
-        // Switch to dashboard-book tab
-        document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-        const target = document.querySelector('[data-tab="dashboard-book"]');
-        if (target) target.classList.add("active");
-        document.querySelectorAll(".tab-panel").forEach(p => p.hidden = true);
-        const panel = $("tab-dashboard-book");
-        if (panel) panel.hidden = false;
-        loadDashboardBook();
-      });
-    }
-
-    const flattenDbBtn = $("btn-flatten-dashboard-book");
-    if (flattenDbBtn) {
-      flattenDbBtn.addEventListener("click", async () => {
-        if (!confirm("Flatten ALL manual options book structures? This closes everything from Options tab.")) return;
-        try {
-          // Use portfolio emergency flatten which now also flattens dashboard book
-          const res = await fetch("/api/portfolio/emergency_stop", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ reason: "manual_dashboard_flatten", mode: "paper" }),
-          });
-          const out = await res.json();
-          if (!res.ok || out.success === false) throw new Error(out.error || "Flatten failed");
-          if (window.showToast) window.showToast(`Flattened ${out.flattened_positions} positions (including manual book)`, "success");
-          loadDashboardBook();
-        } catch (e) {
-          if (window.showToast) window.showToast(e.message, "error");
-        }
-      });
-    }
 
     const dismissUnifiedBtn = $("btn-dismiss-unified");
     if (dismissUnifiedBtn) {
@@ -468,23 +305,9 @@
       }
     }
 
-    // Initial load if playbooks tab is active or on portfolio landing
-    // Load dashboard book summary for banner
-    fetch("/api/portfolio/summary")
-      .then(r => r.json())
-      .then(data => {
-        const portfolio = data.portfolio || data;
-        const dbBook = portfolio.dashboard_book;
-        const banner = $("dashboard-book-banner");
-        const countEl = $("db-book-count");
-        if (banner && countEl && dbBook && dbBook.exists && dbBook.open_structures > 0) {
-          banner.hidden = false;
-          countEl.textContent = `${dbBook.open_structures} structure(s), ${dbBook.open_positions} leg(s) — Equity ₹${Math.round(dbBook.equity).toLocaleString("en-IN")}`;
-        }
-      })
-      .catch(() => {});
+    // (dashboard-book banner removed with the Manual Options Book tab)
 
   });
 
-  window.Playbooks = { loadPlaybooks, loadDashboardBook, spawnFromPlaybook };
+  window.Playbooks = { loadPlaybooks, spawnFromPlaybook };
 })();

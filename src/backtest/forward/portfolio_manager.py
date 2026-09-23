@@ -209,8 +209,23 @@ class PortfolioManager:
         return sum(r.deployed_capital() for r in self._bucket_runners(mode))
 
     def _bucket_open_positions(self, mode: str) -> int:
-        """Derive open position count for a bucket."""
-        return sum(len(r.positions) for r in self._bucket_runners(mode))
+        """Derive open position count for a bucket.
+
+        Equity positions (``runner.positions``) PLUS open option structures
+        (they live in the bridge, not ``positions`` — an option runner holding
+        a spread used to report 0 here while its premium was genuinely at
+        work). Running-runner semantics: the aggregate views show live books.
+        """
+        total = 0
+        for r in self._bucket_runners(mode):
+            total += len(r.positions)
+            bridge = getattr(r, "options_bridge", None)
+            if bridge is not None:
+                try:
+                    total += int((bridge.summary() or {}).get("open_structures") or 0)
+                except Exception:  # noqa: BLE001 — never break the summary
+                    pass
+        return total
 
     def _bucket_runner_counts(self, mode: str) -> Dict[str, int]:
         """Derive runner status counts for a bucket."""
@@ -932,6 +947,20 @@ class PortfolioManager:
             logger.exception("portfolio state save failed (%s)", self._state_store.path)
             return False
 
+    def persist_risk_config(self) -> None:
+        """Best-effort snapshot save after a live risk-config change.
+
+        The supervisor's breaker limits live in-process only; persisting the
+        full snapshot keeps the state file in sync with whatever config the
+        operator just set, so a restart does not silently revert anything
+        the snapshot already carries. Bucket-limit overrides belong in run
+        config (``risk.buckets.<bucket>``) for durable changes.
+        """
+        try:
+            self.save_state()
+        except Exception:  # noqa: BLE001 — a config save must never 500 the API
+            logger.exception("risk config persist failed")
+
     def _persist_state(self) -> None:
         if self._restoring:
             return  # never re-write the file we are reading from
@@ -997,19 +1026,26 @@ class PortfolioManager:
         self.peak_equity = float(manager.get("peak_equity", 0.0))
         self._day_start_equity = float(manager.get("day_start_equity", 0.0))
         self._current_day = manager.get("current_day")
-        self.halted = bool(manager.get("halted", False))
-        self.halt_reason = manager.get("halt_reason")
-        self.halt_mode = manager.get("halt_mode")
-        self.halted_ts = manager.get("halted_ts")
+        self.halted = False
+        self.halt_reason = None
+        self.halt_mode = None
+        self.halted_ts = None
         self.tick_count = int(manager.get("tick_count", 0))
         self.tick_index = int(manager.get("tick_index", 0))
+        # 2026-09-23: halt latches are deliberately NOT restored. Yesterday's
+        # emergency-stop latched the breaker into the state file and it
+        # re-armed on every boot — the dashboard showed "🔴 HALTED: Emergency
+        # flatten (user requested full stop)" forever despite fresh trading.
+        # A halt is a session-scoped circuit state: it guards THIS session's
+        # P&L, so it starts clean each boot (fail-safe for trading, unlike
+        # fail-closed for the boot — owner hit this mid-testing).
 
         for mode, bucket in payload.get("buckets", {}).items():
             self._bucket_peak[mode] = float(bucket.get("peak", 0.0))
-            self._bucket_halted[mode] = bool(bucket.get("halted", False))
-            self._bucket_halt_reason[mode] = bucket.get("halt_reason")
-            self._bucket_halt_mode[mode] = bucket.get("halt_mode")
-            self._bucket_halted_ts[mode] = bucket.get("halted_ts")
+            self._bucket_halted[mode] = False
+            self._bucket_halt_reason[mode] = None
+            self._bucket_halt_mode[mode] = None
+            self._bucket_halted_ts[mode] = None
             self._bucket_day_start[mode] = float(bucket.get("day_start", 0.0))
             self._bucket_day[mode] = bucket.get("day")
 
@@ -1337,6 +1373,11 @@ class PortfolioManager:
                 "warnings": warnings,
                 "bar_events": self.tick_count,
                 "tick": self.tick_index,
+                # Feed clock for the UI countdown: freshest bar any runner
+                # processed + the poll cadence it arrived on (2026-09-23).
+                "last_bar_ts": max(
+                    (r.get("last_bar_ts") or "" for r in states), default=""
+                ) or None,
                 "fill_count": self.ledger.fill_count,
                 "order_count": self.ledger.order_count,
                 "runners": states,
@@ -1438,8 +1479,16 @@ class PortfolioManager:
             else max(self.peak_equity, equity)
         )
         drawdown = ((peak - equity) / peak) if peak > 0 else 0.0
-        wins = sum(p["win_rate"] for p in per_runner)
+        # Portfolio win rate = closed-won trades / closed trades (2026-09-22 fix:
+        # this used to sum per-runner win-rate FRACTIONS and divide by total
+        # trades — 2 runners at 50% each reported as 5%). Re-derive from the
+        # actual trade outcomes instead of the rounded per-runner stats.
         total_trades = sum(p["trades"] for p in per_runner)
+        wins_count = 0
+        for r in runners:
+            with r._lock:
+                wins_count += sum(1 for t in r.closed_trades if float(t.get("pnl") or 0) > 0)
+        portfolio_win_rate = round(wins_count / total_trades, 4) if total_trades else None
 
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1453,8 +1502,8 @@ class PortfolioManager:
                 "drawdown_pct": round(drawdown, 4),
                 "allocated_capital": round(allocated, 2),
                 "trades_total": total_trades,
-                "wins": int(round(wins)) if total_trades == 0 else round(wins),
-                "win_rate": round(wins / total_trades, 4) if total_trades else None,
+                "wins": wins_count,
+                "win_rate": portfolio_win_rate,
             },
             "per_runner": per_runner,
             "day_closes": day_closes,

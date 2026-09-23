@@ -120,18 +120,30 @@ def fetch_start() -> tuple:
             400,
         )
 
-    # Validate auth token exists
-    token_file = os.path.join(os.getcwd(), ".mstock_session_token")
-    if not os.path.exists(token_file):
-        return (
-            jsonify({"error": "No auth token. Please authenticate via the Broker button first."}),
-            401,
-        )
+    # Resolve the session token: prefer the live Broker session (the same
+    # one the chain/quote paths use), fall back to the persisted token file
+    # at the PROJECT ROOT. The old `os.getcwd()` lookup broke whenever the
+    # app was launched from src/ (cwd ≠ project root) → phantom
+    # "No auth token" despite an active login (fixed 2026-09-22).
+    token: str | None = None
+    try:
+        from backtest.brokers.session_manager import get_session_manager
 
-    with open(token_file) as f:
-        token = f.read().strip()
-    if len(token) < 16:
-        return jsonify({"error": "Auth token invalid. Please re-authenticate."}), 401
+        token = get_session_manager().get_active_session_token()
+    except Exception:  # noqa: BLE001 — fall through to the file
+        token = None
+    if not token:
+        token_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            os.pardir,
+            ".mstock_session_token",
+        )
+        token_file = os.path.normpath(token_file)
+        if os.path.exists(token_file):
+            with open(token_file) as f:
+                token = f.read().strip()
+    if not token or len(token) < 16:
+        return jsonify({"error": "No auth token. Please authenticate via the Broker button first."}), 401
 
     # Reset job state
     with _lock:

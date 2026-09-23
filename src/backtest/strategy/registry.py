@@ -114,6 +114,9 @@ def get_all() -> list[dict[str, Any]]:
                 "author": getattr(cls, "author", "") or "",
                 "params": cls.param_schema(),
                 "signal_kind": signal_kind(cls),
+                # 2026-09-22: None = any instrument; a list = spawn form shows
+                # exactly these as a dropdown and the create API enforces them.
+                "eligible_instruments": getattr(cls, "eligible_instruments", None),
             }
         )
     logger.info(

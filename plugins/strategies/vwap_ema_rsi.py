@@ -37,6 +37,9 @@ class VwapEmaRsi(Strategy):
     """VWAP bias + EMA(9/15) cross trigger + RSI pullback band."""
 
     name = "vwap_ema_rsi"
+    # 2026-09-22: instrument eligibility (spawn-form dropdown + create-API
+    # enforcement). Index strategies trade the FNO index set.
+    eligible_instruments = ["NIFTY", "BANKNIFTY"]
     description = (
         "Intraday trend stack: VWAP direction bias, EMA9/15 crossover "
         "trigger, RSI(14) 45–60 pullback filter. Long calls above VWAP on "

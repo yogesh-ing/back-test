@@ -41,9 +41,27 @@ class LiveTradePersister:
     # Public API
     # ------------------------------------------------------------------
 
+    #: Sources whose trades must NEVER reach the permanent DB. Synthetic/
+    # replay data produces fake fills — persisting them would pollute the
+    # real cross-session trade history (owner decision 2026-09-22, mid-session:
+    # "we should not be storing trades which are running or may run on
+    # synthetic data to DB"). Same trust rule as the live bucket's
+    # fail-closed data gate: only REAL market data earns permanent storage.
+    NON_PERSISTENT_SOURCES = frozenset({"synthetic", "replay"})
+
     def flush_runner(self, runner: Any) -> int:
-        """Write runner's not-yet-persisted closed trades. Returns count."""
+        """Write runner's not-yet-persisted closed trades. Returns count.
+
+        Runners on synthetic/replay data are skipped entirely — their fills
+        are simulations on simulated prices and would contaminate the real
+        trade history. Their books still live in the in-memory state + JSON
+        snapshot like before; only mstock (real market data) runners persist.
+        """
         if self.db is None:
+            return 0
+        # Data-trust gate FIRST — cheap check, no work for fake-data runners.
+        source = str(getattr(getattr(runner, "config", None), "source", "") or "").lower()
+        if source in self.NON_PERSISTENT_SOURCES:
             return 0
         try:
             trades = list(runner.closed_trades)
@@ -107,7 +125,11 @@ class LiveTradePersister:
             row = PortfolioRow(
                 name=name,
                 initial_capital=Decimal(str(cfg.allocated_capital)),
-                current_cash=Decimal(str(runner.portfolio.cash)),
+                current_cash=Decimal(
+                    str(getattr(runner.portfolio, "current_cash", 0)
+                        or getattr(runner.portfolio, "cash", 0)
+                        or 0)
+                ),
                 mode="paper",
                 source=str(getattr(cfg, "source", "synthetic") or "synthetic"),
             )

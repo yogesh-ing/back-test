@@ -36,11 +36,59 @@ logger = logging.getLogger("backtest.scripts.chain_snapshots")
 
 
 def _build_client():
-    """The authenticated order broker, or a clean failure."""
+    """The authenticated order broker, or a clean failure.
+
+    2026-09-22: the script runs in its OWN process — the web UI's in-memory
+    broker session is invisible here, and the ``.mstock_session_token`` file
+    can be STALE (a dead token TokenExceptions on every call). Resolution
+    order:
+    1. the local web app's live session via a localhost-only bridge endpoint
+       (fresh token when the user is logged in there — the normal case);
+    2. the persisted token file (root of checkout) — accepted as-is, the
+       API rejects a dead token fail-closed on first use;
+    3. an unauthenticated failure with the standard guidance.
+    """
+    import os
+    from datetime import datetime, timedelta
+
+    import requests as _requests
+
     from backtest.brokers.session_manager import get_session_manager
 
     mgr = get_session_manager()
     if not mgr.is_authenticated():
+        token = None
+        # 1) Fresh token from the local web app (localhost only).
+        try:
+            resp = _requests.get(
+                "http://127.0.0.1:5000/api/broker/session-token", timeout=5
+            )
+            if resp.status_code == 200:
+                token = str(resp.json().get("token") or "")
+        except Exception:  # noqa: BLE001 — app not running / endpoint absent
+            token = None
+        # 2) Persisted token file (may be stale — first API call will tell).
+        if not token:
+            token_file = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                ".mstock_session_token",
+            )
+            if os.path.exists(token_file):
+                with open(token_file) as f:
+                    token = f.read().strip()
+        if not token or len(token) < 16:
+            raise SystemExit(
+                "No authenticated mStock session — run the broker-auth flow first "
+                "(web UI → Broker Auth) or set credentials per docs/DATA-SOURCES.md"
+            )
+        broker = mgr.get_active_broker()
+        # Restore into the broker's in-memory session. Expiry unknown from a
+        # file — assume a same-day session; mStock rejects a dead token
+        # fail-closed on the first call.
+        broker._session_token = token
+        broker._expires_at = datetime.now() + timedelta(hours=8)
+        if mgr.is_authenticated():
+            return broker
         raise SystemExit(
             "No authenticated mStock session — run the broker-auth flow first "
             "(web UI → Broker Auth) or set credentials per docs/DATA-SOURCES.md"

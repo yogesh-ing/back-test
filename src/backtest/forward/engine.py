@@ -1079,6 +1079,13 @@ class ForwardTestingEngine:
         (``allowed``), the mock fallback returns a ``(bool, reason)`` tuple.
         """
         price = self._order_price(order, market_data)
+        if price is None:
+            # Fail closed — see _order_price.
+            logger.warning(
+                "Risk check skipped for %s: no price available — order REJECTED",
+                getattr(order, "symbol", "?"),
+            )
+            return False
         try:
             result = self.risk_manager.validate_order(order, current_price=price)
         except TypeError:  # mock fallback takes only the order
@@ -1124,7 +1131,45 @@ class ForwardTestingEngine:
                     return float(candles["close"].iloc[-1])
             except Exception:
                 pass
-        return 100  # same fallback the strategy adapter uses
+        # No price found — return None so the risk manager FAILS CLOSED
+        # instead of evaluating notional / pct / buying-power checks against
+        # a fantasy fallback price.
+        return None
+
+    def _hydrate_avg_daily_volumes(self) -> None:
+        """Best-effort avg daily volume per symbol for the risk manager.
+
+        Uses the most recent ~20 daily bars from the DB cache. Never
+        raises — a cold DB or an empty universe must not block startup;
+        symbols without data simply skip the volume cap check inside the
+        risk manager.
+        """
+        if self.risk_manager is None or self.db_manager is None:
+            return
+        try:
+            universe = set(self.config.data.symbols or [])
+        except Exception:
+            return
+        if not universe:
+            return
+        for sym in universe:
+            try:
+                rows = self.db_manager.fetch_all(
+                    """
+                    SELECT volume
+                    FROM market_data_cache
+                    WHERE symbol = :symbol AND timeframe = 'day'
+                    ORDER BY ts DESC
+                    LIMIT 20
+                    """,
+                    {"symbol": sym},
+                )
+                vols = [float(r.get("volume") or 0) for r in rows or []]
+                vols = [v for v in vols if v > 0]
+                if vols:
+                    self.risk_manager.set_avg_daily_volume(sym, sum(vols) / len(vols))
+            except Exception as exc:
+                logger.debug("avg daily volume unavailable for %s: %s", sym, exc)
 
     def initialize_system(self):
         """Initialize all components, restore state if available."""
@@ -1359,6 +1404,12 @@ class ForwardTestingEngine:
             )
         except Exception as exc:
             logger.warning("Failed to init sizer, using fixed 100: %s", exc)
+            if self._bucket_key == "live":
+                # A wrong size trades real money — refuse rather than size
+                # blind (fail closed).
+                raise ValidationError(
+                    f"Live bucket requires the configured position sizer; init failed: {exc}"
+                ) from exc
             from backtest.simulator.position_sizing import PositionSizer, SizingConfig
 
             self.sizer = PositionSizer(SizingConfig(method="fixed_quantity", fixed_quantity=100))
@@ -1413,6 +1464,10 @@ class ForwardTestingEngine:
                 logger.info("Order executor initialized: %s", exec_cfg.realism)
         except Exception as exc:
             logger.warning("Failed to init executor: %s", exc)
+            if self._bucket_key == "live":
+                raise ValidationError(
+                    f"Live bucket requires a working order executor; init failed: {exc}"
+                ) from exc
             self.executor = None
 
         # Strategy adapter — signal source only (ticket F-01). It produces
@@ -1480,7 +1535,10 @@ class ForwardTestingEngine:
         if not hasattr(self, "time_manager") or self.time_manager is None:
             self.time_manager = MockTimeManager(market=self.config.system.market)
 
-        # Risk manager – try real implementation
+        # Risk manager – try real implementation. A live bucket NEVER falls
+        # back to the mock: the mock skips restricted symbols, buying power
+        # and the daily-loss check, so a degraded init must refuse the run
+        # (fail closed) instead of trading real money under weaker guards.
         try:
             from backtest.simulator.risk_manager import RiskManager as RealRiskManager
 
@@ -1494,10 +1552,22 @@ class ForwardTestingEngine:
             self.risk_manager = RealRiskManager(portfolio=self.portfolio, config=real_risk_cfg)
             logger.info("Using real RiskManager (Step 15, bucket %s)", self._bucket_key)
         except Exception as exc:
+            if self._bucket_key == "live":
+                raise ValidationError(
+                    f"Live bucket requires the real RiskManager; init failed: {exc}. "
+                    "Refusing to run live trading on the degraded mock risk manager "
+                    "(fail closed)."
+                ) from exc
             logger.warning("Failed to init real RiskManager, using mock: %s", exc)
             self.risk_manager = MockRiskManager(
                 portfolio=self.portfolio, risk_config=self.config.risk
             )
+
+        # Hydrate average daily volume so the live bucket's
+        # max_order_pct_of_daily_volume cap can actually fire (the risk
+        # manager has no market-data access of its own). Fail-soft: symbols
+        # without history simply skip that check.
+        self._hydrate_avg_daily_volumes()
 
         # Stop manager – try real implementation
         try:
@@ -1716,10 +1786,21 @@ class ForwardTestingEngine:
                             self._submit_orders(sigs, bar)
 
                     # Fill orders armed on earlier bars at each new bar's open.
-                    self.executor.step(
+                    results = self.executor.step(
                         {sym: self._to_executor_bar(sym, bar) for sym, bar in new_bars.items()}
                     )
                     self.portfolio.sync_orders()
+
+                    # Feed realized PnL from executed fills into the risk
+                    # manager — this is what makes the engine-level daily
+                    # loss limit and the consecutive-loss breaker live.
+                    now_utc = datetime.now(timezone.utc)
+                    for res in results or []:
+                        if res.did_trade and res.fill is not None and self.risk_manager is not None:
+                            try:
+                                self.risk_manager._record_fill_pnl(res.fill, when=now_utc)
+                            except Exception:  # noqa: BLE001 — risk telemetry never breaks the fill path
+                                logger.exception("fill pnl recording failed")
 
                     # Mark to market at the close of the bars just processed.
                     prices: Dict[str, Any] = {}
@@ -1729,6 +1810,25 @@ class ForwardTestingEngine:
                             prices[sym] = price
                     if prices:
                         self.portfolio.update_prices(prices)
+
+                # Circuit breakers (drawdown / daily loss / consecutive
+                # losses). The manager's validate_order already re-checks
+                # drawdown + daily loss pre-trade; this is the post-trade
+                # trip that latches the halt.
+                if self.risk_manager is not None and hasattr(
+                    self.risk_manager, "check_circuit_breakers"
+                ):
+                    try:
+                        tripped = self.risk_manager.check_circuit_breakers()
+                        if tripped is not None:
+                            logger.error(
+                                "Engine risk breaker tripped: [%s] %s — pausing",
+                                tripped.code,
+                                tripped.reason,
+                            )
+                            self.pause()
+                    except Exception:  # noqa: BLE001 — breaker failure must not kill the loop
+                        logger.exception("circuit breaker check failed")
 
                 # Update performance metrics
                 self.performance.update_metrics(self.portfolio)

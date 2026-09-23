@@ -203,6 +203,7 @@
     }
     html += '<button class="row-btn row-btn-stop" data-act="stop" data-id="' + r.instance_id + '" title="Stop">⏹</button>';
     html += '<button class="row-btn" data-act="deep_dive" data-id="' + r.instance_id + '" title="Deep dive">🔍</button>';
+    html += '<button class="row-btn row-btn-danger" data-act="remove" data-id="' + r.instance_id + '" title="Remove instance (flattens its book, deletes the row)">🗑</button>';
     return html;
   }
 
@@ -215,6 +216,17 @@
     const s = (SOURCE_LABELS[raw] || raw).toUpperCase();
     const cls = mode === "live" ? "badge-live" : "badge-paper";
     return '<span class="badge ' + cls + '">' + m + "/" + s + "</span>";
+  }
+
+  // 2026-09-22: strategy-kind badge — 🎯 for option runners, 📈 for equity.
+  // Mirrors the spawn-form optgroups so a row reads instantly: which kind,
+  // which strategy (with timeframe), on what instrument.
+  function kindBadge(r) {
+    const isOption = OptionView.isOption(r) ||
+      (r.instrument && String(r.instrument.type || "").toLowerCase() === "option");
+    return isOption
+      ? '<span title="Option strategy" style="margin-right:4px">🎯</span>'
+      : '<span title="Equity strategy" style="margin-right:4px">📈</span>';
   }
 
   function renderMatrix(p) {
@@ -241,8 +253,8 @@
         '<tr class="matrix-row' + (option ? " matrix-row-option" : "") +
           ' status-' + r.status.toLowerCase() + '">' +
         '<td>' + (i + 1) + '</td>' +
-        '<td class="cell-name">' + r.name +
-          '<div class="cell-sub">' + r.strategy_name + '</div></td>' +
+        '<td class="cell-name">' + kindBadge(r) + r.name +
+          '<div class="cell-sub">' + r.strategy_name + " · " + r.timeframe + '</div></td>' +
         '<td>' + targetCell + '</td>' +
         '<td>' + instrument + '</td>' +
         '<td>' + badgeHtml(r.mode, r.source) + '</td>' +
@@ -269,25 +281,19 @@
     // C2: an option runner holds whole structures, not equity tickets — show
     // each leg (trading symbol · strike · side) rather than three dashes, and
     // fall back to one summarising row when the leg detail is unavailable.
-    // Also include dashboard book (second book) — fix for invisible trades.
     const rows = [];
     const legPrice = (v) => (v == null ? "—" : Number(v).toFixed(2));
 
-    // Dashboard book (manual options tab) — now visible in portfolio
-    if (p.dashboard_book && p.dashboard_book.exists && p.dashboard_book.positions && p.dashboard_book.positions.length) {
-      const db = p.dashboard_book;
-      (db.positions || []).forEach((pos) => {
-        rows.push(
-          '<tr class="matrix-row-option"><td>Manual Book</td><td>' + (pos.trading_symbol || "") + '</td><td>' + (pos.side || "") + '</td>' +
-          '<td class="num">' + (pos.quantity || 0) + ' × ' + (pos.lot_size || 0) + '</td>' +
-          '<td class="num">' + legPrice(pos.entry_price) + '</td>' +
-          '<td class="num">' + legPrice(pos.current_price) + '</td>' +
-          '<td class="num ' + (pos.unrealized_pnl >= 0 ? "pnl-pos" : "pnl-neg") + '">' + (pos.unrealized_pnl ? "₹" + Math.round(pos.unrealized_pnl).toLocaleString("en-IN") : "—") +
-          ' <span class="muted">(' + (pos.underlying || "") + ' ' + (pos.strike || "") + ' ' + (pos.option_type || "") + ')</span></td></tr>');
-      });
-    }
 
-    p.runners.filter((r) => r.open_positions > 0).forEach((r) => {
+    // 2026-09-22: ONLY running runners' positions belong here. A stopped or
+    // paused runner receives no bars → its book freezes at entry price and
+    // showed fake "+₹0" forever (misrepresentation). Exclude those books;
+    // count them so nothing silently vanishes.
+    const frozen = p.runners.filter(
+      (r) => r.open_positions > 0 && r.status !== "RUNNING"
+    ).length;
+
+    p.runners.filter((r) => r.open_positions > 0 && r.status === "RUNNING").forEach((r) => {
       const structures = OptionView.openStructures(r);
       if (!structures.length) {
         rows.push(
@@ -330,8 +336,11 @@
           ' <span class="muted">exp ' + OptionView.expiryLabel(s.expiry) + '</span></td></tr>');
       });
     });
-    tbody.innerHTML = rows.join("") ||
-      '<tr><td colspan="7" class="muted" style="padding:16px">No open positions.</td></tr>';
+    const base = rows.length ? "" :
+      '<tr><td colspan="7" class="muted" style="padding:16px">No open positions on running runners.</td></tr>';
+    const note = frozen ? '<tr><td colspan="7" class="muted" style="padding:6px 16px;font-size:.75rem">' +
+      frozen + ' stopped/paused runner book(s) hidden — their frozen P&L is not live. Resume a runner to see its positions here.</td></tr>' : "";
+    tbody.innerHTML = base + rows.join("") + note;
   }
 
   function renderAudit() {
@@ -425,20 +434,6 @@
       '<tr><td colspan="8" class="muted" style="padding:16px">No runners in this bucket.</td></tr>';
   }
 
-  // ---------------------------------------------------------------- dashboard book banner
-  function renderDashboardBookBanner(p) {
-    const banner = $("dashboard-book-banner");
-    const countEl = $("db-book-count");
-    if (!banner || !countEl) return;
-    const db = p.dashboard_book;
-    if (db && db.exists && db.open_structures > 0) {
-      banner.hidden = false;
-      countEl.textContent = `${db.open_structures} structure(s), ${db.open_positions} leg(s) — Equity ₹${Math.round(db.equity).toLocaleString("en-IN")} (from Options tab)`;
-    } else {
-      banner.hidden = true;
-    }
-  }
-
   // ---------------------------------------------------------------- render
   function render(p) {
     // SSE broadcasts the combined snapshot — drop other buckets on a scoped page.
@@ -450,7 +445,6 @@
     renderMatrix(p);
     renderAggregatePositions(p);
     renderChart(p);
-    renderDashboardBookBanner(p);
     // T2.5: Hide Emergency Flatten on Paper page (paper = no real money at risk).
     const emergencyBtn = $("btn-emergency");
     if (emergencyBtn) emergencyBtn.hidden = (PAGE_MODE === "paper");
@@ -486,6 +480,13 @@
           (PAGE_MODE ? PAGE_MODE.charAt(0).toUpperCase() + PAGE_MODE.slice(1) + " · " : "Live · ") +
           runnerCount + " runners · " + runningCount + " running · " +
           (p.tick || 0) + " ticks · " + p.fill_count + " fills";
+        // Bar-clock countdown (2026-09-23): bars arrive every POLL_S —
+        // show when the next one lands so "prices not moving" is
+        // distinguishable from "waiting for the next minute bar".
+        const POLL_S = 60;
+        const BAR_PERIOD_S = 60; // 1-minute bars
+        window.__lastBarTs = p.last_bar_ts || window.__lastBarTs || null;
+        window.__barPeriodS = BAR_PERIOD_S;
         render(p);
       } catch (e) { /* ignore malformed frame */ }
     });
@@ -494,6 +495,18 @@
       $("feed-label").textContent = "Feed disconnected — retrying…";
     });
     es.onerror = () => { /* browser auto-reconnects */ };
+    // 1-second countdown ticker: reads __lastBarTs set by the SSE handler.
+    setInterval(() => {
+      const el = document.getElementById("bar-countdown");
+      if (!el) return;
+      const lastTs = window.__lastBarTs;
+      if (!lastTs) { el.textContent = "waiting for first bar…"; return; }
+      const last = new Date(String(lastTs).replace(" ", "T") + "+05:30");
+      const period = window.__barPeriodS || 60;
+      const elapsed = Math.max(0, Math.round((Date.now() - last.getTime()) / 1000));
+      const remain = Math.max(0, period - (elapsed % period));
+      el.textContent = "⏱ next bar in " + remain + "s (bars every " + period + "s, last " + elapsed + "s ago)";
+    }, 1000);
     return es;
   }
 
@@ -547,8 +560,17 @@
       ]);
       const stratSel = $("spawn-strategy");
       const catalogue = strats.strategies || strats || [];
-      stratSel.innerHTML = catalogue.map((s) =>
-        '<option value="' + s.name + '">' + (s.name) + "</option>").join("");
+      // 2026-09-22: group by signal_kind so option vs equity strategies are
+      // visually obvious at pick time — the "which strategy is for which
+      // market" confusion came from one flat alphabetical list.
+      const eq = catalogue.filter((s) => s.signal_kind !== "option");
+      const op = catalogue.filter((s) => s.signal_kind === "option");
+      stratSel.innerHTML =
+        '<optgroup label="📈 Stocks / Equity">' +
+        eq.map((s) => '<option value="' + s.name + '">' + s.name + "</option>").join("") +
+        '</optgroup><optgroup label="🎯 Options (index)">' +
+        op.map((s) => '<option value="' + s.name + '">' + s.name + "</option>").join("") +
+        "</optgroup>";
       stratSel._catalogue = catalogue;
 
       const uniSel = $("spawn-universe");
@@ -586,6 +608,47 @@
   }
 
   /**
+   * Lot-size unit label + capital guard (2026-09-22).
+   * Pulls the real exchange lot sizes from /api/symbols/lot-sizes
+   * (mStock scriptmaster when logged in, static fallback otherwise) and:
+   * 1. shows "1 lot = N units" next to the Lots field for the selected index;
+   * 2. warns (and blocks submit) if lots × units × est. premium > allocated
+   *    capital — oversizing a spread should fail at the form, not in the book.
+   */
+  let LOT_SIZES = null;
+  function fetchLotSizes() {
+    if (LOT_SIZES) return Promise.resolve(LOT_SIZES);
+    return api("/api/symbols/lot-sizes").then((d) => {
+      LOT_SIZES = (d && d.lot_sizes) || {};
+      return LOT_SIZES;
+    }).catch(() => (LOT_SIZES = {}));
+  }
+
+  function selectedLotUnits() {
+    const sel = $("spawn-symbol-select");
+    const idx = (sel && !sel.hidden ? sel.value : $("spawn-symbol").value || "").toUpperCase();
+    return LOT_SIZES ? LOT_SIZES[idx] || 0 : 0;
+  }
+
+  function syncLotUnitLabel() {
+    const units = selectedLotUnits();
+    let hint = document.getElementById("spawn-lots-hint");
+    if (!hint) {
+      hint = document.createElement("small");
+      hint.id = "spawn-lots-hint";
+      hint.className = "muted";
+      const lotsInput = $("spawn-lots");
+      if (lotsInput && lotsInput.parentNode) lotsInput.parentNode.appendChild(hint);
+    }
+    if (units > 0) {
+      const lotsN = Math.max(1, parseInt($("spawn-lots") && $("spawn-lots").value, 10) || 1);
+      hint.textContent = "1 lot = " + units + " units · " + lotsN + " lot" + (lotsN === 1 ? "" : "s") + " = " + (lotsN * units) + " units per leg";
+    } else {
+      hint.textContent = "";
+    }
+  }
+
+  /**
    * U6.1 sync — one rule set, driven by the selected strategy's signal_kind:
    * - option → target type locked to Single Symbol; symbol becomes an index
    *   picker (NIFTY / BANKNIFTY); Playbook row shown.
@@ -594,7 +657,7 @@
   function syncSpawnForm() {
     const kind = selectedSignalKind();
     const isOption = kind === "option";
-
+    const strat = selectedStrategy();
     const hint = $("spawn-strategy-hint");
     if (hint) {
       hint.textContent = isOption
@@ -610,13 +673,31 @@
     if (poolOpt) poolOpt.disabled = isOption;
     if (isOption && targetSel.value === "pool") targetSel.value = "single";
 
-    // Symbol: index picker for options, free text for equity.
+    // Symbol: RESTRICTED strategies (eligible_instruments) get a dropdown of
+    // exactly those instruments — no free typing, no wrong-instrument errors.
+    // Option runners also get the lots-per-leg field (defaults 1, hidden otherwise).
+    // Open strategies keep the free-text input (equity symbols are open-ended).
     const symbolInput = $("spawn-symbol");
+    const symbolSelect = $("spawn-symbol-select");
+    const eligible = strat && strat.eligible_instruments;
+    if (symbolSelect) {
+      if (eligible && eligible.length) {
+        symbolSelect.innerHTML = eligible.map((i) =>
+          '<option value="' + i + '">' + i + "</option>").join("");
+        symbolSelect.hidden = false;
+        symbolInput.hidden = true;
+        symbolInput.value = eligible[0];
+      } else {
+        symbolSelect.hidden = true;
+        symbolInput.hidden = false;
+      }
+    }
     if (isOption) {
       symbolInput.setAttribute("list", "spawn-index-list");
       if (!OPTION_INDEXES.includes((symbolInput.value || "").toUpperCase())) {
         symbolInput.value = "NIFTY";
       }
+      syncLotUnitLabel();
     } else {
       symbolInput.removeAttribute("list");
       // Coming back from an option strategy: NIFTY is a valid equity symbol too,
@@ -631,6 +712,13 @@
     // Playbook row: only meaningful for option strategies.
     const pbRow = $("spawn-playbook-row");
     if (pbRow) pbRow.hidden = !isOption;
+
+    // Lots-per-leg: option strategies only.
+    const lotsRow = $("spawn-lots-row");
+    if (lotsRow) {
+      lotsRow.hidden = !isOption;
+      syncLotUnitLabel();
+    }
 
     // Pool rows follow target type (unchanged behaviour).
     const pool = targetSel.value === "pool";
@@ -657,7 +745,12 @@
       // GAP-2 fix (2026-09-21): symbol must be read HERE, before the option
       // validation below — it used to be attached only AFTER the check, so
       // every option deployment failed with "pick NIFTY or BANKNIFTY".
-      symbol: $("spawn-symbol").value.trim(),
+      // 2026-09-22: restricted strategies render a dropdown; read whichever
+      // element is active so the dropdown value is what gets spawned.
+      symbol: (() => {
+        const sel = $("spawn-symbol-select");
+        return sel && !sel.hidden ? sel.value : $("spawn-symbol").value.trim();
+      })(),
       params,
       // Ticket #10 — the bucket (mode/source) is ALWAYS sent so the runner is
       // labelled from the user's selection; scoped pages default the controls
@@ -677,6 +770,24 @@
         return;
       }
       const pbId = $("spawn-playbook") ? $("spawn-playbook").value : "";
+      const lots = Math.max(1, parseInt($("spawn-lots") && $("spawn-lots").value, 10) || 1);
+      // Capital guard: lots × exchange units × est. premium must fit the
+      // allocation — oversizing fails HERE, not as a -98% runner in the book.
+      const units = selectedLotUnits();
+      const capital = parseFloat($("spawn-capital").value) || 0;
+      if (units > 0 && capital > 0) {
+        const estPremium = 150; // conservative per-unit estimate for ATM-adjacent legs
+        const estExposure = lots * units * estPremium;
+        if (estExposure > capital) {
+          toast(
+            lots + " lot" + (lots === 1 ? "" : "s") + " × " + units + " units ≈ ₹" +
+            estExposure.toLocaleString("en-IN") + " exposure — above your ₹" +
+            capital.toLocaleString("en-IN") + " allocation. Lower the lots or raise capital.",
+            "error"
+          );
+          return;
+        }
+      }
       if (pbId) {
         try {
           const pbResp = await api("/api/playbooks/" + pbId + "/spawn", "POST", {
@@ -687,6 +798,9 @@
           });
           const rc = pbResp.runner_config || pbResp.config;
           if (rc && rc.instrument) body.instrument = rc.instrument;
+          if (body.instrument && body.instrument.expression) {
+            body.instrument.expression.quantity = lots;
+          }
           if (rc && rc.playbook_id) {
             body.playbook_id = rc.playbook_id;
             body.playbook_version = rc.playbook_version;
@@ -698,6 +812,7 @@
           type: "option",
           expression: {
             type: { BULLISH: "bull_call_spread", BEARISH: "bear_put_spread" },
+            quantity: lots,
           },
         };
       }
@@ -752,6 +867,14 @@
       const act = btn.dataset.act;
       if (act === "deep_dive") {
         window.DeepDive.open(id, state.portfolio);
+      } else if (act === "remove") {
+        // Destructive: confirm first — removal flattens the book and
+        // deletes the instance; there is no undo.
+        if (!confirm("Remove this instance? Its open positions are flattened and the row is deleted (no undo).")) return;
+        try {
+          await api("/api/portfolio/runner/" + id, "DELETE");
+          toast("Instance removed.", "success");
+        } catch (err) { toast("Remove failed: " + err.message, "error"); }
       } else {
         controlRunner(id, act);
       }
@@ -789,6 +912,25 @@
 
     $("spawn-target-type").addEventListener("change", syncSpawnForm);
     $("spawn-strategy").addEventListener("change", () => { renderSpawnParams(); syncSpawnForm(); });
+    // Naming convention (2026-09-22): show the auto-name live while the name
+    // field is empty, so every instance reads strategy·instrument·timeframe.
+    const nameInput = $("spawn-name");
+    const updateNameHint = () => {
+      if (!nameInput) return;
+      nameInput.removeAttribute("placeholder");
+      if (nameInput.value.trim()) return; // user is naming it — stay out of the way
+      const sel = $("spawn-symbol-select");
+      const instrument = sel && !sel.hidden ? sel.value : $("spawn-symbol").value;
+      nameInput.placeholder = "auto: " + $("spawn-strategy").value + "·" +
+        (instrument || "?") + "·" + $("spawn-timeframe").value;
+    };
+    if (nameInput) {
+      nameInput.addEventListener("input", updateNameHint);
+      ["spawn-strategy", "spawn-timeframe", "spawn-symbol", "spawn-symbol-select"].forEach((id) => {
+        const el = $(id);
+        if (el) el.addEventListener("change", () => { updateNameHint(); });
+      });
+    }
     // Index datalist for the option symbol picker.
     if (!document.getElementById("spawn-index-list")) {
       const dl = document.createElement("datalist");
@@ -796,6 +938,15 @@
       dl.innerHTML = OPTION_INDEXES.map((i) => '<option value="' + i + '">').join("");
       document.body.appendChild(dl);
     }
+    // Real lot sizes: prefetch once, refresh the unit label on lots/instrument
+    // changes (2026-09-22 — user-selected lots show exchange units + a
+    // capital guard at submit).
+    fetchLotSizes().then(() => syncLotUnitLabel());
+    ["spawn-lots", "spawn-symbol", "spawn-symbol-select"].forEach((id) => {
+      const el = $(id);
+      if (el) el.addEventListener("change", syncLotUnitLabel);
+      if (el) el.addEventListener("input", syncLotUnitLabel);
+    });
     $("spawn-submit").addEventListener("click", submitSpawn);
 
     // Expose for Playbooks UI — allows playbook spawn to pre-fill modal

@@ -143,6 +143,42 @@ class RiskConfig:
 
         # Normalize symbols
         self.restricted_symbols = {str(s).strip().upper() for s in self.restricted_symbols}
+
+    # -- safe partial updates (risk-config API) -----------------------------
+
+    def update_limits(self, values: Mapping[str, Any]) -> List[str]:
+        """Apply a validated partial update and return the changed fields.
+
+        This is the ONLY sanctioned path for mutating an existing
+        ``RiskConfig`` (used by the risk-config API). Assignment bypasses
+        ``__post_init__``, so raw attribute writes can install invalid limits
+        (e.g. a negative drawdown or a non-numeric string) silently. The
+        pattern here is validate-first, commit-after: a copy of the current
+        values plus the update is passed through the ``RiskConfig``
+        constructor — any invalid field raises ``ValidationError`` and the
+        live config is left untouched.
+
+        Unknown keys raise (typo-detection) instead of being ignored.
+        """
+        if not isinstance(values, Mapping):
+            raise ValidationError("values must be a mapping")
+        known = {f.name for f in fields(RiskConfig)}
+        unknown = set(values) - known
+        if unknown:
+            raise ValidationError(f"unknown risk config field(s): {sorted(unknown)}")
+
+        current = {name: getattr(self, name) for name in known}
+        candidate = dict(current)
+        candidate.update(values)
+        RiskConfig(**candidate)  # raises on any invalid field
+
+        changed = []
+        for name, value in values.items():
+            new_value = getattr(RiskConfig(**{**current, name: value}), name)
+            if getattr(self, name) != new_value:
+                changed.append(name)
+            setattr(self, name, new_value)
+        return changed
         if self.allowed_symbols is not None:
             self.allowed_symbols = {str(s).strip().upper() for s in self.allowed_symbols}
 
@@ -369,7 +405,15 @@ class RiskManager:
             except Exception:
                 pass
         if price is None:
-            price = 100  # fallback for testing
+            # Fail closed: without a real price every notional / pct /
+            # buying-power check below would run against a fantasy number.
+            # Refuse instead of assuming a fallback price.
+            return RiskCheckResult(
+                False,
+                "price_unavailable",
+                "No current price available for risk check — refusing to evaluate",
+                {"symbol": symbol},
+            )
 
         try:
             price_dec = to_price(price, "price")
@@ -391,8 +435,11 @@ class RiskManager:
             self._log_rejection(order, result)
             return result
 
-        # Position-level checks
-        result = self.check_position_limits(symbol, qty, price_dec)
+        # Position-level checks (side-aware: reducing exits are never
+        # blocked by the per-symbol caps)
+        result = self.check_position_limits(
+            symbol, qty, price_dec, side=getattr(order, "side", None)
+        )
         if not result.allowed:
             self._log_rejection(order, result)
             return result
@@ -491,39 +538,81 @@ class RiskManager:
         return RiskCheckResult(True)
 
     def check_position_limits(
-        self, symbol: str, new_quantity: Any, current_price: Any = None
+        self,
+        symbol: str,
+        new_quantity: Any,
+        current_price: Any = None,
+        side: Any = None,
     ) -> RiskCheckResult:
-        """Check position-level limits for a symbol."""
+        """Check position-level limits for a symbol.
+
+        The caps apply to the PROJECTED position (existing holdings in the
+        same symbol plus this order), not the single order — otherwise N
+        incremental adds each pass an absolute cap. Reducing exits (sell
+        against a long, buy against a short) project the smaller book and
+        are never blocked by the caps.
+        """
         symbol = str(symbol).strip().upper()
         qty = to_decimal(new_quantity, "new_quantity")
-        price = to_price(current_price or 100, "price")
+        if current_price is None:
+            return RiskCheckResult(
+                False,
+                "invalid_price",
+                "current_price is required for position-level checks",
+                {"symbol": symbol},
+            )
+        price = to_price(current_price, "price")
 
+        # Existing holdings in this symbol (zero when none / lookup fails)
+        existing_qty = ZERO
+        try:
+            existing = self.portfolio.get_position(symbol)
+            if existing is not None:
+                existing_qty = to_decimal(
+                    getattr(existing, "quantity", ZERO) or ZERO, "existing_quantity"
+                )
+        except Exception as exc:
+            logger.debug("Existing position lookup failed for %s: %s", symbol, exc)
+
+        # Reducing exit? (sell closing a long / buy covering a short)
+        side_str = str(getattr(side, "value", side) or "").strip().lower()
+        reducing = (side_str in ("sell", "short") and existing_qty > ZERO) or (
+            side_str in ("buy", "long") and existing_qty < ZERO
+        )
+        if reducing:
+            projected_notional = max(abs(existing_qty) - abs(qty), ZERO) * price
+        else:
+            projected_notional = (abs(existing_qty) + abs(qty)) * price
         notional = abs(qty) * price
 
-        # Max position value per symbol
-        if self.config.max_position_value is not None and notional > self.config.max_position_value:
+        # Max position value per symbol (on the projected position)
+        if (
+            self.config.max_position_value is not None
+            and projected_notional > self.config.max_position_value
+        ):
             return RiskCheckResult(
                 False,
                 "max_position_value",
-                f"Position value {notional} > max {self.config.max_position_value} for {symbol}",
+                f"Projected position value {projected_notional} "
+                f"> max {self.config.max_position_value} for {symbol}",
                 {
                     "symbol": symbol,
-                    "notional": str(notional),
+                    "notional": str(projected_notional),
                     "max": str(self.config.max_position_value),
                 },
             )
 
-        # Max position % per symbol
+        # Max position % per symbol (on the projected position)
         if self.config.max_position_pct is not None:
             try:
                 equity = self.portfolio.calculate_total_equity()
                 if equity > ZERO:
-                    pct = notional / equity
+                    pct = projected_notional / equity
                     if pct > self.config.max_position_pct:
                         return RiskCheckResult(
                             False,
                             "max_position_pct",
-                            f"Position would be {pct:.2%} of equity "
+                            f"Projected position would be {pct:.2%} of equity "
                             f"> limit {self.config.max_position_pct:.2%} for {symbol}",
                             {
                                 "symbol": symbol,
@@ -776,15 +865,55 @@ class RiskManager:
             except Exception as exc:
                 logger.debug("Total exposure check failed: %s", exc)
 
-        # Weekly/monthly loss limits
+        # Weekly / monthly loss limits — PnL is accumulated per UTC day in
+        # ``_daily_pnl`` (see record_trade_result); aggregate the trailing
+        # calendar window and compare against current equity.
         if (
             self.config.weekly_loss_limit_pct is not None
             or self.config.monthly_loss_limit_pct is not None
         ):
-            # Placeholder – would need historical PnL tracking
-            pass
+            try:
+                equity = self.portfolio.calculate_total_equity()
+            except Exception:
+                equity = ZERO
+            if equity > ZERO:
+                if self.config.weekly_loss_limit_pct is not None:
+                    pnl = self._window_pnl(days=7)
+                    if pnl < ZERO and abs(pnl) / equity > self.config.weekly_loss_limit_pct:
+                        return RiskCheckResult(
+                            False,
+                            "weekly_loss_limit",
+                            f"Weekly loss {abs(pnl) / equity:.2%} "
+                            f"> limit {self.config.weekly_loss_limit_pct:.2%}",
+                            {
+                                "weekly_pnl": str(pnl),
+                                "limit": str(self.config.weekly_loss_limit_pct),
+                            },
+                        )
+                if self.config.monthly_loss_limit_pct is not None:
+                    pnl = self._window_pnl(days=30)
+                    if pnl < ZERO and abs(pnl) / equity > self.config.monthly_loss_limit_pct:
+                        return RiskCheckResult(
+                            False,
+                            "monthly_loss_limit",
+                            f"Monthly loss {abs(pnl) / equity:.2%} "
+                            f"> limit {self.config.monthly_loss_limit_pct:.2%}",
+                            {
+                                "monthly_pnl": str(pnl),
+                                "limit": str(self.config.monthly_loss_limit_pct),
+                            },
+                        )
 
         return RiskCheckResult(True)
+
+    def _window_pnl(self, days: int) -> Decimal:
+        """Summed daily PnL over the trailing ``days``-day UTC window."""
+        today = datetime.now(timezone.utc).date()
+        start = today - timedelta(days=days - 1)
+        return sum(
+            (v for k, v in self._daily_pnl.items() if start <= k <= today),
+            ZERO,
+        )
 
     # -- circuit breakers --------------------------------------------------
 
@@ -847,8 +976,13 @@ class RiskManager:
 
         return None
 
-    def record_trade_result(self, pnl: Any, is_win: bool):
-        """Record trade result for consecutive loss tracking."""
+    def record_trade_result(self, pnl: Any, is_win: bool, when: Optional[datetime] = None):
+        """Record trade result for consecutive-loss and daily-PnL tracking.
+
+        ``when`` overrides the timestamp (defaults to now). Naive datetimes
+        are treated as UTC and the day key is the UTC date — the same
+        boundary the forward engine's day anchors use.
+        """
         try:
             pnl_dec = to_decimal(pnl, "pnl")
             if is_win:
@@ -856,12 +990,45 @@ class RiskManager:
             else:
                 self._consecutive_losses += 1
 
-            # Daily PnL
-            today = date.today()
-            self._daily_pnl[today] += pnl_dec
+            ts = when or datetime.now(timezone.utc)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            self._daily_pnl[ts.astimezone(timezone.utc).date()] += pnl_dec
 
         except Exception as exc:
             logger.debug("Failed to record trade result: %s", exc)
+
+    def _record_fill_pnl(self, fill: Any, when: Optional[datetime] = None) -> None:
+        """Derive realized PnL from one executed fill and feed the breakers.
+
+        Closing/reducing a position realizes PnL (the portfolio ledger
+        computes it); opening fills realize nothing. Updating the daily PnL
+        here is what makes ``check_daily_loss_limit`` and
+        ``check_circuit_breakers`` live — without this hook they never trip.
+        """
+        realized = getattr(fill, "realized_pnl", None)
+        if realized is None:
+            return
+        try:
+            pnl_dec = to_decimal(realized, "realized_pnl")
+        except Exception as exc:
+            logger.debug("record fill pnl: bad realized_pnl %r: %s", realized, exc)
+            return
+        if pnl_dec == ZERO:
+            return
+        self.record_trade_result(pnl_dec, is_win=pnl_dec > ZERO, when=when)
+
+    def set_avg_daily_volume(self, symbol: str, volume: Any) -> None:
+        """Record a symbol's average daily volume.
+
+        Enables the ``max_order_pct_of_daily_volume`` order cap for symbols
+        whose volume context the engine hydrated (see
+        ``ForwardTestingEngine._hydrate_avg_daily_volumes``); symbols without
+        data simply skip the check.
+        """
+        self._avg_daily_volume[str(symbol).strip().upper()] = to_decimal(
+            volume, "avg_volume"
+        )
 
     def record_error(self):
         """Record technical error for circuit breaker."""

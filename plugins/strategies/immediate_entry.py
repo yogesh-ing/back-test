@@ -29,6 +29,9 @@ class ImmediateEntry(Strategy):
     """Open the expression's structure on the first bar after deploy."""
 
     name = "immediate_entry"
+    # 2026-09-22: instrument eligibility (spawn-form dropdown + create-API
+    # enforcement). Index strategies trade the FNO index set.
+    eligible_instruments = ["NIFTY", "BANKNIFTY"]
     description = (
         "Immediate single-leg entry: unconditional view on deploy — the "
         "expression's fixed structure (e.g. long_call) books on the first "

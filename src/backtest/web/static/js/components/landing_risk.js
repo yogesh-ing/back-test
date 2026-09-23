@@ -121,6 +121,12 @@
     if (ddEl) ddEl.textContent = pct(ddPct);
     if (posEl) posEl.textContent = `${summary.open_positions || 0} pos`;
 
+    // 2026-09-22: live Running / Open-positions rows on the overview card.
+    const runEl = $("bucket-running-" + mode);
+    const openEl = $("bucket-openpos-" + mode);
+    if (runEl) runEl.textContent = summary.running || 0;
+    if (openEl) openEl.textContent = summary.open_positions || 0;
+
     if (card) {
       card.classList.remove("bucket-card-risk-danger", "bucket-card-risk-warning");
       if (dlPct >= 0.8 || ddPct >= 0.2) card.classList.add("bucket-card-risk-danger");

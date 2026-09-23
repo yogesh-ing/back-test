@@ -32,6 +32,9 @@ class ImmediateStrangle(Strategy):
     """Sell the 2%-OTM strangle the moment the runner is deployed."""
 
     name = "immediate_strangle"
+    # 2026-09-22: instrument eligibility (spawn-form dropdown + create-API
+    # enforcement). Index strategies trade the FNO index set.
+    eligible_instruments = ["NIFTY", "BANKNIFTY"]
     description = (
         "Immediate short strangle: unconditional NEUTRAL view on deploy; "
         "expression maps every direction to short_strangle (~2% OTM legs)."

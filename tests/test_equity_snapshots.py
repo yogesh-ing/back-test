@@ -161,3 +161,50 @@ class TestEquitySnapshotEndpoint:
     def test_manager_method_rejects_bad_mode(self, manager):
         with pytest.raises(ValueError):
             manager.get_equity_snapshots(mode="NOT_A_MODE")
+
+    def test_portfolio_win_rate_is_trade_weighted_not_fraction_summed(self, manager):
+        """2026-09-22 regression: session win_rate summed per-runner FRACTIONS
+        and divided by total trades (2 runners × 50% → 5%). It must be
+        won-trades / total-trades across the whole book."""
+        rids = []
+        for name in ("A", "B"):
+            rids.append(
+                manager.add_runner(
+                    RunnerConfig(
+                        name=name,
+                        strategy_name="rsi_reversion",
+                        allocated_capital=50_000,
+                        target_type=TARGET_SINGLE,
+                        symbols=["BTC/USD"],
+                        timeframe="1hour",
+                        mode="paper",
+                    ),
+                    start=False,
+                )
+            )
+        # Runner A: 1 win, 1 loss (50%). Runner B: 3 wins, 1 loss (75%).
+        # Seed via the Position round-trip (closed_trades is derived from
+        # portfolio.closed_positions — inject the same way the state store does).
+        from datetime import datetime as _dt
+
+        from backtest.simulator.position import Position
+
+        outcomes = [(120.0, -10.0), (100.0, 30.0, 40.0, -20.0)]
+        for rid, pnls in zip(rids, outcomes):
+            portfolio = manager._runners[rid].portfolio
+            for pnl in pnls:
+                pos = Position(
+                    symbol="BTC/USD",
+                    quantity=1,
+                    average_entry_price=100,
+                    current_price=100,
+                )
+                pos.quantity = pos.quantity.__class__(0)  # closed: zero size
+                pos.realized_pnl = pos.realized_pnl.__class__(str(pnl))
+                pos.closed_at = _dt(2026, 9, 22, 10, 0)
+                portfolio.closed_positions.append(pos)
+        snap = manager.get_equity_snapshots()
+        session = snap["session"]
+        assert session["trades_total"] == 6
+        assert session["wins"] == 4
+        assert session["win_rate"] == round(4 / 6, 4)  # ~0.6667, NOT sum(0.5,0.75)/6=0.2083

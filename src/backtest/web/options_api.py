@@ -34,7 +34,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, request
 
 from backtest.options.paper_trading import OptionPaperBroker
 from backtest.options.persistence import StructurePersistence
@@ -460,14 +460,14 @@ def quote_source_name(quotes: Any) -> str:
 # ---------------------------------------------------------------------------
 
 def register_options_routes(app: Flask) -> None:
-    """Attach the options page + JSON API to the Flask app."""
+    """Attach the options JSON API to the Flask app.
 
-    # ------------------------------------------------------------------
-    # Page
-    # ------------------------------------------------------------------
-    @app.get("/options")
-    def options_page() -> Any:
-        return render_template("options.html", active="options")
+    2026-09-22 — GAP-3 resolved: the manual `/options` page was REMOVED
+    (owner decision). This module keeps only what other systems still use:
+    the book singleton (portfolio merge + emergency flatten) and the JSON
+    endpoints exercised by tests. The manual trade UI lives in Portfolio →
+    Playbooks via runner instances.
+    """
 
     # ------------------------------------------------------------------
     # API — summary

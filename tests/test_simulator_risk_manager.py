@@ -444,14 +444,257 @@ def test_validate_orders_batch():
     risk = RiskManager(portfolio, cfg)
 
     orders = [
-        make_order(symbol="INFY", quantity=10),
-        make_order(symbol="BAD", quantity=10),
-        make_order(symbol="TCS", quantity=10),
+        make_order(symbol="INFY", quantity=10, limit_price=100),
+        make_order(symbol="BAD", quantity=10, limit_price=100),
+        make_order(symbol="TCS", quantity=10, limit_price=100),
     ]
 
     approved = risk.validate_orders(orders)
     assert len(approved) == 2
     assert all(o.symbol != "BAD" for o in approved)
+
+
+def test_unresolvable_price_fails_closed():
+    """An order with NO resolvable price must be rejected, not checked
+    against a fantasy fallback price (fail-closed)."""
+    portfolio = make_portfolio()
+    risk = RiskManager(portfolio, RiskConfig())
+
+    order = make_order(symbol="INFY", quantity=10)  # market, no limit price
+    result = risk.validate_order(order)  # no current_price passed
+    assert not result.allowed
+    assert result.code == "price_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Position-level checks (projected holdings)
+# ---------------------------------------------------------------------------
+
+
+def test_position_caps_project_existing_holdings():
+    """Per-symbol caps apply to the PROJECTED position, not the single
+    order — incremental adds must not sail past an absolute cap."""
+    portfolio = make_portfolio()
+    portfolio.open_position("INFY", 40, 100)  # 4k already held
+
+    cfg = RiskConfig(max_position_value=5000)
+    risk = RiskManager(portfolio, cfg)
+
+    # 20 more @100 = 2k → projected 6k > 5k cap → reject
+    result = risk.check_position_limits("INFY", 20, current_price=100, side="buy")
+    assert not result.allowed
+    assert result.code == "max_position_value"
+
+    # 10 more @100 = 1k → projected 5k, exactly at cap → allow
+    result2 = risk.check_position_limits("INFY", 10, current_price=100, side="buy")
+    assert result2.allowed
+
+    # validate_order threads the side through (same projection on the
+    # pre-trade path)
+    order = make_order(symbol="INFY", quantity=20, limit_price=100)
+    result3 = risk.validate_order(order, current_price=100)
+    assert not result3.allowed
+
+
+def test_reducing_exit_never_blocked_by_caps():
+    """Selling against a long projects a SMALLER book — caps must not
+    block exits (trapped-position hazard)."""
+    portfolio = make_portfolio()
+    portfolio.open_position("INFY", 60, 100)  # 6k — already above the cap
+
+    cfg = RiskConfig(max_position_value=5000)
+    risk = RiskManager(portfolio, cfg)
+
+    sell = make_order(symbol="INFY", quantity=30, side="sell", limit_price=100)
+    assert risk.validate_order(sell, current_price=100).allowed
+
+    # Buying MORE while already over the cap is blocked
+    buy = make_order(symbol="INFY", quantity=10, side="buy", limit_price=100)
+    assert not risk.validate_order(buy, current_price=100).allowed
+
+
+# ---------------------------------------------------------------------------
+# Daily loss limit — live wiring
+# ---------------------------------------------------------------------------
+
+
+def test_record_fill_pnl_feeds_daily_loss_breaker():
+    """The fill→risk hook makes check_daily_loss_limit live: without it the
+    engine-level daily loss limit never trips."""
+    portfolio = make_portfolio(100000)
+    risk = RiskManager(portfolio, RiskConfig(daily_loss_limit_pct=0.02))
+
+    from types import SimpleNamespace
+
+    risk._record_fill_pnl(SimpleNamespace(realized_pnl=-3000))  # 3% > 2%
+    assert risk._daily_pnl[date.today()] == Decimal("-3000")
+
+    result = risk.check_daily_loss_limit(portfolio)
+    assert not result.allowed
+    assert result.code == "daily_loss_limit"
+
+    breaker = risk.check_circuit_breakers()
+    assert breaker is not None
+    assert breaker.code == "daily_loss_limit"
+    assert risk.is_halted()
+
+
+def test_record_fill_pnl_ignores_opens_and_bad_payloads():
+    portfolio = make_portfolio()
+    risk = RiskManager(portfolio, RiskConfig())
+
+    from types import SimpleNamespace
+
+    risk._record_fill_pnl(SimpleNamespace(realized_pnl=Decimal("0")))  # open fill
+    risk._record_fill_pnl(SimpleNamespace(realized_pnl=None))  # payload w/o pnl
+    risk._record_fill_pnl(SimpleNamespace())  # attribute missing entirely
+    assert not risk._daily_pnl
+    assert risk._consecutive_losses == 0
+
+
+def test_daily_pnl_uses_utc_day_key():
+    """Day keys must be UTC dates (same boundary as engine anchors), and
+    naive datetimes are treated as UTC."""
+    portfolio = make_portfolio()
+    risk = RiskManager(portfolio, RiskConfig())
+
+    from datetime import datetime, timedelta, timezone
+
+    # 01:30 IST on day X is still day X-1 in UTC
+    ist_like = datetime(2026, 9, 22, 1, 30)  # naive
+    risk.record_trade_result(pnl=-100, is_win=False, when=ist_like)
+    assert date(2026, 9, 22) in risk._daily_pnl  # naive treated as UTC
+
+    aware_utc = datetime(2026, 9, 21, 20, 0, tzinfo=timezone.utc)
+    risk.record_trade_result(pnl=-50, is_win=False, when=aware_utc)
+    assert risk._daily_pnl[date(2026, 9, 21)] == Decimal("-50")
+
+    # IST-converted timestamp (UTC+5:30 → 2026-09-22 01:30 IST = 2026-09-21 UTC)
+    aware_ist = aware_utc + timedelta(hours=5, minutes=30)
+    risk.record_trade_result(pnl=-10, is_win=False, when=aware_ist)
+    assert date(2026, 9, 21) in risk._daily_pnl
+
+
+# ---------------------------------------------------------------------------
+# Weekly / monthly loss limits
+# ---------------------------------------------------------------------------
+
+
+def test_weekly_monthly_loss_limits():
+    portfolio = make_portfolio(100000)
+    # Daily limit 100% so only the weekly/monthly windows can trip here
+    cfg = RiskConfig(
+        daily_loss_limit_pct=1.0,
+        weekly_loss_limit_pct=0.05,
+        monthly_loss_limit_pct=0.10,
+    )
+    risk = RiskManager(portfolio, cfg)
+
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    risk.record_trade_result(pnl=-2000, is_win=False, when=now)  # today
+    risk.record_trade_result(pnl=-1500, is_win=False, when=now - timedelta(days=3))
+    risk.record_trade_result(pnl=-4000, is_win=False, when=now - timedelta(days=20))
+    risk.record_trade_result(pnl=+1000, is_win=True, when=now - timedelta(days=40))
+
+    # Weekly window: -3500 (3.5%) < 5% → pass
+    assert risk.check_daily_loss_limit(portfolio).allowed
+    # Monthly window: -7500 (7.5%) < 10% → pass
+    result = risk._check_portfolio_level("X", Decimal(1), Decimal(100))
+    assert result.allowed
+
+    # Push monthly over WITHOUT tripping weekly: another -4000 twenty days
+    # back (inside the 30d window, outside the 7d one) → monthly -11500
+    # (11.5% > 10%), weekly stays -3500 (3.5% < 5%)
+    risk.record_trade_result(pnl=-4000, is_win=False, when=now - timedelta(days=20))
+    result2 = risk._check_portfolio_level("X", Decimal(1), Decimal(100))
+    assert not result2.allowed
+    assert result2.code == "monthly_loss_limit"
+
+
+# ---------------------------------------------------------------------------
+# Volume-cap hydration
+# ---------------------------------------------------------------------------
+
+
+def test_set_avg_daily_volume_enables_volume_cap():
+    portfolio = make_portfolio()
+    risk = RiskManager(portfolio, RiskConfig(max_order_pct_of_daily_volume=0.1))
+
+    risk.set_avg_daily_volume("INFY", 1000)
+    order = make_order(symbol="INFY", quantity=200, limit_price=100)
+    result = risk.validate_order(order, current_price=100)
+    assert not result.allowed
+    assert result.code == "exceeds_daily_volume"
+
+
+# ---------------------------------------------------------------------------
+# Config partial updates (risk-config API safety)
+# ---------------------------------------------------------------------------
+
+
+def test_risk_config_update_limits_validates():
+    cfg = RiskConfig(max_position_pct=0.2)
+
+    changed = cfg.update_limits({"max_position_pct": 0.1})
+    assert changed == ["max_position_pct"]
+    assert cfg.max_position_pct == Decimal("0.1")
+
+    # Invalid value raises and leaves config untouched
+    with pytest.raises(Exception):
+        cfg.update_limits({"max_drawdown_pct": 1.5})
+    with pytest.raises(Exception):
+        cfg.update_limits({"daily_loss_limit_pct": -1})
+    assert cfg.max_drawdown_pct == Decimal("0.10")
+
+    # Unknown key raises (typo-detection) — silently-ignored typos are how
+    # limits silently stop applying
+    with pytest.raises(Exception):
+        cfg.update_limits({"max_position_typo": 0.5})
+
+
+def test_bucket_update_limits_validates_and_rejects_source_weakening():
+    import dataclasses as dc
+    from decimal import Decimal as D
+
+    from backtest.simulator.bucket_risk import (
+        BUCKET_RISK_LIMITS,
+        LIVE_BUCKET,
+        BucketRiskLimits,
+        update_bucket_limits,
+    )
+
+    # Snapshot + restore: BUCKET_RISK_LIMITS is the process-wide canonical
+    # map, so this test must leave it exactly as it found it.
+    original = {
+        f.name: getattr(BUCKET_RISK_LIMITS[LIVE_BUCKET], f.name)
+        for f in dc.fields(BucketRiskLimits)
+    }
+    try:
+        changed = update_bucket_limits(LIVE_BUCKET, {"max_position_pct": 0.05})
+        assert changed == ["max_position_pct"]
+        assert BUCKET_RISK_LIMITS[LIVE_BUCKET].max_position_pct == D("0.05")
+
+        # Unknown field raises (the old API's `max_positions` typo would
+        # have been silently accepted and done nothing)
+        with pytest.raises(Exception):
+            update_bucket_limits(LIVE_BUCKET, {"max_positions": 3})
+
+        # Invalid value raises and leaves the bucket untouched
+        with pytest.raises(Exception):
+            update_bucket_limits(LIVE_BUCKET, {"max_gross_exposure_pct": -1})
+        assert (
+            BUCKET_RISK_LIMITS[LIVE_BUCKET].max_gross_exposure_pct
+            == original["max_gross_exposure_pct"]
+        )
+
+        # Unknown bucket raises
+        with pytest.raises(Exception):
+            update_bucket_limits("demo", {"max_position_pct": 0.1})
+    finally:
+        for name, value in original.items():
+            setattr(BUCKET_RISK_LIMITS[LIVE_BUCKET], name, value)
 
 
 def test_record_trade_and_daily_pnl():

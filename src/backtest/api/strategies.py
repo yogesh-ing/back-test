@@ -22,6 +22,7 @@ def list_strategies() -> tuple:
             "author": s["author"],
             "params": s["params"],
             "signal_kind": s["signal_kind"],
+            "eligible_instruments": s.get("eligible_instruments"),
         }
         for s in get_all()
     ]

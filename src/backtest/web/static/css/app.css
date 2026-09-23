@@ -414,6 +414,8 @@ body[data-active="portfolio"] .nav-link[data-key="portfolio"] {
 }
 .row-btn:hover { border-color: var(--primary); background: rgba(59,130,246,.15); }
 .row-btn-stop:hover { border-color: var(--danger); background: rgba(239,68,68,.15); }
+.row-btn-danger { color: var(--danger); border-color: rgba(239,68,68,.35); }
+.row-btn-danger:hover { border-color: var(--danger); background: rgba(239,68,68,.2); }
 .matrix-empty { text-align: center; padding: 40px 20px; color: var(--muted); }
 .status-paused { opacity: .72; }
 .status-stopped { opacity: .5; }

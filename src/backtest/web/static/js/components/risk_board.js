@@ -238,7 +238,20 @@
       if (summaryEl) summaryEl.textContent = `${data.summary.total} total · ${data.summary.returned} shown · PnL ${fmtSigned(data.summary.total_pnl)} · Win rate ${pct(data.summary.win_rate)}`;
       if (tbody) {
         if (!data.trades.length) tbody.innerHTML = `<tr><td colspan="9" class="muted">No closed trades yet.</td></tr>`;
-        else tbody.innerHTML = data.trades.map(t => `<tr><td>${t.symbol || ""}</td><td>${t.runner_name || ""}</td><td>${t.strategy || ""}</td><td>${t.kind || "equity"}</td><td>${t.side || ""}</td><td class="num">${t.qty ?? ""}</td><td class="num">${t.entry_price ?? ""} → ${t.exit_price ?? ""}</td><td class="num ${pnlClass(t.pnl)}">${fmtSigned(t.pnl || 0)}</td><td>${t.exit_reason || ""} <span class="muted">${(t.exit_ts || "").slice(0,16)}</span></td></tr>`).join("");
+        else tbody.innerHTML = data.trades.map(t => {
+          // Option structures (2026-09-22 polish): the label already carries
+          // underlying · structure · strikes · type — show it, plus lots×units
+          // and expiry so a spread row reads like the deep-dive does.
+          const isOpt = (t.kind || "") === "option";
+          const symCell = isOpt
+            ? `<span class="badge badge-option">🎯</span> ${t.label || t.symbol || ""}` +
+              (t.expiry ? ` <span class="muted">exp ${t.expiry.slice(0, 10)}</span>` : "")
+            : (t.symbol || "");
+          const qtyCell = isOpt
+            ? `${t.qty ?? ""} lot${t.qty === 1 ? "" : "s"} <span class="muted">(${t.units ?? ""} u)</span>`
+            : (t.qty ?? "");
+          return `<tr class="${isOpt ? "matrix-row-option" : ""}"><td>${symCell}</td><td>${t.runner_name || ""}</td><td>${t.strategy || ""}</td><td>${t.kind || "equity"}</td><td>${t.side || ""}</td><td class="num">${qtyCell}</td><td class="num">${t.entry_price ?? ""} → ${t.exit_price ?? ""}</td><td class="num ${pnlClass(t.pnl)}">${fmtSigned(t.pnl || 0)}</td><td>${t.exit_reason || ""} <span class="muted">${(t.exit_ts || "").slice(0,16)}</span></td></tr>`;
+        }).join("");
       }
     } catch (e) {
       toast("Aggregated trades failed: " + e.message, "error");

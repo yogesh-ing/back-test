@@ -1108,15 +1108,28 @@ class StrategyAdapter:
                         if candles is not None and not candles.empty:
                             current_price = float(candles["close"].iloc[-1])
 
+                    if current_price is None:
+                        # Fail closed: sizing without a real price would
+                        # produce a fantasy quantity.
+                        reason = "no price available — cannot size order"
+                        logger.warning("order skipped for %s: %s", signal.symbol, reason)
+                        if self.db_manager is not None:
+                            self._save_signal_to_db(signal, executed=False, skip_reason=reason)
+                        continue
+
                     qty = self.position_sizer.calculate_position_size(
                         signal, self.portfolio, current_price=current_price
                     )
                     quantity = to_price(qty, "quantity")
                 except Exception as exc:
-                    logger.warning(
-                        "position sizer failed for %s: %s, using 100", signal.symbol, exc
-                    )
-                    quantity = Decimal("100")
+                    logger.warning("position sizer failed for %s: %s", signal.symbol, exc)
+                    if self.db_manager is not None:
+                        self._save_signal_to_db(
+                            signal,
+                            executed=False,
+                            skip_reason=f"position sizer failed: {exc}",
+                        )
+                    continue
 
             # validate against portfolio
             try:
@@ -1125,10 +1138,17 @@ class StrategyAdapter:
                     pos = self.portfolio.get_position(signal.symbol)
                     if pos is None:
                         # opening long
+                        px = self._get_current_price(signal.symbol, market_data)
+                        if px is None:
+                            reason = "no price available — cannot validate order"
+                            logger.warning("order rejected for %s: %s", signal.symbol, reason)
+                            if self.db_manager is not None:
+                                self._save_signal_to_db(signal, executed=False, skip_reason=reason)
+                            continue
                         check = self.portfolio.can_open_position(
                             signal.symbol,
                             quantity,
-                            self._get_current_price(signal.symbol, market_data),
+                            px,
                         )
                         if not check:
                             reason = f"can_open_position denied: {check.code} {check.reason}"
@@ -1156,10 +1176,17 @@ class StrategyAdapter:
                                 self._save_signal_to_db(signal, executed=False, skip_reason=reason)
                             continue
                         # check can open short (negative quantity)
+                        px = self._get_current_price(signal.symbol, market_data)
+                        if px is None:
+                            reason = "no price available — cannot validate order"
+                            logger.warning("order rejected for %s: %s", signal.symbol, reason)
+                            if self.db_manager is not None:
+                                self._save_signal_to_db(signal, executed=False, skip_reason=reason)
+                            continue
                         check = self.portfolio.can_open_position(
                             signal.symbol,
                             -quantity,
-                            self._get_current_price(signal.symbol, market_data),
+                            px,
                         )
                         if not check:
                             reason = (
@@ -1246,8 +1273,16 @@ class StrategyAdapter:
 
         return created_orders
 
-    def _get_current_price(self, symbol: str, market_data: Optional[Mapping[str, Any]]) -> Decimal:
-        """Get current price for symbol from market_data or last bar."""
+    def _get_current_price(
+        self, symbol: str, market_data: Optional[Mapping[str, Any]] = None
+    ) -> Optional[Decimal]:
+        """Get current price for symbol from market_data or last bar.
+
+        Returns ``None`` when no real price is resolvable — callers must
+        treat that as fail-closed (skip the trade), never as "use a
+        fallback price": notional, exposure and buying-power checks against
+        a fantasy price are worse than no trade.
+        """
         symbol = _normalize_symbol(symbol)
         price: Any = None
 
@@ -1273,7 +1308,7 @@ class StrategyAdapter:
                 price = float(candles["close"].iloc[-1])
 
         if price is None:
-            price = 100  # fallback
+            return None
 
         try:
             return to_price(price, "price")
