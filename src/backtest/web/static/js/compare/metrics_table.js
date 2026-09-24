@@ -52,9 +52,10 @@ function renderCompareTable(containerId, slots, onAction) {
     // actions row
     html += `<tr><td>Actions</td>`;
     slots.forEach((s) => {
-        html += `<td><div class="slot-actions-cell">
+        html += `<td><div class="slot-actions-cell" style="display: flex; gap: 4px; flex-wrap: wrap;">
             <button class="btn" data-act="backtest" data-id="${s.id}">🔍 Backtest</button>
             <button class="btn btn-accent" data-act="forward" data-id="${s.id}">▶ Forward</button>
+            <a href="/analytics" class="btn btn-ghost" style="text-decoration: none; font-size: 0.8rem; padding: 4px 8px;" title="View Live/Paper Performance">📈 Live</a>
         </div></td>`;
     });
     html += "</tr></tbody>";

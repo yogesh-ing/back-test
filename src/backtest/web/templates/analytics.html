@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+{% block title %}Strategy Performance Analytics · Trading Bot{% endblock %}
+
+{% block content %}
+<div class="analytics-page">
+    <div class="page-head" style="display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 16px;">
+        <div>
+            <h1 class="page-title">📈 Strategy Performance Analytics</h1>
+            <p class="muted small page-sub">Scientific performance analysis, edge monitoring, risk ratios & trade quality for live & paper trading.</p>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+            <a href="/compare" class="btn btn-ghost" style="text-decoration: none;">📊 Compare Backtests →</a>
+            <button id="refreshAnalyticsBtn" class="btn btn-ghost" type="button" title="Refresh data">🔄 Refresh</button>
+        </div>
+    </div>
+
+    <!-- Analytics Navigation Bar -->
+    <div class="card" style="padding: 10px 16px; margin-bottom: 20px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+            <div class="tabs" style="margin-bottom: 0;">
+                <button class="tab active" id="tabOverviewBtn" data-tab="overview">Overview</button>
+                <button class="tab" id="tabDetailBtn" data-tab="detail" style="display: none;">Strategy Detail</button>
+            </div>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <label for="periodSelect" class="small muted" style="font-weight: 600;">Period:</label>
+                <select id="periodSelect" class="input" style="padding: 4px 10px; width: auto; font-size: 0.85rem;">
+                    <option value="7d">Last 7 Days</option>
+                    <option value="30d" selected>Last 30 Days</option>
+                    <option value="90d">Last 90 Days</option>
+                    <option value="all_time">All Time</option>
+                </select>
+                <label for="modeFilterSelect" class="small muted" style="font-weight: 600;">Mode:</label>
+                <select id="modeFilterSelect" class="input" style="padding: 4px 10px; width: auto; font-size: 0.85rem;">
+                    <option value="all" selected>All Modes</option>
+                    <option value="paper">Paper Only</option>
+                    <option value="live">Live Only</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <!-- TAB 1: OVERVIEW -->
+    <div id="analyticsOverviewPane" class="analytics-tab-pane">
+        <!-- Portfolio Overview Card -->
+        <div class="card" style="margin-bottom: 24px;">
+            <div class="card-head" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                <h2 class="card-title inline" style="margin: 0;">Portfolio Overview</h2>
+                <span id="activeRunnersPill" class="badge" style="background: var(--surface-2); padding: 4px 10px; border-radius: 12px; font-size: 0.8rem;">0 Active Strategies</span>
+            </div>
+            
+            <div class="metric-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px;">
+                <div class="metric-card">
+                    <div class="label">Total Return</div>
+                    <div id="overviewTotalReturn" class="value">—</div>
+                    <div id="overviewTotalPnl" class="small muted">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Portfolio Sharpe</div>
+                    <div id="overviewSharpe" class="value">—</div>
+                    <div id="overviewSharpeRating" class="small muted">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Win Rate</div>
+                    <div id="overviewWinRate" class="value">—</div>
+                    <div id="overviewTradeCount" class="small muted">0 trades</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Max Drawdown</div>
+                    <div id="overviewMaxDd" class="value">—</div>
+                    <div id="overviewMaxDdAmt" class="small muted">—</div>
+                </div>
+            </div>
+
+            <div class="chart-section" style="margin-top: 16px;">
+                <div class="small muted" style="font-weight: 600; margin-bottom: 8px;">Portfolio Equity Curve</div>
+                <div style="height: 220px; position: relative;">
+                    <canvas id="portfolioEquityChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Strategy Health Cards Grid -->
+        <div style="margin-bottom: 24px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <h2 class="card-title" style="margin: 0;">Running Strategies</h2>
+                <a href="/portfolio" class="small" style="color: var(--accent); text-decoration: none;">+ Deploy / Manage in Portfolio →</a>
+            </div>
+            <div id="strategyCardsGrid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px;">
+                <!-- Dynamically populated -->
+            </div>
+            <div id="noStrategiesEmpty" class="card empty-state" style="display: none; text-align: center; padding: 40px 20px;">
+                <p class="muted">No running strategy instances found.</p>
+                <p class="small muted" style="margin-top: 8px;">Deploy a strategy in <a href="/portfolio">Portfolio</a> or test in <a href="/forward">Forward Test</a> to view live performance analytics.</p>
+            </div>
+        </div>
+
+        <!-- Recent Alerts Section -->
+        <div class="card">
+            <h3 class="card-title" style="margin-bottom: 12px;">🚨 Performance Alerts & Edge Degradation</h3>
+            <div id="overviewAlertsList" style="display: flex; flex-direction: column; gap: 8px;">
+                <div class="muted small">No active risk or performance degradation alerts detected.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- TAB 2: STRATEGY DETAIL -->
+    <div id="analyticsDetailPane" class="analytics-tab-pane" style="display: none;">
+        <!-- Header with Back Button and Quick Stats -->
+        <div style="margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+            <div>
+                <button id="backToOverviewBtn" class="btn btn-ghost btn-small" type="button" style="margin-bottom: 4px;">← Back to All Strategies</button>
+                <h2 id="detailStrategyTitle" style="margin: 0; font-size: 1.4rem;">Strategy Name</h2>
+                <div id="detailStrategySubtitle" class="small muted">Mode: paper · Symbols: NIFTY</div>
+            </div>
+            <div style="display: flex; gap: 8px;">
+                <a id="detailBacktestLink" href="/compare" class="btn btn-ghost btn-small" style="text-decoration: none;">🔍 View Backtest Config</a>
+                <a id="detailPortfolioLink" href="/portfolio" class="btn btn-primary btn-small" style="text-decoration: none;">⚙️ Manage Runner</a>
+            </div>
+        </div>
+
+        <!-- Edge Degradation Banner if Alert Triggered -->
+        <div id="degradationAlertBanner" class="card" style="display: none; background: rgba(245, 158, 11, 0.1); border-left: 4px solid var(--warning); margin-bottom: 16px; padding: 12px 16px;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <span style="font-size: 1.3rem;">⚠️</span>
+                <div>
+                    <strong id="degradationTitle">Edge Degradation Warning</strong>
+                    <div id="degradationDesc" class="small muted">Rolling Sharpe has degraded significantly compared to historical performance.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section 1: Key Metrics Header Grid -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h3 class="card-title" style="margin-bottom: 14px;">Key Performance Ratios</h3>
+            <div class="metric-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px;">
+                <div class="metric-card">
+                    <div class="label">Total Return</div>
+                    <div id="detailReturn" class="value">—</div>
+                    <div id="detailPnl" class="small muted">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Sharpe Ratio</div>
+                    <div id="detailSharpe" class="value">—</div>
+                    <div id="detailSharpeBadge" class="small muted">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Sortino Ratio</div>
+                    <div id="detailSortino" class="value">—</div>
+                    <div class="small muted">Downside risk-adjusted</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Calmar Ratio</div>
+                    <div id="detailCalmar" class="value">—</div>
+                    <div class="small muted">Return / Max DD</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Win Rate</div>
+                    <div id="detailWinRate" class="value">—</div>
+                    <div id="detailWinsLosses" class="small muted">0W / 0L</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Profit Factor</div>
+                    <div id="detailProfitFactor" class="value">—</div>
+                    <div id="detailExpectancy" class="small muted">Exp: ₹0/trade</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Max Drawdown</div>
+                    <div id="detailMaxDd" class="value">—</div>
+                    <div id="detailMaxDdAmt" class="small muted">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Win Streak</div>
+                    <div id="detailStreak" class="value">—</div>
+                    <div id="detailMaxStreak" class="small muted">Max: 0W / 0L</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section 2: Interactive Equity Curve & Drawdown -->
+        <div class="card" style="margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <h3 class="card-title inline" style="margin: 0;">Equity Curve & Drawdown (%)</h3>
+                <div class="small muted">Live / Paper execution mark-to-market</div>
+            </div>
+            <div style="height: 320px; position: relative;">
+                <canvas id="detailEquityChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Section 3: Rolling Metrics & Degradation Chart -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h3 class="card-title" style="margin-bottom: 6px;">Rolling Performance Trend (Edge Stability)</h3>
+            <p class="small muted" style="margin-bottom: 12px;">Tracks 10-trade rolling Sharpe and Win Rate to proactively flag edge degradation.</p>
+            <div style="height: 220px; position: relative;">
+                <canvas id="detailRollingChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Section 4: Monthly Performance Breakdown -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h3 class="card-title" style="margin-bottom: 12px;">Monthly Performance Breakdown</h3>
+            <div class="table-scroll">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Month</th>
+                            <th class="text-right">Trades</th>
+                            <th class="text-right">Win Rate</th>
+                            <th class="text-right">Net P&L (₹)</th>
+                            <th class="text-right">Return %</th>
+                            <th class="text-right">Max DD %</th>
+                            <th class="text-right">Sharpe</th>
+                        </tr>
+                    </thead>
+                    <tbody id="detailMonthlyTbody">
+                        <tr><td colspan="7" class="text-center muted">No monthly trade data yet</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Section 5: Trade P&L Distribution -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h3 class="card-title" style="margin-bottom: 10px;">Trade P&L Distribution & Insights</h3>
+            <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 20px; align-items: start;">
+                <div style="height: 220px; position: relative;">
+                    <canvas id="detailDistributionChart"></canvas>
+                </div>
+                <div style="background: var(--surface-2); padding: 16px; border-radius: 8px;">
+                    <h4 style="margin: 0 0 10px 0; font-size: 0.95rem;">💡 Statistical Insights</h4>
+                    <div id="distributionInsightsList" style="display: flex; flex-direction: column; gap: 8px;" class="small muted">
+                        <div>Evaluating trade distribution...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section 6: Closed Trades Log -->
+        <div class="card">
+            <h3 class="card-title" style="margin-bottom: 12px;">Recent Executed Trades</h3>
+            <div class="table-scroll">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Exit Time</th>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th class="text-right">Qty</th>
+                            <th class="text-right">Entry (₹)</th>
+                            <th class="text-right">Exit (₹)</th>
+                            <th class="text-right">P&L (₹)</th>
+                            <th>Result</th>
+                        </tr>
+                    </thead>
+                    <tbody id="detailTradesTbody">
+                        <tr><td colspan="8" class="text-center muted">No trades recorded</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/analytics.js') }}"></script>
+{% endblock %}

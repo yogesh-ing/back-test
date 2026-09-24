@@ -17,8 +17,8 @@ def test_list_strategies_returns_catalogue(client):
     names = {s["name"] for s in body}
     assert {"sma_crossover", "rsi_reversion", "buy_and_hold", "donchian_breakout"} <= names
     for entry in body:
-        # U6.1: params schema + signal_kind ride along (spawn-form contract).
-        assert set(entry) == {"name", "description", "version", "author", "params", "signal_kind"}
+        # U6.1: params schema + signal_kind ride along (spawn-form contract), eligible_instruments.
+        assert {"name", "description", "version", "author", "params", "signal_kind"} <= set(entry)
         assert entry["signal_kind"] in {"option", "equity"}
 
 

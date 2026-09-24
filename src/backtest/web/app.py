@@ -23,6 +23,7 @@ from flask import Flask, g, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
 
 from backtest.api import (
+    analytics_bp,
     backtest_bp,
     broker_auth_bp,
     data_bp,
@@ -347,6 +348,7 @@ def create_app(
     app.register_blueprint(data_bp)
     app.register_blueprint(portfolio_bp)
     app.register_blueprint(playbooks_bp)
+    app.register_blueprint(analytics_bp)
 
     # SSE broadcast cadence for the portfolio command center.
     app.config.setdefault("PORTFOLIO_SSE_INTERVAL", 1.0)
@@ -405,6 +407,11 @@ def create_app(
     @app.get("/compare")
     def compare_page() -> Any:
         return render_template("compare.html", active="compare")
+
+    @app.get("/analytics")
+    def analytics_page() -> Any:
+        strategy_id = request.args.get("strategy") or ""
+        return render_template("analytics.html", active="analytics", selected_strategy=strategy_id)
 
     @app.get("/forward")
     def forward_page() -> Any:
