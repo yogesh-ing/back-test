@@ -21,6 +21,11 @@ env/
 *.sqlite
 *.sqlite3
 
+# Local runtime state / vendored reference code (never commit)
+/data/
+/reference-code/
+/.tmp_chain_probe.json
+
 # Build / run artefacts
 /charts/
 logs/
@@ -44,5 +49,7 @@ Thumbs.db
 /scripts/write_blueprint.py
 /.vscode/
 /.mstock_session_token
+/.mstock_remember_session
+/broker_remember_session.json
 /pyproject.toml
 /strategy-plan/

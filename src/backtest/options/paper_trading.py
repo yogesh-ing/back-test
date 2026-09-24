@@ -591,20 +591,24 @@ class OptionPaperBroker:
 
             quote = quote_provider.get_quote(position.instrument_token)
             price = Decimal(str(quote.get("ltp", 0)))
-            # Fail-closed marking (2026-09-23): a failed/unknown quote (ltp 0
-            # from an unauthenticated provider or unregistered token) must
-            # NOT overwrite the last known price — it zeroed restored legs
-            # and read as a -100% position. Keep the previous mark; a zero
-            # genuinely-priced option is an exchange-impossible state.
-            if price <= 0:
+            # Fail-closed marking (2026-09-23): a FAILED quote (empty row /
+            # error key from a dead session or unknown token) must not
+            # overwrite the last known price — zeros zeroed restored legs
+            # and read as a -100% position. A GENUINE zero still passes
+            # through: a deep-OTM option can legitimately be worth ₹0.00
+            # (the synthetic provider tags real prices with "synthetic";
+            # failure rows are empty or carry an "error" key).
+            is_failure = bool(quote.get("error")) or (
+                price <= 0 and not quote.get("synthetic") and not quote
+            )
+            if is_failure:
                 if position.current_price > 0:
                     total_unrealized += position.calculate_unrealized_pnl()
-                else:
+                elif position.entry_price > 0:
                     # No good mark ever seen — hold at entry premium rather
                     # than flashing a fake total loss.
-                    if position.entry_price > 0:
-                        position.current_price = position.entry_price
-                        total_unrealized += position.calculate_unrealized_pnl()
+                    position.current_price = position.entry_price
+                    total_unrealized += position.calculate_unrealized_pnl()
                 continue
             pnl = position.update_mtm(price)
             total_unrealized += pnl

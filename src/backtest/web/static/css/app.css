@@ -288,6 +288,15 @@ body[data-active="risk"]      .nav-link[data-key="risk"] {
     color: var(--danger); font-size: .84rem; min-height: 1.2em; margin-bottom: 10px;
 }
 
+/* remember-session-today toggle (2026-09-24) */
+.broker-auth-remember {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 12px; font-size: .84rem; color: var(--muted);
+    cursor: pointer; user-select: none;
+}
+.broker-auth-remember input[type="checkbox"] { accent-color: var(--accent, #4a9eff); cursor: pointer; }
+.broker-auth-remember-hint { font-size: .74rem; opacity: .7; margin-left: auto; }
+
 .broker-auth-divider {
     border: none; border-top: 1px solid var(--border); margin: 18px 0;
 }

@@ -585,6 +585,23 @@ class StrategyRunner:
         self.ledger = ledger
         self.broker = broker or PaperBroker(ledger)
 
+        # 2026-09-24: for option runners, the strategy's free-text
+        # ``underlying`` param is FORCED to the runner symbol BEFORE the
+        # strategy instance is built — the options bridge prices the chain
+        # off the view's underlying, so a spawn-form mismatch (Instrument=
+        # BANKNIFTY, Underlying param=NIFTY) would book BANKNIFTY positions
+        # priced off the NIFTY chain. The runner symbol is the single source
+        # of truth; the param is just a label.
+        if (
+            str(config.instrument.get("type", "equity")) == "option"
+            and config.symbols
+            and "underlying" in getattr(get_strategy(config.strategy_name), "params", {})
+        ):
+            try:
+                config.strategy_params["underlying"] = str(config.symbols[0]).upper()
+            except (AttributeError, TypeError):
+                pass
+
         # Strategy instance (isolated per runner so indicator state never leaks)
         if strategy is not None:
             self.strategy = strategy
@@ -652,6 +669,12 @@ class StrategyRunner:
         #: Most recent option-book MTM (0.0 for equity runners) — task A1.
         self.last_option_pnl: float = 0.0
         self.signal_log: Deque[Dict[str, Any]] = deque(maxlen=MAX_SIGNAL_LOG)
+        #: PnL-vs-spot watch series (2026-09-24): one row per closed bar while
+        #: an option structure is open — feeds the end-of-day chart export
+        #: (watch_export.py). Live (mstock) runners only; synthetic books are
+        #: excluded per the owner's "synthetic stuff must vanish" rule.
+        self.watch_series: List[Dict[str, Any]] = []
+        self.last_option_label: Optional[str] = None
 
         # -- state -----------------------------------------------------------
         self.status: str = STATUS_STOPPED
@@ -1056,6 +1079,14 @@ class StrategyRunner:
                 result.get("positions"),
             ),
         )
+        # Watch-export chart title (2026-09-24): e.g. "long_call 23250".
+        try:
+            self.last_option_label = "{} {}".format(
+                result.get("structure_type", ""),
+                "/".join(result.get("strikes", [])),
+            ).strip()
+        except Exception:  # noqa: BLE001 — a label must never kill the entry
+            pass
 
     def options_summary(self) -> Optional[Dict[str, Any]]:
         """Option-book state for runners with ``instrument.type == 'option'``.
@@ -1083,6 +1114,7 @@ class StrategyRunner:
         if pnl is None:
             return
         self.last_option_pnl = float(pnl)
+        self._record_watch_point(ts, price, float(pnl))
         # A stop/target/time exit fires inside the pricing hook — drain and log it.
         while True:
             event = bridge.pop_exit_event()
@@ -1093,6 +1125,29 @@ class StrategyRunner:
             self._log_signal(
                 symbol, "OPTION_MTM", None, price, f"option MTM {float(pnl):+,.0f}"
             )
+
+    def _record_watch_point(self, ts: Optional[str], spot: float, option_pnl: float) -> None:
+        """Append one watch-series row (2026-09-24, watch_export.py).
+
+        Live option runners only — synthetic books are never recorded, so an
+        export can never resurrect vanished synthetic P&L. Capped at one
+        trading day of 1-min bars (~400) × 4 to bound memory.
+        """
+        if str(self.config.source).lower() != "mstock":
+            return
+        if len(self.watch_series) >= 1600:
+            self.watch_series.pop(0)
+        try:
+            self.watch_series.append(
+                {
+                    "ts": str(ts or ""),
+                    "spot": round(float(spot), 2),
+                    "option_pnl": round(float(option_pnl), 2),
+                    "equity": round(self.equity(), 2),
+                }
+            )
+        except Exception:  # noqa: BLE001 — a bad row must never kill the bar
+            pass
 
     def _log_option_exit(self, symbol: str, event: Dict[str, Any], price: float) -> None:
         """Record a structure close in the signal log (task B1/B3).
@@ -1451,12 +1506,20 @@ class StrategyRunner:
         equity = self.equity()
         alloc = self.config.allocated_capital
         breach = None
-        if self.max_drawdown_pct >= self.config.max_drawdown_pct:
+        # 0 disables a breaker (2026-09-24, mirrors the global daily-loss
+        # convention): a clean watch session spawns with 0/0 and never
+        # auto-pauses. A 0 limit can't mean "zero tolerance" — it would trip
+        # on the first ₹1 (or instantly, 0 >= 0).
+        if self.config.max_drawdown_pct > 0 and self.max_drawdown_pct >= self.config.max_drawdown_pct:
             breach = (
                 f"instance max drawdown {self.max_drawdown_pct:.1%} >= "
                 f"{self.config.max_drawdown_pct:.1%}"
             )
-        elif (alloc - equity) >= alloc * self.config.daily_loss_limit_pct and self.daily_pnl() < 0:
+        elif (
+            self.config.daily_loss_limit_pct > 0
+            and (alloc - equity) >= alloc * self.config.daily_loss_limit_pct
+            and self.daily_pnl() < 0
+        ):
             loss_pct = (self._day_start_equity - equity) / alloc
             if loss_pct >= self.config.daily_loss_limit_pct:
                 breach = (

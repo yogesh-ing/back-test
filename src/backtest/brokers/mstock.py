@@ -307,6 +307,18 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             return self._session_token
         return None
 
+    def restore_session(self, token: str, expires_at: Any) -> None:
+        """Seed the in-memory session from a remembered token (2026-09-24).
+
+        Used by the remember-session-today feature: the session manager
+        hands back a token persisted earlier the same day. No temp auth
+        context is set — TOTP re-auth would start a fresh login flow.
+        """
+        self._session_token = token
+        self._expires_at = expires_at
+        self._temp_auth_context = None
+        logger.info("mStock session restored from remembered token (expires %s)", expires_at)
+
     def logout(self) -> None:
         """Clear all in-memory session state (token, expiry, temp context)."""
         had_session = self._session_token is not None

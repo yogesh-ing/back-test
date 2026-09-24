@@ -13,7 +13,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal as D
 from unittest.mock import MagicMock
 
@@ -335,7 +335,40 @@ def client(app):
 
 
 class TestTradeDriverApi:
+    # -- dashboard wiring helpers (pinned-clock tests) -----------------------
+
+    @staticmethod
+    def _dashboard_quote_provider():
+        from backtest.web.options_api import get_quote_provider
+
+        try:
+            return get_quote_provider()
+        except Exception:  # noqa: BLE001 — helper must never break the test
+            return None
+
+    @classmethod
+    def _dashboard_generator(cls):
+        quotes = cls._dashboard_quote_provider()
+        return getattr(quotes, "generator", None) or getattr(
+            getattr(quotes, "inner", None), "generator", None
+        )
+
     def test_open_long_call_201(self, client):
+        # Pin the pricing clock 30 days out: on an expiry DAY (e.g.
+        # 2026-09-24) the wall-clock ATM premium is a legitimate ~₹45, which
+        # would break the premium sanity check below. Date-brittle failure,
+        # fixed 2026-09-24.
+        generator = self._dashboard_generator()
+        if generator is not None:
+            expiry = generator.next_monthly_expiry()
+            provider = self._dashboard_quote_provider()
+            # set_reference lives on the inner synthetic provider, not the
+            # TTL cache wrapper.
+            inner = getattr(provider, "inner", provider)
+            if inner is not None and hasattr(inner, "set_reference"):
+                inner.set_reference(
+                    datetime.combine(expiry - timedelta(days=7), datetime.min.time())
+                )
         resp = client.post(
             "/api/options/trade",
             json={"underlying": "NIFTY", "structure_type": "long_call", "quantity": 1},
@@ -384,7 +417,21 @@ class TestTradeDriverApi:
         assert scaled.legs[0].lot_size == 75
 
     def test_oversized_quantity_rejected_by_risk_policy(self, client):
-        """3 lots of ATM premium ≈ 5% of capital > the 2% per-trade loss cap."""
+        """3 lots of ATM premium ≈ 5% of capital > the 2% per-trade loss cap.
+
+        The pricing clock is pinned 30 days out — on expiry day the ATM
+        premium collapses and 3 lots no longer breach the cap (date-brittle,
+        fixed 2026-09-24).
+        """
+        generator = self._dashboard_generator()
+        if generator is not None:
+            expiry = generator.next_monthly_expiry()
+            provider = self._dashboard_quote_provider()
+            inner = getattr(provider, "inner", provider)
+            if inner is not None and hasattr(inner, "set_reference"):
+                inner.set_reference(
+                    datetime.combine(expiry - timedelta(days=7), datetime.min.time())
+                )
         resp = client.post(
             "/api/options/trade",
             json={"underlying": "NIFTY", "structure_type": "long_call", "quantity": 3},

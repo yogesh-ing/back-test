@@ -182,9 +182,11 @@ class TestRestartCycle:
             )
             assert restored.portfolio.portfolio_id == runner1.portfolio.portfolio_id
             assert restored.bars_processed == runner1.bars_processed
-            # day anchors survive (runner + manager level)
+            # Runner-level day anchor survives; MANAGER-level anchors are
+            # session-scoped (re-baselined on the first bar) — the ghost-
+            # anchor breaker-trip fix of 2026-09-23.
             assert restored._current_day == "2030-01-01"
-            assert mgr2._current_day == "2030-01-01"
+            assert mgr2._current_day is None
 
             # and it can trade again after an explicit resume
             restored.resume()
@@ -225,7 +227,13 @@ class TestRestartCycle:
             mgr2.shutdown()
 
     def test_tripped_breaker_stays_tripped(self, tmp_path):
-        """THE original complaint: a restart must not resurrect a halted breaker."""
+        """2026-09-23 DESIGN CHANGE: halt latches are NO LONGER restored.
+
+        The old behaviour re-armed yesterday's emergency stop on every boot —
+        the dashboard showed a permanent "🔴 HALTED: Emergency flatten" over
+        fresh trading. A halt guards THIS session's P&L, so it is
+        session-scoped and boots clean (breaches re-trip within the session).
+        """
         state = tmp_path / "state.json"
         mgr1 = _manager(state)
         mgr1.add_runner(_runner_config("HALTED"))
@@ -237,16 +245,14 @@ class TestRestartCycle:
 
         mgr2 = _manager(state)
         try:
-            assert mgr2._bucket_halted["paper"] is True
-            assert mgr2._bucket_halt_reason["paper"] == "daily loss limit breached"
-            assert mgr2._bucket_halt_mode["paper"] == "daily_loss_limit"
-            # and the guard still refuses a scoped resume
-            with pytest.raises(RuntimeError, match="halted by circuit breaker"):
-                mgr2.resume_all("paper")
+            assert mgr2._bucket_halted["paper"] is False
+            assert mgr2._bucket_halt_reason["paper"] is None
+            # a scoped resume works again — no stale latch to refuse it
+            mgr2.resume_all("paper")  # must not raise
         finally:
             mgr2.shutdown()
 
-    def test_manager_level_halt_survives(self, tmp_path):
+    def test_manager_level_halt_does_not_survive(self, tmp_path):
         state = tmp_path / "state.json"
         mgr1 = _manager(state)
         mgr1.halted = True
@@ -254,23 +260,37 @@ class TestRestartCycle:
         mgr1.shutdown()
         mgr2 = _manager(state)
         try:
-            assert mgr2.halted is True and mgr2.halt_reason == "master kill"
+            assert mgr2.halted is False and mgr2.halt_reason is None
         finally:
             mgr2.shutdown()
 
-    def test_bucket_anchors_survive(self, tmp_path):
+    def test_bucket_anchors_are_session_scoped(self, tmp_path):
+        """2026-09-23: peak/day anchors are session-scoped like halts.
+
+        A saved ₹1.73 Cr day anchor against a rebuilt ₹20 L book computed a
+        -₹1.53 Cr "daily loss" and tripped the global breaker on the first
+        tick after restart. Anchors re-baseline to the restored book on the
+        first bar instead of resurrecting old-session numbers.
+        """
         state = tmp_path / "state.json"
         mgr1 = _manager(state)
         mgr1.add_runner(_runner_config())
         mgr1._bucket_peak["paper"] = 123_456.0
         mgr1._bucket_day_start["paper"] = 99_000.0
         mgr1._bucket_day["paper"] = "2026-09-17"
+        mgr1._day_start_equity = 17_300_000.0
+        mgr1.peak_equity = 5_174_942.0
+        mgr1._current_day = "2026-09-21"
         mgr1.shutdown()
+
         mgr2 = _manager(state)
         try:
-            assert mgr2._bucket_peak["paper"] == 123_456.0
-            assert mgr2._bucket_day_start["paper"] == 99_000.0
-            assert mgr2._bucket_day["paper"] == "2026-09-17"
+            assert mgr2._bucket_peak["paper"] == 0.0
+            assert mgr2._bucket_day_start["paper"] == 0.0
+            assert mgr2._bucket_day["paper"] is None
+            assert mgr2._day_start_equity == 0.0
+            assert mgr2.peak_equity == 0.0
+            assert mgr2._current_day is None
         finally:
             mgr2.shutdown()
 

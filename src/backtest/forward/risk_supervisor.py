@@ -50,8 +50,8 @@ class GlobalRiskConfig:
     correlation_warning_threshold: int = 3
 
     def __post_init__(self) -> None:
-        if self.daily_loss_limit <= 0:
-            raise ValueError("daily_loss_limit must be positive")
+        if self.daily_loss_limit < 0:
+            raise ValueError("daily_loss_limit must be non-negative (0 = breaker disabled)")
         if not 0 < self.max_drawdown_pct < 1:
             raise ValueError("max_drawdown_pct must be between 0 and 1")
         if self.breach_mode not in (HALT_PAUSE, HALT_FLATTEN):
@@ -129,6 +129,11 @@ class RiskSupervisor:
     # -- rule checks ------------------------------------------------------
 
     def check_portfolio_daily_loss(self, daily_pnl: float) -> Optional[str]:
+        # ``daily_loss_limit == 0`` disables the breaker entirely (2026-09-24
+        # owner request: a clean watch session must never be halted — the
+        # limit cannot be "zero rupees" because that trips on the first ₹).
+        if self.config.daily_loss_limit <= 0:
+            return None
         if daily_pnl <= -abs(self.config.daily_loss_limit):
             return (
                 f"Global daily loss {daily_pnl:,.2f} breached limit "

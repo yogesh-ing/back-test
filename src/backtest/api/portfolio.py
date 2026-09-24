@@ -508,6 +508,36 @@ def runner_detail(instance_id: str) -> Tuple[Response, int]:
     return jsonify({"success": True, "runner": detail}), 200
 
 
+@portfolio_bp.post("/api/portfolio/watch/export")
+def watch_export_now() -> Tuple[Response, int]:
+    """Export PnL-vs-spot charts NOW for every live option runner (2026-09-24).
+
+    Writes PNG + CSV into ``charts/<today-IST>/`` — also runs automatically
+    at 15:30 IST via the server-side scheduler, so being away from the
+    browser before close loses nothing.
+    """
+    try:
+        from backtest.forward.watch_export import export_all_watch_runners
+
+        results = export_all_watch_runners(_manager())
+        return jsonify({"success": True, "exported": results}), 200
+    except Exception as exc:  # noqa: BLE001
+        log.warning("watch export failed: %s", exc)
+        return _error(f"watch export failed: {exc}", 500)
+
+
+@portfolio_bp.get("/api/portfolio/watch/series/<instance_id>")
+def watch_series_view(instance_id: str) -> Tuple[Response, int]:
+    """A runner's captured per-bar watch series (for an in-page chart)."""
+    runner = _manager().get_runner(instance_id)
+    if runner is None:
+        return _error(f"unknown runner: {instance_id}", 404)
+    return jsonify(
+        {"success": True, "series": list(getattr(runner, "watch_series", [])),
+         "label": getattr(runner, "last_option_label", None)}
+    ), 200
+
+
 # ---------------------------------------------------------------------------
 # Spawn
 # ---------------------------------------------------------------------------
@@ -601,6 +631,19 @@ def create_runner() -> Tuple[Response, int]:
             timeframe=str(data.get("timeframe", "1hour")),
             strategy_params=params,
             max_pool_positions=int(data.get("max_pool_positions", 5)),
+            # 2026-09-24: instance breakers are settable at spawn — a clean
+            # watch session spawns with disabled breakers (0/0) instead of
+            # auto-pausing on the 15%-daily-loss default mid-observation.
+            max_drawdown_pct=(
+                float(data["max_drawdown_pct"])
+                if data.get("max_drawdown_pct") is not None
+                else 0.25
+            ),
+            daily_loss_limit_pct=(
+                float(data["daily_loss_limit_pct"])
+                if data.get("daily_loss_limit_pct") is not None
+                else 0.15
+            ),
             position_pct=(
                 float(data["position_pct"])
                 if data.get("position_pct") is not None

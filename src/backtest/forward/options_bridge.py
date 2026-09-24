@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Deque, Optional
 
@@ -148,6 +148,16 @@ class OptionsBridge:
         self.squareoff_minutes_before: int = int(
             self.expression.get("squareoff_minutes_before", 30) or 0
         )
+        #: Minimum days-to-expiry for ENTRY selection (2026-09-24): the bridge
+        #: always picked the NEAREST expiry, so a structure spawned on expiry
+        #: day was cash-settled on the very next bar (instant churn). With
+        #: ``expression["expiry_min_days"] = N`` entry selects the nearest
+        #: expiry at least N days out (falls back to nearest when none
+        #: qualify, so the knob can never block trading entirely).
+        try:
+            self.expiry_min_days: int = max(0, int(self.expression.get("expiry_min_days", 0) or 0))
+        except (TypeError, ValueError):
+            self.expiry_min_days = 0
 
         self.open_structure_id: Optional[str] = None
         self.executed_count: int = 0
@@ -490,6 +500,13 @@ class OptionsBridge:
             underlying = str(symbol or self.underlying or "NIFTY").upper()
             self.underlying = underlying
             self._sync_market(underlying, price, ts)
+            # Restart recovery (2026-09-23): a restored structure's legs carry
+            # REAL trading symbols (e.g. NIFTY26SEP23300CE) but the fresh
+            # process's quote provider may not know their tokens — quotes
+            # returned ltp 0 and legs froze at 0.00. Re-register the open
+            # book's contracts (once per restore) so token→contract lookups
+            # resolve again; unknown tokens fall back to the trading symbol.
+            self._rebind_restored_contracts()
             unrealized = self.option_broker.update_mtm(self.quote_provider, self._bar_datetime(ts))
             self.last_unrealized_pnl = Decimal(str(unrealized))
             self.last_spot = float(price)
@@ -605,6 +622,53 @@ class OptionsBridge:
         if decision is None or decision.reason not in RISK_REASONS:
             return None
         return self._exit_structure(decision, self._bar_ts(self._bar_dt), strategy_name, queue=True)
+
+    _restored_contracts_rebound: bool = False
+
+    def _rebind_restored_contracts(self) -> None:
+        """One-shot: register restored open structures with the quote provider.
+
+        The registry lives on the provider (token → contract); a restarted
+        process builds a fresh provider with an EMPTY registry, so restored
+        legs' real mStock tokens looked up nothing and MTM'd to 0. Legacy
+        live tokens fall back to the trading symbol inside LiveChainProvider.
+        """
+        if getattr(self, "_restored_contracts_rebound", False):
+            return
+        register = getattr(self.quote_provider, "register_contract", None)
+        if register is None:
+            self._restored_contracts_rebound = True
+            return
+        try:
+            for structure in self.option_broker.get_open_structures():
+                for leg in structure.legs:
+                    # Legs aren't full contracts — build the minimum the
+                    # providers' price paths need. For SyntheticQuoteProvider
+                    # this enables pricing; for LiveChainProvider the trading
+                    # symbol is what the LTP endpoint keys on.
+                    from backtest.instruments.option import OptionContract
+                    from backtest.instruments.base import ExerciseType, SettlementType
+
+                    expiry = getattr(structure, "expiry", None) or date.today()
+                    register(
+                        OptionContract(
+                            instrument_token=str(leg.instrument_token or leg.trading_symbol),
+                            trading_symbol=str(leg.trading_symbol or ""),
+                            underlying=str(getattr(leg, "underlying", "") or structure.underlying),
+                            exchange="NSE",
+                            segment="NFO",
+                            expiry=expiry,
+                            strike=Decimal(str(getattr(leg, "strike", 0) or 0)),
+                            option_type=str(getattr(leg, "option_type", "CE") or "CE"),
+                            lot_size=int(getattr(leg, "lot_size", 1) or 1),
+                            tick_size=Decimal("0.05"),
+                            contract_type=ExerciseType.EUROPEAN,
+                            settlement_type=SettlementType.CASH,
+                        )
+                    )
+            self._restored_contracts_rebound = True
+        except Exception:  # noqa: BLE001 — recovery must never kill the bar
+            logger.warning("[options-bridge] restored-contract rebind failed", exc_info=True)
 
     def _sync_market(self, underlying: str, spot: float, ts: Any = None) -> None:
         """Point the quote feed at a new spot / bar clock.
@@ -790,13 +854,21 @@ class OptionsBridge:
         """
         reference = self._bar_dt.date() if self._bar_dt is not None else None
         try:
-            return NearestExpiryPolicy().select_expiry(
-                generator.available_expiries(underlying, reference=reference),
-                reference_date=reference,
-            )
+            expiries = generator.available_expiries(underlying, reference=reference)
         except TypeError:
             # Custom generators may not accept ``reference`` — keep working.
-            return NearestExpiryPolicy().select_expiry(generator.available_expiries(underlying))
+            expiries = generator.available_expiries(underlying)
+            reference = None
+        # expiry_min_days (2026-09-24): skip expiries too close to the bar
+        # clock so an entry on expiry day rides the NEXT expiry instead of
+        # being settled one bar after it opens. Unfiltered fallback keeps
+        # trading alive on calendars that cannot satisfy the knob.
+        if self.expiry_min_days and reference is not None:
+            cutoff = reference + timedelta(days=self.expiry_min_days)
+            filtered = [e for e in expiries if e >= cutoff]
+            if filtered:
+                expiries = filtered
+        return NearestExpiryPolicy().select_expiry(expiries, reference_date=reference)
 
     def _entry_dte_block(self) -> Optional[dict[str, Any]]:
         """Refuse to open a structure the expiry rule would immediately close.

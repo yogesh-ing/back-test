@@ -34,6 +34,14 @@
           <span class="broker-auth-btn-text">Login</span>
           <span class="broker-auth-spinner" hidden></span>
         </button>
+        {# Remember session today (2026-09-24): opt-in. ON + successful TOTP
+           saves the session for the rest of the day so app restarts do not
+           force a re-login. OFF deletes the saved session immediately. #}
+        <label class="broker-auth-remember" for="broker-auth-remember-toggle">
+          <input id="broker-auth-remember-toggle" type="checkbox">
+          <span>Remember session today</span>
+          <span id="broker-auth-remember-hint" class="broker-auth-remember-hint"></span>
+        </label>
       </div>
 
       <hr class="broker-auth-divider">
@@ -78,6 +86,11 @@
           <span id="broker-auth-broker-name" class="broker-auth-info-value">mStock</span>
         </div>
       </div>
+      {# Toggle lives here too so it can be flipped while a session is on. #}
+      <label class="broker-auth-remember" for="broker-auth-remember-toggle-auth">
+        <input id="broker-auth-remember-toggle-auth" type="checkbox">
+        <span>Remember session today</span>
+      </label>
       <button id="broker-auth-logout-btn" class="btn btn-danger btn-block" type="button">Logout</button>
     </div>
 

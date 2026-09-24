@@ -199,19 +199,42 @@ class SyntheticChainGenerator:
             ref = expiries[-1] + timedelta(days=1)
         return expiries
 
+    #: Minimum time-to-expiry used for *pricing* (half a trading day). The
+    #: pricing reference can legitimately sit at or after the expiry midnight
+    #: — a wall-clock entry on expiry day, or replay bars that reach the
+    #: expiry before settlement fires — and zero/negative time collapses
+    #: Black-Scholes to pure intrinsic, pricing every ATM contract ₹0. That
+    #: trips the runner's fail-closed ``ltp=0`` guard and blocks ALL entries
+    #: (31 date-brittle test failures on 2026-09-24, a monthly expiry day).
+    #: Clamping keeps a real, strike-dependent premium smile (a flat premium
+    #: floor would flatten spreads to net ₹0); settlement math is untouched —
+    #: it prices off the spot intrinsic, not this method.
+    MIN_PRICING_YEARS = 0.5 / 365.0
+
     def price_contract(
         self,
         contract: OptionContract,
         option_type: str = "CE",
         reference: datetime | None = None,
     ) -> float:
-        """Black-Scholes price for a generated contract at the current spot."""
+        """Black-Scholes price for a generated contract at the current spot.
+
+        Time-to-expiry is floored at :attr:`MIN_PRICING_YEARS` so contracts on
+        (or nominally past) expiry day keep a tradeable premium instead of
+        collapsing to ₹0 intrinsic.
+        """
         spot = self.get_spot(contract.underlying)
         vol = float(contract.metadata.get("vol", 0.13))
         ref = reference or datetime.now()
         expiry_dt = datetime.combine(contract.expiry or ref.date(), datetime.min.time())
-        years = max((expiry_dt - ref).total_seconds(), 0.0) / (365.0 * 24 * 3600)
-        return bs_price(spot, float(contract.strike), years, vol, option_type)
+        years = (expiry_dt - ref).total_seconds() / (365.0 * 24 * 3600)
+        return bs_price(
+            spot,
+            float(contract.strike),
+            max(years, self.MIN_PRICING_YEARS),
+            vol,
+            option_type,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +298,7 @@ class SyntheticQuoteProvider:
         contract = self._contracts.get(instrument_token)
         if contract is None:
             logger.warning("SyntheticQuoteProvider: unknown token %s", instrument_token)
-            return {"ltp": 0.0, "bid": 0.0, "ask": 0.0}
+            return {"ltp": 0.0, "bid": 0.0, "ask": 0.0, "error": "unknown token"}
         option_type = (
             contract.option_type.value
             if hasattr(contract.option_type, "value")
@@ -339,7 +362,7 @@ class LiveQuoteProvider:
             return {"ltp": 0.0, "bid": 0.0, "ask": 0.0, "error": str(exc)}
 
         if not raw:
-            return {"ltp": 0.0, "bid": 0.0, "ask": 0.0}
+            return {"ltp": 0.0, "bid": 0.0, "ask": 0.0, "error": "empty quote row"}
 
         def _f(key: str) -> float:
             try:

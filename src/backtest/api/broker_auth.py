@@ -129,7 +129,19 @@ def verify_totp() -> tuple:
 def status() -> tuple:
     """Session status for nav-icon polling. Never includes the token."""
     try:
-        return jsonify(get_session_manager().get_status()), 200
+        payload = get_session_manager().get_status()
+        # Remember-session-today (2026-09-24): expose the toggle state so the
+        # auth modal's checkbox reflects the server's actual behaviour.
+        try:
+            from backtest.brokers.remember_session import get_toggle, has_saved_session
+
+            payload["remember_session"] = {
+                "enabled": get_toggle(),
+                "has_saved": has_saved_session(),
+            }
+        except Exception:  # noqa: BLE001 — status must never fail on the extra key
+            payload["remember_session"] = {"enabled": False, "has_saved": False}
+        return jsonify(payload), 200
     except Exception:  # noqa: BLE001 — fail closed
         logger.exception("broker status endpoint failed")
         return (
@@ -139,10 +151,33 @@ def status() -> tuple:
                     "broker": "unknown",
                     "broker_display_name": "Unknown Broker",
                     "expires_at": None,
+                    "remember_session": {"enabled": False, "has_saved": False},
                 }
             ),
             200,
         )
+
+
+@broker_auth_bp.post("/api/broker/remember-session")
+def remember_session_toggle() -> tuple:
+    """Set the "Remember session today" toggle (2026-09-24).
+
+    Body: ``{"enabled": true|false}``. OFF deletes the saved session file
+    immediately — the NEXT app session requires fresh login + TOTP (the
+    currently-running session is not killed; Logout does that explicitly).
+    """
+    data = request.get_json(silent=True) or {}
+    if "enabled" not in data:
+        return jsonify({"success": False, "error": "'enabled' (bool) is required"}), 400
+    try:
+        from backtest.brokers.remember_session import set_toggle
+
+        result = set_toggle(bool(data["enabled"]))
+        logger.info("remember-session toggle → %s", result["remember"])
+        return jsonify({"success": True, **result}), 200
+    except Exception:  # noqa: BLE001
+        logger.exception("remember-session toggle failed")
+        return jsonify({"success": False, "error": "toggle failed"}), 500
 
 
 @broker_auth_bp.get("/api/broker/probe-historical")

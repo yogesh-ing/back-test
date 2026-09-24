@@ -73,6 +73,13 @@ class BrokerSessionManager:
         self._monitor_interval = MONITOR_INTERVAL_SECONDS
         self._monitor_stop = threading.Event()
         self._monitor_thread: threading.Thread | None = None
+        # Remember-session-today (2026-09-24): seed the fresh manager from
+        # the opt-in saved file so a restart does not force a re-login. Must
+        # run AFTER the broker factory is resolvable; failures are non-fatal.
+        try:
+            self._restore_remembered_session()
+        except Exception:  # noqa: BLE001 — a bad restore must never block boot
+            logger.warning("remember-session restore failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Active broker registry
@@ -116,6 +123,9 @@ class BrokerSessionManager:
                 self._expiring_soon_flag = False
                 self._expired_flag = False
                 self._last_observed_status = STATUS_AUTHENTICATED
+            # Remember-session-today (2026-09-24): when the toggle is ON the
+            # freshly-established session is persisted for the next boot.
+            self._save_remembered_session()
         return result
 
     def logout(self) -> None:
@@ -125,6 +135,14 @@ class BrokerSessionManager:
             self._expiring_soon_flag = False
             self._expired_flag = False
             self._last_observed_status = None
+        # An explicit logout also forgets any remembered session — keeping a
+        # dead session on disk after the user said "log out" is wrong.
+        try:
+            from backtest.brokers.remember_session import delete_saved_session
+
+            delete_saved_session()
+        except Exception:  # noqa: BLE001 — a delete failure must never break logout
+            logger.warning("remember-session delete on logout failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Status / token access
@@ -227,6 +245,58 @@ class BrokerSessionManager:
             self._last_observed_status = None
             self._broker = None
 
+    # ------------------------------------------------------------------
+    # Remember-session-today (2026-09-24) — opt-in boot seeding + save
+    # ------------------------------------------------------------------
+
+    def _restore_remembered_session(self) -> bool:
+        """Seed the active broker from the saved remember-session file.
+
+        Only acts when the toggle is ON and the file holds an unexpired
+        token. Restores the broker's in-memory token + expiry so the app
+        boots Authenticated without a re-login. Returns True when restored.
+        """
+        from backtest.brokers.remember_session import get_toggle, load_session
+
+        if not get_toggle():
+            return False
+        saved = load_session()
+        if saved is None:
+            return False
+        broker = self.get_active_broker()
+        setter = getattr(broker, "restore_session", None)
+        if not callable(setter):
+            logger.info(
+                "remember-session: %s has no restore_session() — skipping",
+                broker.broker_name,
+            )
+            return False
+        setter(saved["token"], saved["expires_at"])
+        logger.info(
+            "remember-session: %s session restored from disk (expires %s)",
+            broker.broker_name,
+            saved["expires_at"].isoformat(),
+        )
+        return True
+
+    def _save_remembered_session(self) -> None:
+        """Persist the live session when the toggle is ON (best-effort)."""
+        try:
+            from backtest.brokers.remember_session import get_toggle, save_session
+
+            if not get_toggle():
+                return
+            broker = self.get_active_broker()
+            token = self.get_active_session_token()
+            expires_at = broker.get_session_status().get("expires_at")
+            if not token or not expires_at:
+                return
+            from datetime import datetime as _dt
+
+            save_session(token, _dt.fromisoformat(str(expires_at)), broker=broker.broker_name)
+        except Exception:  # noqa: BLE001 — a save must never break login
+            logger.warning("remember-session save failed", exc_info=True)
+
     def _monitor_loop(self) -> None:
         while not self._monitor_stop.wait(self._monitor_interval):
             self._poll_once()
@@ -235,6 +305,9 @@ class BrokerSessionManager:
         """One monitor tick: flag ``expiring_soon``, clear expired sessions.
 
         Never auto-renews — after expiry the user must re-authenticate.
+        While a session is live and the remember-toggle is ON, the saved file
+        is refreshed each tick so a restore always carries the current token
+        + full remaining validity (2026-09-24).
         """
         with self._lock:
             broker = self.get_active_broker()
@@ -259,6 +332,19 @@ class BrokerSessionManager:
                     "%s session expired — token cleared, manual re-authentication required",
                     broker.broker_name,
                 )
+                try:
+                    from backtest.brokers.remember_session import delete_saved_session
+
+                    delete_saved_session()
+                except Exception:  # noqa: BLE001 — cleanup is best-effort
+                    pass
+            elif status in (STATUS_AUTHENTICATED, STATUS_EXPIRING_SOON):
+                # Keep the remembered file fresh (remaining validity shrinks
+                # every tick; a stale file would restore a soon-dead session).
+                try:
+                    self._save_remembered_session()
+                except Exception:  # noqa: BLE001 — a refresh must never break the monitor
+                    logger.debug("remember-session refresh failed", exc_info=True)
             self._last_observed_status = status
 
 

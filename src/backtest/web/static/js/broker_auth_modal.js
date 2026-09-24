@@ -54,6 +54,11 @@ const BrokerAuthUI = (() => {
     // close
     const closeBtn         = () => document.getElementById("broker-auth-close");
 
+    // remember-session-today toggles (credentials view + authenticated view)
+    const rememberToggleCred = () => document.getElementById("broker-auth-remember-toggle");
+    const rememberToggleAuth = () => document.getElementById("broker-auth-remember-toggle-auth");
+    const rememberHint       = () => document.getElementById("broker-auth-remember-hint");
+
     // ---- helpers -----------------------------------------------------------
 
     function showView(name) {
@@ -105,6 +110,7 @@ const BrokerAuthUI = (() => {
         showView("credentials");
         if (credError()) credError().textContent = "";
         if (usernameInput()) usernameInput().focus();
+        syncRememberToggle();
     }
 
     async function handleLogin() {
@@ -187,6 +193,57 @@ const BrokerAuthUI = (() => {
         }
     }
 
+    // ---- remember-session toggle (2026-09-24) ------------------------------
+
+    async function syncRememberToggle() {
+        // Reflect the server's toggle state on both checkboxes. The status
+        // payload carries remember_session {enabled, has_saved}.
+        let enabled = false, saved = false;
+        try {
+            const resp = await fetch("/api/broker/status");
+            const data = await resp.json();
+            const rs = data.remember_session || {};
+            enabled = !!rs.enabled;
+            saved = !!rs.has_saved;
+        } catch (err) { /* keep defaults */ }
+        for (const el of [rememberToggleCred(), rememberToggleAuth()]) {
+            if (el) el.checked = enabled;
+        }
+        const hint = rememberHint();
+        if (hint) {
+            hint.textContent = enabled
+                ? (saved ? "saved ✓" : "saves on login")
+                : "";
+        }
+    }
+
+    async function handleRememberChange(evt) {
+        const enabled = !!evt.target.checked;
+        // Optimistic sync of the sibling checkbox, then the server call.
+        for (const el of [rememberToggleCred(), rememberToggleAuth()]) {
+            if (el && el !== evt.target) el.checked = enabled;
+        }
+        try {
+            const result = await postJSON("/api/broker/remember-session", { enabled });
+            if (!result.success) throw new Error(result.error || "failed");
+            const hint = rememberHint();
+            if (hint) {
+                hint.textContent = enabled
+                    ? (result.deleted ? "saved ✓" : "saves on login")
+                    : "won't be remembered";
+            }
+        } catch (err) {
+            // Revert on failure so the checkbox never lies.
+            evt.target.checked = !enabled;
+            for (const el of [rememberToggleCred(), rememberToggleAuth()]) {
+                if (el && el !== evt.target) el.checked = !enabled;
+            }
+        }
+        if (BrokerStatus && typeof BrokerStatus.refresh === "function") {
+            BrokerStatus.refresh();
+        }
+    }
+
     // ---- view: authenticated (Step 3) --------------------------------------
 
     function showAuthenticated() {
@@ -200,6 +257,7 @@ const BrokerAuthUI = (() => {
         if (expiresEl()) {
             expiresEl().textContent = formatExpiry(status && status.expires_at);
         }
+        syncRememberToggle();
     }
 
     async function refreshAndShowAuth() {
@@ -305,6 +363,11 @@ const BrokerAuthUI = (() => {
         // logout
         const lo = logoutBtn();
         if (lo) lo.addEventListener("click", handleLogout);
+
+        // remember-session toggles (either checkbox drives the same setting)
+        for (const el of [rememberToggleCred(), rememberToggleAuth()]) {
+            if (el) el.addEventListener("change", handleRememberChange);
+        }
 
         // Register globally so broker_status.js and toasts can call it.
         window.BrokerAuthUI = { open, close };

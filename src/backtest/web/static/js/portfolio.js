@@ -285,19 +285,23 @@
     const legPrice = (v) => (v == null ? "—" : Number(v).toFixed(2));
 
 
-    // 2026-09-22: ONLY running runners' positions belong here. A stopped or
-    // paused runner receives no bars → its book freezes at entry price and
-    // showed fake "+₹0" forever (misrepresentation). Exclude those books;
-    // count them so nothing silently vanishes.
-    const frozen = p.runners.filter(
-      (r) => r.open_positions > 0 && r.status !== "RUNNING"
-    ).length;
+    // 2026-09-23 (owner correction): SHOW every runner's positions, but tag
+    // non-running ones ⏸ FROZEN. The earlier hide-rule made paused books
+    // vanish from the aggregate while the bucket card still counted them —
+    // misrepresentation from the other side. Hiding was wrong, fake +₹0 was
+    // wrong; labeled-frozen is honest. A paused runner's prices are its LAST
+    // marks (no bars while paused) — the tag says so at the name.
+    const frozenTag = (r) =>
+      r.status === "RUNNING"
+        ? ""
+        : ' <span class="badge badge-option" title="Runner not running — prices frozen at the last mark">⏸ ' +
+          r.status + '</span>';
 
-    p.runners.filter((r) => r.open_positions > 0 && r.status === "RUNNING").forEach((r) => {
+    p.runners.filter((r) => r.open_positions > 0).forEach((r) => {
       const structures = OptionView.openStructures(r);
       if (!structures.length) {
         rows.push(
-          '<tr><td>' + r.name + '</td><td>' + r.target_label + '</td><td>' +
+          '<tr><td>' + r.name + frozenTag(r) + '</td><td>' + r.target_label + '</td><td>' +
           (OptionView.isOption(r) ? "OPTION" : "LONG") + '</td>' +
           '<td class="num">—</td><td class="num">—</td><td class="num">—</td>' +
           '<td class="num ' + pnlClass(r.open_pnl) + '">' + fmtSigned(r.open_pnl) +
@@ -308,7 +312,7 @@
         const legs = (s.legs_detail && s.legs_detail.length) ? s.legs_detail : null;
         if (!legs) {
           rows.push(
-            '<tr><td>' + r.name + '</td><td>' + s.symbol + '</td><td>' + s.side + '</td>' +
+            '<tr><td>' + r.name + frozenTag(r) + '</td><td>' + s.symbol + '</td><td>' + s.side + '</td>' +
             '<td class="num">' + s.units + '</td>' +
             '<td class="num">' + legPrice(s.entry_price) + '</td>' +
             '<td class="num">' + legPrice(s.current_price) + '</td>' +
@@ -319,7 +323,7 @@
         legs.forEach((leg, idx) => {
           rows.push(
             '<tr' + (idx === 0 ? ' class="opt-first-leg"' : "") + '>' +
-            '<td>' + (idx === 0 ? r.name : "") + '</td>' +
+            '<td>' + (idx === 0 ? r.name + frozenTag(r) : "") + '</td>' +
             '<td>' + (leg.trading_symbol || s.symbol) + '</td>' +
             '<td>' + leg.side + '</td>' +
             '<td class="num">' + leg.qty + '</td>' +
@@ -337,10 +341,8 @@
       });
     });
     const base = rows.length ? "" :
-      '<tr><td colspan="7" class="muted" style="padding:16px">No open positions on running runners.</td></tr>';
-    const note = frozen ? '<tr><td colspan="7" class="muted" style="padding:6px 16px;font-size:.75rem">' +
-      frozen + ' stopped/paused runner book(s) hidden — their frozen P&L is not live. Resume a runner to see its positions here.</td></tr>' : "";
-    tbody.innerHTML = base + rows.join("") + note;
+      '<tr><td colspan="7" class="muted" style="padding:16px">No open positions.</td></tr>';
+    tbody.innerHTML = base + rows.join("");
   }
 
   function renderAudit() {
@@ -824,7 +826,11 @@
       delete body.symbol;
     } else {
       body.target_type = "SINGLE_SYMBOL";
-      body.symbol = $("spawn-symbol").value.trim();
+      // 2026-09-24: keep the symbol resolved at the TOP of submitSpawn (the
+      // Instrument dropdown when it is visible). Re-reading the hidden
+      // free-text input here clobbered the dropdown with eligible[0] — a
+      // BANKNIFTY dropdown selection spawned a NIFTY runner.
+      if (!body.symbol) body.symbol = $("spawn-symbol").value.trim();
     }
 
     try {
@@ -846,6 +852,27 @@
     // On-demand equity snapshot (owner decision 2026-09-21).
     const snapBtn = $("btn-equity-snapshot");
     if (snapBtn) snapBtn.addEventListener("click", refreshEquitySnapshot);
+
+    // PnL-vs-spot export (2026-09-24): manual trigger of the same sweep the
+    // 15:30 IST scheduler runs server-side. Results land in charts/<date>/.
+    const exportBtn = $("btn-watch-export");
+    if (exportBtn) {
+      exportBtn.addEventListener("click", async () => {
+        exportBtn.disabled = true;
+        try {
+          const data = await api("/api/portfolio/watch/export", "POST", {});
+          const n = (data.exported || []).length;
+          toast(
+            n ? "Exported " + n + " chart(s) to charts/" : "Nothing to export — no live option runner has data yet",
+            n ? "success" : "error"
+          );
+        } catch (e) {
+          toast("Export failed: " + e.message, "error");
+        } finally {
+          exportBtn.disabled = false;
+        }
+      });
+    }
     $("matrix-search").addEventListener("input", (e) => {
       state.search = e.target.value;
       if (state.portfolio) renderMatrix(state.portfolio);

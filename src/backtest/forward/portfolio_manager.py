@@ -690,6 +690,7 @@ class PortfolioManager:
                 if runner.status == STATUS_RUNNING:
                     runner.pause()
                     n += 1
+            self._sync_mstock_thread()
             logger.warning("Paused %d runners%s", n, f" [{mode}]" if mode else "")
             self._persist_state()
             return n
@@ -715,6 +716,10 @@ class PortfolioManager:
                 if runner.status == STATUS_PAUSED:
                     runner.resume()
                     n += 1
+            # 2026-09-23: resume flips runners to RUNNING — the shared mStock
+            # poll thread must follow, or nothing feeds bars (the "prices are
+            # frozen at 10:56" symptom after a restart + resume_all).
+            self._sync_mstock_thread()
             logger.info("Resumed %d runners%s", n, f" [{mode}]" if mode else "")
             self._persist_state()
             return n
@@ -1039,15 +1044,24 @@ class PortfolioManager:
         # A halt is a session-scoped circuit state: it guards THIS session's
         # P&L, so it starts clean each boot (fail-safe for trading, unlike
         # fail-closed for the boot — owner hit this mid-testing).
+        # Same rule for the DAY ANCHOR + PEAK: a saved day_start from a
+        # previous session is a GHOST — the book may have been rebuilt since
+        # (the ₹1.73 Cr anchor vs a ₹20 L book computed daily P&L of
+        # -₹1.53 Cr and tripped the global breaker instantly). The anchor is
+        # re-baselined to the restored book on the first bar (see _on_bar).
+        self._day_start_equity = 0.0
+        self.peak_equity = 0.0
+        self._current_day = None
+        self._bucket_day_start = {"paper": 0.0, "live": 0.0}
+        self._bucket_day = {"paper": None, "live": None}
 
         for mode, bucket in payload.get("buckets", {}).items():
-            self._bucket_peak[mode] = float(bucket.get("peak", 0.0))
+            self._bucket_peak[mode] = 0.0  # session-scoped like the day anchor
             self._bucket_halted[mode] = False
             self._bucket_halt_reason[mode] = None
             self._bucket_halt_mode[mode] = None
             self._bucket_halted_ts[mode] = None
-            self._bucket_day_start[mode] = float(bucket.get("day_start", 0.0))
-            self._bucket_day[mode] = bucket.get("day")
+            # day_start / day stay session-scoped (re-baselined on first bar)
 
     def _on_bar(self, symbol: str, bar: Dict[str, Any]) -> None:
         """Fan one closed candle out to every runner trading that symbol."""

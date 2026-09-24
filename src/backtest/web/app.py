@@ -367,6 +367,18 @@ def create_app(
     # thread, one per process, polls the active broker session every 5 min.
     get_session_manager().start_monitor()
 
+    # PnL-vs-spot end-of-day exporter (2026-09-24): server-side daemon that
+    # fires at 15:30 IST even with no browser open (owner is away before
+    # close), writing charts/<date>/{PNG,CSV} per live option runner.
+    try:
+        from backtest.forward.watch_export import MarketCloseExporter
+
+        _watch_exporter = MarketCloseExporter()
+        _watch_exporter.start()
+        app.config["WATCH_EXPORTER"] = _watch_exporter
+    except Exception:  # noqa: BLE001 — the exporter must never break boot
+        logger.exception("market-close watch exporter failed to start")
+
     # ------------------------------------------------------------------
     # Page routes
     # ------------------------------------------------------------------

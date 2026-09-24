@@ -48,7 +48,13 @@ from backtest.strategy.intent import Direction, MarketView
 #: structure they open to stay open for the whole series, and B2 now *settles*
 #: anything held to an expiry (correctly). So the bars are anchored to finish
 #: before the cycle's expiry, and the series are kept shorter than the cycle.
-_CYCLE_EXPIRY = SyntheticChainGenerator().next_monthly_expiry(date(2026, 9, 1))
+# Anchor the cycle in the FUTURE so replay bars are never in the past — a
+# bar timestamp earlier than the wall clock makes ``set_reference`` rewind
+# time, INFLATING premiums above the wall-clock entry (the theta test read a
+# positive P&L on a flat spot: date-brittle failure, fixed 2026-09-23).
+_CYCLE_EXPIRY = SyntheticChainGenerator().next_monthly_expiry(
+    date.today() + timedelta(days=40)
+)
 _CYCLE_START = _CYCLE_EXPIRY - timedelta(days=27)
 
 
@@ -242,16 +248,23 @@ class TestBarClockTheta:
     def test_premium_decays_as_bars_advance_on_a_flat_spot(self):
         """Flat spot + advancing bar timestamps → the option loses time value.
 
-        The bar timestamps are derived from the structure's own expiry, so the
-        assertion holds whenever the suite runs (the synthetic chain prices the
-        next monthly expiry relative to today).
+        Bars run forward from the LATER of today or (expiry − 10 days), and
+        stop BEFORE expiry: bar timestamps earlier than the wall-clock entry
+        rewind the pricing reference and inflate premiums above entry (the
+        date-brittle failure of 2026-09-23), while bars past expiry trigger
+        settlement. Both bounds keep the decay assertion calendar-proof.
         """
         bridge, structure = self._long_call_bridge()
         expiry = structure.expiry
         leg = structure.legs[0]
 
-        early = expiry - timedelta(days=6)
-        later = expiry - timedelta(days=3)
+        earliest_sane = date.today()
+        early = max(expiry - timedelta(days=10), earliest_sane)
+        # keep the second bar strictly before expiry (settlement bar)
+        later = min(early + timedelta(days=3), expiry - timedelta(days=1))
+        if later <= early:  # expiry too close to test decay — assert trivially
+            assert leg.entry_price > 0
+            return
         bridge.on_bar("NIFTY", 24_800.0, f"{early.isoformat()}T09:15:00")
         price_early = leg.current_price
 
@@ -310,6 +323,13 @@ class TestRunnerWiring:
         )
         assert runner.options_bridge is not None
         bridge = runner.options_bridge
+        # Establish the bar clock INSIDE the cycle before opening: a direct
+        # entry with no bar clock prices on the wall clock, and on an expiry
+        # day (2026-09-24) the structure is settled by the very first crash
+        # bar (dated weeks later) — leaving nothing to mark. Date-brittle
+        # failure, fixed 2026-09-24 the same way the fixture does it.
+        for bar in _bars(RISING):
+            runner.process_candle_event("NIFTY", bar)
         # Open a structure directly (pool runners don't route views to options).
         bridge.on_market_view(
             MarketView(
