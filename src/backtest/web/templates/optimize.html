@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+{% block title %}Parameter Optimization · Trading Bot{% endblock %}
+
+{% block content %}
+<div class="opt-page" id="optSetup" data-selected-strategy="{{ selected_strategy }}" data-source="{{ source }}">
+    <div class="opt-page-head">
+        <div>
+            <h1 class="page-title">🎯 Parameter Optimization</h1>
+            <p class="muted small">Search a strategy's parameter space, filter by risk constraints, and
+                validate out-of-sample before applying anything to a runner.</p>
+        </div>
+        <div class="actions">
+            <a href="/backtest" class="btn btn-ghost">Backtest →</a>
+        </div>
+    </div>
+
+    <div id="optDbBanner" class="warning-banner" hidden></div>
+
+    <div class="opt-setup-grid">
+        <!-- ============================ SETUP FORM ============================ -->
+        <form id="optForm" class="opt-form" autocomplete="off" novalidate>
+            <!-- 1. Strategy + data -->
+            <section class="card">
+                <div class="card-head">
+                    <h2 class="card-title">1 · Strategy &amp; data</h2>
+                    <div class="actions">
+                        <select id="optPresetSelect" class="input input-select opt-preset-select" title="Load a saved preset's values as the 'current' column">
+                            <option value="">Load preset…</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="opt-fields">
+                    <div class="form-row">
+                        <label for="optStrategy">Strategy</label>
+                        <select id="optStrategy" class="input" required></select>
+                        <div id="optStrategyDesc" class="hint muted small"></div>
+                    </div>
+                    <div class="form-row">
+                        <label for="optSymbol">Symbol</label>
+                        <input id="optSymbol" class="input" value="DEMO" maxlength="40">
+                    </div>
+                    <div class="form-row">
+                        <label for="optTimeframe">Timeframe</label>
+                        <select id="optTimeframe" class="input">
+                            <option value="1day" selected>1 day</option>
+                            <option value="1hour">1 hour</option>
+                            <option value="15min">15 min</option>
+                            <option value="5min">5 min</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label for="optFrom">From</label>
+                        <input id="optFrom" class="input" type="date">
+                    </div>
+                    <div class="form-row">
+                        <label for="optTo">To</label>
+                        <input id="optTo" class="input" type="date">
+                    </div>
+                    <div class="form-row">
+                        <label for="optCapital">Initial capital</label>
+                        <input id="optCapital" class="input" type="number" min="1000" step="1000" value="500000">
+                    </div>
+                    <div class="form-row" id="optSelectorRow" hidden>
+                        <label for="optSelector">Strike selector</label>
+                        <select id="optSelector" class="input">
+                            <option value="atm">ATM</option>
+                            <option value="delta">Delta target</option>
+                            <option value="fixed_distance">Fixed distance</option>
+                        </select>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 2. Parameters -->
+            <section class="card">
+                <div class="card-head">
+                    <h2 class="card-title">2 · Parameters</h2>
+                    <span id="optParamCount" class="muted small"></span>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table opt-param-table" id="optParamTable">
+                        <thead>
+                            <tr>
+                                <th title="Optimize this parameter (unchecked = held at its current value)">Opt.</th>
+                                <th>Parameter</th>
+                                <th>Current</th>
+                                <th>Min</th>
+                                <th>Max</th>
+                                <th>Step</th>
+                                <th title="Values in this parameter's grid">#</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+                <div id="optParamEmpty" class="muted small" hidden>This strategy has no numeric parameters to optimize.</div>
+            </section>
+
+            <!-- 3. Objective + method -->
+            <section class="card">
+                <h2 class="card-title">3 · Objective &amp; search</h2>
+                <div class="opt-fields">
+                    <div class="form-row">
+                        <label for="optObjective">Maximize</label>
+                        <select id="optObjective" class="input"></select>
+                    </div>
+                    <div class="form-row opt-span-2">
+                        <label>Method</label>
+                        <div class="opt-method-group" role="radiogroup" id="optMethodGroup">
+                            <label class="opt-method"><input type="radio" name="optMethod" value="grid" checked>
+                                <span><strong>Grid</strong><small>every combination</small></span></label>
+                            <label class="opt-method"><input type="radio" name="optMethod" value="random">
+                                <span><strong>Random</strong><small>sample N points</small></span></label>
+                            <label class="opt-method"><input type="radio" name="optMethod" value="bayesian">
+                                <span><strong>Bayesian</strong><small>GP-guided, fewest runs</small></span></label>
+                            <label class="opt-method"><input type="radio" name="optMethod" value="genetic">
+                                <span><strong>Genetic</strong><small>evolve a population</small></span></label>
+                        </div>
+                    </div>
+                    <div class="form-row" data-method="random">
+                        <label for="optNSamples">Samples</label>
+                        <input id="optNSamples" class="input" type="number" min="1" step="1" placeholder="20% of grid">
+                    </div>
+                    <div class="form-row" data-method="bayesian">
+                        <label for="optNCalls">Evaluations</label>
+                        <input id="optNCalls" class="input" type="number" min="5" max="1000" step="1" value="60">
+                    </div>
+                    <div class="form-row" data-method="genetic">
+                        <label for="optPopulation">Population</label>
+                        <input id="optPopulation" class="input" type="number" min="4" max="200" step="1" value="20">
+                    </div>
+                    <div class="form-row" data-method="genetic">
+                        <label for="optGenerations">Generations</label>
+                        <input id="optGenerations" class="input" type="number" min="1" max="200" step="1" value="10">
+                    </div>
+                </div>
+            </section>
+
+            <!-- 4. Constraints -->
+            <section class="card">
+                <div class="card-head">
+                    <h2 class="card-title">4 · Constraints</h2>
+                    <button type="button" id="optAddConstraint" class="btn btn-sm">+ Add</button>
+                </div>
+                <p class="muted small opt-help">Results that break any constraint are kept but never ranked.
+                    Drawdown is a magnitude in % (<code>&lt; 20</code> = never worse than −20%); win rate and return are in %.</p>
+                <div id="optConstraints" class="opt-constraints"></div>
+            </section>
+
+            <!-- 5. Walk-forward -->
+            <section class="card">
+                <div class="card-head">
+                    <h2 class="card-title">5 · Walk-forward validation</h2>
+                    <label class="opt-switch"><input type="checkbox" id="optWfEnabled" checked> <span>Enabled</span></label>
+                </div>
+                <div class="opt-fields" id="optWfFields">
+                    <div class="form-row">
+                        <label for="optWfTrain">Train window (days)</label>
+                        <input id="optWfTrain" class="input" type="number" min="5" step="1" value="180">
+                    </div>
+                    <div class="form-row">
+                        <label for="optWfTest">Test window (days)</label>
+                        <input id="optWfTest" class="input" type="number" min="2" step="1" value="60">
+                    </div>
+                    <div class="form-row">
+                        <label for="optWfStep">Step (days)</label>
+                        <input id="optWfStep" class="input" type="number" min="1" step="1" value="60">
+                    </div>
+                    <div class="form-row">
+                        <label for="optWfBudget">Max evals / split</label>
+                        <input id="optWfBudget" class="input" type="number" min="5" step="5" value="150">
+                    </div>
+                </div>
+                <div id="optWfPreview" class="muted small"></div>
+            </section>
+        </form>
+
+        <!-- ============================ SIDEBAR ============================ -->
+        <aside class="opt-side">
+            <section class="card opt-estimate-card" id="optEstimateCard">
+                <h2 class="card-title">Run estimate</h2>
+                <div class="opt-estimate-grid">
+                    <div><span class="metric-label">Combinations</span><div class="metric-value" id="estGrid">—</div></div>
+                    <div><span class="metric-label">Backtests</span><div class="metric-value" id="estEvals">—</div></div>
+                    <div><span class="metric-label">Est. time</span><div class="metric-value" id="estTime">—</div></div>
+                    <div><span class="metric-label">Workers</span><div class="metric-value" id="estWorkers">—</div></div>
+                </div>
+                <ul id="estWarnings" class="opt-warnings"></ul>
+                <ul id="estErrors" class="opt-errors"></ul>
+                <button type="button" id="optStart" class="btn btn-primary btn-block" disabled>▶ Start optimization</button>
+                <button type="button" id="optDraft" class="btn btn-ghost btn-block opt-draft-btn" disabled>Save as draft</button>
+            </section>
+
+            <section class="card">
+                <div class="card-head">
+                    <h2 class="card-title">Recent runs</h2>
+                    <label class="small muted"><input type="checkbox" id="optHistoryFilter"> this strategy only</label>
+                </div>
+                <div id="optHistory" class="opt-history"><div class="muted small">Loading…</div></div>
+            </section>
+        </aside>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/optimize_common.js') }}"></script>
+<script src="{{ url_for('static', filename='js/optimize_setup.js') }}"></script>
+{% endblock %}

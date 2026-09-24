@@ -116,6 +116,27 @@ bar-by-bar over historical candles with deterministic synthetic pricing:
 See [docs/OPTIONS-BACKTEST-PRD.md](docs/OPTIONS-BACKTEST-PRD.md) and the
 task tracker [docs/OPTIONS-BACKTEST-TASKS.md](docs/OPTIONS-BACKTEST-TASKS.md).
 
+## Parameter Optimization
+
+`🎯 Optimize` (`/optimize`) searches a strategy's parameters. It supports
+grid, random, Bayesian and genetic search, with up to 8 parameters and
+parallel backtests. Every combination is scored with the same engine as a
+normal backtest, and checked against risk constraints (max drawdown, minimum
+trades, win rate, …). The best set is then stress-tested with sensitivity
+sweeps and optional walk-forward validation.
+
+Results include:
+- heatmaps of any two parameters;
+- stability plateaus;
+- a 0–10 robustness score and plain-English overfitting warnings;
+- a baseline-vs-optimized comparison and CSV export.
+
+One click applies the winner to a paper runner (new, A/B, or restart of an
+existing one), recorded in an audit trail with rollback. Applying to **live**
+is gated: it needs explicit confirmation plus walk-forward validation, and is
+refused for overfitted runs. Storage is PostgreSQL (migrations 005–009) or
+the dev SQLite profile. See [docs/OPTIMIZATION-ENGINE.md](docs/OPTIMIZATION-ENGINE.md).
+
 ## Data Sources
 
 | Source | Description |
@@ -155,6 +176,8 @@ src/backtest/
 │                   #   execution, Greeks, margin, fees, expiry, persistence
 ├── instruments/    # Instrument model (equity, option, expiry calendar)
 ├── db/             # SQLAlchemy models + DB manager
+├── optimization/   # Parameter optimization: grid/random/Bayesian/genetic
+│                   #   search, walk-forward, sensitivity, apply-to-runner
 ├── web/            # Flask web app (UI + API)
 ├── live/           # mStock live auth + data adapter
 ├── cli.py          # Command-line interface

@@ -31,6 +31,7 @@ from backtest.api import (
     portfolio_bp,
     strategies_bp,
 )
+from backtest.api.optimize import optimize_bp
 from backtest.api.playbooks import playbooks_bp
 from backtest.api.portfolio import list_instances
 from backtest.api.symbols import symbols_bp
@@ -349,6 +350,7 @@ def create_app(
     app.register_blueprint(portfolio_bp)
     app.register_blueprint(playbooks_bp)
     app.register_blueprint(analytics_bp)
+    app.register_blueprint(optimize_bp)
 
     # SSE broadcast cadence for the portfolio command center.
     app.config.setdefault("PORTFOLIO_SSE_INTERVAL", 1.0)
@@ -412,6 +414,23 @@ def create_app(
     def analytics_page() -> Any:
         strategy_id = request.args.get("strategy") or ""
         return render_template("analytics.html", active="analytics", selected_strategy=strategy_id)
+
+    @app.get("/optimize")
+    def optimize_page() -> Any:
+        """Parameter optimization: setup form + run history."""
+        return render_template(
+            "optimize.html",
+            active="optimize",
+            selected_strategy=request.args.get("strategy") or "",
+            source=app.config.get("BACKTEST_SOURCE", "synthetic"),
+        )
+
+    @app.get("/optimize/runs/<run_id>")
+    @app.get("/optimize/runs/<run_id>/progress")
+    @app.get("/optimize/runs/<run_id>/results")
+    def optimize_run_page(run_id: str) -> Any:
+        """One run: live progress while running, results dashboard after."""
+        return render_template("optimize_run.html", active="optimize", run_id=run_id)
 
     @app.get("/forward")
     def forward_page() -> Any:
