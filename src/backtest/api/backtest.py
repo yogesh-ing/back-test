@@ -362,6 +362,17 @@ def run_single_backtest(params: dict) -> dict:
     process boundary. (Worker log lines drop the request id: contextvars do
     not cross processes; the endpoint's own log lines carry it.)
     """
+    # Plugin strategies (U6.3) register in the WEB process at startup; pool
+    # workers are fresh processes whose registries are empty, so "unknown
+    # strategy: atm_instant_buy" (2026-09-24) hit every plugin slot run via
+    # /compare. Discovery is idempotent + mtime-cached, and a missing
+    # plugins dir just returns [] — never a worker crash.
+    try:
+        from backtest.plugins import discover_plugins
+
+        discover_plugins()
+    except Exception:  # noqa: BLE001 — plugin failure must not kill the slot
+        log.warning("[slot %s] plugin discovery failed in worker", params.get("id"))
     sid = params.get("id")
     strategy = params.get("strategy")
     symbol = str(params.get("symbol", "DEMO"))
