@@ -43,6 +43,8 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 - ✅ 1582 passed, 4 skipped (mStock credentials) — `PYTHONPATH=src pytest tests/ -q`
   (as of 2026-08-31, post-F-01; the count drifts with each refactor ticket)
 - ✅ 36 JS behaviour assertions across 4 Node harnesses (`tests/js/*.mjs`)
+- ✅ Optimization engine: `pytest tests/optimization tests/db/test_migrations_005_009.py`
+  (~105 tests, ~25 s; set `OPTIMIZATION_TEST_PG_URL` for the live PostgreSQL round trip)
 - ⚠ Sandbox note: rebuild the venv each session —
   `python3 -m venv /home/user/.venv && /home/user/.venv/bin/pip install -q -r requirements.txt pytest-cov flake8`
 
@@ -62,6 +64,8 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 | mstock.py | API client + data normalization | ✅ Complete |
 | preflight.py | DNS/HTTPS/auth checks | ✅ Complete |
 | cli.py | All 5 commands wired | ✅ Complete |
+| optimization/ | Parameter optimization engine: config → search (grid/random/Bayesian/GA) → sensitivity → walk-forward → analysis → store; apply-to-runner + rollback | ✅ New — docs/OPTIMIZATION-ENGINE.md, migrations 005–009 |
+| api/optimize.py | `/api/optimize/*` REST (503 without a DB) | ✅ New |
 
 ## Known Limitations
 - Timeframe is cosmetic on synthetic/CSV sources (daily bars only) — see gap G6 / U2

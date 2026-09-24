@@ -1120,3 +1120,359 @@ class OptionChainSnapshot(Base):
             f"<OptionChainSnapshot {self.underlying} {self.expiry} "
             f"{self.strike}{self.option_type}>"
         )
+
+
+# ===========================================================================
+# Parameter Optimization Engine (PRD "Parameter Optimization Engine" v1.0)
+# ===========================================================================
+#
+# Mirrors Alembic revisions 005-009 / db/migrations/005-009_*.sql. PostgreSQL
+# is the production target (native UUID + JSONB, GIN index on result params,
+# updated_at triggers, analytics views); the same models run on SQLite for
+# local development and the test suite via ``create_all``.
+
+
+class OptimizationStatus(StrEnum):
+    DRAFT = "draft"
+    PENDING = "pending"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class OptimizationObjective(StrEnum):
+    SHARPE = "sharpe"
+    SORTINO = "sortino"
+    CALMAR = "calmar"
+    TOTAL_RETURN = "total_return"
+    PROFIT_FACTOR = "profit_factor"
+    EXPECTANCY = "expectancy"
+
+
+class OptimizationMethod(StrEnum):
+    GRID = "grid"
+    RANDOM = "random"
+    BAYESIAN = "bayesian"
+    GENETIC = "genetic"
+
+
+class PresetSource(StrEnum):
+    OPTIMIZATION = "optimization"
+    MANUAL = "manual"
+    DEFAULT = "default"
+    IMPORT = "import"
+    #: Automatic "params before apply" snapshot kept for one-click rollback.
+    SNAPSHOT = "snapshot"
+
+
+#: Ratio / score columns (Sharpe, returns as decimals, drawdown...).
+Score = Numeric(10, 4)
+#: Per-trade currency amounts on result rows (PRD precision).
+TradeMoney = Numeric(10, 2)
+
+
+class OptimizationRun(Base):
+    """One optimization job: config, lifecycle, best result, WF verdict.
+
+    Columns beyond the PRD schema (``baseline_*``, ``analysis``,
+    ``robustness_score``) hold the original-vs-optimized comparison and the
+    sensitivity/robustness output the results dashboard renders, so a
+    completed run is fully reproducible from this row plus its results.
+    """
+
+    __tablename__ = "optimization_runs"
+
+    run_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    strategy_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    bucket_id: Mapped[Optional[str]] = mapped_column(String(100))
+
+    # -- configuration ------------------------------------------------------
+    objective_function: Mapped[str] = mapped_column(String(50), nullable=False)
+    method: Mapped[str] = mapped_column(String(50), nullable=False)
+    param_space: Mapped[Any] = mapped_column(JSONVariant, nullable=False)
+    constraints: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    backtest_config: Mapped[Any] = mapped_column(JSONVariant, nullable=False)
+
+    # -- lifecycle ----------------------------------------------------------
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'pending'")
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    # -- progress -----------------------------------------------------------
+    total_combinations: Mapped[Optional[int]] = mapped_column(Integer)
+    tested_combinations: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    valid_combinations: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+
+    # -- results summary ----------------------------------------------------
+    best_params: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    best_score: Mapped[Optional[Decimal]] = mapped_column(Score)
+    best_metrics: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    # -- original-vs-optimized comparison (extension) ------------------------
+    baseline_params: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    baseline_metrics: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    baseline_score: Mapped[Optional[Decimal]] = mapped_column(Score)
+
+    # -- walk-forward -------------------------------------------------------
+    walk_forward_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    walk_forward_config: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    walk_forward_results: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    overfitted: Mapped[Optional[bool]] = mapped_column(Boolean)
+    avg_train_score: Mapped[Optional[Decimal]] = mapped_column(Score)
+    avg_test_score: Mapped[Optional[Decimal]] = mapped_column(Score)
+
+    # -- analytics (extension): sensitivity, equity curves, warnings --------
+    analysis: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    robustness_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 2))
+
+    # -- metadata -----------------------------------------------------------
+    created_by: Mapped[Optional[str]] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        onupdate=func.now(),
+    )
+    task_id: Mapped[Optional[str]] = mapped_column(String(100))
+
+    results: Mapped[list["OptimizationResult"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(_in_check("status", OptimizationStatus), name="ck_opt_runs_status"),
+        CheckConstraint(
+            _in_check("objective_function", OptimizationObjective),
+            name="ck_opt_runs_objective",
+        ),
+        CheckConstraint(_in_check("method", OptimizationMethod), name="ck_opt_runs_method"),
+        CheckConstraint("tested_combinations >= 0", name="ck_opt_runs_tested_nonneg"),
+        CheckConstraint("valid_combinations >= 0", name="ck_opt_runs_valid_nonneg"),
+        Index("idx_opt_runs_strategy", "strategy_id"),
+        Index("idx_opt_runs_status", "status"),
+        Index("idx_opt_runs_created", "created_at"),
+        Index("idx_opt_runs_strategy_status", "strategy_id", "status"),
+        Index("idx_opt_runs_bucket", "bucket_id"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<OptimizationRun {self.strategy_id} {self.method} {self.status}>"
+
+
+class OptimizationResult(Base):
+    """One tested parameter combination and its standardized metrics."""
+
+    __tablename__ = "optimization_results"
+
+    result_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    run_id: Mapped[str] = mapped_column(
+        UUIDStr,
+        ForeignKey("optimization_runs.run_id", ondelete="CASCADE", name="fk_opt_results_run"),
+        nullable=False,
+    )
+    params: Mapped[Any] = mapped_column(JSONVariant, nullable=False)
+
+    # -- core metrics -------------------------------------------------------
+    sharpe: Mapped[Optional[Decimal]] = mapped_column(Score)
+    sortino: Mapped[Optional[Decimal]] = mapped_column(Score)
+    calmar: Mapped[Optional[Decimal]] = mapped_column(Score)
+    #: Decimal fraction: 0.124 = 12.4 %.
+    total_return: Mapped[Optional[Decimal]] = mapped_column(Score)
+    cagr: Mapped[Optional[Decimal]] = mapped_column(Score)
+    #: Negative decimal fraction: -0.083 = -8.3 %.
+    max_drawdown: Mapped[Optional[Decimal]] = mapped_column(Score)
+    drawdown_duration_days: Mapped[Optional[int]] = mapped_column(Integer)
+
+    # -- trade statistics ---------------------------------------------------
+    profit_factor: Mapped[Optional[Decimal]] = mapped_column(Score)
+    #: Percentage: 54.20 = 54.2 % of closed trades were winners.
+    win_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2))
+    total_trades: Mapped[Optional[int]] = mapped_column(Integer)
+    winning_trades: Mapped[Optional[int]] = mapped_column(Integer)
+    losing_trades: Mapped[Optional[int]] = mapped_column(Integer)
+    expectancy: Mapped[Optional[Decimal]] = mapped_column(TradeMoney)
+    avg_win: Mapped[Optional[Decimal]] = mapped_column(TradeMoney)
+    avg_loss: Mapped[Optional[Decimal]] = mapped_column(TradeMoney)
+    largest_win: Mapped[Optional[Decimal]] = mapped_column(TradeMoney)
+    largest_loss: Mapped[Optional[Decimal]] = mapped_column(TradeMoney)
+
+    # -- risk ---------------------------------------------------------------
+    volatility: Mapped[Optional[Decimal]] = mapped_column(Score)
+    downside_deviation: Mapped[Optional[Decimal]] = mapped_column(Score)
+
+    # -- execution ----------------------------------------------------------
+    avg_holding_time_minutes: Mapped[Optional[int]] = mapped_column(Integer)
+    avg_slippage: Mapped[Optional[Decimal]] = mapped_column(Score)
+
+    # -- constraints & ranking ----------------------------------------------
+    constraints_met: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    constraint_violations: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    objective_score: Mapped[Decimal] = mapped_column(Score, nullable=False)
+    rank: Mapped[Optional[int]] = mapped_column(Integer)
+
+    full_result: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    run: Mapped[OptimizationRun] = relationship(back_populates="results")
+
+    __table_args__ = (
+        CheckConstraint("rank IS NULL OR rank >= 1", name="ck_opt_results_rank_pos"),
+        CheckConstraint(
+            "win_rate IS NULL OR (win_rate >= 0 AND win_rate <= 100)",
+            name="ck_opt_results_win_rate",
+        ),
+        Index("idx_opt_results_run", "run_id"),
+        Index(
+            "idx_opt_results_rank",
+            "run_id",
+            "rank",
+            postgresql_where=text("rank IS NOT NULL"),
+            sqlite_where=text("rank IS NOT NULL"),
+        ),
+        Index("idx_opt_results_score", "run_id", "objective_score"),
+        Index("idx_opt_results_constraints", "run_id", "constraints_met"),
+        # JSONB containment search (params @> '{"fast": 10}') — PostgreSQL only.
+        Index("idx_opt_results_params_gin", "params", postgresql_using="gin").ddl_if(
+            dialect="postgresql"
+        ),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<OptimizationResult rank={self.rank} score={self.objective_score}>"
+
+
+class ParameterPreset(Base):
+    """A named, reusable parameter set for a strategy."""
+
+    __tablename__ = "parameter_presets"
+
+    preset_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    strategy_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    params: Mapped[Any] = mapped_column(JSONVariant, nullable=False)
+
+    source: Mapped[str] = mapped_column(String(50), nullable=False)
+    optimization_run_id: Mapped[Optional[str]] = mapped_column(
+        UUIDStr,
+        ForeignKey(
+            "optimization_runs.run_id", ondelete="SET NULL", name="fk_presets_opt_run"
+        ),
+    )
+    backtest_metrics: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    applied_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    last_applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    created_by: Mapped[Optional[str]] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("strategy_id", "name", name="uq_strategy_preset_name"),
+        CheckConstraint(_in_check("source", PresetSource), name="ck_presets_source"),
+        CheckConstraint("applied_count >= 0", name="ck_presets_applied_nonneg"),
+        Index("idx_presets_strategy", "strategy_id"),
+        Index(
+            "idx_presets_active",
+            "strategy_id",
+            "is_active",
+            postgresql_where=text("is_active = true"),
+            sqlite_where=text("is_active = 1"),
+        ),
+        Index("idx_presets_source", "source"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<ParameterPreset {self.strategy_id}:{self.name}>"
+
+
+class OptimizationAudit(Base):
+    """Append-only audit trail: who changed which parameters, when, where."""
+
+    __tablename__ = "optimization_audit"
+
+    audit_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    run_id: Mapped[Optional[str]] = mapped_column(
+        UUIDStr,
+        ForeignKey("optimization_runs.run_id", ondelete="SET NULL", name="fk_audit_opt_run"),
+    )
+    strategy_id: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    action: Mapped[str] = mapped_column(String(50), nullable=False)
+    action_details: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    old_params: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    new_params: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    params_diff: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    applied_to_bucket: Mapped[Optional[str]] = mapped_column(String(100))
+    applied_to_mode: Mapped[Optional[str]] = mapped_column(String(20))
+    runner_restarted: Mapped[Optional[bool]] = mapped_column(Boolean)
+
+    expected_impact: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    actual_impact: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    requires_approval: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    approved_by: Mapped[Optional[str]] = mapped_column(String(100))
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    user_id: Mapped[Optional[str]] = mapped_column(String(100))
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45))
+    user_agent: Mapped[Optional[str]] = mapped_column(String(255))
+
+    __table_args__ = (
+        CheckConstraint(
+            "applied_to_mode IS NULL OR applied_to_mode IN ('paper', 'live')",
+            name="ck_audit_mode",
+        ),
+        Index("idx_audit_strategy", "strategy_id"),
+        Index("idx_audit_timestamp", "timestamp"),
+        Index("idx_audit_action", "action"),
+        Index("idx_audit_user", "user_id"),
+        Index("idx_audit_bucket", "applied_to_bucket"),
+        Index("idx_audit_run", "run_id"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<OptimizationAudit {self.action} {self.strategy_id}>"
+
+
+#: Tables owned by the optimization engine (used for scoped ``create_all``).
+OPTIMIZATION_TABLES = (
+    OptimizationRun.__table__,
+    OptimizationResult.__table__,
+    ParameterPreset.__table__,
+    OptimizationAudit.__table__,
+)

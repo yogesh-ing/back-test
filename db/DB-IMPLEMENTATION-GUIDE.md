@@ -424,3 +424,51 @@ Not needed now; noted so the decision isn't a surprise later.
 
 Once every box is ticked, Step 1 is done and **Step 2 (Database Connection
 Manager)** can begin.
+---
+
+## 11. Parameter optimization engine (migrations 005–009)
+
+Adds the storage behind `/optimize` (see
+[`docs/OPTIMIZATION-ENGINE.md`](../docs/OPTIMIZATION-ENGINE.md)). Apply it
+**after** 001–004, the same way as the rest of the schema: run the SQL files
+by hand *or* use `alembic upgrade head`, never both. If you applied the SQL
+by hand, run `alembic stamp 009` afterwards.
+
+| # | File (PostgreSQL) | Adds |
+|---|---|---|
+| 005 | `005_optimization_core.sql` | `optimization_runs`, `optimization_results` (FK `ON DELETE CASCADE`), `updated_at` trigger reusing `set_updated_at()` from 001 |
+| 006 | `006_optimization_audit_presets.sql` | `parameter_presets`, `optimization_audit` (FKs to runs `ON DELETE SET NULL`, so history survives a deleted run) |
+| 007 | `007_optimization_indexes.sql` | lookup indexes, plus partial indexes on ranked results / active presets |
+| 008 | `008_optimization_views.sql` | `v_latest_optimization`, `v_top_results`, `v_optimization_summary`, `v_parameter_history`, `v_active_presets` |
+| 009 | `009_optimization_seed_presets.sql` | three default presets (Conservative / Moderate / Aggressive), fixed UUIDs, `ON CONFLICT DO NOTHING` |
+
+Rollback of all five, which destroys optimization data only:
+`005_009_optimization_rollback.sql`. The SQLite mirror is
+`005_009_optimization_engine.sqlite.sql`; 008 is PostgreSQL-only and is skipped there.
+
+```bash
+for f in 005_optimization_core 006_optimization_audit_presets 007_optimization_indexes \
+         008_optimization_views 009_optimization_seed_presets; do
+  psql -U ft_app -d forward_test -v ON_ERROR_STOP=1 -f db/migrations/$f.sql
+done
+# or
+FORWARD_TEST_DB_URL=postgresql+psycopg2://ft_app:...@localhost/forward_test alembic upgrade head
+```
+
+Design notes:
+
+- The PKs are `UUID DEFAULT gen_random_uuid()`, which is built in from PostgreSQL 13, so no `pgcrypto` is needed. The application also supplies uuid4 keys, so SQLite (TEXT keys) behaves the same.
+- Parameters, constraints, configs and analysis are `JSONB`. Metrics that the UI sorts by (`sharpe`, `max_drawdown`, `total_trades`, …) are real columns on `optimization_results`, so sorting and filtering 50 000 results is an indexed query, not a JSON scan.
+- `max_drawdown` is stored as a signed fraction (−0.12 = 12 % drawdown). `win_rate` is 0–100. Constraint thresholds in the UI and API use percent magnitudes and are normalised before comparison.
+- The enumerations (run status, objective, method, preset source, audit action) are `CHECK` constraints, like the rest of this schema (§5).
+
+Verify:
+
+```sql
+SELECT version FROM schema_migrations WHERE version >= '005' ORDER BY 1;  -- 005 … 009
+SELECT name FROM parameter_presets WHERE strategy_id = 'default';         -- 3 rows
+SELECT * FROM v_optimization_summary;                                      -- empty until a run
+```
+
+Tests: `tests/db/test_migrations_005_009.py`. Set `OPTIMIZATION_TEST_PG_URL`
+to run a real upgrade → downgrade → upgrade round trip in a throwaway database.

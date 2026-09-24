@@ -1,0 +1,286 @@
+{% extends "base.html" %}
+{% block title %}Optimization run · Trading Bot{% endblock %}
+
+{% block content %}
+<div class="opt-page" id="optRun" data-run-id="{{ run_id }}">
+    <div class="opt-page-head">
+        <div>
+            <div class="small muted"><a href="/optimize" class="opt-back">← Optimization</a></div>
+            <h1 class="page-title" id="runTitle">Optimization run</h1>
+            <p class="muted small" id="runSubtitle"></p>
+        </div>
+        <div class="actions" id="runActions">
+            <button class="btn" id="btnPause" hidden>⏸ Pause</button>
+            <button class="btn" id="btnResume" hidden>▶ Resume</button>
+            <button class="btn btn-danger" id="btnCancel" hidden>■ Cancel</button>
+            <button class="btn" id="btnStartDraft" hidden>▶ Start</button>
+            <button class="btn btn-ghost" id="btnRerun" hidden>↻ Re-run</button>
+            <a class="btn btn-ghost" id="btnExport" hidden>⬇ CSV</a>
+            <button class="btn" id="btnPreset" hidden>★ Save preset</button>
+            <button class="btn btn-primary" id="btnApply" hidden>Apply parameters…</button>
+        </div>
+    </div>
+
+    <div id="runError" class="warning-banner" hidden></div>
+
+    <!-- ============================ LIVE PROGRESS ============================ -->
+    <section class="card" id="progressCard" hidden>
+        <div class="card-head">
+            <h2 class="card-title">Progress <span id="progPhase" class="opt-phase"></span></h2>
+            <span id="progStatus"></span>
+        </div>
+        <div class="opt-progress-row">
+            <div class="progress-track opt-progress-track"><div class="progress-fill" id="progFill"></div></div>
+            <span id="progPct" class="opt-progress-pct">0%</span>
+        </div>
+        <div class="metrics-grid opt-progress-metrics">
+            <div class="metric-card"><div class="label">Tested</div><div class="value" id="progTested">0</div><div class="small muted" id="progTestedSub"></div></div>
+            <div class="metric-card"><div class="label">Valid</div><div class="value" id="progValid">0</div><div class="small muted" id="progValidSub"></div></div>
+            <div class="metric-card"><div class="label">Elapsed</div><div class="value" id="progElapsed">—</div></div>
+            <div class="metric-card"><div class="label">Remaining</div><div class="value" id="progEta">—</div><div class="small muted" id="progRate"></div></div>
+        </div>
+        <div class="opt-live-grid">
+            <div>
+                <h3 class="opt-subtitle">Best so far</h3>
+                <div id="progBest" class="opt-best-box muted small">Waiting for the first valid result…</div>
+            </div>
+            <div>
+                <h3 class="opt-subtitle">Recent results</h3>
+                <div class="table-scroll opt-recent-scroll">
+                    <table class="data-table opt-compact">
+                        <thead><tr><th>#</th><th>Parameters</th><th>Score</th><th>Return</th><th>DD</th><th>Trades</th><th></th></tr></thead>
+                        <tbody id="progRecent"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div id="progWfBox" hidden>
+            <h3 class="opt-subtitle">Walk-forward splits</h3>
+            <div class="table-scroll">
+                <table class="data-table opt-compact">
+                    <thead><tr><th>Split</th><th>Train</th><th>Test</th><th>Params</th><th>Train score</th><th>Test score</th></tr></thead>
+                    <tbody id="progWf"></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================ RESULTS ============================ -->
+    <section id="resultsBox" hidden>
+        <div class="tabs opt-tabs" role="tablist">
+            <button class="tab active" data-tab="overview">Overview</button>
+            <button class="tab" data-tab="heatmaps">Heatmaps</button>
+            <button class="tab" data-tab="walkforward">Walk-forward</button>
+            <button class="tab" data-tab="sensitivity">Sensitivity</button>
+            <button class="tab" data-tab="results">All results</button>
+            <button class="tab" data-tab="audit">Audit</button>
+        </div>
+
+        <!-- Overview -->
+        <div class="tab-pane active" data-pane="overview">
+            <div class="opt-overview-grid">
+                <div class="card opt-robust-card">
+                    <h2 class="card-title">Robustness</h2>
+                    <div class="opt-robust-score"><span id="robustScore">—</span><small>/10</small></div>
+                    <div id="robustLabel" class="opt-robust-label"></div>
+                    <ul id="robustComponents" class="opt-kv"></ul>
+                </div>
+                <div class="card">
+                    <h2 class="card-title">Current vs optimized</h2>
+                    <div class="table-scroll">
+                        <table class="data-table opt-compare-table">
+                            <thead><tr><th>Metric</th><th>Current</th><th>Optimized</th><th>Change</th></tr></thead>
+                            <tbody id="compareBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2 class="card-title">Parameters</h2>
+                    <table class="data-table opt-compact">
+                        <thead><tr><th>Parameter</th><th>Current</th><th>Optimized</th></tr></thead>
+                        <tbody id="paramsBody"></tbody>
+                    </table>
+                    <h3 class="opt-subtitle">Constraints</h3>
+                    <ul id="complianceList" class="opt-kv"></ul>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-head"><h2 class="card-title">Equity curve — current vs optimized (in-sample)</h2></div>
+                <div class="chart-wrap opt-chart"><canvas id="equityChart"></canvas></div>
+            </div>
+            <div class="card">
+                <h2 class="card-title">Warning signs</h2>
+                <ul id="warningsList" class="opt-warning-list"></ul>
+                <div id="runStats" class="muted small opt-stats"></div>
+            </div>
+        </div>
+
+        <!-- Heatmaps -->
+        <div class="tab-pane" data-pane="heatmaps">
+            <div class="card">
+                <div class="opt-heat-controls">
+                    <label>X <select id="heatX" class="input input-select"></select></label>
+                    <label>Y <select id="heatY" class="input input-select"></select></label>
+                    <label>Metric <select id="heatMetric" class="input input-select">
+                        <option value="score">Objective score</option>
+                        <option value="sharpe">Sharpe</option>
+                        <option value="total_return">Total return</option>
+                        <option value="max_drawdown">Max drawdown</option>
+                        <option value="win_rate">Win rate</option>
+                        <option value="total_trades">Trades</option>
+                        <option value="profit_factor">Profit factor</option>
+                        <option value="calmar">Calmar</option>
+                    </select></label>
+                    <label>Other params <select id="heatAgg" class="input input-select">
+                        <option value="max">best value</option>
+                        <option value="mean">average</option>
+                        <option value="slice">fixed at optimum</option>
+                    </select></label>
+                    <label class="small"><input type="checkbox" id="heatCompliant"> constraint-compliant only</label>
+                </div>
+                <div id="heatNote" class="muted small"></div>
+                <div id="heatmap" class="opt-heatmap"></div>
+                <div id="heatLegend" class="opt-heat-legend"></div>
+            </div>
+        </div>
+
+        <!-- Walk-forward -->
+        <div class="tab-pane" data-pane="walkforward">
+            <div id="wfEmpty" class="card muted" hidden>Walk-forward validation was not enabled for this run.
+                <button class="btn btn-sm" id="btnRerunWf">Re-run with walk-forward</button></div>
+            <div id="wfBox">
+                <div id="wfVerdict" class="opt-verdict"></div>
+                <div class="metrics-grid">
+                    <div class="metric-card"><div class="label">Avg train score</div><div class="value" id="wfTrain">—</div></div>
+                    <div class="metric-card"><div class="label">Avg test score</div><div class="value" id="wfTest">—</div></div>
+                    <div class="metric-card"><div class="label">Degradation</div><div class="value" id="wfDeg">—</div></div>
+                    <div class="metric-card"><div class="label">WF efficiency</div><div class="value" id="wfEff">—</div><div class="small muted">test ÷ train</div></div>
+                    <div class="metric-card"><div class="label">Profitable tests</div><div class="value" id="wfPos">—</div></div>
+                </div>
+                <div class="card">
+                    <h2 class="card-title">Train vs test score per split</h2>
+                    <div class="chart-wrap opt-chart-sm"><canvas id="wfChart"></canvas></div>
+                </div>
+                <div class="card">
+                    <h2 class="card-title">Stitched out-of-sample equity</h2>
+                    <div class="chart-wrap opt-chart-sm"><canvas id="wfEquityChart"></canvas></div>
+                </div>
+                <div class="card">
+                    <h2 class="card-title">Splits</h2>
+                    <div class="table-scroll">
+                        <table class="data-table opt-compact">
+                            <thead><tr><th>#</th><th>Train</th><th>Test</th><th>Chosen params</th><th>Train</th><th>Test</th><th>Degradation</th><th>Test trades</th></tr></thead>
+                            <tbody id="wfSplits"></tbody>
+                        </table>
+                    </div>
+                    <h3 class="opt-subtitle">Parameter stability across splits</h3>
+                    <table class="data-table opt-compact">
+                        <thead><tr><th>Parameter</th><th>Values chosen</th><th>Mean</th><th>Std</th><th>CV</th></tr></thead>
+                        <tbody id="wfStability"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sensitivity -->
+        <div class="tab-pane" data-pane="sensitivity">
+            <p class="muted small opt-help">Each chart varies one parameter with the others fixed at the optimum.
+                A wide plateau (shaded points within 10% of the best) is robust; a sharp peak is fragile.</p>
+            <div id="sensGrid" class="opt-sens-grid"></div>
+        </div>
+
+        <!-- All results -->
+        <div class="tab-pane" data-pane="results">
+            <div class="card">
+                <div class="card-head">
+                    <h2 class="card-title">All results <span id="resTotal" class="muted small"></span></h2>
+                    <label class="small"><input type="checkbox" id="resCompliant"> compliant only</label>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table opt-results-table">
+                        <thead id="resHead"></thead>
+                        <tbody id="resBody"></tbody>
+                    </table>
+                </div>
+                <div class="pagination opt-pager">
+                    <button class="btn btn-sm" id="resPrev">‹ Prev</button>
+                    <span id="resPage" class="small muted"></span>
+                    <button class="btn btn-sm" id="resNext">Next ›</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Audit -->
+        <div class="tab-pane" data-pane="audit">
+            <div class="card">
+                <h2 class="card-title">Applied parameter changes</h2>
+                <div class="table-scroll">
+                    <table class="data-table opt-compact">
+                        <thead><tr><th>When</th><th>Action</th><th>Target</th><th>Change</th><th>User</th><th></th></tr></thead>
+                        <tbody id="auditBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </section>
+</div>
+
+<!-- Apply modal -->
+<div id="applyModal" class="modal-overlay" hidden>
+    <div class="modal opt-apply-modal" role="dialog" aria-modal="true" aria-labelledby="applyTitle">
+        <div class="modal-head"><h3 id="applyTitle">Apply parameters</h3><button class="modal-close" data-close>✕</button></div>
+        <div class="modal-body">
+            <div id="applyParams" class="opt-apply-params"></div>
+            <div class="form-row">
+                <label>Target</label>
+                <div class="opt-target-group">
+                    <label><input type="radio" name="applyTarget" value="none" checked> Record only <small class="muted">(audit + preset, no runner change)</small></label>
+                    <label><input type="radio" name="applyTarget" value="paper"> Paper runner <small class="muted">(restart an existing one, or spawn new)</small></label>
+                    <label><input type="radio" name="applyTarget" value="ab_test"> A/B test <small class="muted">(new paper runner beside the current one)</small></label>
+                    <label><input type="radio" name="applyTarget" value="live"> Live runner <small class="neg">(real capital)</small></label>
+                </div>
+            </div>
+            <div class="form-row" id="applyRunnerRow" hidden>
+                <label for="applyRunner">Runner</label>
+                <select id="applyRunner" class="input"></select>
+                <div class="hint muted small" id="applyRunnerHint"></div>
+            </div>
+            <div id="applyLiveBox" class="opt-live-box" hidden>
+                <div id="applyLiveGate" class="small"></div>
+                <label class="small"><input type="checkbox" id="applyAllowUnvalidated"> apply even though this run was not walk-forward validated</label>
+                <label class="small"><input type="checkbox" id="applyConfirmLive"> I understand this changes a LIVE strategy trading real money</label>
+            </div>
+            <div class="form-row">
+                <label for="applyNotes">Notes (audit trail)</label>
+                <input id="applyNotes" class="input" maxlength="500" placeholder="why this change?">
+            </div>
+            <div id="applyError" class="opt-errors"></div>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-ghost" data-close>Cancel</button>
+            <button class="btn btn-primary" id="applyConfirm">Apply</button>
+        </div>
+    </div>
+</div>
+
+<!-- Preset modal -->
+<div id="presetModal" class="modal-overlay" hidden>
+    <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="presetTitle">
+        <div class="modal-head"><h3 id="presetTitle">Save as preset</h3><button class="modal-close" data-close>✕</button></div>
+        <div class="modal-body">
+            <div id="presetParams" class="opt-apply-params"></div>
+            <div class="form-row"><label for="presetName">Name</label><input id="presetName" class="input" maxlength="90"></div>
+            <div class="form-row"><label for="presetDesc">Description</label><input id="presetDesc" class="input" maxlength="300"></div>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-ghost" data-close>Cancel</button>
+            <button class="btn btn-primary" id="presetConfirm">Save</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/optimize_common.js') }}"></script>
+<script src="{{ url_for('static', filename='js/optimize_run.js') }}"></script>
+{% endblock %}
