@@ -35,7 +35,10 @@ async function fetchJSON(url, opts) {
 // ---------------------------------------------------------------------------
 
 function strategiesOptions(selected) {
-    return strategies.map((s) => `<option value="${s.name}" ${s.name === selected ? "selected" : ""}>${s.name}</option>`).join("");
+    return strategies.map((s) => {
+        const kindBadge = s.signal_kind === "option" ? " [Options]" : "";
+        return `<option value="${s.name}" ${s.name === selected ? "selected" : ""}>${s.name}${kindBadge}</option>`;
+    }).join("");
 }
 
 function addSlot(prefill) {

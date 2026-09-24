@@ -1,9 +1,16 @@
 {% extends "base.html" %}
-{% block title %}Compare · Trading Bot{% endblock %}
+{% block title %}Compare Backtests · Trading Bot{% endblock %}
 
 {% block content %}
-<h1 class="page-title">Compare</h1>
-<p class="muted small page-sub">Run 2–4 strategy / timeframe combinations side by side.</p>
+<div class="page-head" style="display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px;">
+    <div>
+        <h1 class="page-title">📊 Compare Backtests</h1>
+        <p class="muted small page-sub">Historical simulation: Run 2–4 strategy / parameter combinations side by side.</p>
+    </div>
+    <div>
+        <a href="/analytics" class="btn btn-ghost" style="text-decoration: none;">📈 View Live & Paper Analytics →</a>
+    </div>
+</div>
 
 <!-- ================= SHARED CONFIG ================= -->
 <div class="card shared-config">
@@ -11,8 +18,8 @@
         <div class="form-row">
             <label for="symbol">Symbol</label>
             <select id="symbol" class="input">
-                <option>DEMO</option><option>BTCUSD</option><option>ETHUSD</option>
-                <option>NIFTY</option><option>INFY</option>
+                <option>NIFTY</option><option>BANKNIFTY</option><option>DEMO</option>
+                <option>INFY</option><option>BTCUSD</option><option>ETHUSD</option>
             </select>
         </div>
         <div class="form-row">
