@@ -101,6 +101,7 @@ def test_manager_module_public_api():
         "BrokerSessionManager",
         "get_session_manager",
         "reset_default_manager",
+        "available_brokers",
     ]
 
 

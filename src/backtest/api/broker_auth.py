@@ -26,7 +26,10 @@ from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
 
-from backtest.brokers.session_manager import get_session_manager
+from backtest.brokers.session_manager import (
+    available_brokers,
+    get_session_manager,
+)
 from backtest.logging_config import get_logger
 
 __all__ = ["broker_auth_bp"]
@@ -53,10 +56,43 @@ def _string_field(data: dict, key: str) -> str | None:
     return None
 
 
+@broker_auth_bp.get("/api/broker/list")
+def list_brokers() -> tuple:
+    """Brokers the login UI can offer (broker selector in the auth modal)."""
+    return jsonify({"success": True, "brokers": available_brokers()}), 200
+
+
+@broker_auth_bp.post("/api/broker/select")
+def select_broker() -> tuple:
+    """Switch the active broker (one live session at a time).
+
+    Body: ``{"broker": "mstock" | "dhan" | ...}``. Switching away from a
+    broker with a live session drops that session (the Forward Engine
+    consumes a single token).
+    """
+    data = request.get_json(silent=True) or {}
+    broker_name = _string_field(data, "broker")
+    if broker_name is None:
+        return jsonify({"success": False, "message": "broker is required"}), 400
+    try:
+        result = get_session_manager().switch_broker(broker_name)
+        status_code = 200 if result.get("success") else 400
+        logger.info("broker select → %s", result.get("broker") or result.get("message"))
+        return jsonify(result), status_code
+    except Exception:  # noqa: BLE001 — generic message to browser, detail to log
+        logger.exception("broker select endpoint failed")
+        return (jsonify({"success": False, "message": _GENERIC_ERROR_MESSAGE}), 500)
+
+
 @broker_auth_bp.post("/api/broker/login")
 def login() -> tuple:
-    """Step 1 — credentials. The password is used once, then discarded."""
+    """Step 1 — credentials. The password is used once, then discarded.
+
+    Body: ``{broker, username, password}`` where ``broker`` selects which
+    broker's flow to use (defaults to the active broker when omitted).
+    """
     data = request.get_json(silent=True) or {}
+    broker_name = _string_field(data, "broker")
     username = _string_field(data, "username")
     password = data.get("password")
     password = password if isinstance(password, str) and password else None
@@ -80,6 +116,16 @@ def login() -> tuple:
         )
 
     try:
+        if broker_name is not None:
+            switch = get_session_manager().switch_broker(broker_name)
+            if not switch.get("success"):
+                return (
+                    jsonify(
+                        {"success": False, "message": switch.get("message", "Unknown broker"),
+                         "requires_totp": False}
+                    ),
+                    400,
+                )
         # Credentials are passed as call arguments only — never stored or
         # logged anywhere past this line.
         result = get_session_manager().login(username, password)
@@ -336,3 +382,24 @@ def logout() -> tuple:
         logger.exception("broker logout endpoint failed")
         return jsonify({"success": False, "message": _GENERIC_ERROR_MESSAGE}), 500
     return jsonify({"success": True}), 200
+
+
+@broker_auth_bp.get("/api/broker/feed-quality")
+def feed_quality() -> tuple:
+    """Feed-quality comparison — which broker delivers fast, reliable data.
+
+    ``?live=1``  → in-memory hot tails (this process only, fast).
+    Default      → full report recomputed from the durable JSONL log
+                   (``data/feed_quality.log``, restart-proof, all brokers).
+    """
+    try:
+        from backtest.forward.feed_quality import aggregate_report, all_quality_monitors
+
+        if request.args.get("live"):
+            feeds = [m.summary() for m in all_quality_monitors()]
+        else:
+            feeds = aggregate_report()["feeds"]
+        return jsonify({"success": True, "feeds": feeds}), 200
+    except Exception:  # noqa: BLE001
+        logger.exception("feed-quality endpoint failed")
+        return jsonify({"success": False, "message": _GENERIC_ERROR_MESSAGE}), 500

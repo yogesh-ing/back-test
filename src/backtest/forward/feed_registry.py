@@ -54,6 +54,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from backtest.forward.feed_quality import get_quality_monitor
 from backtest.options.quote_providers import (
     SyntheticChainGenerator,
     SyntheticQuoteProvider,
@@ -283,52 +284,50 @@ def option_quote_provider_for(
 ) -> tuple[Any, str]:
     """``(quote_provider, label)`` for an option runner's bridge — P1.1.
 
-    * ``source="mstock"`` + an authenticated broker (explicit or via the
-      session manager) → the shared :class:`LiveChainProvider`
-      (``"live:mstock"``): real chains, real LTP, one API budget per
-      underlying (ChainBus refcount).
+    * ``source="mstock"``/``"dhan"`` + an authenticated broker of the same
+      name (explicit or via the session manager) → the shared
+      :class:`LiveChainProvider` (``"live:<broker>"``): real chains, real
+      LTP, one API budget per underlying (ChainBus refcount).
     * otherwise → the synthetic pair (``"synthetic:bs"``). The fallback is
       **deliberate and labelled** — every surface that shows the runner also
       shows the label, so a synthetic-priced run is never mistaken for a
       live one (the honesty rule; runner summaries carry ``quote_source``).
     """
     underlying = str(underlying).upper()
-    if str(source).lower() == "mstock":
+    source_key = str(source).lower()
+    if source_key in ("mstock", "dhan"):
         broker = quote_broker if quote_broker is not None else _default_quote_broker()
-        if broker is not None:
-            provider = get_chain_bus().acquire(underlying, source="mstock", broker=broker)
-            return provider, getattr(provider, "source_name", "live:mstock")
+        # A session-manager-resolved broker always carries broker_name; a
+        # duck-typed injected broker may not — accept it for the matching
+        # source only (an explicit quote_broker is a deliberate override).
+        name = getattr(broker, "broker_name", None)
+        if broker is not None and (name is None or name == source_key):
+            provider = get_chain_bus().acquire(underlying, source=source_key, broker=broker)
+            return provider, getattr(provider, "source_name", f"live:{source_key}")
         logger.warning(
-            "option runner on %s requested source=mstock but no authenticated "
-            "broker session — using synthetic chain (labelled)",
+            "option runner on %s requested source=%s but no authenticated "
+            "%s session — using synthetic chain (labelled)",
             underlying,
+            source_key,
+            source_key,
         )
     generator = get_chain_bus().acquire(underlying)
     return option_quote_provider(generator), "synthetic:bs"
 
 
-class MStockBarFeed:
-    """Live bar feed for ``source=mstock`` runners (Gap #1, lands in the bus).
+class _BrokerBarFeedBase:
+    """Shared plumbing for broker poll threads (mStock/Dhan/...).
 
-    ONE poll thread per manager, round-robin over every subscribed mstock
-    symbol — runner count never multiplies API polls (the §5.2 rule; mStock
-    rate limits die at ~1 req/s). Bars are pushed through the *same*
-    ``on_bar`` / ``on_tick_end`` hooks the :class:`SyntheticFeed` uses, so
-    the manager's fan-out and every runner are unchanged (C2: the engine
-    hands data in — runners cannot tell which feed produced a bar).
-
-    Polling is delegated to a duck-typed client with ``latest_bar(symbol)
-    -> dict | None`` — by default :class:`MStockLiveFeed` (which owns the
-    market-hours gate, credentials, and scriptmaster resolution). Bars are
-    normalized to the runner bar shape and deduped per symbol (a poll that
-    returns the same candle twice is dropped, so retries never re-feed).
-    Feed errors are logged and skipped — a data hiccup must never take the
-    trading loop down.
-
-    While the exchange is closed, each symbol is polled at most once (a
-    startup catch-up so runners are seeded with the latest real bar) and
-    then the loop idles until market open.
+    ONE poll thread per manager per broker, round-robin over subscribed
+    symbols; bars pushed through the same ``on_bar``/``on_tick_end`` hooks
+    as :class:`SyntheticFeed` (C2: runners cannot tell which feed produced a
+    bar). Subclasses set ``broker_name`` and default ``_feed_client_class``.
+    Every delivered bar is observed by the feed-quality monitor for the
+    (broker, symbol) pair — the multi-broker comparison data source.
     """
+
+    broker_name = "unset"
+    _feed_client_class: Optional[type] = None
 
     def __init__(
         self,
@@ -340,9 +339,8 @@ class MStockBarFeed:
         self.poll_interval_s = float(poll_interval_s)
         # Duck-typed: anything with ``latest_bar(symbol) -> dict | None``.
         if feed_client is None:
-            from backtest.data.mstock_live_feed import MStockLiveFeed
-
-            feed_client = MStockLiveFeed(poll_interval_s=self.poll_interval_s)
+            assert self._feed_client_class is not None  # noqa: S101 — subclass contract
+            feed_client = self._feed_client_class()
         self._client = feed_client
         self._symbols: List[str] = []
         self._lock = threading.RLock()
@@ -350,15 +348,13 @@ class MStockBarFeed:
         self._thread: Optional[threading.Thread] = None
         self._last_ts: Dict[str, str] = {}  # symbol → last pushed bar ts
 
-    # -- subscription (same shape as SyntheticFeed) ------------------------
-
     def add_symbols(self, symbols: List[str]) -> None:
         with self._lock:
             for symbol in symbols:
                 symbol = str(symbol).upper()
                 if symbol not in self._symbols:
                     self._symbols.append(symbol)
-                    logger.info("mstock feed subscribed %s", symbol)
+                    logger.info("%s feed subscribed %s", self.broker_name, symbol)
 
     def remove_symbols(self, symbols: List[str]) -> None:
         with self._lock:
@@ -368,21 +364,18 @@ class MStockBarFeed:
                     self._symbols.remove(symbol)
                 self._last_ts.pop(symbol, None)
 
-    # -- lifecycle ----------------------------------------------------------
-
     def start(self, warmup: bool = False) -> None:
-        """Start the poll thread (idempotent). ``warmup`` accepted for API
-        parity with :meth:`SyntheticFeed.start` — real bars need no warmup."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop.clear()
             self._thread = threading.Thread(
-                target=self._loop, name="mstock-bar-feed", daemon=True
+                target=self._loop, name=f"{self.broker_name}-bar-feed", daemon=True
             )
             self._thread.start()
             logger.info(
-                "mstock feed started: %d symbols, %.0fs polls",
+                "%s feed started: %d symbols, %.0fs polls",
+                self.broker_name,
                 len(self._symbols),
                 self.poll_interval_s,
             )
@@ -394,13 +387,11 @@ class MStockBarFeed:
             self._thread = None
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=5.0)
-        logger.info("mstock feed stopped")
+        logger.info("%s feed stopped", self.broker_name)
 
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
-
-    # -- polling ------------------------------------------------------------
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -408,27 +399,20 @@ class MStockBarFeed:
             try:
                 self._poll_once()
             except Exception:  # noqa: BLE001 — the loop survives anything
-                logger.exception("mstock feed poll failed")
+                logger.exception("%s feed poll failed", self.broker_name)
             elapsed = time.monotonic() - started
             self._stop.wait(max(0.0, self.poll_interval_s - elapsed))
 
     def _poll_once(self) -> int:
-        """One round-robin sweep: fetch + push a bar per symbol.
-
-        Returns how many bars were actually delivered. Split out of the loop
-        body so tests can drive polls without threads.
-        """
         with self._lock:
             symbols = list(self._symbols)
         if not symbols:
             return 0
-
         delivered = 0
         market_open = self._market_open()
         for symbol in symbols:
             if self._stop.is_set():
                 break
-            # Market closed + already seeded → idle (never hammer a closed API).
             if not market_open and symbol in self._last_ts:
                 continue
             bar = self._fetch_bar(symbol)
@@ -436,7 +420,7 @@ class MStockBarFeed:
                 continue
             with self._lock:
                 if bar["ts"] <= self._last_ts.get(symbol, ""):
-                    continue  # dedupe: same candle as last push
+                    continue
                 self._last_ts[symbol] = bar["ts"]
             if self.on_bar is not None:
                 self.on_bar(symbol, bar)
@@ -446,13 +430,19 @@ class MStockBarFeed:
         return delivered
 
     def _fetch_bar(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Latest bar for ``symbol``, normalized + error-soft."""
+        monitor = get_quality_monitor(self.broker_name, symbol)
         try:
             raw = self._client.latest_bar(symbol)
         except Exception as exc:  # noqa: BLE001 — feed hiccups are logged, not fatal
-            logger.warning("mstock feed: latest_bar(%s) failed: %s", symbol, exc)
+            logger.warning("%s feed: latest_bar(%s) failed: %s", self.broker_name, symbol, exc)
+            monitor.observe_error(str(exc))
             return None
-        return self._normalize_bar(raw)
+        bar = self._normalize_bar(raw)
+        if bar is None:
+            monitor.observe_poll_no_data("unparseable bar row")
+        else:
+            monitor.observe_bar(bar["ts"])
+        return bar
 
     @staticmethod
     def _market_open() -> bool:
@@ -465,13 +455,6 @@ class MStockBarFeed:
 
     @staticmethod
     def _normalize_bar(raw: Any) -> Optional[Dict[str, Any]]:
-        """Client row → runner bar shape (str ts the whole stack agrees on).
-
-        The runner de-dupes by string comparison (``ts <= last``), so every
-        feed must emit one canonical format. ``pd.to_datetime`` absorbs both
-        mStock shapes (ISO strings and epoch millis — the latter detected by
-        magnitude and read as milliseconds).
-        """
         if not isinstance(raw, dict):
             return None
         try:
@@ -490,8 +473,59 @@ class MStockBarFeed:
                 "volume": float(raw.get("volume", 0) or 0),
             }
         except (KeyError, TypeError, ValueError):
-            logger.debug("mstock feed: unparseable bar row skipped: %r", raw)
+            logger.debug("broker feed: unparseable bar row skipped: %r", raw)
             return None
+
+
+class MStockBarFeed(_BrokerBarFeedBase):
+    """Live bar feed for ``source=mstock`` runners (Gap #1, lands in the bus).
+
+    ONE poll thread per manager, round-robin over every subscribed mstock
+    symbol — runner count never multiplies API polls (the §5.2 rule; mStock
+    rate limits die at ~1 req/s). See :class:`_BrokerBarFeedBase` for the
+    shared polling/normalization/dedupe machinery (2026-09-25 refactor: the
+    per-broker class is now just config + the Dhan sibling reuses it).
+    """
+
+    broker_name = "mstock"
+    _feed_client_class = None  # set lazily in __init__ via class attr override
+
+    def __init__(
+        self,
+        feed_client: Any = None,
+        poll_interval_s: float = 60.0,
+    ) -> None:
+        if feed_client is None:
+            from backtest.data.mstock_live_feed import MStockLiveFeed
+
+            feed_client = MStockLiveFeed(poll_interval_s=poll_interval_s)
+        super().__init__(feed_client=feed_client, poll_interval_s=poll_interval_s)
+
+
+class DhanBarFeed(_BrokerBarFeedBase):
+    """Live bar feed for ``source=dhan`` runners (2026-09-25).
+
+    Same one-thread-per-manager round-robin as :class:`MStockBarFeed`, but
+    delegating to :class:`~backtest.data.dhan_live_feed.DhanLiveFeed`.
+    Requires an active Dhan broker session (Dhan data APIs are token-gated).
+    """
+
+    broker_name = "dhan"
+
+    def __init__(
+        self,
+        feed_client: Any = None,
+        poll_interval_s: float = 60.0,
+    ) -> None:
+        if feed_client is None:
+            from backtest.data.dhan_live_feed import DhanLiveFeed
+
+            feed_client = DhanLiveFeed()
+        super().__init__(feed_client=feed_client, poll_interval_s=poll_interval_s)
+
+
+# Backward-compat alias for anything importing the old name.
+_BrokerBarFeed = MStockBarFeed
 
 
 # ---------------------------------------------------------------------------

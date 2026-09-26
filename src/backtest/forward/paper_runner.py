@@ -1005,19 +1005,22 @@ class StrategyRunner:
             from backtest.forward.feed_registry import option_quote_provider_for
 
             self._chain_underlying = config.symbols[0] if config.symbols else "NIFTY"
-            # P1.1: source routes the chain — mstock + authenticated session →
-            # the shared LiveChainProvider (real chains + LTP, one API budget
-            # per underlying); anything else → the synthetic pair. The fallback
-            # is deliberate and labelled ("synthetic:bs") so a synthetic-priced
-            # runner can never pass as live.
+            # P1.1: source routes the chain — mstock/dhan + authenticated
+            # session → the shared LiveChainProvider (real chains + LTP, one
+            # API budget per underlying); anything else → the synthetic pair.
+            # The fallback is deliberate and labelled ("synthetic:bs") so a
+            # synthetic-priced runner can never pass as live.
             provider, quote_label = option_quote_provider_for(
                 config.source, self._chain_underlying
             )
-            # The bus STORE the acquire landed in (synthetic|mstock) — derived
-            # from the resolved provider, not from config.source: a requested
-            # "mstock" that fell back to synthetic must release the synthetic
-            # entry, or stop() leaks the refcount.
-            self._chain_source = "mstock" if quote_label == "live:mstock" else "synthetic"
+            # The bus STORE the acquire landed in (synthetic|mstock|dhan) —
+            # derived from the resolved provider, not from config.source: a
+            # requested "mstock"/"dhan" that fell back to synthetic must
+            # release the synthetic entry, or stop() leaks the refcount.
+            live_label = f"live:{config.source.lower()}"
+            self._chain_source = (
+                str(config.source).lower() if quote_label == live_label else "synthetic"
+            )
             self._chain_released = False  # one release per acquire (stop is idempotent)
             self.options_bridge = OptionsBridge(
                 capital=config.allocated_capital,
@@ -2023,6 +2026,27 @@ class StrategyRunner:
             data["low"][i] = bar["low"]
             data["close"][i] = bar["close"]
             data["volume"][i] = bar["volume"]
+        # 2026-09-25: give the frame a REAL time index when every bar carries
+        # a parseable timestamp. Time-aware strategies (daily EMA, session
+        # windows, 30-min resamples) need ``candles.index`` to be a clock,
+        # not a row counter. Unparseable/partial timestamps fall back to the
+        # legacy positional index, so nothing that shipped before changes.
+        ts_values = [str(bar.get("ts") or "").strip() for bar in buf]
+        index = None
+        if buf and all(ts_values):
+            try:
+                parsed = pd.to_datetime(ts_values, errors="coerce")
+                if not parsed.isna().any():
+                    index = pd.DatetimeIndex(parsed)
+            except (TypeError, ValueError):
+                index = None
+        if index is not None:
+            return pd.DataFrame(
+                data,
+                index=index,
+                columns=["open", "high", "low", "close", "volume"],
+                dtype="float64",
+            )
         return pd.DataFrame(
             data, columns=["open", "high", "low", "close", "volume"], dtype="float64"
         )

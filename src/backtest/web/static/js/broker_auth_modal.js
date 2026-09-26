@@ -59,6 +59,21 @@ const BrokerAuthUI = (() => {
     const rememberToggleAuth = () => document.getElementById("broker-auth-remember-toggle-auth");
     const rememberHint       = () => document.getElementById("broker-auth-remember-hint");
 
+    // broker selector (2026-09-25): which broker's login flow to run.
+    const brokerSelect       = () => document.getElementById("broker-auth-broker-select");
+    const usernameLabel      = () => document.getElementById("broker-auth-username-label");
+
+    // Per-broker step-1 wording (field labels + placeholders). A new broker
+    // only needs an entry here once it's registered server-side.
+    const BROKER_FIELDS = {
+        mstock: { userLabel: "Username", userPlaceholder: "Enter username", passLabel: "Password" },
+        dhan:   { userLabel: "Client ID", userPlaceholder: "Enter Dhan client ID", passLabel: "PIN" },
+    };
+
+    // The broker whose credentials flow is currently in progress (kept across
+    // steps so /api/broker/verify-totp lands on the right session).
+    let selectedBroker = null;
+
     // ---- helpers -----------------------------------------------------------
 
     function showView(name) {
@@ -76,6 +91,43 @@ const BrokerAuthUI = (() => {
     function setTitle(text) {
         const el = titleEl();
         if (el) el.textContent = text;
+    }
+
+    // ---- broker selector ---------------------------------------------------
+
+    async function loadBrokerList() {
+        const sel = brokerSelect();
+        if (!sel || sel.options.length > 0) return; // already populated
+        let brokers = [];
+        try {
+            const resp = await fetch("/api/broker/list");
+            const data = await resp.json();
+            brokers = (data && data.brokers) || [];
+        } catch (err) { /* fall through — selector just stays empty */ }
+        for (const b of brokers) {
+            const opt = document.createElement("option");
+            opt.value = b.name;
+            opt.textContent = b.display_name || b.name;
+            sel.appendChild(opt);
+        }
+    }
+
+    function applyBrokerFields() {
+        const sel = brokerSelect();
+        const name = (sel && sel.value) || "mstock";
+        const f = BROKER_FIELDS[name] || BROKER_FIELDS.mstock;
+        if (usernameLabel()) usernameLabel().textContent = f.userLabel;
+        if (usernameInput()) usernameInput().placeholder = f.userPlaceholder;
+        const passField = passwordInput() && passwordInput().closest(".broker-auth-field");
+        if (passField) {
+            const lbl = passField.querySelector("label");
+            if (lbl) lbl.textContent = f.passLabel;
+        }
+    }
+
+    function currentBroker() {
+        const sel = brokerSelect();
+        return selectedBroker || (sel && sel.value) || null;
     }
 
     function setSpinner(btnEl, spinning) {
@@ -106,9 +158,11 @@ const BrokerAuthUI = (() => {
     // ---- view: credentials (Step 1) ----------------------------------------
 
     function showCredentials() {
-        setTitle("🔐 mStock Login");
+        setTitle("🔐 Broker Login");
         showView("credentials");
         if (credError()) credError().textContent = "";
+        applyBrokerFields();
+        selectedBroker = null; // next login uses the selector's current value
         if (usernameInput()) usernameInput().focus();
         syncRememberToggle();
     }
@@ -134,8 +188,10 @@ const BrokerAuthUI = (() => {
         if (credError()) credError().textContent = "";
 
         try {
-            const result = await postJSON("/api/broker/login", { username, password });
+            const broker = brokerSelect() && brokerSelect().value;
+            const result = await postJSON("/api/broker/login", { broker, username, password });
             if (result.success && result.requires_totp) {
+                selectedBroker = broker;
                 showTotp();
             } else if (result.success) {
                 // login succeeded but no TOTP required — go straight to authenticated
@@ -143,7 +199,7 @@ const BrokerAuthUI = (() => {
             } else {
                 // show error but don't call showCredentials() which clears it
                 if (credError()) credError().textContent = result.message || "Login failed";
-                setTitle("🔐 mStock Login");
+                setTitle("🔐 Broker Login");
                 showView("credentials");
             }
         } catch (err) {
@@ -156,7 +212,9 @@ const BrokerAuthUI = (() => {
     // ---- view: TOTP (Step 2) -----------------------------------------------
 
     function showTotp() {
-        setTitle("🔐 mStock Login");
+        const name = currentBroker();
+        const display = (name && BROKER_FIELDS[name] && name.charAt(0).toUpperCase() + name.slice(1)) || "Broker";
+        setTitle(`🔐 ${display} Login — TOTP`);
         showView("totp");
         if (totpError()) totpError().textContent = "";
         const t = totpInput();
@@ -298,6 +356,8 @@ const BrokerAuthUI = (() => {
         if (!ov) return;
         ov.classList.add("open");
 
+        loadBrokerList().then(() => applyBrokerFields());
+
         // Seed the correct view based on current auth state.
         const state = BrokerStatus && BrokerStatus.state();
         if (state === "authenticated" || state === "expiring_soon") {
@@ -354,11 +414,14 @@ const BrokerAuthUI = (() => {
             if (e.key === "Enter") handleTotp();
         });
 
-        // Credentials enter-key
-        const pi = passwordInput();
-        if (pi) pi.addEventListener("keydown", (e) => {
+        const passField = passwordInput();
+        if (passField) passField.addEventListener("keydown", (e) => {
             if (e.key === "Enter") handleLogin();
         });
+
+        // Broker selector: re-apply the field wording when it changes.
+        const bs = brokerSelect();
+        if (bs) bs.addEventListener("change", applyBrokerFields);
 
         // logout
         const lo = logoutBtn();

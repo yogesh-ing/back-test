@@ -128,7 +128,7 @@ class PortfolioManager:
         # Gap #1: live mStock bars ride the SAME fan-out as synthetic bars.
         # The feed owns ONE poll thread for all its symbols (rate-limit rule);
         # it only runs while at least one runner trades source=mstock.
-        from backtest.forward.feed_registry import MStockBarFeed
+        from backtest.forward.feed_registry import DhanBarFeed, MStockBarFeed
 
         self.mstock_feed = MStockBarFeed(
             feed_client=mstock_feed_client,
@@ -136,6 +136,12 @@ class PortfolioManager:
         )
         self.mstock_feed.on_bar = self._on_bar
         self.mstock_feed.on_tick_end = self._on_tick_end
+
+        # 2026-09-25: Dhan live bars ride the same fan-out — one poll thread
+        # per manager per broker (source=dhan runners).
+        self.dhan_feed = DhanBarFeed(poll_interval_s=mstock_poll_interval_s)
+        self.dhan_feed.on_bar = self._on_bar
+        self.dhan_feed.on_tick_end = self._on_tick_end
 
         # U3.3: audit log with scope — every control action logs scope=paper|live|playbook|dashboard
         self._audit_log_entries: Deque[Dict[str, Any]] = deque(maxlen=1000)
@@ -1345,20 +1351,22 @@ class PortfolioManager:
         return str(bar.get("ts", ""))[:10] or datetime.now(timezone.utc).date().isoformat()
 
     def _sync_mstock_thread(self) -> None:
-        """Run the live poll thread iff at least one mstock runner exists.
+        """Run the live poll threads iff at least one live-source runner exists.
 
-        The thread is expensive (API polls) — it must not idle-spin while no
-        runner consumes live bars, and it must be running before the first
-        mstock runner's bars are expected.
+        The threads are expensive (API polls) — they must not idle-spin while
+        no runner consumes live bars, and they must be running before the
+        first live runner's bars are expected. 2026-09-25: extended to the
+        Dhan thread (source=dhan) alongside the mStock thread.
         """
-        has_live = any(
-            r.config.source == "mstock" and r.status != STATUS_STOPPED
-            for r in self._runners.values()
-        )
-        if has_live and not self.mstock_feed.running:
-            self.mstock_feed.start()
-        elif not has_live and self.mstock_feed.running:
-            self.mstock_feed.stop()
+        for source, feed in (("mstock", self.mstock_feed), ("dhan", self.dhan_feed)):
+            has_live = any(
+                r.config.source == source and r.status != STATUS_STOPPED
+                for r in self._runners.values()
+            )
+            if has_live and not feed.running:
+                feed.start()
+            elif not has_live and feed.running:
+                feed.stop()
 
     # ------------------------------------------------------------------ #
     # State persistence (Gap #3 / V2 — P2.4). No-op unless a state path is

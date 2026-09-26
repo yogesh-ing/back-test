@@ -33,7 +33,12 @@ from backtest.brokers.base import (
     BrokerAuthBase,
 )
 
-__all__ = ["BrokerSessionManager", "get_session_manager", "reset_default_manager"]
+__all__ = [
+    "BrokerSessionManager",
+    "get_session_manager",
+    "reset_default_manager",
+    "available_brokers",
+]
 
 logger = logging.getLogger("backtest.brokers.session_manager")
 
@@ -41,16 +46,50 @@ logger = logging.getLogger("backtest.brokers.session_manager")
 MONITOR_INTERVAL_SECONDS = 300.0
 
 
-def _default_broker_factory() -> BrokerAuthBase:
-    """Create the default broker (mStock — the only implementation today).
+# Broker registry (2026-09-25): maps ``broker_name`` → lazy factory. Adding a
+# new broker later is a single entry here plus its own module under
+# ``backtest.brokers`` — the session manager, API routes, and UI modal are
+# already broker-agnostic.
+_BROKER_REGISTRY: dict[str, Callable[[], BrokerAuthBase]] = {
+    "mstock": lambda: _lazy("mstock"),
+    "dhan": lambda: _lazy("dhan"),
+}
 
-    Imported lazily so that engine/API code importing this module has no
-    direct dependency on :class:`~backtest.brokers.mstock.MStockBroker`;
-    future brokers plug in via ``set_broker`` / a custom factory.
+
+def _lazy(module: str) -> BrokerAuthBase:
+    """Instantiate a broker by module name under ``backtest.brokers``.
+
+    Imported lazily so engine/API code importing this module has no direct
+    dependency on any concrete broker class. Each module must expose a
+    zero-argument-constructor broker class (MStockBroker / DhanBroker).
     """
-    from backtest.brokers.mstock import MStockBroker
+    if module == "mstock":
+        from backtest.brokers.mstock import MStockBroker
 
-    return MStockBroker()
+        return MStockBroker()
+    if module == "dhan":
+        from backtest.brokers.dhan import DhanBroker
+
+        return DhanBroker()
+    raise ValueError(f"unknown broker module: {module}")
+
+
+def available_brokers() -> list[dict[str, str]]:
+    """Brokers the login UI can offer, ordered (mStock first, then new ones).
+
+    Returns ``[{"name", "display_name"}, ...]`` without instantiating any
+    broker (display names are static class attributes).
+    """
+    display_names = {"mstock": "mStock", "dhan": "Dhan"}
+    return [
+        {"name": name, "display_name": display_names.get(name, name.title())}
+        for name in _BROKER_REGISTRY
+    ]
+
+
+def _default_broker_factory() -> BrokerAuthBase:
+    """Create the default broker (mStock — keeps pre-registry behaviour)."""
+    return _lazy("mstock")
 
 
 class BrokerSessionManager:
@@ -99,6 +138,31 @@ class BrokerSessionManager:
             self._expiring_soon_flag = False
             self._expired_flag = False
             self._last_observed_status = None
+
+    def switch_broker(self, broker_name: str) -> dict[str, Any]:
+        """Make ``broker_name`` the active broker (API broker selector).
+
+        Switching drops any live session of the previous broker (one active
+        broker session at a time, by design — the Forward Engine consumes a
+        single token). Returns a small result dict for the API layer.
+        """
+        key = (broker_name or "").strip().lower()
+        if key not in _BROKER_REGISTRY:
+            return {"success": False, "message": f"Unknown broker: {broker_name}"}
+        with self._lock:
+            if self._broker is not None and self._broker.broker_name == key:
+                pass  # already active — idempotent
+            else:
+                self._broker = _BROKER_REGISTRY[key]()
+            self._expiring_soon_flag = False
+            self._expired_flag = False
+            self._last_observed_status = None
+        logger.info("active broker switched to %s", key)
+        return {
+            "success": True,
+            "broker": key,
+            "status": self.get_status(),
+        }
 
     # ------------------------------------------------------------------
     # Auth flow delegation (API routes depend only on these)

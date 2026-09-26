@@ -21,8 +21,14 @@
     {# ---------- STEP 1: Credentials ---------- #}
     <div id="broker-auth-step-credentials" class="broker-auth-view">
       <div class="broker-auth-form">
+        {# Broker selector (2026-09-25): populated from /api/broker/list.
+           New brokers appear here automatically once registered. #}
         <div class="broker-auth-field">
-          <label for="broker-auth-username">Username</label>
+          <label for="broker-auth-broker-select">Broker</label>
+          <select id="broker-auth-broker-select" class="input"></select>
+        </div>
+        <div class="broker-auth-field">
+          <label for="broker-auth-username" id="broker-auth-username-label">Username</label>
           <input id="broker-auth-username" class="input" type="text" autocomplete="username" placeholder="Enter username">
         </div>
         <div class="broker-auth-field">

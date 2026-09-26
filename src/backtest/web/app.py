@@ -531,8 +531,8 @@ def main() -> None:
     parser.add_argument(
         "--source",
         default="synthetic",
-        choices=["synthetic", "csv", "mstock", "db"],
-        help="Data source: synthetic | csv | mstock | db",
+        choices=["synthetic", "csv", "mstock", "dhan", "db"],
+        help="Data source: synthetic | csv | mstock | dhan | db",
     )
     parser.add_argument("--debug", action="store_true")
     parser.add_argument(
