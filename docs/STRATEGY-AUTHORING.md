@@ -4,6 +4,10 @@
 > Python file**; the engine, data, costs, exits, UI and portfolio plumbing are
 > fixed infrastructure you never touch.
 >
+> **Rules & quality bar:** [STRATEGY-GUIDELINES.md](STRATEGY-GUIDELINES.md) — the
+> rulebook (lookahead, backtest≡forward, risk ownership, costs, parameters) and
+> `templates/strategy_test_template.py`, the tests every new strategy should pass.
+>
 > Related: `docs/ARCHITECTURE-UNIFIED-TRADING.md` (§5 data ownership),
 > `PROJECT-CONTEXT.md` (invariants), `src/backtest/plugins/__init__.py` (the loader).
 
@@ -35,7 +39,7 @@ Implement **one** signal hook (or the market view for options):
 | Hook | Returns | Use when |
 |---|---|---|
 | `generate_signals(candles)` | `Series[int]` aligned to candles: `1` long, `0` flat, `-1` short | You think in target positions. The canonical equity hook. |
-| `entries(candles)` (+ optional `exits(candles)`) | `Series[bool]` | You think in entry/exit rules; the base class builds positions for you. Declared `stop_loss`/`take_profit` on the class are enforced by the engine either way. |
+| `entries(candles)` (+ optional `exits(candles)`) | `Series[bool]` | You think in entry/exit rules; the base class builds positions for you. ⚠️ Class-level `stop_loss`/`take_profit` are enforced **only** by the legacy `quick_screen` backtest — the default engine and forward runners ignore them (verified; see STRATEGY-GUIDELINES R-R1). Enforce stops in your signal logic or in the option `expression.exit`. |
 | `generate_market_view(candles)` | `MarketView` or `None` | **Option strategies.** You emit a direction + confidence; the OptionsBridge selects strikes and trades the playbook's structure. |
 
 Notes:
@@ -159,5 +163,7 @@ half-valid strategy registered. A missing `plugins/` folder is a no-op.
 - [ ] Deterministic: no clock/random/module state
 - [ ] Backward-looking only; comfortable with next-bar execution
 - [ ] Passes `tests/test_strategy_conformance.py`
+- [ ] Passes a copy of `templates/strategy_test_template.py` and the full
+      checklist in [STRATEGY-GUIDELINES.md §9](STRATEGY-GUIDELINES.md#9-review-checklist)
 - [ ] If option-kind: `MarketView.confidence` semantics documented
       (confidence is the bridge's trade/no-trade dial)
