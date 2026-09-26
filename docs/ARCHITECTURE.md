@@ -70,7 +70,20 @@ src/backtest/
 │   ├── backtest.py          # POST /api/backtest/run
 │   ├── strategies.py        # GET /api/strategies
 │   ├── forward.py           # POST /api/forward/start, GET /api/forward/status
-│   └── broker_auth.py       # POST /api/broker/login, /verify-totp
+│   ├── broker_auth.py       # POST /api/broker/login, /verify-totp
+│   └── intelligence.py      # /api/portfolio/greeks…, /api/market/*, /api/alerts/*
+│
+├── alerts/                  # PORTFOLIO ALERTS (information layer)
+│   ├── types.py             # AlertType, Severity, Alert
+│   ├── broker.py            # AlertBroker pub/sub + lifecycle, alert_broker() singleton
+│   └── catalog.py           # per-type explanation / typical responses
+│
+├── intelligence/            # PORTFOLIO INTELLIGENCE (analytics, never trades)
+│   ├── collectors.py        # runner books / option bridges → ExposureLeg
+│   ├── greeks.py            # aggregated Black-Scholes Greeks + scenarios
+│   ├── concentration.py · correlation.py · regime.py · market_activity.py
+│   ├── service.py           # IntelligenceService: rules → AlertBroker
+│   └── persistence.py       # async writes: alerts, greeks/regime history
 │
 ├── web/                     # FLASK WEB APP
 │   ├── app.py               # App factory, --source flag, page routes
@@ -78,7 +91,7 @@ src/backtest/
 │   └── static/js/           # Frontend JavaScript
 │
 ├── db/                      # DATABASE
-│   ├── models.py            # SQLAlchemy ORM (10 tables)
+│   ├── models.py            # SQLAlchemy ORM (incl. alerts, portfolio_greeks_history, market_regime_history)
 │   ├── manager.py           # DatabaseManager - connection pool + retries
 │   └── config.py            # FORWARD_TEST_DB_URL config
 │
@@ -172,6 +185,25 @@ class Strategy(ABC):
         # Returns: Series of +1 (long), -1 (short), 0 (flat)
         # Same DatetimeIndex as candles
 ```
+
+Optional portfolio-alert hooks (see `docs/STRATEGY-ALERTS.md`):
+`subscribed_alerts` / `subscribe_to_alerts([...])`, `on_alert(alert_type,
+alert_data)`, `on_alert_resolved(...)`, and two levers the strategy controls —
+`pause_new_entries` and `request_exit(fraction, position_key, reason)`, executed
+by the runner through the normal engine path on its next bar.
+
+### Portfolio Intelligence (information layer)
+
+```
+PortfolioManager ── bars/ticks ──► IntelligenceService ──► AlertBroker ──► Strategy.on_alert (subscribers)
+        │                               │                      ├─► IntelligencePersister (DB audit)
+        └── runners / option bridges ◄──┘ (read-only)          └─► alert widget (/api/alerts/active)
+```
+
+The platform **calculates, informs and broadcasts; strategies decide**. The
+intelligence layer only reads books (brief per-runner locks) and never
+closes, resizes or blocks a position; failures inside it are logged and
+swallowed. Details: `docs/PORTFOLIO-INTELLIGENCE.md`.
 
 ### BacktestResult (`engine/backtester.py`)
 ```python

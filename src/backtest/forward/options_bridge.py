@@ -1229,6 +1229,22 @@ class OptionsBridge:
             "iv": float(vol),
         }
 
+    def leg_pricing_inputs(self, leg: Any) -> dict[str, Any]:
+        """Market inputs for pricing one open leg (Portfolio Intelligence).
+
+        The same inputs :meth:`_leg_greeks` uses — last bar spot, the leg's
+        implied vol, its expiry and the bar-clock date — exposed publicly so
+        the portfolio Greeks aggregator never reaches into bridge internals.
+        Any input may be ``None``; the aggregator reports such legs as
+        "Greeks unavailable" rather than inventing numbers.
+        """
+        return {
+            "spot": float(self.last_spot) if self.last_spot else None,
+            "iv": self._leg_vol(leg),
+            "expiry": getattr(leg, "expiry", None) or self._structure_expiry,
+            "reference_date": self._bar_dt.date() if self._bar_dt else None,
+        }
+
     def _leg_vol(self, leg: Any) -> Optional[float]:
         """Implied vol for a leg: contract metadata first, generator default second."""
         token = str(getattr(leg, "instrument_token", "") or "")

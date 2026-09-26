@@ -18,14 +18,33 @@ Contract adaptation
 * This is a mechanics test instrument (does the app book a short 2-leg
   credit structure end-to-end on live data), not an edge. Short strangles
   carry unlimited-loss risk — paper bucket only until risk-reviewed.
+
+Portfolio alerts (2026-09-26)
+-----------------------------
+Reference implementation of a strategy that *listens* to the platform's
+information layer (``docs/STRATEGY-ALERTS.md``). The platform never acts on
+an alert; this strategy decides:
+
+* ``portfolio_gamma_critical`` — short gamma is this structure's core risk.
+  ``alert_response="pause"`` (default) stops opening new strangles until the
+  alert resolves; ``"exit"`` additionally requests a full close **only if this
+  runner contributes ≥50% of the portfolio's short gamma**; ``"ignore"``
+  logs and carries on.
+* ``vix_regime_change`` — a short strangle is designed for calm markets
+  (``regime_vix_range = (10, 15)``). Entering a HIGH-volatility regime pauses
+  new entries; leaving it lifts the pause.
 """
 
 from __future__ import annotations
 
 import pandas as pd
 
+from backtest.alerts.types import AlertType
 from backtest.strategy.base import Strategy
 from backtest.strategy.intent import Direction, MarketView
+
+#: Contribution share above which ``alert_response="exit"`` requests a close.
+EXIT_SHARE_MIN = 0.5
 
 
 class ImmediateStrangle(Strategy):
@@ -39,8 +58,14 @@ class ImmediateStrangle(Strategy):
         "Immediate short strangle: unconditional NEUTRAL view on deploy; "
         "expression maps every direction to short_strangle (~2% OTM legs)."
     )
-    version = "1.0"
+    version = "1.1"
     author = "strategy-plan spec 2026-09-18"
+    # Portfolio Intelligence: designed for a calm (LOW-VIX) market.
+    regime_vix_range = (10.0, 15.0)
+    subscribed_alerts = (
+        AlertType.PORTFOLIO_GAMMA_CRITICAL.value,
+        AlertType.VIX_REGIME_CHANGE.value,
+    )
 
     params = {
         "underlying": {
@@ -49,7 +74,52 @@ class ImmediateStrangle(Strategy):
             "label": "Underlying",
             "tooltip": "Index the view applies to (NIFTY / BANKNIFTY).",
         },
+        "alert_response": {
+            "default": "pause",
+            "type": "str",
+            "label": "Gamma alert response",
+            "tooltip": (
+                "What this strategy does on a portfolio_gamma_critical alert: "
+                "pause (stop new entries until it clears), exit (also close if "
+                "this runner is ≥50% of short gamma) or ignore."
+            ),
+        },
     }
+
+    # -- portfolio alerts ----------------------------------------------------
+
+    def _pause_reasons(self) -> set:
+        return self.__dict__.setdefault("_pause_reason_set", set())
+
+    def _set_pause(self, reason: str, on: bool) -> None:
+        reasons = self._pause_reasons()
+        if on:
+            reasons.add(reason)
+        else:
+            reasons.discard(reason)
+        self.pause_new_entries = bool(reasons)
+
+    def on_alert(self, alert_type, alert_data):
+        response = str(getattr(self, "alert_response", "pause") or "pause").lower()
+        if alert_type == AlertType.PORTFOLIO_GAMMA_CRITICAL:
+            if response == "ignore":
+                return "ignored"
+            self._set_pause("gamma", True)
+            mine = alert_data.get("self_contribution") or {}
+            share = float(mine.get("share") or 0.0)
+            if response == "exit" and share >= EXIT_SHARE_MIN:
+                self.request_exit(1.0, reason=f"gamma_critical share={share:.0%}")
+                return "exit_requested"
+            return "paused"
+        if alert_type == AlertType.VIX_REGIME_CHANGE:
+            high = alert_data.get("new_regime") == "high_vol"
+            self._set_pause("regime", high)
+            return "paused" if high else "resumed"
+        return None
+
+    def on_alert_resolved(self, alert_type, alert_data):
+        if alert_type == AlertType.PORTFOLIO_GAMMA_CRITICAL:
+            self._set_pause("gamma", False)
 
     def entries(self, candles: pd.DataFrame) -> pd.Series:
         """Equity-path fallback: always in the market (view is unconditional)."""

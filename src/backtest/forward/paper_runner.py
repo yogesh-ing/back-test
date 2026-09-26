@@ -1758,6 +1758,9 @@ class StrategyRunner:
                 # asked for can never be immediately undone by a same-bar
                 # re-entry the strategy was about to make anyway.
                 self._check_position_rules(symbol, price)
+                # Portfolio Intelligence: exits the strategy *requested* from
+                # on_alert run here, through the normal close path.
+                self._apply_strategy_requests()
                 # Phase 3: a refused order gets its next attempt here, on the
                 # bar clock — after the strategy and the levels, so a retry can
                 # never jump ahead of a decision made on the same bar.
@@ -1818,9 +1821,68 @@ class StrategyRunner:
             try:
                 self._process_pool(tick_ts)
                 self._check_instance_risk()
+                self._apply_strategy_requests()
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Runner %s pool scan failed: %s", self.instance_id[:8], exc)
                 self.error = str(exc)
+
+    # -- strategy alert responses (Portfolio Intelligence) -----------------
+
+    def _entries_paused_by_strategy(self) -> bool:
+        try:
+            return bool(getattr(self.strategy, "pause_new_entries", False))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _apply_strategy_requests(self) -> List[Dict[str, Any]]:
+        """Execute exits the strategy queued via ``request_exit``.
+
+        The platform never decides to close; it only carries out a request
+        the strategy made, through :meth:`close_position` (same audit trail
+        as a manual close, reason ``strategy_alert:<reason>``). Option
+        structures close atomically, so a partial request on one is refused
+        and logged instead of splitting a spread's legs.
+        """
+        drain = getattr(self.strategy, "drain_exit_requests", None)
+        if not callable(drain):
+            return []
+        try:
+            requests = drain()
+        except Exception:  # noqa: BLE001
+            return []
+        results: List[Dict[str, Any]] = []
+        for req in requests or []:
+            fraction = float(req.get("fraction", 1.0) or 1.0)
+            reason = f"strategy_alert:{req.get('reason') or 'alert'}"
+            key = req.get("position_key")
+            if key:
+                keys = [str(key)]
+            else:
+                keys = list(self.positions)
+                if self.options_bridge is not None:
+                    keys += [
+                        s.structure_id
+                        for s in self.options_bridge.option_broker.get_open_structures()
+                    ]
+            for k in keys:
+                try:
+                    kind, _ = self._resolve_position_key(k)
+                    if kind == "option" and fraction < 1.0:
+                        self._log_signal(
+                            k[:8],
+                            "ALERT_EXIT_REFUSED",
+                            None,
+                            None,
+                            f"{reason}: option structures close atomically — "
+                            f"partial {fraction:.0%} refused",
+                        )
+                        continue
+                    results.append(self.close_position(k, fraction=fraction, reason=reason))
+                except (KeyError, ValueError) as exc:
+                    self._log_signal(k[:8], "ALERT_EXIT_REFUSED", None, None, f"{reason}: {exc}")
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Runner %s alert exit failed: %s", self.instance_id[:8], exc)
+        return results
 
     # -- single symbol ----------------------------------------------------
 
@@ -1854,6 +1916,23 @@ class StrategyRunner:
                 symbol, "ERROR", None, self.last_price.get(symbol), f"view error: {exc}"
             )
             return
+        if (
+            view is not None
+            and self._entries_paused_by_strategy()
+            and not self.options_bridge._has_open_structure()
+        ):
+            # Strategy paused new entries (alert response): with nothing open
+            # a view could only open a structure, so drop it. With a structure
+            # open the view still flows — it drives the exit rules, and the
+            # bridge never re-enters on the bar it exits.
+            self._log_signal(
+                symbol,
+                "OPTION_BLOCKED",
+                None,
+                bar["close"],
+                "entry paused by strategy (alert response)",
+            )
+            view = None
         # A viewless bar is meaningful (B1): the bridge counts it towards the
         # neutral exit rule and can close a position the strategy walked away
         # from. So the call happens even when the strategy has no opinion.
@@ -2095,6 +2174,13 @@ class StrategyRunner:
         if signal == 1 and not held:
             if self.status != STATUS_RUNNING:
                 self._log_signal(symbol, "BLOCKED", 1, price, f"entry blocked while {self.status}")
+                return
+            if self._entries_paused_by_strategy():
+                # Portfolio Intelligence: the *strategy* chose to pause entries
+                # (typically in on_alert). Exits below are unaffected.
+                self._log_signal(
+                    symbol, "BLOCKED", 1, price, "entry paused by strategy (alert response)"
+                )
                 return
             if len(self.positions) >= self.config.max_pool_positions:
                 self._log_signal(

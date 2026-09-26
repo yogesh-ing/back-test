@@ -28,6 +28,7 @@ from backtest.api import (
     broker_auth_bp,
     data_bp,
     forward_bp,
+    intelligence_bp,
     portfolio_bp,
     strategies_bp,
 )
@@ -347,11 +348,15 @@ def create_app(
     app.register_blueprint(broker_auth_bp)
     app.register_blueprint(data_bp)
     app.register_blueprint(portfolio_bp)
+    app.register_blueprint(intelligence_bp)
     app.register_blueprint(playbooks_bp)
     app.register_blueprint(analytics_bp)
 
     # SSE broadcast cadence for the portfolio command center.
     app.config.setdefault("PORTFOLIO_SSE_INTERVAL", 1.0)
+    # Portfolio Intelligence: the alert widget renders on every page unless
+    # the app was started with --disable-portfolio-intelligence.
+    app.config.setdefault("PORTFOLIO_INTELLIGENCE_ENABLED", True)
 
     # U6.3 / D7: drop-in strategy plugins (plugins/strategies/*.py). Import-
     # clean + conformance-passing files register here; broken files are logged
@@ -489,6 +494,47 @@ def create_app(
     return app
 
 
+def start_portfolio_intelligence(enabled: bool = True, interval: "float | None" = None) -> None:
+    """Start the alert evaluator thread + alert/history persistence.
+
+    Tests never call this (they drive ``evaluate()`` directly). Fail-soft: a
+    broken intelligence layer logs and leaves trading untouched.
+    """
+    try:
+        from backtest.forward.portfolio_manager import get_portfolio_manager
+
+        intel = getattr(get_portfolio_manager(), "intelligence", None)
+        if intel is None:
+            logger.warning("[intelligence] unavailable — alerts disabled")
+            return
+        intel.enabled = bool(enabled)
+        if not enabled:
+            logger.info("[intelligence] disabled (--disable-portfolio-intelligence)")
+            return
+        try:
+            from backtest.db import DatabaseManager
+            from backtest.intelligence.persistence import IntelligencePersister
+
+            db = DatabaseManager.from_env()
+            is_sqlite = str(db.config.url or "").startswith("sqlite")
+            intel.attach_persister(IntelligencePersister(db, ensure_schema=is_sqlite))
+        except Exception:  # noqa: BLE001 — history is best-effort
+            logger.info("[intelligence] alert persistence disabled (no database)", exc_info=True)
+        try:
+            from backtest.options.chain_snapshots import add_snapshot_listener
+
+            add_snapshot_listener(
+                lambda underlying, rows, ts: intel.ingest_chain(
+                    underlying, rows, ts=ts, source="chain_snapshot"
+                )
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("[intelligence] chain snapshot hook unavailable", exc_info=True)
+        intel.start(interval)
+    except Exception:  # noqa: BLE001
+        logger.exception("[intelligence] failed to start — trading unaffected")
+
+
 def run_app(
     host: str = "0.0.0.0",
     port: int = 5000,
@@ -498,6 +544,8 @@ def run_app(
     log_file: "str | None" = None,
     currency: "str | None" = None,
     replay_speed: "float | None" = None,
+    enable_portfolio_intelligence: bool = True,
+    alert_refresh_interval: "float | None" = None,
 ) -> None:
     """Boot the app and serve it. Unset options fall back to their env vars."""
     app = create_app(
@@ -508,6 +556,8 @@ def run_app(
         replay_speed=replay_speed,
         debug=debug,
     )
+    app.config["PORTFOLIO_INTELLIGENCE_ENABLED"] = bool(enable_portfolio_intelligence)
+    start_portfolio_intelligence(enable_portfolio_intelligence, alert_refresh_interval)
     routes = sorted(str(r) for r in app.url_map.iter_rules())
     logger.info(
         "serving %d routes on http://%s:%s — %d api endpoints",
@@ -558,6 +608,26 @@ def main() -> None:
         default=os.getenv("BACKTEST_LOG_FILE"),
         help="also append every log line to this file (env: BACKTEST_LOG_FILE)",
     )
+    parser.add_argument(
+        "--enable-portfolio-intelligence",
+        dest="portfolio_intelligence",
+        action="store_true",
+        default=os.getenv("PORTFOLIO_INTELLIGENCE", "1").strip().lower()
+        not in {"0", "false", "no", "off"},
+        help="portfolio Greeks/regime analytics + alerts (default ON; env: PORTFOLIO_INTELLIGENCE)",
+    )
+    parser.add_argument(
+        "--disable-portfolio-intelligence",
+        dest="portfolio_intelligence",
+        action="store_false",
+        help="turn the alert evaluator and alert widget off",
+    )
+    parser.add_argument(
+        "--alert-refresh-interval",
+        type=float,
+        default=float(os.getenv("ALERT_REFRESH_INTERVAL", "1.0")),
+        help="seconds between alert-rule evaluations (env: ALERT_REFRESH_INTERVAL)",
+    )
     args = parser.parse_args()
     run_app(
         host=args.host,
@@ -568,6 +638,8 @@ def main() -> None:
         log_file=args.log_file,
         currency=args.currency,
         replay_speed=args.replay_speed,
+        enable_portfolio_intelligence=args.portfolio_intelligence,
+        alert_refresh_interval=args.alert_refresh_interval,
     )
 
 

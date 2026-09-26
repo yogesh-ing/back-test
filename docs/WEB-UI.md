@@ -84,6 +84,30 @@ Runner matrix + bucket metrics over the SSE snapshot, with the trading tabs:
 Behaviours are pinned in a stub DOM by `tests/js/test_position_actions.mjs` and
 `tests/js/test_orders_tab.mjs` (see `docs/PORTFOLIO-CENTER.md`).
 
+**Risk Board → Portfolio Intelligence** (`components/portfolio_intelligence.js`,
+mounted in `#pi-root` inside `#tab-risk`): collapsible Portfolio Greeks,
+Concentration, Correlation heatmap, Market Regime and Market Activity sections.
+Fast data (`/api/portfolio/greeks`, `/concentration`) every 1 s and slow data
+(`/api/portfolio/intelligence`, `/correlation`) every 30 s — only while the tab
+and the page are visible. Section state: `localStorage["pi.section.<name>"]`.
+Deep links `…?tab=risk#pi-<section>` switch tab, expand and flash the section.
+See `docs/PORTFOLIO-INTELLIGENCE.md`.
+
+### Global: Alert widget (every page)
+**Template:** `templates/base.html` (`#alert-widget`, rendered only when
+`PORTFOLIO_INTELLIGENCE_ENABLED`) **JS:** `static/js/components/alert_widget.js`
+
+Bottom-right portfolio alert panel: minimized pill with count and severity
+breakdown, expanded list (View Details / Dismiss), toast for new critical and
+warning alerts, and a detail modal (`#alert-detail-modal`, created on demand)
+with current state, what it means, contributing strategies, typical responses
+and subscribed strategies — no position-changing buttons. Polls
+`/api/alerts/active` every 3 s (15 s when the page is hidden) and re-renders
+only when the broker `version` changes; expanded state in
+`localStorage["pi.alertWidget.expanded"]`. Adds `body.has-alert-widget` so
+page content can keep clear of it. Pinned by `tests/js/test_alert_widget.mjs`.
+See `docs/ALERTS-GUIDE.md`.
+
 ### 4. Dashboard (`/dashboard`)
 **Template:** `templates/dashboard.html`
 **JS:** `static/js/dashboard.js`
@@ -151,6 +175,18 @@ Details: [FORWARD-TESTING.md](FORWARD-TESTING.md).
 |--------|----------|----------|
 | GET | `/health` | `{status: "ok", source: "synthetic"}` |
 
+### Portfolio Intelligence & Alerts
+| Method | Endpoint | Response |
+|--------|----------|----------|
+| GET | `/api/portfolio/greeks` · `/concentration` · `/correlation` · `/intelligence` | Aggregated analytics (`?mode=paper\|live`) |
+| GET | `/api/market/regime` · `/api/market/oi-activity?symbol=` | Regime + strategy fit; OI / liquidity activity |
+| POST | `/api/market/vix` · `/api/market/chain-activity` | Feed a VIX print / option-chain rows |
+| GET | `/api/alerts/active` · `/api/alerts/history` · `/api/alerts/<id>` · `/api/alerts/subscriptions` | Alerts |
+| POST | `/api/alerts/<id>/dismiss` · `/review` · `/resolve` | Alert lifecycle |
+
+All return 503 when started with `--disable-portfolio-intelligence`. Full
+reference: `docs/PORTFOLIO-INTELLIGENCE.md`.
+
 ## JavaScript Architecture
 
 ### Components (`static/js/components/`)
@@ -159,6 +195,8 @@ Details: [FORWARD-TESTING.md](FORWARD-TESTING.md).
 - `trade_table.js` — Sortable, paginated trade table
 - `loader.js` — Loading spinner
 - `toast.js` — Notification toasts
+- `alert_widget.js` — Global portfolio alert widget + detail modal (every page)
+- `portfolio_intelligence.js` — Risk Board intelligence sections (Greeks, concentration, correlation, regime)
 
 ### Charts (`static/js/charts/`)
 - `equity_chart.js` — Equity curve (line chart)

@@ -247,6 +247,7 @@ Open `http://localhost:5000` → Backtest tab → Pick a strategy → Hit **Run 
 | [docs/FORWARD-TESTING.md](docs/FORWARD-TESTING.md) / [docs/OPTIONS-FORWARD-TESTING.md](docs/OPTIONS-FORWARD-TESTING.md) | Forward test engine |
 | [docs/DATA-SOURCES.md](docs/DATA-SOURCES.md) / [docs/DATABASE.md](docs/DATABASE.md) | Data sources, PostgreSQL/TimescaleDB |
 | [docs/STRATEGY-AUTHORING.md](docs/STRATEGY-AUTHORING.md) / [docs/ADDING-NEW.md](docs/ADDING-NEW.md) | Writing strategies/plugins |
+| [docs/STRATEGY-GUIDELINES.md](docs/STRATEGY-GUIDELINES.md) | Rules & review checklist for new strategies (+ `templates/strategy_test_template.py`) |
 | [docs/LOGGING.md](docs/LOGGING.md) | Logging levels, request ids, debugging table |
 
 ## Tests
