@@ -1079,3 +1079,51 @@ body[data-active="portfolio"] .nav-link[data-key="portfolio"] {
 .breach-highlight { animation: breach-pulse 2s ease; }
 @keyframes breach-pulse { 0%{ background: rgba(239,68,68,.25)} 100%{ background: transparent } }
 
+
+/* ------------------------------------------------------------------ */
+/* Live Order Management (2026-09-23)                                  */
+/*                                                                     */
+/* Positions table: per-position rows with operator levels and         */
+/* action buttons; Orders tab: the ledger's status/slippage columns.   */
+/* ------------------------------------------------------------------ */
+.pos-toolbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.pos-toolbar-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pos-check { display: flex; gap: 6px; align-items: center; font-size: .8rem; white-space: nowrap; }
+.pos-footnote { padding: 8px 2px; font-size: .75rem; line-height: 1.5; }
+
+/* Frozen-book rows stay visible (an operator must still be able to close a
+   paused runner's position) but they read as not-live. */
+.matrix-table tr.pos-row-stale td { background: rgba(148,163,184,.06); color: #cbd5e1; }
+.matrix-table tr.pos-row-stale .cell-name { font-style: italic; }
+.matrix-table tr.opt-leg-row td { background: rgba(148,163,184,.05); font-size: .8rem; }
+.matrix-table tr.opt-leg-row .cell-sub { padding-left: 14px; }
+.pos-sl { color: #fca5a5; }
+.pos-tp { color: #86efac; }
+.pos-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.pos-actions .row-btn { font-size: .72rem; padding: 3px 6px; }
+.pos-actions .row-btn[disabled] { opacity: .4; cursor: not-allowed; }
+
+/* Action modals: the row being acted on is always named before submit. */
+.pos-modal-context { background: var(--surface-2, rgba(148,163,184,.08)); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: .85rem; }
+.pos-modal-line { margin-bottom: 3px; }
+.pos-modal-note { font-size: .78rem; line-height: 1.5; margin-top: 10px; }
+.pos-fraction-row { display: flex; gap: 6px; margin-bottom: 8px; }
+
+/* Orders tab */
+.tab-badge { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 10px; background: rgba(245,158,11,.2); color: #fcd34d; font-size: .7rem; font-weight: 700; }
+.orders-summary { display: flex; gap: 18px; flex-wrap: wrap; padding: 10px 12px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2, rgba(148,163,184,.05)); }
+.orders-stat { display: flex; flex-direction: column; font-size: .82rem; }
+.orders-stat strong { font-size: 1rem; }
+.orders-stat-warn strong { color: var(--warning); }
+.orders-stat-bad strong { color: var(--danger); }
+.order-status { white-space: nowrap; }
+.order-row.order-pending td { background: rgba(245,158,11,.06); }
+.order-row.order-rejected td { background: rgba(239,68,68,.08); }
+.order-row.order-cancelled td { color: #94a3b8; }
+/* Order aging (Phase 3): a working order the venue has gone quiet on. The
+   row is tinted AND the age cell is badged, so the signal survives a
+   screenshot, a colour-blind reader and a greyscale print. */
+.order-row.order-row-warn td { background: rgba(245,158,11,.04); }
+.order-row.order-row-alert td { background: rgba(239,68,68,.07); }
+.order-aging-warn { color: var(--warning); font-weight: 600; }
+.order-aging-alert { color: var(--danger); font-weight: 700; }

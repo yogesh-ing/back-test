@@ -80,6 +80,11 @@ def bs_price(
 # Synthetic chain generator (G4.3 — the "mock broker" role)
 # ---------------------------------------------------------------------------
 
+#: Smallest quotable option premium (NSE tick). A provider must never emit
+#: 0.00 for a live contract: downstream, 0 means "quote failed".
+MIN_QUOTE_TICK = 0.05
+
+
 class SyntheticChainGenerator:
     """Deterministic NIFTY/BANKNIFTY option chain — no credentials needed.
 
@@ -305,9 +310,14 @@ class SyntheticQuoteProvider:
             else str(contract.option_type)
         )
         ltp = self.generator.price_contract(contract, option_type, reference=self._reference)
+        # An exchange-traded premium can never be 0.00 — NSE's tick is 5 paise.
+        # Rounding a deep-OTM contract to zero told the MTM fail-closed guard
+        # "this quote failed" (0 = no quote, an impossible price), so a crash
+        # froze the mark instead of marking the leg down: stops never fired.
+        ltp = max(round(ltp, 2), MIN_QUOTE_TICK)
         return {
-            "ltp": round(ltp, 2),
-            "bid": round(max(ltp - self.spread, 0.05), 2),
+            "ltp": ltp,
+            "bid": round(max(ltp - self.spread, MIN_QUOTE_TICK), 2),
             "ask": round(ltp + self.spread, 2),
             "volume": 0,
             "oi": 0,

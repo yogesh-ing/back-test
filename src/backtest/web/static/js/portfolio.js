@@ -16,6 +16,10 @@
     chart: null,
     audit: [],
     backendAudit: [],
+    // Positions tab (Live Order Management): which rows the operator is
+    // looking at — the table is filtered client-side off the live snapshot.
+    posSearch: "",
+    posRulesOnly: false,
   };
 
 
@@ -65,6 +69,18 @@
   };
   const pnlClass = (n) => (n > 0 ? "pnl-pos" : n < 0 ? "pnl-neg" : "pnl-flat");
   const pct = (x) => ((x || 0) * 100).toFixed(2) + "%";
+  // Prices are shown at 2dp and "—" when unknown; a blank cell in a money
+  // table reads as zero, which is a different (and wrong) statement.
+  const legPriceOf = (v) => (v == null ? "—" : Number(v).toFixed(2));
+  const expiryLabelOf = (iso) => {
+    const view = (typeof window !== "undefined" && window.OptionView) || null;
+    if (view && typeof view.expiryLabel === "function") return view.expiryLabel(iso);
+    return iso ? String(iso).slice(0, 10) : "—";
+  };
+  const positionActionsCell = (row) => {
+    const api = (typeof window !== "undefined" && window.PositionActions) || null;
+    return api && typeof api.buttonCell === "function" ? api.buttonCell(row) : "";
+  };
 
   function toast(msg, kind) {
     // Reuse the platform toast helper when present.
@@ -274,10 +290,174 @@
   }
 
   // ---------------------------------------------------------------- tabs
-  function renderAggregatePositions(p) {
+
+  // --------------------------------------------------------- positions tab
+  // Live Order Management (2026-09-23). The tab used to be a runner-summary:
+  // an equity runner with three tickets collapsed into one "3 pos" row with
+  // dashes for entry/current price, and nothing could be acted on. The
+  // snapshot now carries `positions` — one flat row per open position
+  // (PortfolioManager.list_positions), including the operator's stop/target,
+  // option Greeks when they are computable, and the `position_key` the action
+  // buttons send back. Older payloads (no `positions`) still render through
+  // the runner-shaped fallback below, so nothing regresses.
+  let POSITION_ROWS = [];
+
+  function positionFiltered(rows) {
+    const q = String(state.posSearch || "").trim().toLowerCase();
+    let out = rows;
+    if (q) {
+      out = out.filter((r) =>
+        String(r.symbol || "").toLowerCase().includes(q) ||
+        String(r.label || "").toLowerCase().includes(q) ||
+        String(r.runner || "").toLowerCase().includes(q) ||
+        String(r.strategy_name || "").toLowerCase().includes(q) ||
+        String(r.instance_id || "").toLowerCase().includes(q));
+    }
+    if (state.posRulesOnly) {
+      out = out.filter((r) => r.stop_loss !== null && r.stop_loss !== undefined ||
+        (r.target !== null && r.target !== undefined));
+    }
+    return out;
+  }
+
+  function posLevelCell(level, kind) {
+    if (level === null || level === undefined) {
+      return '<td class="num muted">—</td>';
+    }
+    const cls = kind === "stop" ? "pos-sl" : "pos-tp";
+    return '<td class="num ' + cls + '">' + Number(level).toLocaleString("en-IN", {
+      minimumFractionDigits: 2, maximumFractionDigits: 2,
+    }) + "</td>";
+  }
+
+  function greeksCell(row) {
+    if (row.net_delta === null || row.net_delta === undefined) {
+      return '<td class="num muted" title="' + (row.kind === "option"
+        ? "Greeks need a spot, an expiry and an implied vol for the legs"
+        : "Not an option position") + '">—</td>';
+    }
+    const delta = Number(row.net_delta);
+    const theta = row.net_theta === null || row.net_theta === undefined ? null : Number(row.net_theta);
+    return '<td class="num" title="' + (row.greeks_source ? "Black-Scholes (" + row.greeks_source + ")" : "Black-Scholes") +
+      '"><span class="' + (delta >= 0 ? "pnl-pos" : "pnl-neg") + '">Δ ' +
+      delta.toLocaleString("en-IN", { maximumFractionDigits: 1 }) + "</span>" +
+      (theta === null ? "" : '<span class="muted"> Θ ' +
+        theta.toLocaleString("en-IN", { maximumFractionDigits: 1 }) + "</span>") + "</td>";
+  }
+
+  function positionRowHtml(row) {
+    const pnl = Number(row.unrealized_pnl || 0);
+    const stale = row.stale
+      ? '<span class="muted" title="Runner is not running — this mark is frozen, actions still work">⏸</span> '
+      : "";
+    const label = row.kind === "option"
+      ? '<span class="badge badge-option">OPTION</span> ' + (row.label || row.symbol) + " <span class=\"muted\">(net)</span>"
+      : row.label || row.symbol;
+    const sub = row.kind === "option"
+      ? '<div class="cell-sub">' + (row.structure_type || "").replace(/_/g, " ") +
+        (row.expiry ? " · exp " + expiryLabelOf(row.expiry) : "") +
+        (row.bars_held ? " · " + row.bars_held + " bars" : "") + "</div>"
+      : '<div class="cell-sub">' + (row.strategy_name || "") + "</div>";
+    return (
+      '<tr class="pos-row' + (row.stale ? " pos-row-stale" : "") +
+        (row.kind === "option" ? " matrix-row-option" : "") + '">' +
+      '<td>' + stale + (row.runner || String(row.instance_id || "").slice(0, 8)) +
+        '<div class="cell-sub">' + (row.status || "") + "</div></td>" +
+      '<td class="cell-name">' + label + sub + "</td>" +
+      "<td>" + (row.side || "") + "</td>" +
+      '<td class="num">' + Number(row.qty || 0).toLocaleString("en-IN") + "</td>" +
+      '<td class="num">' + legPriceOf(row.entry_price) + "</td>" +
+      '<td class="num">' + legPriceOf(row.current_price) + "</td>" +
+      '<td class="num ' + pnlClass(pnl) + '">' + fmtSigned(pnl) + "</td>" +
+      posLevelCell(row.target, "target") +
+      posLevelCell(row.stop_loss, "stop") +
+      greeksCell(row) +
+      "<td>" + positionActionsCell(row) + "</td>" +
+      "</tr>" +
+      optionLegRows(row)
+    );
+  }
+
+  /** Leg rows under a structure — the net row above is what gets acted on. */
+  function optionLegRows(row) {
+    if (row.kind !== "option" || !Array.isArray(row.legs) || !row.legs.length) return "";
+    return row.legs.map((leg) => {
+      const legPnl = Number(leg.pnl || 0);
+      const greeks = leg.delta === null || leg.delta === undefined ? "—"
+        : "Δ " + Number(leg.delta).toFixed(2) +
+          (leg.theta === null || leg.theta === undefined ? "" : " Θ " + Number(leg.theta).toFixed(1));
+      return (
+        '<tr class="opt-leg-row">' +
+        "<td></td>" +
+        '<td class="cell-sub">↳ leg ' + (leg.trading_symbol || "") +
+          '<span class="muted"> ' + Number(leg.strike || 0).toLocaleString("en-IN") +
+          " " + (leg.option_type || "") + "</span></td>" +
+        "<td>" + (leg.side || "") + "</td>" +
+        '<td class="num">' + Number(leg.qty || 0).toLocaleString("en-IN") + "</td>" +
+        '<td class="num">' + legPriceOf(leg.entry_price) + "</td>" +
+        '<td class="num">' + legPriceOf(leg.current_price) + "</td>" +
+        '<td class="num ' + pnlClass(legPnl) + '">' + fmtSigned(legPnl) + "</td>" +
+        '<td class="num muted">—</td><td class="num muted">—</td>' +
+        '<td class="num muted">' + greeks + "</td><td></td></tr>"
+      );
+    }).join("");
+  }
+
+  function renderPositionRows(rows) {
     const tbody = $("aggregate-positions");
-    // Row-level aggregate: open count + open P&L per runner; per-symbol detail
-    // is available via each runner's deep-dive drawer.
+    if (!tbody) return;
+    POSITION_ROWS = rows;
+    const shown = positionFiltered(rows);
+    if (!rows.length) {
+      tbody.innerHTML =
+        '<tr><td colspan="11" class="muted" style="padding:16px">No open positions. ' +
+        "Nothing is held right now — deploy an instance or check that the feed is running.</td></tr>";
+    } else if (!shown.length) {
+      tbody.innerHTML =
+        '<tr><td colspan="11" class="muted" style="padding:16px">No positions match the filter.</td></tr>';
+    } else {
+      tbody.innerHTML = shown.map(positionRowHtml).join("");
+    }
+
+    const pnls = rows.map((r) => Number(r.unrealized_pnl || 0));
+    const withRules = rows.filter((r) =>
+      (r.stop_loss !== null && r.stop_loss !== undefined) ||
+      (r.target !== null && r.target !== undefined)).length;
+    const stale = rows.filter((r) => r.stale).length;
+    const summaryEl = $("pos-summary");
+    if (summaryEl) {
+      summaryEl.innerHTML = rows.length
+        ? "<strong>" + rows.length + "</strong> open · " +
+          rows.filter((r) => r.kind === "option").length + " option · " +
+          rows.filter((r) => r.kind === "equity").length + " equity · " +
+          withRules + " with a manual level · open P&L " +
+          (pnls.reduce((a, b) => a + b, 0) >= 0 ? "" : "-") +
+          fmtMoney(Math.abs(pnls.reduce((a, b) => a + b, 0)))
+        : "nothing held";
+    }
+    const footEl = $("pos-footnote");
+    if (footEl) {
+      footEl.innerHTML =
+        (stale ? "⏸ " + stale + " row(s) belong to a paused/stopped runner — their mark is frozen " +
+          "(actions still work; resume the runner to see live P&L). " : "") +
+        "Stop and Target are <strong>price</strong> levels: the share price for an equity position, the " +
+        "net premium per unit for an option structure. Both are checked on every bar and exit at market — " +
+        "the strategy does not have to trade for them to fire.";
+    }
+    // Re-arm the action buttons against THIS render's rows: a click resolves
+    // against the book the operator can see, never a stale page-load copy.
+    if (window.PositionActions) window.PositionActions.rows(rows);
+  }
+
+  function renderAggregatePositions(p) {
+    // Live Order Management: the flat positions array is the primary source.
+    if (Array.isArray(p.positions)) {
+      return renderPositionRows(p.positions);
+    }
+    const tbody = $("aggregate-positions");
+    // Legacy fallback (payloads without `positions`): row-level aggregate —
+    // open count + open P&L per runner; per-symbol detail is available via
+    // each runner's deep-dive drawer.
     // C2: an option runner holds whole structures, not equity tickets — show
     // each leg (trading symbol · strike · side) rather than three dashes, and
     // fall back to one summarising row when the leg detail is unavailable.
@@ -446,6 +626,9 @@
     renderBanner(p);
     renderMatrix(p);
     renderAggregatePositions(p);
+    // Orders tab: the ledger rows come from REST, but the COUNTS ride the SSE
+    // snapshot, so the tab badge is live even before the tab is ever opened.
+    if (window.OrdersTab) window.OrdersTab.noteTick(p);
     renderChart(p);
     // T2.5: Hide Emergency Flatten on Paper page (paper = no real money at risk).
     const emergencyBtn = $("btn-emergency");
@@ -1000,7 +1183,51 @@
         if (state.tab === "risk" && window.RiskBoard) window.RiskBoard.refresh();
         if (state.tab === "aggregated-trades" && window.RiskBoard) window.RiskBoard.refreshAggregatedTrades();
         if (state.tab === "positions" && state.portfolio) renderAggregatePositions(state.portfolio);
+        // Orders are a REST read (the ledger is not in the SSE payload, only
+        // its counts are) — refresh the moment the tab is opened.
+        if (state.tab === "orders" && window.OrdersTab) window.OrdersTab.refresh(true);
       }));
+
+    // Positions tab controls: a client-side filter over the same snapshot the
+    // table already renders, so "which of my positions has no stop?" is one
+    // click during a live session.
+    const posSearch = $("pos-search");
+    if (posSearch) posSearch.addEventListener("input", (e) => {
+      state.posSearch = e.target.value;
+      renderPositionRows(POSITION_ROWS);
+    });
+    const posRules = $("pos-rules-only");
+    if (posRules) posRules.addEventListener("change", (e) => {
+      state.posRulesOnly = e.target.checked;
+      renderPositionRows(POSITION_ROWS);
+    });
+    const posRefresh = $("pos-refresh");
+    if (posRefresh) posRefresh.addEventListener("click", () => {
+      if (state.portfolio) renderAggregatePositions(state.portfolio);
+      toast("Positions re-rendered from the latest snapshot", "success");
+    });
+
+    // Manual position management (Live Order Management): the action modals +
+    // the delegated buttons in the positions table.
+    if (window.PositionActions) {
+      window.PositionActions.init({
+        tableId: "aggregate-positions",
+        rows: POSITION_ROWS,
+        toast,
+        onDone: () => {
+          if (state.portfolio) renderAggregatePositions(state.portfolio);
+          if (window.OrdersTab) window.OrdersTab.refresh(true);
+          fetchBackendAudit();
+        },
+      });
+    }
+    if (window.OrdersTab) {
+      window.OrdersTab.init({
+        mode: PAGE_MODE,
+        toast,
+        onChanged: () => { if (state.portfolio) renderAggregatePositions(state.portfolio); },
+      });
+    }
 
     // Demo: Ctrl+Shift+T injects a crash for circuit-breaker verification.
     document.addEventListener("keydown", (e) => {

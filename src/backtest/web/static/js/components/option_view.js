@@ -31,6 +31,10 @@ const OptionView = (function () {
     time_stop: "Time stop",
     auto_square_off: "Squared off pre-expiry",
     expiry_settlement: "Expiry settlement",
+    // Operator-set levels (Live Order Management) — distinct from the
+    // playbook's own stop/target so the trade log says WHO closed it.
+    manual_stop_loss: "Manual stop-loss",
+    manual_target: "Manual target",
   };
 
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",

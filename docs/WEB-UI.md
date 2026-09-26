@@ -61,6 +61,29 @@ after a refresh.
 - Positions table with entry vs current price, move %, unrealised P&L, bars held
 - Trade feed via the shared `TradeTable` (pagination, ✅/❌/⏳ Open)
 
+### 3b. Portfolio Command Center (`/portfolio`, `/portfolio/paper`, `/portfolio/live`)
+**Template:** `templates/portfolio*.html` → `_portfolio_center.html`
+**JS:** `static/js/portfolio.js` + `components/position_actions.js` + `components/orders_tab.js`
+
+Runner matrix + bucket metrics over the SSE snapshot, with the trading tabs:
+
+- **Aggregate Open Positions** — one flat row per open position (equity + option
+  structures, legs listed underneath), with Target / Stop / net Δ-Θ columns and an
+  **Actions** column: `🛑 SL`, `🎯 TP`, `◐ 50%`, `✕ All`. Each opens a modal that
+  names the row it will act on and posts to `/api/portfolio/position/action`;
+  level validation is the *server's* (it checks the live mark), so refusals are
+  shown verbatim and the modal stays open.
+- **Orders** — the `OrderLedger` read surface (`/api/portfolio/orders`): PENDING
+  with age and a cancel button, FILLED with requested-vs-filled price and
+  adverse-positive slippage, REJECTED with its reason, CANCELLED. Polled at 3 s
+  while visible; the tab badge counts working + rejected orders from the SSE
+  snapshot. Phase 3 adds a `✎ Amend` action on order resting at a venue
+  (quantity / limit price, venue-first), `⏰ Aging only` filtering, and age
+  bands (warn 60 s / alert 5 min) rendered as tinted rows and badged age cells.
+
+Behaviours are pinned in a stub DOM by `tests/js/test_position_actions.mjs` and
+`tests/js/test_orders_tab.mjs` (see `docs/PORTFOLIO-CENTER.md`).
+
 ### 4. Dashboard (`/dashboard`)
 **Template:** `templates/dashboard.html`
 **JS:** `static/js/dashboard.js`

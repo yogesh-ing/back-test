@@ -139,6 +139,8 @@
         <div class="tabs">
             <button class="tab active" data-tab="equity" type="button">Combined Equity Curve</button>
             <button class="tab" data-tab="positions" type="button">Aggregate Open Positions</button>
+            <button class="tab" data-tab="orders" type="button">🧾 Orders
+                <span id="orders-tab-badge" class="tab-badge" hidden></span></button>
             <button class="tab" data-tab="risk" type="button">🛡️ Risk Board</button>
             <button class="tab" data-tab="aggregated-trades" type="button">📊 Aggregated Trades</button>
             <button class="tab" data-tab="playbooks" type="button">📚 Playbooks (Option Plug-and-Play)</button>
@@ -164,12 +166,104 @@
             </table>
         </div>
         <div class="tab-panel" id="tab-positions" hidden>
+            <div class="pos-toolbar">
+                <div>
+                    <h3 style="margin:0;">Open Positions — the live book</h3>
+                    <div class="muted">What is held <em>right now</em>, with the manual controls.
+                        <span id="pos-summary"></span></div>
+                </div>
+                <div class="pos-toolbar-controls">
+                    <input id="pos-search" class="input" type="text"
+                           placeholder="Filter symbol / instance…" autocomplete="off">
+                    <label class="pos-check muted" title="Hide rows with no stop or target armed">
+                        <input id="pos-rules-only" type="checkbox"> SL/Target only
+                    </label>
+                    <button id="pos-refresh" class="btn btn-ghost btn-small" type="button"
+                            title="Re-render from the latest snapshot">↻ Refresh</button>
+                </div>
+            </div>
             <div class="table-scroll">
                 <table class="matrix-table">
-                    <thead><tr><th>Instance</th><th>Symbol</th><th>Side</th><th class="num">Qty</th>
-                        <th class="num">Entry</th><th class="num">Current</th><th class="num">Unrealized P&amp;L</th></tr></thead>
+                    <thead><tr>
+                        <th>Instance</th>
+                        <th>Position</th>
+                        <th>Side</th>
+                        <th class="num">Qty</th>
+                        <th class="num">Entry</th>
+                        <th class="num">Current</th>
+                        <th class="num">Unrealized P&amp;L</th>
+                        <th class="num">Target</th>
+                        <th class="num">Stop</th>
+                        <th class="num" title="Option structures only: net delta per point, theta per day">Δ / Θ</th>
+                        <th>Actions</th>
+                    </tr></thead>
                     <tbody id="aggregate-positions"></tbody>
                 </table>
+            </div>
+            <div id="pos-footnote" class="muted pos-footnote"></div>
+        </div>
+        <div class="tab-panel" id="tab-orders" hidden>
+            <div class="pos-toolbar">
+                <div>
+                    <h3 style="margin:0;">🧾 Orders — order flow</h3>
+                    <div class="muted">Every order the engine tagged, with its fate: pending, filled,
+                        cancelled or rejected — plus the slippage actually paid.</div>
+                </div>
+                <div class="pos-toolbar-controls">
+                    <select id="orders-status" class="input input-select" style="min-width:130px;">
+                        <option value="">All statuses</option>
+                        <option value="PENDING">⏳ Pending</option>
+                        <option value="FILLED">✅ Filled</option>
+                        <option value="REJECTED">⛔ Rejected</option>
+                        <option value="CANCELLED">🚫 Cancelled</option>
+                    </select>
+                    <input id="orders-search" class="input" type="text"
+                           placeholder="Filter symbol / instance…" autocomplete="off">
+                    <label class="pos-check" title="Show only working orders past the aging thresholds">
+                        <input id="orders-aging-only" type="checkbox"> ⏰ Aging only
+                    </label>
+                    <select id="orders-limit" class="input input-select" style="min-width:80px;">
+                        <option value="50">50</option>
+                        <option value="100" selected>100</option>
+                        <option value="200">200</option>
+                        <option value="500">500</option>
+                    </select>
+                    <button id="orders-refresh" class="btn btn-primary btn-small" type="button">↻ Refresh</button>
+                </div>
+            </div>
+            <div id="orders-summary" class="orders-summary"></div>
+            <div class="table-scroll">
+                <table class="matrix-table">
+                    <thead><tr>
+                        <th>Time</th>
+                        <th>Instance</th>
+                        <th>Symbol</th>
+                        <th>Side</th>
+                        <th class="num">Qty</th>
+                        <th class="num">Ordered @</th>
+                        <th class="num">Filled @</th>
+                        <th class="num">Slippage</th>
+                        <th>Status</th>
+                        <th>Age</th>
+                        <th>Detail</th>
+                        <th>Action</th>
+                    </tr></thead>
+                    <tbody id="orders-body">
+                        <tr><td colspan="12" class="muted" style="padding:16px">Open the tab or press
+                            Refresh to load the order ledger.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="muted pos-footnote">
+                Orders are the execution ledger (equity + paper routing). Option structures execute as a
+                unit on the strategy's own option book — their entries, exits and blocks are on the runner
+                signals and the <strong>Aggregated Trades</strong> tab.<br>
+                <strong>⏰ Order aging:</strong> a working order past
+                <span class="muted">60s</span> is flagged <em>warn</em>, past
+                <span class="muted">5min</span> <em>alert</em> — the engine writes one audit entry per
+                band, because an order that never fills is the quietest failure there is. Only orders at a
+                <strong>venue</strong> can be amended; a simulated order fills or rejects in the same call,
+                so use Cancel and let the strategy re-arm.
             </div>
         </div>
         <div class="tab-panel" id="tab-risk" hidden>
@@ -403,6 +497,153 @@
         <div class="modal-foot">
             <button class="btn btn-ghost" data-close="spawn-modal" type="button">Cancel</button>
             <button id="spawn-submit" class="btn btn-primary" type="button">Deploy Instance</button>
+        </div>
+    </div>
+</div>
+
+<!-- =====================================================================
+     Position action modals (Live Order Management).
+     Four verbs on one live position: modify stop, modify target, scale out,
+     close. Each modal names the exact position it will act on — an action
+     dialog that could hit the wrong row is worse than no dialog.
+     ===================================================================== -->
+
+<!-- Modify stop-loss -->
+<div id="pos-sl-modal" class="modal-overlay" hidden>
+    <div class="modal modal-sm">
+        <div class="modal-head">
+            <h3>🛑 Modify Stop-Loss</h3>
+            <button class="modal-close" data-close="pos-sl-modal" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+            <div id="pos-sl-context" class="pos-modal-context"></div>
+            <div class="form-row">
+                <label>Stop level (price)</label>
+                <input id="pos-sl-value" class="input" type="number" step="0.05" min="0"
+                       placeholder="e.g. 24150">
+                <small class="muted" id="pos-sl-hint"></small>
+            </div>
+            <p class="muted pos-modal-note">
+                The stop fires on the next mark at or below this level and market-exits the position.
+                It is checked on every bar — the strategy does not have to trade for it to work.
+            </p>
+        </div>
+        <div class="modal-foot">
+            <button id="pos-sl-clear" class="btn btn-ghost" type="button">Clear level</button>
+            <button class="btn btn-ghost" data-close="pos-sl-modal" type="button">Cancel</button>
+            <button id="pos-sl-submit" class="btn btn-primary" type="button">Arm Stop</button>
+        </div>
+    </div>
+</div>
+
+<!-- Modify target -->
+<div id="pos-target-modal" class="modal-overlay" hidden>
+    <div class="modal modal-sm">
+        <div class="modal-head">
+            <h3>🎯 Modify Target</h3>
+            <button class="modal-close" data-close="pos-target-modal" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+            <div id="pos-target-context" class="pos-modal-context"></div>
+            <div class="form-row">
+                <label>Target level (price)</label>
+                <input id="pos-target-value" class="input" type="number" step="0.05" min="0"
+                       placeholder="e.g. 25500">
+                <small class="muted" id="pos-target-hint"></small>
+            </div>
+            <p class="muted pos-modal-note">
+                The target fires on the next mark at or above this level, booking the position out at
+                market. For an option structure the level is the <strong>net premium per unit</strong>
+                (the same number the Current column shows).
+            </p>
+        </div>
+        <div class="modal-foot">
+            <button id="pos-target-clear" class="btn btn-ghost" type="button">Clear level</button>
+            <button class="btn btn-ghost" data-close="pos-target-modal" type="button">Cancel</button>
+            <button id="pos-target-submit" class="btn btn-primary" type="button">Arm Target</button>
+        </div>
+    </div>
+</div>
+
+<!-- Partial close / scale out -->
+<div id="pos-partial-modal" class="modal-overlay" hidden>
+    <div class="modal modal-sm">
+        <div class="modal-head">
+            <h3>📉 Close Part of Position</h3>
+            <button class="modal-close" data-close="pos-partial-modal" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+            <div id="pos-partial-context" class="pos-modal-context"></div>
+            <div class="form-row">
+                <label>Fraction to close</label>
+                <div class="pos-fraction-row">
+                    <button class="btn btn-ghost btn-small pos-fraction" data-fraction="0.25" type="button">25%</button>
+                    <button class="btn btn-ghost btn-small pos-fraction" data-fraction="0.5" type="button">50%</button>
+                    <button class="btn btn-ghost btn-small pos-fraction" data-fraction="0.75" type="button">75%</button>
+                    <button class="btn btn-ghost btn-small pos-fraction" data-fraction="1" type="button">100%</button>
+                </div>
+                <input id="pos-partial-value" class="input" type="number" step="0.05" min="0.05" max="1" value="0.5">
+                <small class="muted" id="pos-partial-hint"></small>
+            </div>
+            <p class="muted pos-modal-note" id="pos-partial-note">
+                Scaling out books the realised P&amp;L on the closed part and leaves the rest working with
+                its stop and target intact.
+            </p>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-ghost" data-close="pos-partial-modal" type="button">Cancel</button>
+            <button id="pos-partial-submit" class="btn btn-primary" type="button">Close Fraction</button>
+        </div>
+    </div>
+</div>
+
+<!-- Amend a working order (Phase 3) -->
+<div id="order-modify-modal" class="modal-overlay" hidden>
+    <div class="modal modal-sm">
+        <div class="modal-head">
+            <h3>✎ Amend Working Order</h3>
+            <button class="modal-close" data-close="order-modify-modal" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+            <div id="order-modify-context" class="pos-modal-context"></div>
+            <div class="form-row">
+                <label>New quantity <span class="muted">(blank = leave as is)</span></label>
+                <input id="order-modify-qty" class="input" type="number" step="1" min="1">
+            </div>
+            <div class="form-row">
+                <label>New limit price <span class="muted">(blank = leave as is)</span></label>
+                <input id="order-modify-price" class="input" type="number" step="0.05" min="0.05">
+            </div>
+            <p class="muted pos-modal-note">
+                The venue is asked <strong>first</strong> — if it refuses, nothing changes here. An amended
+                order keeps its client order id, so filled quantity, slippage and the audit trail continue
+                on the same order instead of starting a new one.
+            </p>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-ghost" data-close="order-modify-modal" type="button">Cancel</button>
+            <button id="order-modify-submit" class="btn btn-primary" type="button">Amend Order</button>
+        </div>
+    </div>
+</div>
+
+<!-- Close all -->
+<div id="pos-closeall-modal" class="modal-overlay" hidden>
+    <div class="modal modal-sm">
+        <div class="modal-head">
+            <h3>🚪 Close Position</h3>
+            <button class="modal-close" data-close="pos-closeall-modal" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+            <div id="pos-closeall-context" class="pos-modal-context"></div>
+            <p>This market-exits the position <strong>now</strong> at the last price and books the
+                realised P&amp;L. Option structures close every leg together.</p>
+            <p class="muted">The strategy may re-enter on the next bar if it still wants the trade —
+                pause the runner if you want it to stand down.</p>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-ghost" data-close="pos-closeall-modal" type="button">Cancel</button>
+            <button id="pos-closeall-confirm" class="btn btn-danger" type="button">Close Now</button>
         </div>
     </div>
 </div>

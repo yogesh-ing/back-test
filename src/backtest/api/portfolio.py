@@ -828,6 +828,172 @@ def test_breach() -> Tuple[Response, int]:
 
 
 # ---------------------------------------------------------------------------
+# Live Order Management (2026-09-23)
+#
+# The positions table and the Orders tab read/write through these four
+# endpoints. Read-side is deliberately thin here: the 1 Hz SSE snapshot already
+# carries ``positions`` + ``orders_summary``, so the UI only calls these for an
+# explicit refresh (Orders tab, deep links) and for every write.
+# ---------------------------------------------------------------------------
+
+
+def _position_rows(mode: str | None) -> Tuple[list[dict], dict]:
+    rows = _manager().list_positions(mode)
+    pnls = [float(r.get("unrealized_pnl") or 0) for r in rows]
+    summary = {
+        "total": len(rows),
+        "equity": sum(1 for r in rows if r.get("kind") == "equity"),
+        "option": sum(1 for r in rows if r.get("kind") == "option"),
+        "stale": sum(1 for r in rows if r.get("stale")),
+        "with_stop": sum(1 for r in rows if r.get("stop_loss") is not None),
+        "with_target": sum(1 for r in rows if r.get("target") is not None),
+        # Unrealized P&L of the rows above (frozen marks included; the row
+        # carries ``stale`` so the UI can say which part is not live).
+        "unrealized_pnl": round(sum(pnls), 2) if pnls else 0.0,
+        "winners": sum(1 for p in pnls if p > 0),
+        "losers": sum(1 for p in pnls if p < 0),
+    }
+    return rows, summary
+
+
+@portfolio_bp.get("/api/portfolio/positions")
+def positions() -> Tuple[Response, int]:
+    """Every open position across runners, flattened for the positions table.
+
+    ``mode`` scopes to one bucket (paper/live) exactly like the summary.
+    """
+    mode = request.args.get("mode") or None
+    if mode is not None:
+        mode = str(mode).strip().lower()
+        if mode not in VALID_INSTANCE_MODES:
+            return _error(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
+    try:
+        rows, summary = _position_rows(mode)
+    except ValueError as exc:
+        return _error(str(exc))
+    return jsonify({"success": True, "positions": rows, "summary": summary}), 200
+
+
+@portfolio_bp.post("/api/portfolio/position/action")
+def position_action() -> Tuple[Response, int]:
+    """Manual intervention on one position (the positions table's action column).
+
+    ``action`` ∈ ``modify_stop_loss`` | ``modify_target`` | ``clear_stop_loss``
+    | ``clear_target`` | ``close_fraction`` | ``close_all``.
+
+    Validation failures come back verbatim (409) — the operator typed the
+    number, so they should read exactly why it was refused.
+    """
+    data = request.get_json(silent=True) or {}
+    instance_id = str(data.get("instance_id", "")).strip()
+    if not instance_id:
+        return _error("instance_id is required")
+    try:
+        result = _manager().position_action(instance_id, data)
+    except KeyError as exc:
+        return _error(str(exc), 404)
+    except (ValueError, RuntimeError) as exc:
+        return _error(str(exc), 409)
+    return jsonify({"success": True, **result}), 200
+
+
+@portfolio_bp.get("/api/portfolio/orders")
+def orders() -> Tuple[Response, int]:
+    """The order ledger: pending / filled / cancelled / rejected + slippage.
+
+    Scope precedence: ``instance_id`` → ``mode`` → whole ledger. ``status``
+    accepts a comma-separated list (``?status=pending,rejected``).
+    """
+    mode = request.args.get("mode") or None
+    if mode is not None:
+        mode = str(mode).strip().lower()
+        if mode not in VALID_INSTANCE_MODES:
+            return _error(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
+    statuses = [
+        s.strip().upper()
+        for s in str(request.args.get("status", "")).split(",")
+        if s.strip()
+    ]
+    known = {"PENDING", "FILLED", "CANCELLED", "REJECTED"}
+    unknown = [s for s in statuses if s not in known]
+    if unknown:
+        return _error(f"unknown status filter(s): {unknown}; expected {sorted(known)}")
+    try:
+        limit = int(request.args.get("limit", 200))
+    except (TypeError, ValueError):
+        limit = 200
+    try:
+        payload = _manager().list_orders(
+            mode=mode,
+            instance_id=request.args.get("instance_id") or None,
+            statuses=statuses or None,
+            limit=limit,
+        )
+    except KeyError as exc:
+        return _error(str(exc), 404)
+    except ValueError as exc:
+        return _error(str(exc))
+    return (
+        jsonify(
+            {
+                "success": True,
+                "orders": payload["orders"],
+                "summary": payload["summary"],
+                "mode": mode or "all",
+            }
+        ),
+        200,
+    )
+
+
+@portfolio_bp.post("/api/portfolio/orders/<client_order_id>/cancel")
+def cancel_order(client_order_id: str) -> Tuple[Response, int]:
+    try:
+        row = _manager().cancel_order(client_order_id)
+    except KeyError as exc:
+        return _error(str(exc), 404)
+    except ValueError as exc:
+        return _error(str(exc), 409)
+    log.info("order %s cancelled", client_order_id)
+    return jsonify({"success": True, "order": row}), 200
+
+
+@portfolio_bp.post("/api/portfolio/orders/<client_order_id>/modify")
+def modify_order(client_order_id: str) -> Tuple[Response, int]:
+    """Amend a working order (Phase 3): new quantity and/or limit price.
+
+    Only a live working order can be amended — a paper order fills or rejects
+    in the same call, so 409 with that explanation is the honest answer rather
+    than a 200 on an amendment that applies to nothing.
+    """
+    payload = request.get_json(silent=True) or {}
+    raw_qty = payload.get("quantity", payload.get("qty"))
+    raw_price = payload.get("limit_price", payload.get("price"))
+    quantity = None
+    limit_price = None
+    try:
+        if raw_qty is not None:
+            quantity = float(raw_qty)
+        if raw_price is not None:
+            limit_price = float(raw_price)
+    except (TypeError, ValueError):
+        return _error("quantity/limit_price must be numbers")
+    try:
+        result = _manager().modify_order(
+            client_order_id, quantity=quantity, limit_price=limit_price
+        )
+    except KeyError as exc:
+        return _error(str(exc), 404)
+    except (ValueError, RuntimeError) as exc:
+        return _error(str(exc), 409)
+    log.info(
+        "order %s amended (qty=%s limit=%s)",
+        client_order_id, result.get("quantity"), result.get("limit_price"),
+    )
+    return jsonify({"success": True, **result}), 200
+
+
+# ---------------------------------------------------------------------------
 # SSE stream
 # ---------------------------------------------------------------------------
 

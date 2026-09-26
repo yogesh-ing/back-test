@@ -33,6 +33,14 @@ from backtest.forward.state_store import (
     restore_runner,
 )
 from backtest.forward.paper_runner import (
+    ORDER_AGING_ALERT_S,
+    ORDER_AGING_WARN_S,
+    ORDER_CANCELLED,
+    ORDER_FILLED,
+    ORDER_PENDING,
+    ORDER_REJECTED,
+    RULE_STOP_LOSS,
+    RULE_TARGET,
     STATUS_PAUSED,
     STATUS_RUNNING,
     STATUS_STOPPED,
@@ -158,6 +166,9 @@ class PortfolioManager:
         self._injected_live_broker = live_broker
         self._confirm_live_orders = bool(confirm_live_orders)
         self._live_gateway: Optional[Any] = None
+        #: Phase 3 order-aging alerts: coid → the bands already announced, so
+        #: each working order is reported once per band instead of every tick.
+        self._aging_alerted: Dict[str, set] = {}
         self._state_store = (
             PortfolioStateStore(state_path) if state_path else None
         )
@@ -681,6 +692,452 @@ class PortfolioManager:
             self._persist_state()
             return state
 
+    # ------------------------------------------------------------------ #
+    # Live Order Management (2026-09-23)
+    # ------------------------------------------------------------------ #
+    #
+    # Two surfaces the command center reads/writes:
+    #
+    # * **positions** — one flat, action-ready row per open position across
+    #   runners (equity tickets AND option structures), so the positions table
+    #   stops being a runner-summary and shows what is actually held.
+    # * **orders** — the ledger's order flow (pending / filled / cancelled /
+    #   rejected) with real slippage, so "did my order fill?" has an answer.
+    #
+    # Every write goes through here (not straight from the API) so it lands in
+    # the audit log, honours the bucket scope, and persists the state file.
+
+    def list_positions(self, mode: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Flat rows for every open position, optionally bucket-scoped.
+
+        ``stale`` marks a row whose runner is not RUNNING: the P&L is a frozen
+        last mark rather than a live one. The row is still returned — an
+        operator must be able to close, stop or target a paused runner's
+        position — but the UI can label it instead of implying it is live.
+        """
+        if mode is not None:
+            mode = str(mode).strip().lower()
+            if mode not in VALID_INSTANCE_MODES:
+                raise ValueError(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
+        with self._lock:
+            runners = [
+                r for r in self._runners.values()
+                if mode is None or self._runner_bucket(r) == mode
+            ]
+        rows: List[Dict[str, Any]] = []
+        for runner in runners:
+            base = {
+                "instance_id": runner.instance_id,
+                "runner": runner.config.name,
+                "strategy_name": runner.config.strategy_name,
+                "mode": runner.config.mode,
+                "source": runner.config.source,
+                "status": runner.status,
+                "stale": runner.status != STATUS_RUNNING,
+                "target_label": runner.target_label,
+            }
+            try:
+                for row in runner.positions_detail():
+                    rows.append({**base, **row})
+            except Exception:  # noqa: BLE001 — one bad book must not blank the table
+                logger.exception("positions_detail failed for %s", runner.instance_id[:8])
+            summary = runner.options_summary() or {}
+            for row in summary.get("open_structures_detail") or []:
+                rows.append(
+                    {
+                        **base,
+                        "position_key": row.get("position_key") or row.get("structure_id"),
+                        "kind": "option",
+                        "symbol": row.get("symbol"),
+                        "label": row.get("label"),
+                        "side": row.get("side"),
+                        "qty": row.get("qty"),
+                        "units": row.get("units"),
+                        "entry_price": row.get("entry_price"),
+                        "current_price": row.get("current_price"),
+                        "unrealized_pnl": row.get("unrealized_pnl"),
+                        "pnl_pct": row.get("open_pnl_pct"),
+                        "entry_ts": row.get("entry_ts"),
+                        "stop_loss": row.get("stop_loss"),
+                        "target": row.get("target"),
+                        "structure_type": row.get("structure_type"),
+                        "strikes": row.get("strikes"),
+                        "expiry": row.get("expiry"),
+                        "bars_held": row.get("bars_held"),
+                        "net_delta": row.get("net_delta"),
+                        "net_theta": row.get("net_theta"),
+                        "greeks_source": row.get("greeks_source"),
+                        "legs": row.get("legs_detail") or [],
+                        # Multi-leg structures close atomically (V1).
+                        "can_partial_close": False,
+                    }
+                )
+        return rows
+
+    def position_action(self, instance_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply one manual action to one position and audit it.
+
+        ``action`` ∈ ``modify_stop_loss`` | ``modify_target`` |
+        ``clear_stop_loss`` | ``clear_target`` | ``close_fraction`` |
+        ``close_all``. Raises ``KeyError`` for an unknown runner/position and
+        ``ValueError`` for a bad level or fraction — the API maps those onto
+        404 / 409 so the UI can show the reason verbatim.
+        """
+        action = str(payload.get("action", "")).strip().lower()
+        key = str(payload.get("position_key") or payload.get("symbol") or "").strip()
+        with self._lock:
+            runner = self._runners.get(instance_id)
+            if runner is None:
+                raise KeyError(f"unknown runner: {instance_id}")
+            if not key:
+                raise ValueError("position_key (or symbol) is required")
+
+            if action in ("modify_stop_loss", "modify_target"):
+                field = RULE_STOP_LOSS if action.endswith("stop_loss") else RULE_TARGET
+                value = payload.get("value", payload.get("price"))
+                if value is None:
+                    raise ValueError(f"{action} needs a 'value' price")
+                result = runner.set_position_rule(key, field, value)
+            elif action in ("clear_stop_loss", "clear_target"):
+                field = RULE_STOP_LOSS if action.endswith("stop_loss") else RULE_TARGET
+                result = runner.set_position_rule(key, field, None)
+            elif action == "close_fraction":
+                result = runner.close_position(key, payload.get("fraction", 0.5))
+            elif action in ("close_all", "close_position"):
+                result = runner.close_position(key, 1.0)
+            else:
+                raise ValueError(f"unknown position action: {action}")
+
+            bucket = self._runner_bucket(runner)
+            detail = (
+                f"{action} {key}"
+                + (f" = {result.get('value')}" if result.get("value") is not None else "")
+                + (f" qty={result.get('qty_closed')}" if result.get("qty_closed") else "")
+            )
+            self._audit_log(
+                f"MANUAL_{action.upper()} · {runner.config.name}",
+                scope=bucket,
+                instance_id=instance_id,
+                detail=detail,
+            )
+            self._persist_state()
+        result["runner"] = runner.get_state()
+        return result
+
+    def list_orders(
+        self,
+        mode: Optional[str] = None,
+        instance_id: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        """The ledger's order flow + a summary strip (Orders tab).
+
+        Scope rules: an explicit ``instance_id`` wins; otherwise ``mode``
+        narrows to that bucket's runners; otherwise the whole ledger. Orders
+        are only attributed to a bucket through their runner, so a ledger row
+        whose runner was removed simply stops appearing — it is not silently
+        reassigned.
+        """
+        if mode is not None:
+            mode = str(mode).strip().lower()
+            if mode not in VALID_INSTANCE_MODES:
+                raise ValueError(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
+        try:
+            limit = max(1, min(int(limit), 1000))
+        except (TypeError, ValueError):
+            limit = 200
+        with self._lock:
+            if instance_id:
+                if instance_id not in self._runners:
+                    raise KeyError(f"unknown runner: {instance_id}")
+                instances = [instance_id]
+            elif mode is not None:
+                instances = [r.instance_id for r in self._bucket_runners(mode)]
+            else:
+                instances = None  # no filter — the whole ledger
+
+            if instances is None:
+                orders = self.ledger.snapshot(statuses=statuses, limit=limit)
+                summary = self.ledger.summary()
+            else:
+                orders, summary = [], None
+                # Fetch newest-first from the ledger, then keep only the
+                # in-scope rows, so the limit never hides a scoped order
+                # behind unrelated traffic.
+                for coid_owner in list(instances):
+                    rows = self.ledger.snapshot(
+                        instance_id=coid_owner, statuses=statuses, limit=limit
+                    )
+                    orders.extend(rows)
+                orders.sort(
+                    key=lambda o: (o.get("created_ts") or "", o["client_order_id"]),
+                    reverse=True,
+                )
+                orders = orders[:limit]
+                summary = self._scoped_orders_summary(instances)
+
+            labels = {
+                r.instance_id: {
+                    "runner": r.config.name,
+                    "strategy_name": r.config.strategy_name,
+                    "mode": r.config.mode,
+                    "symbols": list(r.config.symbols),
+                }
+                for r in self._runners.values()
+            }
+        for row in orders:
+            row["runner"] = labels.get(row["instance_id"], {}).get("runner")
+            row["strategy_name"] = labels.get(row["instance_id"], {}).get("strategy_name")
+            row["mode"] = labels.get(row["instance_id"], {}).get("mode")
+        return {"orders": orders, "summary": summary}
+
+    def _scoped_orders_summary(self, instances: List[str]) -> Dict[str, Any]:
+        """Ledger summary restricted to a set of runners."""
+        totals: Dict[str, Any] = {
+            "total": 0, "pending": 0, "filled": 0, "cancelled": 0, "rejected": 0,
+            "status_counts": {}, "fills": 0, "avg_slippage": 0.0,
+            "avg_slippage_pct": 0.0, "worst_slippage": 0.0,
+            "slippage_samples": 0, "oldest_pending_age_s": 0.0,
+            # Phase 3 order aging. Shipped on BOTH summary paths (scoped and
+            # whole-ledger) so the Orders tab's badge and strip cannot show
+            # different aging counts than the rows they sit above.
+            "aging_warn_s": ORDER_AGING_WARN_S,
+            "aging_alert_s": ORDER_AGING_ALERT_S,
+            "aging_warn_count": 0,
+            "aging_alert_count": 0,
+            "oldest_pending_coid": None,
+            "oldest_pending_symbol": None,
+        }
+        slips: List[float] = []
+        slips_pct: List[float] = []
+        for instance_id in instances:
+            rows = self.ledger.snapshot(instance_id=instance_id, limit=1000)
+            for row in rows:
+                totals["total"] += 1
+                # Statuses are stored upper-case (ORDER_PENDING & co). Lower-
+                # casing the key here made every scoped count read 0 while the
+                # unscoped ledger summary read the truth — the same order,
+                # two different answers depending on the tab's scope.
+                status = str(row.get("status", "")).upper()
+                if status in totals["status_counts"]:
+                    totals["status_counts"][status] += 1
+                else:
+                    totals["status_counts"][status] = 1
+                if row.get("slippage") is not None:
+                    slips.append(float(row["slippage"]))
+                if row.get("slippage_pct") is not None:
+                    slips_pct.append(float(row["slippage_pct"]))
+                if row.get("status") == ORDER_PENDING:
+                    age = self.ledger.age_seconds(row.get("created_ts"))
+                    if age >= totals["oldest_pending_age_s"]:
+                        totals["oldest_pending_age_s"] = age
+                        totals["oldest_pending_coid"] = row.get("client_order_id")
+                        totals["oldest_pending_symbol"] = row.get("symbol")
+                    band = self.ledger.aging_band(age)
+                    if band:
+                        totals[f"aging_{band}_count"] += 1
+        counts = totals["status_counts"]
+        totals["pending"] = counts.get(ORDER_PENDING, 0)
+        totals["filled"] = counts.get(ORDER_FILLED, 0)
+        totals["cancelled"] = counts.get(ORDER_CANCELLED, 0)
+        totals["rejected"] = counts.get(ORDER_REJECTED, 0)
+        totals["fills"] = totals["filled"]
+        totals["slippage_samples"] = len(slips)
+        totals["avg_slippage"] = round(sum(slips) / len(slips), 6) if slips else 0.0
+        totals["avg_slippage_pct"] = round(sum(slips_pct) / len(slips_pct), 8) if slips_pct else 0.0
+        totals["worst_slippage"] = round(max(slips), 6) if slips else 0.0
+        totals["oldest_pending_age_s"] = round(totals["oldest_pending_age_s"], 1)
+        return totals
+
+    def check_order_aging(self) -> List[Dict[str, Any]]:
+        """Raise an alert for every working order that has aged past a band.
+
+        An aged order is the quietest failure in a trading system: nothing
+        throws, the book simply never moves, and the operator's attention is
+        on the P&L rather than on the absence of a fill. This sweep gives each
+        order ONE alert per band (warn, then alert) — an alert that repeats
+        every tick is noise the operator learns to ignore, which is worse than
+        no alert at all.
+
+        Returns the alerts raised by this call. Never raises: it runs inside
+        the tick loop, where a monitoring failure must not stop trading.
+        """
+        raised: List[Dict[str, Any]] = []
+        try:
+            rows = self.ledger.snapshot(statuses=[ORDER_PENDING], limit=1000)
+        except Exception:  # noqa: BLE001 — monitoring never breaks the tick
+            logger.exception("order-aging sweep could not read the ledger")
+            return raised
+        live: set = set()
+        for row in rows:
+            coid = row.get("client_order_id")
+            band = row.get("aging") or ""
+            live.add(coid)
+            if not band:
+                continue
+            seen = self._aging_alerted.setdefault(coid, set())
+            if band in seen:
+                continue
+            seen.add(band)
+            runner = self._runners.get(row.get("instance_id"))
+            bucket = self._runner_bucket(runner) if runner is not None else "paper"
+            age = float(row.get("age_s") or 0.0)
+            alert = {
+                "client_order_id": coid,
+                "instance_id": row.get("instance_id"),
+                "symbol": row.get("symbol"),
+                "side": row.get("side"),
+                "quantity": row.get("quantity"),
+                "age_s": age,
+                "band": band,
+                "scope": bucket,
+            }
+            raised.append(alert)
+            level = logging.WARNING if band == "alert" else logging.INFO
+            logger.log(
+                level,
+                "[orders] %s aged %gs (%s %s x%g) — still working, coid=%s",
+                band.upper(), age, row.get("side"), row.get("symbol"),
+                float(row.get("quantity") or 0.0), coid,
+            )
+            try:
+                self._audit_log(
+                    f"ORDER_{band.upper()}ING · {row.get('symbol')}",
+                    scope=bucket,
+                    instance_id=row.get("instance_id"),
+                    detail=(
+                        f"coid={coid} working {age:.0f}s without a fill "
+                        f"({row.get('side')} {float(row.get('quantity') or 0):g})"
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — an audit hiccup is not a trade
+                logger.exception("order-aging audit failed for %s", coid)
+        # Forget orders that filled/cancelled so a later, second-order problem
+        # (same symbol, new coid) is not suppressed by a stale memory.
+        for coid in [c for c in self._aging_alerted if c not in live]:
+            self._aging_alerted.pop(coid, None)
+        return raised
+
+    def _orders_summary_for(self, mode: Optional[str] = None) -> Dict[str, Any]:
+        """Ledger summary scoped to one bucket (whole ledger when unscoped).
+
+        Both read paths use this: the REST ``/orders`` call and the SSE
+        snapshot that seeds the Orders-tab badge. They must agree, or the
+        badge nudges about work the page cannot show.
+        """
+        if mode is None:
+            return self.ledger.summary()
+        return self._scoped_orders_summary(
+            [r.instance_id for r in self._bucket_runners(mode)]
+        )
+
+    def cancel_order(self, client_order_id: str) -> Dict[str, Any]:
+        """Cancel a still-pending order; audited like every other control.
+
+        Only PENDING orders can be cancelled — a filled order is history, and
+        pretending otherwise in the UI would be a lie. Raises ``KeyError`` for
+        an unknown id and ``ValueError`` when the order is already terminal.
+
+        A LIVE working order is cancelled **at the venue first**: marking it
+        cancelled locally while it still rests at the broker is how a position
+        opens after the operator was told the order was dead. If the venue
+        refuses, the refusal propagates and nothing changes locally.
+        """
+        order = self.ledger.get_order(client_order_id)
+        if order is None:
+            raise KeyError(f"unknown order: {client_order_id}")
+        if order.status != ORDER_PENDING:
+            raise ValueError(
+                f"order {client_order_id} is {order.status} — only PENDING orders can be cancelled"
+            )
+        runner = self._runners.get(order.instance_id)
+        at_venue = ""
+        if order.broker_order_id is not None:
+            gateway = self._live_gateway
+            if gateway is None or gateway.working_state(client_order_id) is None:
+                # The venue order exists but this process is not tracking it
+                # (restored state, or the gateway was rebuilt). Cancelling
+                # locally would leave it live at the broker.
+                raise ValueError(
+                    f"order {client_order_id} is working at the venue "
+                    f"({order.broker_order_id}) but is not tracked by this process — "
+                    "reconcile with the broker before cancelling"
+                )
+            gateway.cancel_working(client_order_id)
+            at_venue = f" at venue {order.broker_order_id}"
+        elif not self.ledger.cancel(client_order_id):
+            raise ValueError(f"order {client_order_id} could not be cancelled")
+        bucket = self._runner_bucket(runner) if runner is not None else "paper"
+        self._audit_log(
+            f"ORDER_CANCELLED · {order.symbol}",
+            scope=bucket,
+            instance_id=order.instance_id,
+            detail=f"coid={client_order_id} (was {order.quantity:g} {order.side}){at_venue}",
+        )
+        self._persist_state()
+        return self.ledger.row_with_age(self.ledger.get_order(client_order_id))
+
+    def modify_order(
+        self,
+        client_order_id: str,
+        quantity: Optional[float] = None,
+        limit_price: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Amend a working order (Phase 3); audited like every other control.
+
+        Only a LIVE working order can be amended: a paper order fills or
+        rejects within the same call, so there is never anything resting to
+        change. Saying so is more useful than accepting an amendment that
+        silently applies to nothing.
+
+        Raises ``KeyError`` for an unknown id, ``ValueError`` for a terminal or
+        paper order / a nonsense value, and ``OrderRefused`` when the venue
+        refuses the amendment (nothing changes locally in that case).
+        """
+        order = self.ledger.get_order(client_order_id)
+        if order is None:
+            raise KeyError(f"unknown order: {client_order_id}")
+        if order.status != ORDER_PENDING:
+            raise ValueError(
+                f"order {client_order_id} is {order.status} — only a working order "
+                "can be amended"
+            )
+        if quantity is None and limit_price is None:
+            raise ValueError("modify needs a new quantity and/or limit price")
+        runner = self._runners.get(order.instance_id)
+        bucket = self._runner_bucket(runner) if runner is not None else "paper"
+        gateway = self._live_gateway
+        if order.broker_order_id is None:
+            raise ValueError(
+                f"order {client_order_id} is a paper order — it fills or rejects "
+                "immediately, so there is nothing at a venue to amend; cancel it "
+                "and let the strategy re-arm"
+            )
+        if gateway is None or gateway.working_state(client_order_id) is None:
+            raise ValueError(
+                f"order {client_order_id} is working at the venue "
+                f"({order.broker_order_id}) but is not tracked by this process — "
+                "reconcile with the broker before amending"
+            )
+
+        before = (order.quantity, order.limit_price)
+        result = gateway.modify_working(
+            client_order_id, quantity=quantity, limit_price=limit_price
+        )
+        after = (result["quantity"], result["limit_price"])
+        self._audit_log(
+            f"ORDER_AMENDED · {order.symbol}",
+            scope=bucket,
+            instance_id=order.instance_id,
+            detail=(
+                f"coid={client_order_id} qty {before[0]:g}→{after[0]:g} "
+                f"limit {before[1]}→{after[1]}"
+            ),
+        )
+        self._persist_state()
+        return {**result, "order": self.ledger.row_with_age(self.ledger.get_order(client_order_id))}
+
     def pause_all(self, mode: Optional[str] = None) -> int:
         """Pause runners. ``mode=None`` pauses all; mode='paper'|'live' pauses only that bucket."""
         with self._lock:
@@ -1101,6 +1558,11 @@ class PortfolioManager:
             self.tick_index += 1
             for runner in self._runners.values():
                 runner.on_tick_end(tick_ts)
+            # Phase 3: an order that has been working for a minute without a
+            # fill is the quietest failure mode there is — nothing throws, the
+            # book just never moves. Sweep once per tick (the ledger only
+            # reports a band once per order, so this is not spam).
+            self.check_order_aging()
             self._evaluate_risk()
             # V2: bounded save rate. The %60 was tuned for 1s synthetic ticks
             # (one save/min); the live mStock feed ticks once per SWEEP (60s),
@@ -1399,6 +1861,17 @@ class PortfolioManager:
                 "capability": capability,
                 # Step 1: dashboard book embedded — portfolio renders per-structure option trades
                 "dashboard_book": dashboard_book,
+                # Live Order Management (2026-09-23): one flat row per open
+                # position across runners, so the positions table renders
+                # holdings (with their stop/target and the actions key) from
+                # the same 1 Hz snapshot as everything else instead of
+                # re-deriving them per render.
+                "positions": self.list_positions(mode),
+                # Scoped like the positions above and the REST read: the badge
+                # is seeded from this snapshot, so a paper page counting live
+                # traffic would nudge the operator about an order they cannot
+                # see (or cancel) from that page.
+                "orders_summary": self._orders_summary_for(mode),
             }
 
     def get_runner_detail(self, instance_id: str) -> Dict[str, Any]:

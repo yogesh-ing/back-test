@@ -58,12 +58,16 @@ from typing import Any, Deque, Optional
 
 from backtest.options.exit_policy import (
     EXIT_DTE,
+    EXIT_MANUAL_STOP,
+    EXIT_MANUAL_TARGET,
     EXIT_SIGNAL_FLIP,
     RISK_REASONS,
     ExitConfig,
+    ExitDecision,
     ExitPolicy,
     _label,
 )
+from backtest.options.greeks import BlackScholes
 from backtest.options.expiry import EXIT_REASON_SETTLEMENT, ExpiryManager
 from backtest.options.expiry_policy import NearestExpiryPolicy
 from backtest.options.paper_trading import OptionPaperBroker
@@ -82,6 +86,10 @@ from backtest.options.structures import (
 from backtest.strategy.intent import Direction, MarketView
 
 logger = logging.getLogger("backtest.forward.options_bridge")
+
+#: Sentinel for "argument not supplied" in :meth:`OptionsBridge.set_manual_rule`
+#: — distinct from an explicit ``None``, which CLEARS the level.
+_UNSET: Any = object()
 
 #: structure_type → (structure instance, option side of the chain)
 STRUCTURES: dict[str, tuple[Any, str]] = {
@@ -103,6 +111,10 @@ _STRICKES_NEEDED = {
     "bear_put_spread": 2,
     "short_strangle": 2,
 }
+
+#: Risk-free rate used for the display-only Greeks (a dashboard column, not a
+#: pricing input — premiums come from the quote provider).
+DEFAULT_RISK_FREE_RATE = 0.06
 
 #: Default expression: direction-aware spreads, ATM strikes, one lot.
 DEFAULT_EXPRESSION: dict[str, Any] = {
@@ -174,6 +186,17 @@ class OptionsBridge:
         #: Exits that happened outside :meth:`on_market_view` (the per-bar
         #: risk rules) — the runner drains these to log them.
         self._exit_events: Deque[dict[str, Any]] = deque(maxlen=32)
+
+        # -- operator-set levels (Live Order Management) ---------------------
+        #: Manual stop / target on the OPEN structure's net premium per unit.
+        #: Expressed in premium (the same unit ``entry_price`` /
+        #: ``current_price`` use on a structure row), so "stop at ₹80" means
+        #: 80 per unit of the structure, not a ₹ P&L figure. Kept on the
+        #: bridge because only one structure is open at a time (V1), and
+        #: cleared the moment that structure closes — a stale level must never
+        #: ambush the next trade.
+        self.manual_stop_loss: Optional[float] = None
+        self.manual_target: Optional[float] = None
 
         # -- bar clock / structure age bookkeeping ---------------------------
         self._bar_index: int = 0
@@ -277,6 +300,141 @@ class OptionsBridge:
         if self._entry_bar_index is None:
             return 0
         return self._bar_index - self._entry_bar_index
+
+    # ------------------------------------------------------------------ #
+    # Operator-set levels + manual close (Live Order Management)
+    # ------------------------------------------------------------------ #
+    #
+    # The exit policy is the *strategy's* opinion (configured once, in the
+    # playbook). These are the *operator's* levels, set from the positions
+    # table while the trade is live, and they must win: a human overriding a
+    # stop is exactly what the dashboard is for.
+    #
+    # Both levels are expressed in the structure's **mark** — the signed net
+    # premium per unit that ``open_structures_snapshot`` reports as
+    # ``current_price``. P&L moves with that mark in the SAME direction for
+    # debit and credit structures alike ((mark − entry) × units is the
+    # structure's P&L), so "stop is below the mark, target above it" holds
+    # without the bridge having to know which kind of structure is open.
+
+    def manual_rules(self) -> dict[str, Optional[float]]:
+        """The operator's stop/target for the open structure (``None`` = unset)."""
+        return {"stop_loss": self.manual_stop_loss, "target": self.manual_target}
+
+    def set_manual_rule(
+        self,
+        stop_loss: Any = _UNSET,
+        target: Any = _UNSET,
+    ) -> dict[str, Optional[float]]:
+        """Arm, re-price or clear the operator's levels on the open structure.
+
+        ``_UNSET`` leaves a level untouched; ``None`` clears it. Raises
+        ``ValueError`` when nothing is open, when a level is not a positive
+        number, or when the level is on the wrong side of the current mark
+        (a stop above the mark would fire on the very next bar — that is a
+        market exit, and the UI's Close action is the honest way to ask for
+        one).
+        """
+        if not self._has_open_structure():
+            raise ValueError("no open option structure to manage")
+        mark = self._open_mark()
+        # A net-debit structure profits as premium rises (stop below, target
+        # above); a net-credit structure is the mirror image.
+        stop_below = self._long_premium()
+        if stop_loss is not _UNSET:
+            self.manual_stop_loss = self._validated_level(
+                stop_loss, "stop-loss", mark, must_be_below=stop_below
+            )
+        if target is not _UNSET:
+            self.manual_target = self._validated_level(
+                target, "target", mark, must_be_below=not stop_below
+            )
+        return self.manual_rules()
+
+    def clear_manual_rules(self) -> None:
+        """Drop both operator levels (used when the structure closes)."""
+        self.manual_stop_loss = None
+        self.manual_target = None
+
+    def manual_exit(
+        self,
+        reason: str = "manual_close",
+        strategy_name: str = "",
+    ) -> Optional[dict[str, Any]]:
+        """Close the open structure now, at the current mark.
+
+        Bypasses the exit policy entirely — this is a human saying "get me
+        out", so no rule may veto it. Returns the same event shape as a
+        policy close (``{"exited": True, ...}``) or ``None`` when nothing is
+        open. The event is queued for :meth:`pop_exit_event` as well, so a
+        runner that does not read the return value still logs the exit.
+        """
+        if not self._has_open_structure():
+            return None
+        return self._exit_structure(
+            ExitDecision(
+                reason=str(reason or "manual_close"),
+                detail="closed manually from the positions table",
+            ),
+            self._bar_ts(self._bar_dt),
+            strategy_name,
+            queue=True,
+        )
+
+    def _open_mark(self) -> Optional[float]:
+        """Current net premium per unit of the open structure (``None`` if shut)."""
+        structure_id = self.open_structure_id
+        if structure_id is None:
+            return None
+        try:
+            for row in self.open_structures_snapshot():
+                if row.get("structure_id") == structure_id:
+                    return float(row.get("current_price") or 0.0)
+        except Exception as exc:  # noqa: BLE001 — a snapshot hiccup must not block control
+            logger.warning("[options-bridge] mark lookup failed: %s", exc)
+        return None
+
+    def _long_premium(self) -> bool:
+        """True when a RISING mark is profit, i.e. the structure was a net debit.
+
+        A credit structure (net premium received) is the mirror image: the
+        operator's stop sits ABOVE the mark and the target BELOW it, because
+        premium rising is what costs money. Guessing this wrong would arm a
+        level that fires on the very next bar.
+        """
+        structure_id = self.open_structure_id
+        if structure_id is None:
+            return True
+        structure = self.option_broker.get_structure(structure_id)
+        if structure is None:
+            return True
+        try:
+            return float(structure.total_entry_cost) >= 0.0
+        except (TypeError, ValueError):  # pragma: no cover — defensive
+            return True
+
+    @staticmethod
+    def _validated_level(
+        value: Any, label: str, mark: Optional[float], must_be_below: bool
+    ) -> Optional[float]:
+        """Coerce an operator level, or raise with a message the UI can show."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        try:
+            level = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{label} must be a number, got {value!r}") from None
+        if not (level > 0) or level != level or level in (float("inf"), float("-inf")):
+            raise ValueError(f"{label} must be a finite price above 0, got {level}")
+        if mark:
+            wrong_side = (level >= mark) if must_be_below else (level <= mark)
+            if wrong_side:
+                relation = "at or above" if must_be_below else "at or below"
+                raise ValueError(
+                    f"{label} {level:.2f} is {relation} the current mark "
+                    f"{mark:.2f} — it would exit immediately; use Close instead"
+                )
+        return round(level, 4)
 
     def summary(self) -> dict[str, Any]:
         """Compact book state for runner state payloads and tests."""
@@ -388,19 +546,37 @@ class OptionsBridge:
                     total += price * Decimal(str(leg.total_quantity)) * (1 if leg.is_long else -1)
                 return float(total / Decimal(str(units)))
 
-            leg_rows = [
-                {
-                    "option_type": leg.option_type,
-                    "side": "LONG" if leg.is_long else "SHORT",
-                    "strike": float(leg.strike),
-                    "trading_symbol": leg.trading_symbol,
-                    "qty": leg.total_quantity,
-                    "entry_price": float(leg.entry_price),
-                    "current_price": float(leg.current_price),
-                    "pnl": float(leg.unrealized_pnl),
-                }
-                for leg in legs
-            ]
+            leg_rows = []
+            net_delta = 0.0
+            net_theta = 0.0
+            greeks_seen = False
+            greeks_iv: Optional[float] = None
+            for leg in legs:
+                greeks = self._leg_greeks(leg)
+                if greeks:
+                    greeks_seen = True
+                    greeks_iv = greeks.get("iv") if greeks_iv is None else greeks_iv
+                    sign = 1.0 if leg.is_long else -1.0
+                    net_delta += sign * float(greeks["delta"]) * float(leg.total_quantity)
+                    net_theta += sign * float(greeks["theta"]) * float(leg.total_quantity)
+                leg_rows.append(
+                    {
+                        "option_type": leg.option_type,
+                        "side": "LONG" if leg.is_long else "SHORT",
+                        "strike": float(leg.strike),
+                        "trading_symbol": leg.trading_symbol,
+                        "qty": leg.total_quantity,
+                        "entry_price": float(leg.entry_price),
+                        "current_price": float(leg.current_price),
+                        "pnl": float(leg.unrealized_pnl),
+                        # Best-effort analytics: None (not 0.0!) when the spot,
+                        # expiry or an implied vol for this contract is
+                        # unavailable — an invented delta is worse than none.
+                        "delta": round(greeks["delta"], 4) if greeks else None,
+                        "theta": round(greeks["theta"], 4) if greeks else None,
+                        "iv": round(greeks["iv"], 4) if greeks else None,
+                    }
+                )
             entry = _net_premium("entry_price")
             current = _net_premium("current_price")
             unrealized = float(structure.total_unrealized_pnl)
@@ -436,6 +612,20 @@ class OptionsBridge:
                         self._bar_index - self._entry_bar_index
                         if self._entry_bar_index is not None
                         else 0
+                    ),
+                    # -- Live Order Management (positions table) ------------
+                    # The key the dashboard sends back for any manual action
+                    # on this row: a structure id is unique for the life of
+                    # the structure, unlike a symbol label.
+                    "position_key": structure.structure_id,
+                    "stop_loss": self._rule_for(structure.structure_id, self.manual_stop_loss),
+                    "target": self._rule_for(structure.structure_id, self.manual_target),
+                    # Net Greeks for the whole structure (units-scaled), or
+                    # None when they cannot be computed honestly.
+                    "net_delta": round(net_delta, 2) if greeks_seen else None,
+                    "net_theta": round(net_theta, 2) if greeks_seen else None,
+                    "greeks_source": (
+                        f"bs:iv={greeks_iv:.2f}" if greeks_seen and greeks_iv else None
                     ),
                 }
             )
@@ -515,6 +705,11 @@ class OptionsBridge:
             logger.warning("[options-bridge] MTM failed for %s @ %s: %s", symbol, price, exc)
             return None
 
+        # Operator levels first: a human's stop beats every configured rule,
+        # and it must be evaluated against this bar's fresh mark (that is the
+        # only reason a manual stop can be trusted — it never waits for a
+        # strategy view that may never come).
+        self._maybe_manual_exit()
         self._maybe_risk_exit(strategy_name="")
         self._maybe_expiry_settlement()
         return self.last_unrealized_pnl
@@ -603,6 +798,10 @@ class OptionsBridge:
         self._structure_direction = None
         self._structure_expiry = None
         self._entry_premium = Decimal("0")
+        # Live Order Management: the operator's levels belong to the structure
+        # that just left the book. Keeping them would arm the NEXT trade with
+        # a stop nobody asked for.
+        self.clear_manual_rules()
         self.last_unrealized_pnl = self.option_broker.total_unrealized_pnl
         self._exit_events.append(event)
 
@@ -615,6 +814,42 @@ class OptionsBridge:
             report.get("squared_off_count", 0),
         )
         return event
+
+    def _maybe_manual_exit(self) -> Optional[dict[str, Any]]:
+        """Fire an operator-set stop/target against the freshly marked book.
+
+        Levels are premium-per-unit marks (see :meth:`set_manual_rule`), so
+        the comparison is a plain below/above test on the structure's mark.
+        Nothing open → nothing to do; both levels unset → no bookkeeping.
+        """
+        if self.manual_stop_loss is None and self.manual_target is None:
+            return None
+        mark = self._open_mark()
+        if mark is None:
+            return None
+        level, reason, label = None, None, ""
+        long_premium = self._long_premium()
+        stop = self.manual_stop_loss
+        target = self.manual_target
+        if stop is not None and (
+            (mark <= float(stop)) if long_premium else (mark >= float(stop))
+        ):
+            level, reason, label = stop, EXIT_MANUAL_STOP, "manual stop-loss"
+        elif target is not None and (
+            (mark >= float(target)) if long_premium else (mark <= float(target))
+        ):
+            level, reason, label = target, EXIT_MANUAL_TARGET, "manual target"
+        if reason is None:
+            return None
+        return self._exit_structure(
+            ExitDecision(
+                reason=reason,
+                detail=f"{label} {float(level):.2f} hit (mark {mark:.2f})",
+            ),
+            self._bar_ts(self._bar_dt),
+            strategy_name="",
+            queue=True,
+        )
 
     def _maybe_risk_exit(self, strategy_name: str) -> Optional[dict[str, Any]]:
         """Apply the view-independent exit rules to the freshly marked book."""
@@ -828,6 +1063,10 @@ class OptionsBridge:
         self._structure_direction = None
         self._structure_expiry = None
         self._entry_premium = Decimal("0")
+        # Live Order Management: the operator's levels belong to the structure
+        # that just left the book. Keeping them would arm the NEXT trade with
+        # a stop nobody asked for.
+        self.clear_manual_rules()
         if queue:
             self._exit_events.append(event)
         # The legs are closed, so the open-leg mark is gone. Keep the summary
@@ -929,6 +1168,88 @@ class OptionsBridge:
                 return str(type_cfg.get("BEARISH", "bear_put_spread"))
             return str(type_cfg.get("BULLISH", "bull_call_spread"))
         return str(type_cfg)
+
+    # ------------------------------------------------------------------ #
+    # Position analytics (Greeks) — Live Order Management
+    # ------------------------------------------------------------------ #
+
+    def _rule_for(self, structure_id: str, level: Optional[float]) -> Optional[float]:
+        """Report an operator level only against the structure it belongs to."""
+        if level is None or self.open_structure_id != structure_id:
+            return None
+        return float(level)
+
+    def _leg_greeks(self, leg: Any) -> Optional[dict[str, float]]:
+        """Black-Scholes Greeks for one leg, or ``None`` when they can't be honest.
+
+        Inputs: spot (last bar close), the leg's strike/expiry/option type and
+        an implied vol. The vol comes from the chain contract's own metadata
+        (the synthetic generator stamps ``vol`` on every contract it builds)
+        or the generator's per-underlying default — deliberately NOT from a
+        fresh quote lookup, because this runs inside the 1 Hz snapshot and a
+        live provider would burn an API call per leg per second for a display
+        column. No vol → no Greeks → the UI shows "—".
+        """
+        spot = self.last_spot
+        expiry = getattr(leg, "expiry", None) or self._structure_expiry
+        vol = self._leg_vol(leg)
+        if not spot or not expiry or not vol:
+            return None
+        reference = self._bar_dt.date() if self._bar_dt else datetime.now(timezone.utc).date()
+        try:
+            years = (expiry - reference).days / 365.0
+        except TypeError:  # mixed date/datetime expiry — not worth guessing
+            return None
+        if years <= 0:
+            return None
+        option_type = str(getattr(leg, "option_type", "CE") or "CE").upper()
+        if option_type not in ("CE", "PE"):
+            return None
+        try:
+            greeks = BlackScholes(
+                risk_free_rate=DEFAULT_RISK_FREE_RATE, volatility=float(vol)
+            ).greeks(
+                spot=float(spot),
+                strike=float(leg.strike),
+                expiry_years=years,
+                option_type=option_type,
+            )
+        except Exception as exc:  # noqa: BLE001 — analytics must never break a snapshot
+            logger.debug(
+                "[options-bridge] greeks failed for %s: %s",
+                getattr(leg, "trading_symbol", "?"),
+                exc,
+            )
+            return None
+        # Theta is reported per DAY (the model returns it per year) because a
+        # per-day number is what an operator reads off a position table.
+        return {
+            "delta": float(greeks.delta),
+            "theta": float(greeks.theta) / 365.0,
+            "iv": float(vol),
+        }
+
+    def _leg_vol(self, leg: Any) -> Optional[float]:
+        """Implied vol for a leg: contract metadata first, generator default second."""
+        token = str(getattr(leg, "instrument_token", "") or "")
+        contracts = getattr(self.quote_provider, "_contracts", None)
+        if token and isinstance(contracts, dict):
+            contract = contracts.get(token)
+            metadata = getattr(contract, "metadata", None) or {}
+            vol = metadata.get("vol") or metadata.get("implied_volatility")
+            if vol:
+                try:
+                    return float(vol)
+                except (TypeError, ValueError):
+                    return None
+        underlying = str(getattr(leg, "underlying", "") or self.underlying or "").upper()
+        default_vols = getattr(self._generator(), "VOL", None)
+        if isinstance(default_vols, dict) and underlying in default_vols:
+            try:
+                return float(default_vols[underlying])
+            except (TypeError, ValueError):
+                return None
+        return None
 
     def _generator(self) -> SyntheticChainGenerator:
         generator = getattr(self.quote_provider, "generator", None) or getattr(

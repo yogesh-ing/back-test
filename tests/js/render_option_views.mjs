@@ -135,11 +135,16 @@ const configTab = body.includes('data-ddpanel="params"')
     ? body.slice(body.indexOf('data-ddpanel="params"'))
     : "";
 
-console.log("---MATRIX---");
-console.log(store["matrix-body"] ? store["matrix-body"].innerHTML : "");
-console.log("---POSITIONS---");
-console.log(store["aggregate-positions"] ? store["aggregate-positions"].innerHTML : "");
-console.log("---DEEPDIVE---");
-console.log(body);
-console.log("---DEEPDIVE-CONFIG---");
-console.log(configTab);
+// Store to stdout, then leave: portfolio.js boots a live SSE page and its
+// 1 Hz countdown `setInterval` keeps the event loop alive forever, so a plain
+// script exit never comes and the caller's subprocess waits for it in vain
+// (observed as a 120 s subprocess timeout on every render test).
+process.stdout.write("---MATRIX---\n");
+process.stdout.write((store["matrix-body"] ? store["matrix-body"].innerHTML : "") + "\n");
+process.stdout.write("---POSITIONS---\n");
+process.stdout.write((store["aggregate-positions"] ? store["aggregate-positions"].innerHTML : "") + "\n");
+process.stdout.write("---DEEPDIVE---\n");
+process.stdout.write(body + "\n");
+process.stdout.write("---DEEPDIVE-CONFIG---\n");
+process.stdout.write(configTab + "\n");
+process.exit(0);
