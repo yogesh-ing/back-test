@@ -74,6 +74,12 @@
 
     <div id="toast-stack" class="toast-stack"></div>
 
+    {% if config.get("PORTFOLIO_INTELLIGENCE_ENABLED", True) %}
+    <!-- Portfolio Intelligence alert widget (every page). Information only —
+         it shows what the platform detected; it never trades. -->
+    <div id="alert-widget" class="alert-widget" data-state="minimized" aria-live="polite"></div>
+    {% endif %}
+
     {% include "components/broker_auth_modal.html" %}
 
     <!-- Risk Flatten Confirmation Modal (Tier 1) -->
@@ -106,6 +112,9 @@
     <script src="{{ url_for('static', filename='js/broker_status.js') }}"></script>
     <script src="{{ url_for('static', filename='js/broker_auth_modal.js') }}"></script>
     <script src="{{ url_for('static', filename='js/playbooks.js') }}"></script>
+    {% if config.get("PORTFOLIO_INTELLIGENCE_ENABLED", True) %}
+    <script src="{{ url_for('static', filename='js/components/alert_widget.js') }}"></script>
+    {% endif %}
     {% block scripts %}{% endblock %}
 </body>
 </html>

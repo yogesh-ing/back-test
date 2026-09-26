@@ -284,6 +284,128 @@
                 </div>
             </div>
 
+            <!-- Portfolio Intelligence (information only — the platform never acts on these) -->
+            <div id="pi-root" class="pi-root" data-pi-root>
+                <div class="pi-intro muted">
+                    📡 <strong>Portfolio Intelligence</strong> — aggregate Greeks, concentration, correlation and market
+                    regime across every runner. Information only: the platform calculates and alerts, strategies
+                    decide, you override. Nothing here closes a position.
+                </div>
+
+                <section class="pi-section card" id="pi-greeks" data-pi-section="greeks">
+                    <button class="pi-section-head" type="button" data-pi-toggle="greeks" aria-expanded="true">
+                        <span class="pi-caret">▾</span> 📊 Portfolio Greeks
+                        <span class="pi-head-summary muted" id="pi-greeks-summary"></span>
+                    </button>
+                    <div class="pi-section-body" id="pi-greeks-body">
+                        <div id="pi-greeks-cards" class="pi-cards"><div class="muted">Loading Greeks…</div></div>
+                        <div id="pi-greeks-warnings" class="pi-warnings"></div>
+                        <div class="pi-two-col">
+                            <div>
+                                <h5 class="pi-subhead">Breakdown by strategy instance</h5>
+                                <div class="table-scroll" style="max-height:280px;">
+                                    <table class="matrix-table pi-table">
+                                        <thead><tr><th>Runner</th><th>Strategy</th><th class="num">Δ</th><th class="num">Γ (per 1%)</th><th class="num">Vega</th><th class="num">Θ / day</th><th class="num">Pos</th><th class="num">Γ share</th></tr></thead>
+                                        <tbody id="pi-greeks-breakdown"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div>
+                                <h5 class="pi-subhead">Scenario analysis <span class="muted">(full revaluation)</span></h5>
+                                <table class="matrix-table pi-table">
+                                    <thead><tr><th>Scenario</th><th class="num">Portfolio P&amp;L</th></tr></thead>
+                                    <tbody id="pi-greeks-scenarios"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="muted pi-foot" id="pi-greeks-foot"></div>
+                    </div>
+                </section>
+
+                <section class="pi-section card" id="pi-concentration" data-pi-section="concentration">
+                    <button class="pi-section-head" type="button" data-pi-toggle="concentration" aria-expanded="true">
+                        <span class="pi-caret">▾</span> 🎯 Concentration
+                        <span class="pi-head-summary muted" id="pi-concentration-summary"></span>
+                    </button>
+                    <div class="pi-section-body" id="pi-concentration-body">
+                        <div class="pi-two-col">
+                            <div>
+                                <h5 class="pi-subhead">By underlying <span class="muted" id="pi-conc-threshold"></span></h5>
+                                <div id="pi-conc-underlying"><div class="muted">Loading…</div></div>
+                            </div>
+                            <div>
+                                <h5 class="pi-subhead">By strike (clustering)</h5>
+                                <div class="table-scroll" style="max-height:240px;">
+                                    <table class="matrix-table pi-table">
+                                        <thead><tr><th>Strike</th><th class="num">Positions</th><th>Types</th><th>Held by</th><th class="num">Exposure</th></tr></thead>
+                                        <tbody id="pi-conc-strikes"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="muted pi-foot" id="pi-concentration-foot"></div>
+                    </div>
+                </section>
+
+                <section class="pi-section card" id="pi-correlation" data-pi-section="correlation">
+                    <button class="pi-section-head" type="button" data-pi-toggle="correlation" aria-expanded="true">
+                        <span class="pi-caret">▾</span> 🔗 Strategy Correlation
+                        <span class="pi-head-summary muted" id="pi-correlation-summary"></span>
+                    </button>
+                    <div class="pi-section-body" id="pi-correlation-body">
+                        <div class="pi-toolbar">
+                            <label class="muted">Group by
+                                <select id="pi-corr-group" class="input input-select">
+                                    <option value="runner">Runner</option>
+                                    <option value="strategy">Strategy</option>
+                                </select>
+                            </label>
+                            <button id="pi-corr-refresh" class="btn btn-ghost btn-small" type="button">↻ Recalculate</button>
+                        </div>
+                        <div id="pi-corr-heatmap" class="table-scroll"><div class="muted">Loading…</div></div>
+                        <div class="muted pi-foot" id="pi-correlation-foot"></div>
+                    </div>
+                </section>
+
+                <section class="pi-section card" id="pi-regime" data-pi-section="regime">
+                    <button class="pi-section-head" type="button" data-pi-toggle="regime" aria-expanded="true">
+                        <span class="pi-caret">▾</span> 🌡️ Market Regime
+                        <span class="pi-head-summary muted" id="pi-regime-summary"></span>
+                    </button>
+                    <div class="pi-section-body" id="pi-regime-body">
+                        <div class="pi-two-col">
+                            <div>
+                                <div id="pi-regime-current"><div class="muted">Loading…</div></div>
+                                <div class="pi-vix-input">
+                                    <label class="muted" for="pi-vix-value">Set India VIX</label>
+                                    <input id="pi-vix-value" class="input" type="number" min="1" max="199" step="0.1" placeholder="e.g. 18.4">
+                                    <button id="pi-vix-submit" class="btn btn-ghost btn-small" type="button">Apply</button>
+                                </div>
+                                <div class="pi-chart-wrap"><canvas id="pi-regime-chart" height="90"></canvas></div>
+                            </div>
+                            <div>
+                                <h5 class="pi-subhead">Strategy regime fit</h5>
+                                <table class="matrix-table pi-table">
+                                    <thead><tr><th>Runner</th><th>Strategy</th><th>Designed for</th><th>Fit</th></tr></thead>
+                                    <tbody id="pi-regime-fit"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="muted pi-foot" id="pi-regime-foot"></div>
+                    </div>
+                </section>
+
+                <section class="pi-section card" id="pi-activity" data-pi-section="activity">
+                    <button class="pi-section-head" type="button" data-pi-toggle="activity" aria-expanded="false">
+                        <span class="pi-caret">▾</span> 📈 Market Activity (OI &amp; liquidity)
+                        <span class="pi-head-summary muted" id="pi-activity-summary"></span>
+                    </button>
+                    <div class="pi-section-body" id="pi-activity-body">
+                        <div id="pi-activity-content"><div class="muted">Loading…</div></div>
+                    </div>
+                </section>
+            </div>
+
             <!-- Gauges -->
             <div id="risk-gauges" class="risk-gauges-grid" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-bottom:16px;">
                 <div class="muted">Loading risk gauges…</div>

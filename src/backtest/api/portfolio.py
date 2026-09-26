@@ -1011,7 +1011,14 @@ def stream() -> Response:
         yield ": connected to /api/portfolio/stream\n\n"
         while True:
             try:
-                payload = _manager().get_portfolio_summary()
+                manager = _manager()
+                payload = manager.get_portfolio_summary()
+                intel = getattr(manager, "intelligence", None)
+                if intel is not None and getattr(intel, "enabled", False):
+                    try:
+                        payload["intelligence"] = intel.stream_summary()
+                    except Exception:  # noqa: BLE001 — analytics never break the stream
+                        log.debug("intelligence stream summary failed", exc_info=True)
                 errors = 0
                 yield f"event: portfolio\ndata: {json.dumps(payload, default=str)}\n\n"
             except GeneratorExit:

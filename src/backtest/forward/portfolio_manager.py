@@ -190,6 +190,16 @@ class PortfolioManager:
         except Exception:  # noqa: BLE001 — persistence is best-effort
             logger.info("trade persistence disabled (no reachable database)", exc_info=True)
         self._restoring = False  # suppress saves while rehydrating
+        # Portfolio Intelligence (2026-09-26): read-only aggregate analytics +
+        # alert rules. Built before the restore so restored runners register
+        # their alert subscriptions. It never touches a position.
+        self.intelligence: Optional[Any] = None
+        try:
+            from backtest.intelligence.service import PortfolioIntelligence
+
+            self.intelligence = PortfolioIntelligence(self)
+        except Exception:  # noqa: BLE001 — analytics must never block trading
+            logger.exception("portfolio intelligence disabled (init failed)")
         self._restore_state()
 
     # ------------------------------------------------------------------ #
@@ -614,6 +624,11 @@ class PortfolioManager:
                 )
             except Exception:
                 pass
+            if self.intelligence is not None:
+                try:
+                    self.intelligence.register_runner(runner)
+                except Exception:  # noqa: BLE001
+                    logger.exception("alert subscription failed for %s", runner.instance_id)
             self._persist_state()
             return runner.instance_id
 
@@ -623,6 +638,11 @@ class PortfolioManager:
             if runner is None:
                 return False
             bucket = self._runner_bucket(runner)
+            if self.intelligence is not None:
+                try:
+                    self.intelligence.unregister_runner(instance_id, runner)
+                except Exception:  # noqa: BLE001
+                    logger.exception("alert unsubscribe failed for %s", instance_id)
             runner.stop()  # U6.2: stop() releases the runner's chain-bus subscription
             self.ledger.unregister_handler(instance_id)
             # U6.2: release the bar-feed subscription this runner held.
@@ -1530,6 +1550,15 @@ class PortfolioManager:
 
     def _on_bar(self, symbol: str, bar: Dict[str, Any]) -> None:
         """Fan one closed candle out to every runner trading that symbol."""
+        self._on_bar_core(symbol, bar)
+        intel = self.intelligence
+        if intel is not None:
+            try:
+                intel.on_bar(symbol, bar)
+            except Exception:  # noqa: BLE001 — analytics never break the bar
+                logger.debug("intelligence on_bar failed", exc_info=True)
+
+    def _on_bar_core(self, symbol: str, bar: Dict[str, Any]) -> None:
         with self._lock:
             self.tick_count += 1
             bar_date = self._bar_date(bar)
@@ -1562,6 +1591,17 @@ class PortfolioManager:
 
     def _on_tick_end(self, tick_ts: str) -> None:
         """All symbols have their bar for this tick: run pool scans + risk."""
+        self._on_tick_end_core(tick_ts)
+        # Outside the manager lock: evaluation reads books one runner lock at
+        # a time and strategy alert callbacks take their runner's lock.
+        intel = self.intelligence
+        if intel is not None:
+            try:
+                intel.on_tick_end()
+            except Exception:  # noqa: BLE001 — analytics never break the tick
+                logger.debug("intelligence on_tick_end failed", exc_info=True)
+
+    def _on_tick_end_core(self, tick_ts: str) -> None:
         with self._lock:
             self.tick_index += 1
             for runner in self._runners.values():
@@ -2066,6 +2106,13 @@ class PortfolioManager:
             except Exception:  # noqa: BLE001
                 logger.exception("[live] final poll before shutdown failed")
         self._persist_state()  # V2: last write wins — leave a restorable state
+        if self.intelligence is not None:
+            try:
+                self.intelligence.stop()
+                for iid, runner in list(self._runners.items()):
+                    self.intelligence.unregister_runner(iid, runner)
+            except Exception:  # noqa: BLE001
+                logger.debug("intelligence shutdown failed", exc_info=True)
         self.feed.stop()
         self.mstock_feed.stop()
         with self._lock:
@@ -2107,6 +2154,14 @@ def reset_portfolio_manager(
     with _MANAGER_LOCK:
         if _MANAGER is not None:
             _MANAGER.shutdown()
+        # Alerts belong to the manager's book: a fresh manager starts with a
+        # fresh alert broker (no stale alerts/subscriptions from the old one).
+        try:
+            from backtest.alerts.broker import reset_alert_broker
+
+            reset_alert_broker()
+        except Exception:  # noqa: BLE001
+            pass
         _MANAGER = PortfolioManager(
             risk_config=risk_config,
             tick_seconds=tick_seconds,

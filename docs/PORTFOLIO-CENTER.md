@@ -16,6 +16,8 @@ PortfolioManager (control tower)
   ├── PaperBroker          V1 execution (fills at bar close via OrderExecutor)
   ├── RiskSupervisor       daily-loss + max-drawdown breakers, concentration warning
   ├── SyntheticFeed        per-second OHLCV bars (swappable for mStock)
+  ├── IntelligenceService  portfolio Greeks / concentration / correlation / regime
+  │     └── AlertBroker    alert pub/sub → alert widget, subscribed strategies, audit log
   └── StrategyRunner × N   isolated capital bucket, positions, trades, PnL
         ├── SINGLE_SYMBOL   one ticker (e.g. BTC/USD)
         └── SYMBOL_UNIVERSE  a curated pool (NIFTY_50, TOP_10_CRYPTO, …),
@@ -32,6 +34,7 @@ Key files (`src/backtest/`):
 | `forward/feed.py` | `SyntheticFeed` — deterministic random-walk bars, warmup |
 | `data/universe.py` | Symbol universe registry (`NIFTY_50`, `TOP_10_CRYPTO`, …) |
 | `api/portfolio.py` | REST + SSE blueprint (`/api/portfolio/*`, `/api/portfolio/stream`) |
+| `intelligence/*`, `alerts/*`, `api/intelligence.py` | Portfolio Intelligence & alerts — see [PORTFOLIO-INTELLIGENCE.md](PORTFOLIO-INTELLIGENCE.md) |
 | `web/templates/portfolio.html`, `portfolio_paper.html`, `portfolio_live.html`, `_portfolio_center.html` + `web/static/js/portfolio.js`, `deep_dive.js` | Command Center UI (landing + per-bucket pages) |
 
 ## Run it
@@ -77,12 +80,40 @@ curl -X POST localhost:5000/api/portfolio/test/breach -H 'Content-Type: applicat
 | POST | `/api/portfolio/control/<action>` | `pause_all` / `resume_all` / `stop_all` / `emergency_flatten` / `reset_breaker` |
 | POST | `/api/portfolio/emergency_stop` | Global emergency flatten + halt |
 | POST | `/api/portfolio/test/breach` | Simulated crash (circuit-breaker test) |
-| GET | `/api/portfolio/stream` | SSE — JSON snapshot every second (bucket-scoped when on a bucket page), carries `positions` + `orders_summary` |
+| GET | `/api/portfolio/stream` | SSE — JSON snapshot every second (bucket-scoped when on a bucket page), carries `positions` + `orders_summary` + a compact `intelligence` block (net Greeks, scenarios, alert counts) |
 | GET | `/api/portfolio/positions?mode=` | Flat row per open position (equity + option structures) with its manual stop/target |
 | POST | `/api/portfolio/position/action` | `modify_stop_loss` / `clear_stop_loss` / `modify_target` / `clear_target` / `close_fraction` / `close_all` on one position |
 | GET | `/api/portfolio/orders?mode=&instance_id=&status=&limit=` | The order ledger, newest first + a summary strip (counts, slippage, oldest working age) |
 | POST | `/api/portfolio/orders/<coid>/cancel` | Cancel a still-PENDING order — **at the venue first** for a live order (404 unknown, 409 already terminal / venue refused) |
 | POST | `/api/portfolio/orders/<coid>/modify` | Amend a working order's quantity and/or limit price at the venue (409 for a paper/terminal/untracked order or a venue refusal) |
+
+Portfolio Intelligence adds `/api/portfolio/greeks`, `/api/portfolio/concentration`,
+`/api/portfolio/correlation`, `/api/portfolio/intelligence`, `/api/market/*` and
+`/api/alerts/*` — documented in [PORTFOLIO-INTELLIGENCE.md](PORTFOLIO-INTELLIGENCE.md#api).
+
+## Risk Board — Portfolio Intelligence
+
+The **Risk Board** tab now opens with five collapsible sections above the
+per-runner risk table (open/closed state kept in `localStorage`):
+
+| Section | Content | Refresh |
+|---|---|---|
+| Portfolio Greeks | net Δ / Γ / Vega / Θ with bias, scenario P&L (NIFTY ±2%, IV ±5, crash), per-strategy breakdown | 1 s |
+| Concentration | exposure % per underlying (flag above 60%), strike clusters (3+) | 1 s |
+| Correlation | runner-vs-runner P&L correlation heatmap (> 0.8 highlighted) | 5 min |
+| Market Regime | VIX band (or labelled realized-vol proxy), 24 h change, transition badge, history chart, strategy regime fit | 30 s view / 5 min samples |
+| Market Activity | OI anomalies and liquidity dry-ups from option chains (collapsed by default) | 30 s |
+
+Polling only runs while the Risk Board tab and the browser tab are visible.
+On `/portfolio/paper` and `/portfolio/live` the numbers are scoped to that
+bucket; *All buckets* aggregates both. Alert deep links
+(`/portfolio?tab=risk#pi-greeks`) open this tab, expand the section and
+highlight it.
+
+Alerts derived from these numbers appear in the global **alert widget**
+(bottom-right, every page) — see [ALERTS-GUIDE.md](ALERTS-GUIDE.md). They are
+information only: no alert closes or blocks a position; subscribed strategies
+decide for themselves ([STRATEGY-ALERTS.md](STRATEGY-ALERTS.md)).
 
 ## Behavior changes & known caveats
 

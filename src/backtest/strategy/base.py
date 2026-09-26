@@ -141,6 +141,14 @@ class Strategy(ABC):
     # and the runner/create API enforces the same set (defense in depth).
     # Option strategies declare the indexes their chain source supports.
     eligible_instruments: list[str] | None = None
+    # Portfolio Intelligence (2026-09-26). Alerts are *information*: the
+    # platform never acts on them. A strategy opts in by listing alert types
+    # here (or calling :meth:`subscribe_to_alerts`) and decides in
+    # :meth:`on_alert` — pause entries, request an exit, or ignore.
+    subscribed_alerts: tuple[str, ...] = ()
+    # ``(low, high)`` India VIX range the strategy is designed for; drives the
+    # Risk Board "strategy regime fit" column. ``None`` = any regime.
+    regime_vix_range: tuple[float, float] | None = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -160,6 +168,121 @@ class Strategy(ABC):
         for key, value in overrides.items():
             if key in self.params:
                 setattr(self, key, self._coerce_override(key, value))
+
+    # -- portfolio alerts (information layer) ------------------------------
+
+    def subscribe_to_alerts(self, alert_types: Any) -> list[str]:
+        """Subscribe this strategy to portfolio alert types.
+
+        ``alert_types`` is an iterable of :class:`~backtest.alerts.AlertType`
+        members or their string values. Unknown types raise ``ValueError``.
+        Alerts arrive via :meth:`on_alert` once the runner is registered with
+        the portfolio manager (subscribing later, at runtime, re-registers).
+        """
+        from backtest.alerts.types import AlertType
+
+        if isinstance(alert_types, (str, AlertType)):
+            alert_types = [alert_types]
+        known = {t.value for t in AlertType}
+        wanted: list[str] = []
+        for t in alert_types:
+            value = t.value if isinstance(t, AlertType) else str(t)
+            if value not in known:
+                raise ValueError(
+                    f"unknown alert type {value!r}; expected one of {sorted(known)}"
+                )
+            wanted.append(value)
+        current = list(self.__dict__.get("_alert_subscriptions", []))
+        for value in wanted:
+            if value not in current:
+                current.append(value)
+        self._alert_subscriptions = current
+        registrar = self.__dict__.get("_alert_registrar")
+        if callable(registrar):
+            registrar()
+        return list(current)
+
+    def unsubscribe_from_alerts(self, alert_types: Any = None) -> list[str]:
+        """Drop some (or, with ``None``, all instance-level) subscriptions."""
+        from backtest.alerts.types import AlertType
+
+        current = list(self.__dict__.get("_alert_subscriptions", []))
+        if alert_types is None:
+            current = []
+        else:
+            if isinstance(alert_types, (str, AlertType)):
+                alert_types = [alert_types]
+            drop = {t.value if isinstance(t, AlertType) else str(t) for t in alert_types}
+            current = [t for t in current if t not in drop]
+        self._alert_subscriptions = current
+        registrar = self.__dict__.get("_alert_registrar")
+        if callable(registrar):
+            registrar()
+        return list(current)
+
+    def alert_subscriptions(self) -> list[str]:
+        """Class-level ``subscribed_alerts`` ∪ runtime subscriptions."""
+        out: list[str] = []
+        for t in list(self.subscribed_alerts or ()) + list(
+            self.__dict__.get("_alert_subscriptions", [])
+        ):
+            value = getattr(t, "value", None) or str(t)
+            if value not in out:
+                out.append(value)
+        return out
+
+    def on_alert(self, alert_type: str, alert_data: dict[str, Any]) -> None:
+        """Called when a subscribed portfolio alert fires. Default: ignore.
+
+        ``alert_data`` carries the alert's metrics plus ``self_contribution``
+        (this runner's share, or ``None``) and ``is_contributor``. Runs on the
+        evaluator thread under this runner's lock — keep it fast and do not
+        block. To act, set :attr:`pause_new_entries` or call
+        :meth:`request_exit`; the runner executes requests through the normal
+        engine path on its next bar. The platform itself never closes
+        anything in response to an alert.
+        """
+        return None
+
+    def on_alert_resolved(self, alert_type: str, alert_data: dict[str, Any]) -> None:
+        """Called when an alert this strategy was notified about resolves
+        (the condition cleared, or an event alert expired). Default: ignore.
+        Typical use: lift a pause set in :meth:`on_alert`.
+        """
+        return None
+
+    @property
+    def pause_new_entries(self) -> bool:
+        """When ``True`` the runner skips new entries (exits still run)."""
+        return bool(self.__dict__.get("_pause_new_entries", False))
+
+    @pause_new_entries.setter
+    def pause_new_entries(self, value: bool) -> None:
+        self._pause_new_entries = bool(value)
+
+    def request_exit(
+        self,
+        fraction: float = 1.0,
+        position_key: str | None = None,
+        reason: str = "alert",
+    ) -> None:
+        """Ask the runner to close ``fraction`` of one (or every) position.
+
+        Queued, not executed: the runner drains the queue on its next bar and
+        closes through the engine (same audit trail as a stop-loss). Option
+        structures close atomically — a partial fraction is refused and
+        logged rather than breaking a spread's legs apart.
+        """
+        fraction = float(fraction)
+        if not 0.0 < fraction <= 1.0:
+            raise ValueError("fraction must be in (0, 1]")
+        queue = self.__dict__.setdefault("_exit_requests", [])
+        queue.append({"fraction": fraction, "position_key": position_key, "reason": str(reason)})
+
+    def drain_exit_requests(self) -> list[dict[str, Any]]:
+        queue = self.__dict__.get("_exit_requests") or []
+        self._exit_requests = []
+        return list(queue)
 
     # -- param access ----------------------------------------------------
 
@@ -348,3 +471,7 @@ class Strategy(ABC):
             spot_price=Decimal(str(last_close)),
             bar_timestamp=ts,
         )
+
+
+#: PRD name for the strategy base class.
+BaseStrategy = Strategy

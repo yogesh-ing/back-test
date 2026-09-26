@@ -54,6 +54,8 @@ def test_forward_live_widgets_render():
         ("test_position_actions.mjs", 12),
         # Phase 3 (amend / aging / retry lineage) added nine more.
         ("test_orders_tab.mjs", 21),
+        # Portfolio Intelligence: alert widget + Risk Board intelligence sections.
+        ("test_alert_widget.mjs", 11),
     ],
 )
 def test_live_order_management_components(harness, expected):

@@ -1,0 +1,74 @@
+# =============================================================================
+# Portfolio Intelligence & Alerts — thresholds and cadences
+# =============================================================================
+# Loaded by backtest.intelligence.config.load_config(). Every key is optional:
+# a missing key falls back to the default in IntelligenceConfig. Environment
+# overrides use the PI_ prefix and the upper-cased key, e.g.
+#   PI_GAMMA_CRITICAL=-200  PI_CONCENTRATION_MAX_PCT=0.5
+#
+# Philosophy: information only. Nothing in here makes the platform close or
+# resize a position — thresholds decide when an ALERT is raised, nothing more.
+#
+# UNITS (read these before tuning — see docs/PORTFOLIO-INTELLIGENCE.md):
+#   net_delta   share-equivalent units (1 NIFTY lot of futures = 75).
+#               Net delta 800 ≈ ₹800 P&L per 1-point move of the underlying.
+#   net_gamma   change in net delta for a 1% move in the underlying
+#               (Γ × units × spot × 1%). Comparable across NIFTY / BANKNIFTY /
+#               stocks, unlike raw per-point gamma. One short ATM NIFTY
+#               straddle lot at ~30 DTE ≈ -17; near expiry ≈ -40 or worse.
+#   net_vega    ₹ per +1 implied-volatility point.
+#   net_theta   ₹ per calendar day.
+# =============================================================================
+
+# --- Greeks alerts ---------------------------------------------------------
+gamma_critical: -150          # net_gamma below this → 🔴 Portfolio Gamma Critical
+delta_warning_abs: 800        # |net_delta| above this → ⚠️ Portfolio Delta Warning
+
+# --- Concentration ---------------------------------------------------------
+concentration_max_pct: 0.60   # share of gross exposure in one underlying → ⚠️
+concentration_min_positions: 2  # don't flag a single-position book as "concentrated"
+strike_cluster_min: 3         # positions sharing one strike → ℹ️ Strike Clustering
+
+# --- Correlation -----------------------------------------------------------
+correlation_warning: 0.80     # pairwise P&L correlation above this → ⚠️
+correlation_min_samples: 30   # aligned return samples needed before a pair is scored
+correlation_window: 240       # most recent samples used per pair
+correlation_cache_s: 300      # matrix recompute cadence (PRD: 5-minute cache)
+
+# --- Market regime (VIX bands, in index points) -----------------------------
+regime_low_max: 15.0          # VIX < 15 → low_vol
+regime_high_min: 22.0         # VIX >= 22 → high_vol ; in between → moderate_vol
+regime_hysteresis: 0.5        # must cross a band edge by this much to flip regime
+regime_sample_s: 300          # regime history sampling cadence (PRD: 5 minutes)
+regime_benchmark: NIFTY       # underlying whose bars feed the realized-vol proxy
+realized_vol_window: 60       # returns used by the realized-vol proxy
+vix_symbols: [INDIAVIX, "INDIA VIX", VIX]  # bars for these symbols are read as VIX prints
+vix_stale_s: 900              # an ingested VIX older than this falls back to the proxy
+
+# --- Market activity -------------------------------------------------------
+oi_spike_multiplier: 3.0      # |ΔOI| above N × rolling mean |ΔOI| → ℹ️ OI Anomaly
+oi_min_history: 3             # snapshots of history before a strike can be anomalous
+spread_multiplier: 2.0        # bid-ask spread above N × its rolling average → ℹ️ Liquidity
+
+# --- Data feed -------------------------------------------------------------
+feed_stale_s: 120             # running runner without a new bar for this long → 🔴
+
+# --- Scenarios (full Black-Scholes revaluation, applied to every underlying) --
+scenarios:
+  - {key: spot_down_2pct, label: "Market -2%", spot_pct: -0.02, vol_pts: 0}
+  - {key: spot_up_2pct,   label: "Market +2%", spot_pct:  0.02, vol_pts: 0}
+  - {key: vol_up_5pts,    label: "IV +5 pts",  spot_pct:  0.0,  vol_pts: 5}
+  - {key: vol_down_5pts,  label: "IV -5 pts",  spot_pct:  0.0,  vol_pts: -5}
+  - {key: crash,          label: "Market -2% & IV +5", spot_pct: -0.02, vol_pts: 5}
+
+# --- Alert lifecycle ---------------------------------------------------------
+event_alert_ttl_s: 3600       # event alerts (regime change, OI, liquidity) expire after
+ignore_ttl_s: 3600            # un-actioned alerts auto-dismiss after (PRD: 1 hour)
+auto_dismiss_exempt: [critical]  # never auto-dismiss these severities
+renotify_cooldown_s: 60       # flapping guard for strategy notifications
+
+# --- Cadence / persistence ---------------------------------------------------
+greeks_cache_s: 1.0           # snapshot TTL shared by every SSE client (PRD: 1 s)
+evaluate_interval_s: 1.0      # background alert evaluation cadence
+greeks_history_s: 60          # portfolio_greeks_history snapshot cadence
+risk_free_rate: 0.06

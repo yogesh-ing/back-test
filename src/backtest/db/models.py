@@ -1120,3 +1120,101 @@ class OptionChainSnapshot(Base):
             f"<OptionChainSnapshot {self.underlying} {self.expiry} "
             f"{self.strike}{self.option_type}>"
         )
+
+
+# ---------------------------------------------------------------------------
+# Portfolio Intelligence & Alerts (migration 005)
+# ---------------------------------------------------------------------------
+
+
+class AlertSeverity(StrEnum):
+    CRITICAL = "critical"
+    WARNING = "warning"
+    INFO = "info"
+
+
+class PortfolioAlert(Base):
+    """Alert audit trail — one row per alert, updated through its lifecycle.
+
+    Written by :class:`backtest.intelligence.persistence.IntelligencePersister`
+    (fail-soft, off the tick thread). ``alert_key`` is the dedupe identity
+    (``type:subject``); ``notified_strategies`` records which strategy
+    subscribers were called and whether their callback succeeded.
+    """
+
+    __tablename__ = "alerts"
+
+    alert_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    alert_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    alert_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    data: Mapped[dict[str, Any]] = mapped_column(
+        JSONVariant, nullable=False, server_default=text("'{}'")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    dismissed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    dismissed_by: Mapped[Optional[str]] = mapped_column(String(100))
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    notified_strategies: Mapped[Optional[list[Any]]] = mapped_column(JSONVariant)
+
+    __table_args__ = (
+        CheckConstraint(_in_check("severity", AlertSeverity), name="ck_alerts_severity"),
+        Index("idx_alerts_type", "alert_type"),
+        Index("idx_alerts_created", text("created_at DESC")),
+        Index("idx_alerts_active", "alert_type", "resolved_at"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<PortfolioAlert {self.alert_type} {self.severity}>"
+
+
+class PortfolioGreeksSnapshot(Base):
+    """Periodic portfolio Greeks snapshot (historical analysis, not per tick).
+
+    Units: ``net_delta`` share-equivalents, ``net_gamma`` Δ per 1% move,
+    ``net_vega`` ₹ per IV point, ``net_theta`` ₹ per day.
+    """
+
+    __tablename__ = "portfolio_greeks_history"
+
+    snapshot_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    net_delta: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2))
+    net_gamma: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2))
+    net_vega: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2))
+    net_theta: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2))
+    greeks_by_strategy: Mapped[Optional[list[Any]]] = mapped_column(JSONVariant)
+    concentration_by_underlying: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONVariant)
+    concentration_by_strike: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONVariant)
+
+    __table_args__ = (Index("idx_greeks_time", text("timestamp DESC")),)
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<PortfolioGreeksSnapshot {self.timestamp}>"
+
+
+class MarketRegimeSnapshot(Base):
+    """Market regime samples (5-minute cadence + every transition)."""
+
+    __tablename__ = "market_regime_history"
+
+    regime_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    regime: Mapped[str] = mapped_column(String(20), nullable=False)
+    vix: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2))
+    realized_vol: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2))
+    source: Mapped[Optional[str]] = mapped_column(String(64))
+    previous_regime: Mapped[Optional[str]] = mapped_column(String(20))
+    regime_changed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
+    __table_args__ = (Index("idx_regime_time", text("timestamp DESC")),)
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<MarketRegimeSnapshot {self.regime} {self.vix}>"

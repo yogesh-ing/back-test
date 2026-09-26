@@ -1127,3 +1127,111 @@ body[data-active="portfolio"] .nav-link[data-key="portfolio"] {
 .order-row.order-row-alert td { background: rgba(239,68,68,.07); }
 .order-aging-warn { color: var(--warning); font-weight: 600; }
 .order-aging-alert { color: var(--danger); font-weight: 700; }
+
+/* ------------------------------------------------------------------ */
+/* Portfolio Intelligence — alert widget (every page)                  */
+/* ------------------------------------------------------------------ */
+.alert-widget { position: fixed; right: 16px; bottom: 16px; z-index: 150; font-size: .85rem; }
+body.has-alert-widget .toast-stack { bottom: 76px; }
+.aw-pill {
+    display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px;
+    border-radius: 999px; border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.35);
+}
+.aw-pill:hover { border-color: var(--primary); }
+.aw-pill-clear { color: var(--muted); opacity: .85; }
+.aw-pill-critical { border-color: var(--danger); box-shadow: 0 0 0 2px rgba(239,68,68,.25), 0 4px 14px rgba(0,0,0,.35); }
+.aw-pill-warning { border-color: var(--warning); }
+.aw-pill-info { border-color: var(--primary); }
+.aw-count { font-size: .95rem; }
+.aw-sev { font-size: .78rem; color: var(--muted); }
+.aw-panel {
+    width: min(400px, 92vw); max-height: min(70vh, 560px); display: flex; flex-direction: column;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 10px 30px rgba(0,0,0,.5);
+}
+.aw-panel-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.aw-panel-links { display: flex; gap: 10px; align-items: center; }
+.aw-link { color: var(--primary); text-decoration: none; font-size: .8rem; }
+.aw-min { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1rem; padding: 0 4px; }
+.aw-list { list-style: none; overflow-y: auto; padding: 6px; margin: 0; }
+.aw-item { border-left: 3px solid var(--border); background: var(--surface-2); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
+.aw-item-critical { border-left-color: var(--danger); }
+.aw-item-warning { border-left-color: var(--warning); }
+.aw-item-info { border-left-color: var(--primary); }
+.aw-item-head { display: flex; gap: 6px; align-items: center; }
+.aw-item-title { font-weight: 600; flex: 1; }
+.aw-item-time { font-size: .72rem; }
+.aw-item-msg { margin: 3px 0; }
+.aw-item-summary { font-size: .76rem; }
+.aw-item-actions { display: flex; gap: 6px; margin-top: 6px; }
+.aw-empty { padding: 16px; }
+.aw-error { padding: 6px 12px; color: var(--warning); font-size: .78rem; }
+.aw-panel-foot { padding: 6px 12px; border-top: 1px solid var(--border); font-size: .72rem; }
+.aw-status { font-size: .72rem; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); margin-left: 6px; }
+.aw-detail-msg { border-left: 3px solid var(--border); padding: 8px 12px; background: var(--surface-2); border-radius: 6px; margin-bottom: 10px; }
+.pi-modal { max-width: 720px; }
+.pi-modal-body h4 { margin: 14px 0 6px; font-size: .9rem; }
+.pi-modal-body p { line-height: 1.45; }
+.pi-kv { width: 100%; border-collapse: collapse; font-size: .85rem; }
+.pi-kv th { text-align: left; color: var(--muted); font-weight: 500; padding: 3px 12px 3px 0; width: 45%; }
+.pi-kv td { padding: 3px 0; }
+.pi-list { margin: 0 0 0 18px; line-height: 1.5; }
+.pi-note { margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: rgba(59,130,246,.08); border: 1px solid rgba(59,130,246,.3); font-size: .8rem; }
+
+/* ------------------------------------------------------------------ */
+/* Portfolio Intelligence — Risk Board sections                         */
+/* ------------------------------------------------------------------ */
+.pi-root { margin-bottom: 16px; }
+.pi-intro { margin-bottom: 10px; font-size: .82rem; }
+.pi-section { padding: 0; margin-bottom: 12px; }
+.pi-section + .pi-section { margin-top: 0; }
+.pi-section-head {
+    width: 100%; text-align: left; display: flex; gap: 8px; align-items: center;
+    padding: 10px 14px; background: none; border: none; color: var(--text);
+    font-size: .95rem; font-weight: 600; cursor: pointer;
+}
+.pi-head-summary { font-weight: 400; font-size: .8rem; margin-left: auto; }
+.pi-caret { display: inline-block; transition: transform .15s; }
+.pi-collapsed .pi-caret { transform: rotate(-90deg); }
+.pi-collapsed .pi-section-body { display: none; }
+.pi-section-body { padding: 0 14px 12px; }
+.pi-flash { box-shadow: 0 0 0 2px var(--primary); transition: box-shadow .3s; }
+.pi-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 10px; }
+.pi-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.pi-card-label { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.pi-card-value { font-size: 1.35rem; font-weight: 700; margin: 2px 0; }
+.pi-card-sub { font-size: .74rem; }
+.pi-card-warn { border-color: var(--warning); }
+.pi-card-crit { border-color: var(--danger); background: rgba(239,68,68,.08); }
+.pi-warnings { margin-bottom: 8px; }
+.pi-warning { font-size: .78rem; color: var(--warning); }
+.pi-two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+.pi-subhead { margin: 6px 0; font-size: .82rem; }
+.pi-table td, .pi-table th { font-size: .8rem; }
+.pi-row-stale td { opacity: .6; }
+.pi-row-flag td { background: rgba(245,158,11,.08); }
+.pi-foot { margin-top: 8px; font-size: .72rem; }
+.pi-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+.pi-bar-row { display: grid; grid-template-columns: 140px 1fr 70px; gap: 8px; align-items: center; margin-bottom: 6px; }
+.pi-bar { position: relative; height: 12px; background: var(--surface-2); border-radius: 6px; overflow: visible; }
+.pi-bar-fill { height: 100%; background: var(--primary); border-radius: 6px; }
+.pi-bar-high .pi-bar-fill { background: var(--warning); }
+.pi-bar-limit { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--danger); }
+.pi-bar-value { text-align: right; font-variant-numeric: tabular-nums; }
+.pi-corr-table { border-collapse: collapse; font-size: .78rem; }
+.pi-corr-table th { color: var(--muted); font-weight: 500; padding: 4px 6px; text-align: left; white-space: nowrap; }
+.pi-corr-h { max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+.pi-corr-cell { min-width: 56px; text-align: center; padding: 6px; border: 1px solid var(--bg); font-variant-numeric: tabular-nums; }
+.pi-corr-hot { outline: 2px solid var(--warning); outline-offset: -2px; font-weight: 700; }
+.pi-regime-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+.pi-regime-badge { padding: 4px 10px; border-radius: 999px; font-weight: 700; font-size: .78rem; }
+.pi-regime-low { background: rgba(34,197,94,.18); color: var(--success); }
+.pi-regime-moderate { background: rgba(245,158,11,.18); color: var(--warning); }
+.pi-regime-high { background: rgba(239,68,68,.18); color: var(--danger); }
+.pi-regime-unknown { background: var(--surface-2); color: var(--muted); }
+.pi-regime-vix { font-size: 1.1rem; font-weight: 700; }
+.pi-regime-trans { color: var(--warning); font-size: .8rem; }
+.pi-vix-input { display: flex; gap: 6px; align-items: center; margin: 10px 0; }
+.pi-vix-input .input { width: 110px; padding: 5px 8px; }
+.pi-chart-wrap { max-width: 520px; }

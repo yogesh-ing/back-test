@@ -36,7 +36,22 @@ from backtest.options.quote_providers import LiveChainProvider
 
 logger = logging.getLogger("backtest.options.chain_snapshots")
 
-__all__ = ["ChainSnapshotRecorder", "load_snapshots"]
+__all__ = ["ChainSnapshotRecorder", "add_snapshot_listener", "load_snapshots"]
+
+#: ``listener(underlying, rows: list[dict], snapshot_ts)`` called after every
+#: recorded snapshot — Portfolio Intelligence uses it for OI-spike and
+#: liquidity alerts. Listener failures never affect recording.
+_SNAPSHOT_LISTENERS: list = []
+
+
+def add_snapshot_listener(listener: Any) -> None:
+    if listener not in _SNAPSHOT_LISTENERS:
+        _SNAPSHOT_LISTENERS.append(listener)
+
+
+def remove_snapshot_listener(listener: Any) -> None:
+    if listener in _SNAPSHOT_LISTENERS:
+        _SNAPSHOT_LISTENERS.remove(listener)
 
 
 def _dec(value: Any) -> Optional[Decimal]:
@@ -184,8 +199,26 @@ class ChainSnapshotRecorder:
                 )
             )
 
+        listener_rows = [
+            {
+                "strike": float(r.strike),
+                "option_type": r.option_type,
+                "trading_symbol": r.trading_symbol,
+                "oi": r.oi,
+                "bid": float(r.bid) if r.bid is not None else None,
+                "ask": float(r.ask) if r.ask is not None else None,
+                "ltp": float(r.ltp) if r.ltp is not None else None,
+                "volume": r.volume,
+            }
+            for r in rows
+        ]
         with self.manager.session() as session:
             session.add_all(rows)
+        for listener in list(_SNAPSHOT_LISTENERS):
+            try:
+                listener(underlying, listener_rows, ts)
+            except Exception:  # noqa: BLE001 — analytics never break capture
+                logger.debug("[chain-snap] snapshot listener failed", exc_info=True)
         logger.info(
             "[chain-snap] %s: %d rows (%d with quotes) at %s",
             underlying,
