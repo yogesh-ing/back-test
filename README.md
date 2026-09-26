@@ -40,6 +40,7 @@ Market Data (OHLCV candles)
 | **Portfolio** | Run multiple strategies simultaneously under shared risk limits |
 | **Portfolio (Live)** | Live-scoped command center — only real-money positions |
 | **Portfolio (Paper)** | Paper sandbox — simulated fills, no risk |
+| **Monitor** | Portfolio intelligence across *all* runners + the manual options book: portfolio Greeks in ₹ with full-revaluation scenarios and limit alerts, concentration (underlying / index group / strike clusters), strategy P&L correlation, and volatility-regime fit — alerts are raised server-side and audited even with no browser open. See [docs/PORTFOLIO-INTELLIGENCE.md](docs/PORTFOLIO-INTELLIGENCE.md) |
 | **Options** | Trade multi-leg NIFTY option structures (long call/put, bull call spread, bear put spread) with Greeks, fees, and expiry handling — paper or live |
 | **Options Backtest** | *(Python API)* Model-driven options backtesting: the same expression layer (view → selector → structure → intent) run bar-by-bar over a candle frame with synthetic Black-Scholes pricing — no UI tab yet |
 | **Dashboard** | Overview of all strategies and their status |
@@ -150,6 +151,7 @@ src/backtest/
 ├── strategies/     # Built-in strategies (SMA, RSI, Donchian, Buy&Hold, PriceMove, DirectionalOptions)
 ├── engine/         # Backtest engine (trade simulation, metrics, options backtest driver)
 ├── forward/        # Forward testing (paper trading)
+├── monitoring/     # Portfolio intelligence: Greeks, concentration, correlation, regime, alerts
 ├── simulator/      # Costs, slippage, fills, risk — incl. option fee stack
 ├── options/        # Options trading: selectors, structures, paper/live
 │                   #   execution, Greeks, margin, fees, expiry, persistence

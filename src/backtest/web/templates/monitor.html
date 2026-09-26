@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Portfolio Intelligence{% endblock %}
+
+{% block content %}
+<div class="mon-page" id="mon-page" data-section="{{ section or 'greeks' }}">
+  <div class="mon-header">
+    <div>
+      <h1 class="mon-title">🧠 Portfolio Intelligence</h1>
+      <div class="muted">
+        The combined book — every runner plus the manual options book. Per-strategy limits can't see
+        this: stacked Greeks, hidden concentration, correlated P&amp;L, regime drift.
+      </div>
+    </div>
+    <div class="mon-controls">
+      <select id="mon-mode" class="input input-select" aria-label="Bucket scope">
+        <option value="">All buckets</option>
+        <option value="paper">Paper only</option>
+        <option value="live">Live only</option>
+      </select>
+      <select id="mon-refresh" class="input input-select" aria-label="Refresh rate">
+        <option value="1000">Refresh: 1s</option>
+        <option value="2000" selected>Refresh: 2s</option>
+        <option value="5000">Refresh: 5s</option>
+        <option value="0">Paused</option>
+      </select>
+      <button id="mon-refresh-now" class="btn btn-small mon-btn" type="button" title="Refresh now">↻</button>
+      <span id="mon-updated" class="muted mon-updated">—</span>
+    </div>
+  </div>
+
+  <div id="mon-summary" class="mon-summary"></div>
+
+  <!-- Alerts: the actionable layer, always on top -->
+  <section class="card mon-alerts-card">
+    <div class="card-head">
+      <div class="card-title">Risk alerts <span id="mon-alert-counts" class="mon-counts"></span></div>
+      <label class="muted mon-toggle"><input type="checkbox" id="mon-show-info" checked> show info</label>
+    </div>
+    <div id="mon-alerts"><div class="muted">Loading…</div></div>
+  </section>
+
+  <div class="tabs mon-tabs" role="tablist">
+    <button class="tab" data-tab="greeks" type="button">Δ Greeks &amp; scenarios</button>
+    <button class="tab" data-tab="concentration" type="button">◎ Concentration</button>
+    <button class="tab" data-tab="correlation" type="button">⇄ Correlation</button>
+    <button class="tab" data-tab="regime" type="button">≋ Market regime</button>
+  </div>
+
+  <!-- Greeks -->
+  <section class="tab-pane" id="mon-tab-greeks">
+    <div id="mon-greek-cards" class="mon-cards"></div>
+    <div class="mon-grid-2">
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">P&amp;L profile — underlying move</div>
+          <span class="muted mon-note">full revaluation vs delta-gamma estimate · β = 1</span>
+        </div>
+        <div class="mon-chart"><canvas id="mon-profile-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Scenarios</div>
+        <div id="mon-scenarios"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Breakdown by strategy</div>
+      <div class="table-scroll" id="mon-by-strategy"></div>
+    </div>
+    <div class="mon-grid-2">
+      <div class="card">
+        <div class="card-title">By underlying</div>
+        <div class="table-scroll" id="mon-by-underlying"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Legs <span class="muted mon-note" id="mon-iv-sources"></span></div>
+        <div class="table-scroll mon-legs" id="mon-legs"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Concentration -->
+  <section class="tab-pane" id="mon-tab-concentration">
+    <div id="mon-conc-stats" class="mon-cards"></div>
+    <div class="mon-grid-2">
+      <div class="card">
+        <div class="card-title">Exposure by underlying <span class="muted mon-note">gross notional</span></div>
+        <div id="mon-conc-underlying"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Correlated groups</div>
+        <div id="mon-conc-groups"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Strike clusters <span class="muted mon-note">exit-liquidity risk</span></div>
+      <div class="table-scroll" id="mon-conc-strikes"></div>
+    </div>
+  </section>
+
+  <!-- Correlation -->
+  <section class="tab-pane" id="mon-tab-correlation">
+    <div id="mon-corr-stats" class="mon-cards"></div>
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">Strategy P&amp;L correlation</div>
+        <span class="muted mon-note" id="mon-corr-meta"></span>
+      </div>
+      <div class="table-scroll" id="mon-corr-matrix"></div>
+    </div>
+  </section>
+
+  <!-- Regime -->
+  <section class="tab-pane" id="mon-tab-regime">
+    <div class="mon-regime-head">
+      <div id="mon-regime-badge" class="mon-regime-badge">—</div>
+      <label class="muted">Underlying
+        <select id="mon-regime-symbol" class="input input-select"><option value="">auto</option></select>
+      </label>
+    </div>
+    <div id="mon-regime-stats" class="mon-cards"></div>
+    <div class="mon-grid-2">
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">Volatility</div>
+          <span class="muted mon-note" id="mon-regime-source"></span>
+        </div>
+        <div class="mon-chart"><canvas id="mon-vol-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Strategy regime fit</div>
+        <div class="table-scroll" id="mon-regime-fit"></div>
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/monitor.js') }}"></script>
+{% endblock %}

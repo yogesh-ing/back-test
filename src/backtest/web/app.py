@@ -31,6 +31,7 @@ from backtest.api import (
     portfolio_bp,
     strategies_bp,
 )
+from backtest.api.monitor import monitor_bp
 from backtest.api.playbooks import playbooks_bp
 from backtest.api.portfolio import list_instances
 from backtest.api.symbols import symbols_bp
@@ -349,6 +350,7 @@ def create_app(
     app.register_blueprint(portfolio_bp)
     app.register_blueprint(playbooks_bp)
     app.register_blueprint(analytics_bp)
+    app.register_blueprint(monitor_bp)
 
     # SSE broadcast cadence for the portfolio command center.
     app.config.setdefault("PORTFOLIO_SSE_INTERVAL", 1.0)
@@ -445,6 +447,17 @@ def create_app(
     @app.get("/risk")
     def risk_page() -> Any:
         return render_template("risk.html", active="risk")
+
+    @app.get("/monitor")
+    def monitor_page() -> Any:
+        """Portfolio intelligence: combined Greeks, concentration, correlation,
+        regime and alerts across every runner + the manual book."""
+        return render_template("monitor.html", active="monitor", section="greeks")
+
+    @app.get("/portfolio/greeks")
+    def portfolio_greeks_page() -> Any:
+        """PRD §1.1 URL — the same page, opened on the Greeks section."""
+        return render_template("monitor.html", active="monitor", section="greeks")
 
     @app.get("/data")
     def data_page() -> Any:

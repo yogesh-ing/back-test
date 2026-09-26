@@ -67,6 +67,8 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
 | forward/portfolio_manager.py | Command center: runners/buckets/breakers + positions/orders read + manual position actions | ✅ LOM (2026-09-23) |
 | web/static/js/components/position_actions.js | Positions-table action buttons + their modals | ✅ LOM (2026-09-23) |
 | web/static/js/components/orders_tab.js | Orders tab: ledger rows, slippage, cancel, badge, amend + aging (Phase 3) | ✅ LOM (2026-09-23) |
+| monitoring/ | Portfolio intelligence: ₹ Greeks + scenarios, concentration, P&L correlation, regime fit, alert book | ✅ PRD §1.1–1.3 (2026-09-26) |
+| api/monitor.py · templates/monitor.html · static/js/monitor.js | `/api/monitor/*` + the `/monitor` page | ✅ PRD §1.1–1.3 (2026-09-26) |
 
 ## Known Limitations
 - Timeframe is cosmetic on synthetic/CSV sources (daily bars only) — see gap G6 / U2
@@ -102,6 +104,17 @@ backtest papertrade --mode walkforward --strategies X --from D1 --to D2  # Paper
   against the live mark, checked on every bar and on stress markdowns; option structures
   close atomically. A live close returns `placed`, never a fake fill.
 - Endpoints, semantics and the two tabs: `docs/PORTFOLIO-CENTER.md`.
+
+## Portfolio Intelligence (2026-09-26)
+- PRD P0 §1.1 Greeks dashboard, §1.2 concentration + correlation, §1.3 regime detector:
+  `src/backtest/monitoring/`, page `/monitor` (alias `/portfolio/greeks`), API `/api/monitor/*`.
+- Greek limits are **fractions of equity in ₹** (`config/monitoring.yaml`), not raw Greek
+  units — raw Greeks don't sum across underlyings. Scenarios are full Black-Scholes revaluation.
+- The portfolio manager samples every runner's equity each tick (correlation input) and sweeps
+  every `sweep_every_ticks` (5); transitions are audited with `scope="monitor"`; the sweep
+  disables itself after 5 consecutive failures (feed unaffected).
+- Not yet: §1.4 liquidity, §1.5 conflict detector, DB schema, rules engine.
+  Details: `docs/PORTFOLIO-INTELLIGENCE.md`.
 
 ## Build Dependencies
 Python 3.10+, pandas, numpy, requests, python-dotenv, matplotlib, pytest

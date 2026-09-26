@@ -190,6 +190,11 @@ class PortfolioManager:
         except Exception:  # noqa: BLE001 — persistence is best-effort
             logger.info("trade persistence disabled (no reachable database)", exc_info=True)
         self._restoring = False  # suppress saves while rehydrating
+        # Portfolio intelligence (2026-09-26): the read-only meta-layer that
+        # aggregates Greeks / concentration / correlation / regime across every
+        # runner and the manual book. Built lazily (first API read or sweep).
+        self._monitor: Optional[Any] = None
+        self._monitor_failures = 0  # consecutive sweep failures
         self._restore_state()
 
     # ------------------------------------------------------------------ #
@@ -1572,6 +1577,7 @@ class PortfolioManager:
             # reports a band once per order, so this is not spam).
             self.check_order_aging()
             self._evaluate_risk()
+            self._monitor_sweep(tick_ts)
             # V2: bounded save rate. The %60 was tuned for 1s synthetic ticks
             # (one save/min); the live mStock feed ticks once per SWEEP (60s),
             # so %60 meant one save per HOUR (live-session finding 2026-09-21).
@@ -1682,6 +1688,53 @@ class PortfolioManager:
         elif self.halted and not report.halted:
             # Supervisor says clear but latch stays until explicit reset.
             pass
+
+    # ------------------------------------------------------------------ #
+    # Portfolio intelligence monitor (2026-09-26)
+    # ------------------------------------------------------------------ #
+
+    def get_monitor(self) -> Any:
+        """The portfolio-level monitor (Greeks, concentration, correlation,
+        regime + alert book), created on first use."""
+        with self._lock:
+            if self._monitor is None:
+                from backtest.monitoring import PortfolioMonitor
+
+                self._monitor = PortfolioMonitor(self, audit=self._audit_log)
+            return self._monitor
+
+    #: Consecutive sweep failures before the sweep switches itself off.
+    MONITOR_MAX_FAILURES = 5
+
+    def _monitor_sweep(self, tick_ts: Any = None) -> None:
+        """Server-side alert pass every ``sweep_every_ticks`` complete ticks.
+
+        Runs with no browser open so a gamma or concentration breach reaches
+        the audit log on its own. Tick-safe: no external fetches, and a
+        failure is logged (traceback once, then one line) — after
+        ``MONITOR_MAX_FAILURES`` in a row the sweep disables itself instead of
+        erroring every tick. The feed and the breakers are unaffected either way.
+        """
+        if self._monitor_failures >= self.MONITOR_MAX_FAILURES or not self._runners:
+            return
+        try:
+            monitor = self.get_monitor()
+            # Same-instant equity sample of every runner (correlation input).
+            monitor.record_tick(tick_ts, list(self._runners.values()))
+            every = int(monitor.config.sweep_every_ticks or 0)
+            if every <= 0 or self.tick_index % every:
+                return
+            monitor.sweep()
+            self._monitor_failures = 0
+        except Exception:  # noqa: BLE001 — monitoring must never break the tick
+            self._monitor_failures += 1
+            if self._monitor_failures == 1:
+                logger.exception("[monitor] sweep failed")
+            else:
+                logger.error("[monitor] sweep failed (%d in a row)", self._monitor_failures)
+            if self._monitor_failures >= self.MONITOR_MAX_FAILURES:
+                logger.error("[monitor] sweep disabled after %d consecutive failures",
+                             self._monitor_failures)
 
     # ------------------------------------------------------------------ #
     # Aggregation

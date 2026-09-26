@@ -1,0 +1,85 @@
+# =============================================================================
+# Portfolio Intelligence Monitor — limits & thresholds (2026-09-26)
+# =============================================================================
+# Loaded by backtest.monitoring.config.load_monitor_config()
+# Override the path with MONITORING_CONFIG_PATH. Every key is optional: a
+# missing key keeps the default in monitoring/config.py.
+#
+# GREEK LIMITS ARE FRACTIONS OF PORTFOLIO EQUITY, IN MONEY TERMS.
+# Raw Greeks cannot be summed across underlyings (1 NIFTY delta ≠ 1 RELIANCE
+# share), and "gamma -1,000" means different things on ₹5L and ₹5Cr.
+# Each limit reads: "this much P&L, as a fraction of equity, for this move".
+#
+#   delta_1pct  |₹ P&L for a 1% move in every underlying|      / equity
+#   gamma_2pct  convexity LOSS on a ±2% move (short gamma only) / equity
+#   vega_1pt    |₹ P&L per 1 vol-point IV change|               / equity
+#   theta_day   time decay PAID per calendar day (neg. theta)   / equity
+#
+# Worked example — ₹5L book, 2 lots (150 units) short ATM NIFTY straddle,
+# 7 DTE, IV 15%: convexity loss on a 2% move ≈ ₹29k ≈ 5.8% → CRITICAL.
+# =============================================================================
+
+greek_limits:
+  delta_1pct: { warn: 0.01,   critical: 0.02 }
+  gamma_2pct: { warn: 0.005,  critical: 0.01 }
+  vega_1pt:   { warn: 0.0075, critical: 0.015 }
+  theta_day:  { warn: 0.003,  critical: 0.006 }
+
+scenarios:
+  spot_moves_pct: [-3, -2, -1, -0.5, 0.5, 1, 2, 3]
+  iv_shifts_pts: [-5, -2, 2, 5]          # absolute vol points
+  stress:
+    - { name: "Crash: −2% & IV +5",    spot_pct: -2, iv_pts: 5,  days: 0 }
+    - { name: "Gap down: −3% & IV +8", spot_pct: -3, iv_pts: 8,  days: 0 }
+    - { name: "Rally: +2% & IV −2",    spot_pct: 2,  iv_pts: -2, days: 0 }
+    - { name: "Melt-up: +3% & IV +3",  spot_pct: 3,  iv_pts: 3,  days: 0 }
+  # Worst modelled loss / equity. Also escalates to CRITICAL whenever the
+  # worst loss exceeds the headroom left before the daily-loss breaker.
+  worst_loss: { warn: 0.03, critical: 0.05 }
+
+concentration:
+  underlying_pct: { warn: 0.50, critical: 0.70 }   # share of gross notional
+  group_pct:      { warn: 0.70, critical: 0.85 }   # correlated family share
+  strike_cluster_positions: 3                      # legs at one strike/expiry
+  strategies_per_underlying: 3                     # strategies stacked on one name
+  min_positions: 2      # % alerts need >= this many distinct exposures (a spread = 1)
+  min_strategies: 2     # ... held by >= this many strategies (one strategy's design is not hidden concentration)
+  groups:
+    INDIA_INDEX: [NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX]
+
+correlation:
+  lookback: 300            # most recent aligned P&L observations
+  min_observations: 20     # fewer overlapping points → "insufficient data"
+  positive: { warn: 0.70, critical: 0.85 }
+  negative_info: 0.70      # corr ≤ -0.70 → reported as an offsetting (hedge) pair
+
+regime:
+  low_vol_max: 15          # vol index below this (and RV below realized_low_max) = low
+  high_vol_min: 25         # vol index above this (or RV above realized_high_min) = high
+  realized_low_max: 12
+  realized_high_min: 20
+  realized_window: 20      # bars
+  transition_lookback: 5   # bars
+  transition_change_pct: 20
+  range_window: 20
+  range_expansion_mult: 1.5
+  benchmark: NIFTY
+  vol_index_symbol: INDIAVIX   # loaded from the data source when available
+
+# Strategy regime profiles — override the inference (structure type → profile,
+# strategy name keywords → profile). Keys match a runner name, a registry
+# strategy name, or an option structure type (case-insensitive).
+strategy_profiles:
+  banknifty_straddle:
+    optimal_regime: low_vol
+    optimal_vol_range: [10, 16]
+    tags: [short_premium, short_gamma]
+  # nifty_scalper:
+  #   optimal_regime: high_vol
+  #   optimal_vol_range: [14, 40]
+  #   tags: [trend]
+
+risk_free_rate: 0.06
+default_iv: 0.15           # used only when neither contract nor market IV exists
+cache_ttl_s: 1.0           # API snapshot cache (UI polls at 1 Hz)
+sweep_every_ticks: 5       # server-side alert sweep cadence (0 = off)

@@ -78,6 +78,20 @@ def test_live_order_management_components(harness, expected):
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_monitor_page_renders():
+    """Portfolio Intelligence page (/monitor): alert ordering + ack control, Greek
+    card signs, concentration bars, correlation heatmap, regime fit, escaping."""
+    harness = _REPO_ROOT / "tests" / "js" / "test_monitor_page.mjs"
+    result = subprocess.run(
+        ["node", str(harness)], cwd=_REPO_ROOT, capture_output=True, text=True, timeout=60
+    )
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "11 tests passed" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_trade_table_is_container_scoped():
     """Two tables on one page must keep their own sort/page state (G13 remnant)."""
     script = """

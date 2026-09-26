@@ -1229,6 +1229,35 @@ class OptionsBridge:
             "iv": float(vol),
         }
 
+    # ------------------------------------------------------------------ #
+    # Portfolio-monitor seam (2026-09-26) — read-only pricing context so the
+    # monitoring layer never reaches into private attributes.
+    # ------------------------------------------------------------------ #
+
+    def pricing_context(self) -> dict[str, Any]:
+        """Spot, bar clock and expiry the book is currently priced against."""
+        return {
+            "underlying": self.underlying,
+            "spot": self.last_spot,
+            "as_of": self._bar_dt,
+            "structure_expiry": self._structure_expiry,
+        }
+
+    def leg_contract_vol(self, leg: Any) -> Optional[float]:
+        """The chain contract's own vol metadata for a leg — never a default."""
+        token = str(getattr(leg, "instrument_token", "") or "")
+        contracts = getattr(self.quote_provider, "_contracts", None)
+        if token and isinstance(contracts, dict):
+            contract = contracts.get(token)
+            metadata = getattr(contract, "metadata", None) or {}
+            vol = metadata.get("vol") or metadata.get("implied_volatility")
+            if vol:
+                try:
+                    return float(vol)
+                except (TypeError, ValueError):
+                    return None
+        return None
+
     def _leg_vol(self, leg: Any) -> Optional[float]:
         """Implied vol for a leg: contract metadata first, generator default second."""
         token = str(getattr(leg, "instrument_token", "") or "")
