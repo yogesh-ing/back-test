@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
+from tempfile import gettempdir
 from typing import Tuple
 
 from backtest.data.sources_policy import default_backtest_source
@@ -50,9 +51,11 @@ class ConvertedStrategyValidator:
             - backtest_metrics: dict of metrics (if available)
             - rejection_reason: str (if failed)
         """
-        # 1. Save as temporary plugin
-        temp_path = Path(f"/tmp/{strategy_name}_temp.py")
-        temp_path.write_text(strategy_code)
+        # 1. Save as temporary plugin. The generated code carries non-ASCII
+        # arrows/dashes in its comments, so the write must name its encoding —
+        # the platform default is cp1252 on Windows and refuses those chars.
+        temp_path = Path(gettempdir()) / f"{strategy_name}_temp.py"
+        temp_path.write_text(strategy_code, encoding="utf-8")
 
         # 2. Run backtest (if engine available)
         if self.engine is None:

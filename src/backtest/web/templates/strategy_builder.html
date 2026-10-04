@@ -428,13 +428,11 @@
         // becomes visible when the checklist is complete.
         var missing = setSummary(m.readable);
         updateSaveGate();
+        var note = (m.warnings || []).join(' ');
         if (missing.length) {
-          setStatus('Converted, but ' + missing.join(', ') + ' missing — type them into the highlighted fields above to unlock Save.');
+          setStatus('Converted, but ' + missing.join(', ') + ' missing — type them into the highlighted fields above to unlock Save.' + (note ? ' Note: ' + note : ''));
         } else {
-          setStatus('Converted ✓ — check the criteria above, validate with a quick backtest, then save.');
-        }
-        if (outEl.value.indexOf('No entry conditions recognised') !== -1) {
-          setError('Warning: no entry conditions were recognised in this Pine script — the converted strategy will stay flat. Try simplifying the script or use the LLM prompt for manual conversion.');
+          setStatus('Converted ✓ — check the criteria above, validate with a quick backtest, then save.' + (note ? ' Note: ' + note : ''));
         }
       })
       .catch(function (e) { setError('Network error: ' + e); setStatus(''); });

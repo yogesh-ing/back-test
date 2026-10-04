@@ -9,9 +9,12 @@ from __future__ import annotations
 import ast
 import json
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Tuple
+from types import ModuleType
+from typing import Dict, List, Tuple
+from uuid import uuid4
 
 from .codegen import PineCodeGenerator
 from .parser import PineScriptParser
@@ -73,7 +76,23 @@ class PineScriptConverter:
         if not is_valid:
             raise PineConversionError(f"Generated code validation failed: {error}")
 
-        # 5. Extract metadata
+        # 5. An `indicator()` script plots but never trades — with no
+        # `strategy.entry()` block nothing is wired into entries(), and the
+        # saved plugin would silently stay flat on every bar.
+        if not re.search(r"^\s+(?:long|short)_entries \|=", python_code, re.MULTILINE):
+            raise PineConversionError(
+                "No `strategy.entry()` call was found, so nothing can be "
+                "converted into entries. This looks like an `indicator()` "
+                "script: it plots signals but never trades. Declare "
+                "`strategy(...)` and wrap the buy/sell conditions in "
+                "`if <condition>:` blocks calling `strategy.entry(...)`."
+            )
+
+        # 6. Preflight: import it and run the plugin conformance battery, so a
+        # script that would only die at load dies here, with the reason.
+        self._preflight_generated(python_code, strategy_name)
+
+        # 7. Extract metadata
         metadata = {
             "original_name": strategy_name,
             "indicators_used": self._extract_indicators_list(pine_ast),
@@ -81,6 +100,7 @@ class PineScriptConverter:
             "has_short": self._has_short_trades(pine_ast),
             "complexity": self._estimate_complexity(pine_ast),
             "readable": self._extract_readable_summary(pine_ast, pine_code),
+            "warnings": self._collect_warnings(python_code),
         }
         return python_code, metadata
 
@@ -270,6 +290,79 @@ import numpy as np
                 return False, f"Dangerous pattern detected: {pattern}"
 
         return True, ""
+
+    def _collect_warnings(self, python_code: str) -> List[str]:
+        """Transpilation limits the operator must know about before saving.
+
+        The entries/exits model needs a vectorisable exit condition. Pine
+        stops and targets built on ``var`` state (``trailStop := ...``) are
+        per-trade bookkeeping, so they never become an ``exits()`` — and the
+        Save checklist still accepts them as typed criteria strings, which
+        otherwise leaves the impression the level is enforced in code.
+        """
+        if re.search(r"^\s+def exits\(", python_code, re.MULTILINE):
+            return []
+        return [
+            "No exits() was generated: the strategy enters and then holds the "
+            "position. Pine stop/target levels built on `var` state "
+            "(trailStop := ...) are per-trade bookkeeping and do not "
+            "transpile — add exits() by hand if the script relies on them."
+        ]
+
+    def _preflight_generated(self, python_code: str, class_name: str) -> None:
+        """Import the generated module and vet it like the plugin loader would.
+
+        ``ast.parse`` accepts a strategy whose entry line reads
+        ``long_entries |= buyCE`` with no ``buyCE`` anywhere — the Pine
+        variable the converter could not translate. That file imports, saves,
+        and then gets refused by :func:`backtest.plugins.conformance_errors`
+        during discovery, which the UI can only report as "failed to load".
+        Running the same battery here moves the failure to Convert, where the
+        user can still act on it, and names the dead identifier.
+        """
+        from backtest.plugins import conformance_errors
+        from backtest.strategy.base import Strategy
+        from backtest.strategy.registry import _REGISTRY
+
+        # The generated class always sets `name = <ClassName>.lower()`; if that
+        # name is already registered (a re-converted plugin), the base class's
+        # __init_subclass__ would refuse the preview with a duplicate-name
+        # error. Hold the live registration aside and restore it after.
+        preview_key = class_name.lower()
+        held = _REGISTRY.pop(preview_key, None)
+        modname = f"_pine_preview_{uuid4().hex[:12]}"
+        module = ModuleType(modname)
+        sys.modules[modname] = module
+        try:
+            try:
+                exec(
+                    compile(python_code, f"<strategy-builder {class_name}>", "exec"),
+                    module.__dict__,
+                )
+            except Exception as exc:  # noqa: BLE001 — the user's code, any failure
+                raise PineConversionError(
+                    f"Generated strategy does not import: {exc.__class__.__name__}: {exc}"
+                ) from exc
+
+            failures: List[str] = []
+            for attr in list(module.__dict__.values()):
+                if not (isinstance(attr, type) and issubclass(attr, Strategy)):
+                    continue
+                if attr.__module__ != modname:
+                    continue  # the imported Strategy base itself
+                result = conformance_errors(attr)
+                if not result.ok:
+                    failures.extend(result.errors)
+                _REGISTRY.pop(str(getattr(attr, "name", "")) or preview_key, None)
+            if failures:
+                raise PineConversionError(
+                    "Generated strategy would be refused by the plugin loader: "
+                    + "; ".join(sorted(set(failures)))
+                )
+        finally:
+            sys.modules.pop(modname, None)
+            if held is not None and _REGISTRY.get(preview_key) is None:
+                _REGISTRY[preview_key] = held
 
     def _sanitize_class_name(self, name: str) -> str:
         """Convert 'EMA Cross' → 'EmaCross' and keep 'MyCustomStrategy' as typed.

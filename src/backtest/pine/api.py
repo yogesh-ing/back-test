@@ -236,11 +236,11 @@ def save_as_plugin():
         load_error = None
         try:
             get_strategy(expected)
-        except Exception:  # noqa: BLE001 — not registered → surface it honestly
+        except Exception as exc:  # noqa: BLE001 — not registered → surface it honestly
             load_error = (
-                "Plugin file saved, but it failed to load — check the app "
-                "log for 'plugin ... skipped'. The generated code may need "
-                "manual fixes."
+                f"Plugin file saved, but it did not load as {expected!r} — the "
+                f"app log line 'plugin ... skipped' gives the reason. "
+                f"({exc.__class__.__name__}: {exc})"
             )
 
         return jsonify(

@@ -16,6 +16,7 @@ Known limitations (documented in generated header):
 
 from __future__ import annotations
 
+import ast
 import re
 from typing import Dict, List, Optional
 
@@ -40,13 +41,13 @@ class PineCodeGenerator:
     # Standard OHLC series names usable as function arguments.
     SERIES_NAMES = {"open", "high", "low", "close", "volume", "hl2", "hlc3", "ohlc4"}
 
-    def generate(self, ast: Dict, strategy_name: str) -> str:
+    def generate(self, pine_ast: Dict, strategy_name: str) -> str:
         """Generate a complete, loadable plugin module for ``strategy_name``."""
-        env = self._collect_env(ast)
-        inputs = [s for s in ast.get("statements", []) if s.get("type") == "input"]
-        logic_lines = self._generate_logic(ast, env)
-        calc_lines = self._generate_indicator_calculations(ast, env)
-        helpers = self._required_helpers(ast, env)
+        env = self._collect_env(pine_ast)
+        inputs = [s for s in pine_ast.get("statements", []) if s.get("type") == "input"]
+        logic_lines = self._generate_logic(pine_ast, env)
+        calc_lines = self._generate_calculations(pine_ast, env)
+        helpers = self._required_helpers(pine_ast, env)
         params_block = self._generate_params(inputs)
 
         class_code = f'''class {strategy_name}(Strategy):
@@ -66,14 +67,19 @@ class PineCodeGenerator:
 {params_block}
 
     def entries(self, df: pd.DataFrame) -> pd.Series:
+        open = df["open"].values
         high = df["high"].values
         low = df["low"].values
         close = df["close"].values
+        volume = df["volume"].values
+        hl2 = (high + low) / 2.0
+        hlc3 = (high + low + close) / 3.0
+        ohlc4 = (open + high + low + close) / 4.0
         n = len(close)
 
         # Pine inputs → instance params (bound by Strategy.__init__)
 {self._generate_param_bindings(inputs)}
-        # Indicator calculations
+        # Calculations, in Pine source order (indicators then signal variables)
 {calc_lines}
         # Entry conditions (long-only platform: shorts folded in)
         long_entries = np.zeros(n, dtype=bool)
@@ -99,13 +105,13 @@ class PineCodeGenerator:
         )
 
     # ------------------------------------------------------------------
-    # Environment: variable → expression, so conditions referencing
-    # assigned variables resolve to their underlying expressions.
+    # Environment: which Pine names become computed variables in entries()
     # ------------------------------------------------------------------
 
-    def _collect_env(self, ast: Dict) -> Dict[str, str]:
+    def _collect_env(self, ast_: Dict) -> Dict[str, str]:
+        """Pine name → its source expression (used for helper detection)."""
         env: Dict[str, str] = {}
-        for st in ast.get("statements", []):
+        for st in ast_.get("statements", []):
             if st.get("type") == "assignment":
                 env[st["name"]] = st["value"]
             elif st.get("type") == "indicator_call":
@@ -116,29 +122,156 @@ class PineCodeGenerator:
                 )
         return env
 
+    def _known_names(self, ast_: Dict) -> set:
+        """Every Pine name the generated entries() defines or binds."""
+        names = set(self.SERIES_NAMES) | {"n", "np", "pd"}
+        for st in ast_.get("statements", []):
+            stype = st.get("type")
+            if stype in ("assignment", "input"):
+                names.add(st["name"])
+            elif stype == "indicator_call":
+                names.add(st["var_name"])
+        return names
+
     # ------------------------------------------------------------------
     # Expression translation
     # ------------------------------------------------------------------
 
-    def _expr(self, expr: str, env: Dict[str, str], depth: int = 0) -> str:
-        """Translate one Pine expression (possibly nested calls) to Python."""
-        e = expr.strip()
-        if depth > 6:  # cycle / runaway guard
-            return "False"
+    #: Pine boolean/comparison operators → numpy elementwise equivalents.
+    _BINOPS = {
+        ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/",
+        ast.Mod: "%", ast.Pow: "**",
+    }
+    _CMPOPS = {
+        ast.Gt: ">", ast.Lt: "<", ast.GtE: ">=", ast.LtE: "<=",
+        ast.Eq: "==", ast.NotEq: "!=",
+    }
 
-        if e in env:
-            return self._expr(env[e], env, depth + 1)
+    def _translate_expr(self, text: str, known: set, depth: int = 0) -> Optional[str]:
+        """Translate one Pine expression into numpy-compatible Python.
 
-        for m in re.finditer(r"(ta|math)\.(\w+)\(([^()]*)\)", e):
-            ns, func, args_str = m.group(1), m.group(2), m.group(3)
-            args = [a.strip() for a in args_str.split(",") if a.strip()]
-            py_args = [self._expr(a, env, depth + 1) for a in args]
-            repl = self._map_call(ns, func, py_args)
-            if repl is None:
-                return "False"  # unsupported function → condition never fires
-            e = e[: m.start()] + repl + e[m.end():]
+        Pine's ``and``/``or``/``not`` are Python keywords, so a spread
+        condition like ``close > ema5 and bullST and stWithin25`` would
+        otherwise emit `and` on boolean **arrays** — a runtime
+        "truth value is ambiguous". Parsing the expression (Pine's
+        arithmetic/boolean subset is valid Python syntax) and rebuilding it
+        with ``&``/``|``/``~`` plus ``_hist()`` history offsets is what makes
+        multi-term conditions convert at all.
 
-        return e
+        Returns None when the expression uses syntax this converter cannot
+        express, so callers can say so instead of emitting dead code.
+        """
+        src = str(text).strip()
+        if not src:
+            return None
+        try:
+            tree = ast.parse(src, mode="eval")
+        except SyntaxError:
+            return None
+        return self._translate_node(tree.body, known, depth)
+
+    def _translate_node(self, node, known: set, depth: int) -> Optional[str]:
+        if depth > 12:  # runaway / self-referencing guard
+            return None
+
+        if isinstance(node, ast.BoolOp):
+            parts = []
+            for value in node.values:
+                part = self._translate_node(value, known, depth + 1)
+                if part is None:
+                    return None
+                parts.append(f"({part})")
+            joiner = " & " if isinstance(node.op, ast.And) else " | "
+            return joiner.join(parts)
+
+        if isinstance(node, ast.UnaryOp):
+            inner = self._translate_node(node.operand, known, depth + 1)
+            if inner is None:
+                return None
+            if isinstance(node.op, ast.Not):
+                return f"(~({inner}))"
+            if isinstance(node.op, ast.USub):
+                return f"(-({inner}))"
+            return None
+
+        if isinstance(node, ast.Compare):
+            if len(node.ops) != 1:
+                return None  # chained comparisons: Pine has no such form
+            left = self._translate_node(node.left, known, depth + 1)
+            right = self._translate_node(node.comparators[0], known, depth + 1)
+            op = self._CMPOPS.get(type(node.ops[0]))
+            if left is None or right is None or op is None:
+                return None
+            return f"({left} {op} {right})"
+
+        if isinstance(node, ast.BinOp):
+            left = self._translate_node(node.left, known, depth + 1)
+            right = self._translate_node(node.right, known, depth + 1)
+            op = self._BINOPS.get(type(node.op))
+            if left is None or right is None or op is None:
+                return None
+            return f"({left} {op} {right})"
+
+        if isinstance(node, ast.Subscript):
+            # Pine's x[1] is "value one bar back", not an index.
+            if isinstance(node.slice, ast.Constant):
+                offset = node.slice.value
+            else:  # Python < 3.9 wraps it in ast.Index
+                inner = getattr(node.slice, "value", None)
+                if not isinstance(inner, ast.Constant):
+                    return None
+                offset = inner.value
+            if not isinstance(offset, int) or offset < 0:
+                return None
+            src = self._translate_node(node.value, known, depth + 1)
+            if src is None:
+                return None
+            if offset == 0:
+                return src
+            return f"_hist({src}, {offset})"
+
+        if isinstance(node, ast.Call):
+            return self._translate_call(node, known, depth)
+
+        if isinstance(node, ast.Name):
+            return self._translate_name(node.id, known)
+
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, bool):
+                return "True" if node.value else "False"
+            if isinstance(node.value, (int, float)):
+                return repr(node.value)
+            return None
+
+        return None
+
+    def _translate_name(self, name: str, known: set) -> str:
+        if name == "na":
+            return "np.nan"
+        if name in ("true", "false"):
+            return name.capitalize()
+        if name in known:
+            return name
+        # Unknown identifier: emit it as-is so the preflight reports the dead
+        # name instead of the converter quietly substituting `False`.
+        return name
+
+    def _translate_call(self, node: ast.Call, known: set, depth: int) -> Optional[str]:
+        func = node.func
+        if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
+            return None
+        ns = func.value.id
+        if ns not in ("ta", "math"):
+            return None
+        if node.keywords:
+            return None  # named indicator args (e.g. ta.stdev(ddof=1))
+        args: List[str] = []
+        for arg in node.args:
+            text = self._translate_node(arg, known, depth + 1)
+            if text is None:
+                return None
+            args.append(text)
+        return self._map_call(ns, func.attr, args)
 
     def _map_call(self, ns: str, func: str, args: List[str]) -> Optional[str]:
         """Map one ta./math. call to its Python helper, or None if unsupported."""
@@ -189,12 +322,13 @@ class PineCodeGenerator:
     # Logic generation
     # ------------------------------------------------------------------
 
-    def _generate_logic(self, ast: Dict, env: Dict[str, str]) -> str:
+    def _generate_logic(self, pine_ast: Dict, env: Dict[str, str]) -> str:
+        known = self._known_names(pine_ast)
         lines: List[str] = []
-        for st in ast.get("statements", []):
+        for st in pine_ast.get("statements", []):
             if st.get("type") != "if_statement":
                 continue
-            cond = self._translate_condition(st["condition"], env)
+            cond = self._translate_condition(st["condition"], known)
             for inner in st.get("body", []):
                 if inner.get("type") == "strategy_call" and inner["function"] == "strategy.entry":
                     if "long" in inner.get("direction", ""):
@@ -220,21 +354,34 @@ class PineCodeGenerator:
             )
         return "\n".join(lines)
 
-    def _translate_condition(self, condition: Dict, env: Dict[str, str]) -> str:
+    def _translate_condition(self, condition: Dict, known: set) -> str:
+        """Translate an if-condition into a numpy boolean expression.
+
+        The parser's structured form only understands a single comparison, so
+        the raw source text is translated first and the structured form is the
+        fallback for conditions the expression translator rejects.
+        """
         if not isinstance(condition, dict):
             return "False"
+
+        raw = str(condition.get("raw") or "").strip()
+        if raw:
+            translated = self._translate_expr(raw, known)
+            if translated is not None:
+                return translated
+
         ctype = condition.get("type")
 
         if ctype == "function_call":
             ns = condition.get("namespace", "ta")
             func = condition.get("function", "")
-            args = [self._expr(str(a), env) for a in condition.get("args", [])]
+            args = [str(a).strip() for a in condition.get("args", [])]
             repl = self._map_call(ns, func, args)
             return repl if repl is not None else "False"
 
         if ctype == "comparison":
-            left = self._expr(str(condition["left"]), env)
-            right = self._expr(str(condition["right"]), env)
+            left = self._fallback_expr(str(condition["left"]), known)
+            right = self._fallback_expr(str(condition["right"]), known)
             return f"{left} {condition['operator']} {right}"
 
         if ctype == "change_flip":
@@ -242,64 +389,91 @@ class PineCodeGenerator:
             op = condition.get("operator", "<")
             # Pine: ta.change(direction) < 0 → flipped to bull → long;
             #       ta.change(direction) > 0 → flipped to bear → short.
-            src = self._expr(var, env) if var in env else var
+            src = var if var in known else var
             if op == "<":
                 return f"_changed({src}) < 0"
             return f"_changed({src}) > 0"
 
         if ctype == "identifier":
-            return self._expr(str(condition.get("name", "")), env)
+            return self._fallback_expr(str(condition.get("name", "")), known)
 
         return "False"
 
+    def _fallback_expr(self, text: str, known: set) -> str:
+        """Translate a condition fragment, keeping the text if unsupported."""
+        translated = self._translate_expr(text, known)
+        return translated if translated is not None else text.strip()
+
     # ------------------------------------------------------------------
-    # Indicator calculations + inputs → params
+    # Calculations + inputs → params
     # ------------------------------------------------------------------
 
-    def _generate_indicator_calculations(self, ast: Dict, env: Dict[str, str]) -> str:
+    def _generate_calculations(self, pine_ast: Dict, env: Dict[str, str]) -> str:
+        """Emit every Pine calculation as its own variable, in source order.
+
+        Pine assignments used to be inlined into the entry conditions, which
+        left a spread condition (`ceSetup = close > ema5 and bullST and
+        stWithin25`) as a bare identifier in the generated file — it imported,
+        then died with `name 'ceSetup' is not defined`. Materialising them keeps
+        dependencies ordered the way the script wrote them.
+        """
         lines: List[str] = []
-        stmts = [
-            s for s in ast.get("statements", []) if s.get("type") == "indicator_call"
-        ]
-        # Destructured tuples: the direction element (index 1) must be emitted
-        # before the line element (index 0), which references it.
-        stmts.sort(
-            key=lambda s: 1 if s.get("tuple_index") == 1 else 0, reverse=True
-        )  # direction (index 1) first — the line element references it
-        for st in stmts:
-            var = st["var_name"]
-            func = st.get("function", "")
-            args = [str(a) for a in st.get("args", [])]
-            tuple_len = st.get("tuple_len", 0)
-            expr = self._map_call(st.get("namespace", "ta"), func, args)
-            if expr is None:
-                lines.append(f"        # {var}: ta.{func} not supported — skipped")
-                continue
-            if tuple_len == 2:
-                # [value, direction] = ta.supertrend(...) — the SECOND name gets
-                # the direction array; the first gets the supertrend line itself.
-                if st.get("tuple_index") == 1:
-                    lines.append(f"        {var} = {expr}")
-                else:
-                    dir_var = self._tuple_partner(ast, st)
-                    partner = f"{dir_var}" if dir_var else "None"
+        known = self._known_names(pine_ast)
+        emitted: set = set()
+        for st in pine_ast.get("statements", []):
+            stype = st.get("type")
+            if stype == "indicator_call":
+                if st["var_name"] in emitted:
+                    continue
+                lines.extend(self._indicator_lines(pine_ast, st, emitted))
+            elif stype == "assignment":
+                name = str(st.get("name", ""))
+                if not name or name in emitted:
+                    continue
+                emitted.add(name)
+                expr = self._translate_expr(st.get("value", ""), known)
+                if expr is None:
                     lines.append(
-                        f"        {var} = _supertrend_line(high, low, close, "
-                        f"int({args[1] if len(args) > 1 else 10}), "
-                        f"float({args[0] if args else 3.0}), {partner})"
+                        f"        # {name}: Pine expression not convertible — skipped"
                     )
-            else:
-                lines.append(f"        {var} = {expr}")
+                    continue
+                lines.append(f"        {name} = {expr}")
         if not lines:
             lines.append("        # No indicators to precompute")
         return "\n".join(lines)
 
-    def _tuple_partner(self, ast: Dict, st: Dict) -> Optional[str]:
+    def _indicator_lines(self, pine_ast: Dict, st: Dict, emitted: set) -> List[str]:
+        var = st["var_name"]
+        func = st.get("function", "")
+        args = [str(a) for a in st.get("args", [])]
+        expr = self._map_call(st.get("namespace", "ta"), func, args)
+        if expr is None:
+            emitted.add(var)
+            return [f"        # {var}: ta.{func} not supported — skipped"]
+        if st.get("tuple_len") == 2 and st.get("tuple_index") == 0:
+            # [line, direction] = ta.supertrend(...): the price line needs the
+            # direction array, which Pine's destructuring assigns separately.
+            out: List[str] = []
+            partner = self._tuple_partner(pine_ast, st)
+            if partner and partner not in emitted:
+                emitted.add(partner)
+                out.append(f"        {partner} = {expr}")
+            emitted.add(var)
+            out.append(
+                f"        {var} = _supertrend_line(high, low, close, "
+                f"int({args[1] if len(args) > 1 else 10}), "
+                f"float({args[0] if args else 3.0}), {partner or 'None'})"
+            )
+            return out
+        emitted.add(var)
+        return [f"        {var} = {expr}"]
+
+    def _tuple_partner(self, pine_ast: Dict, st: Dict) -> Optional[str]:
         """For a destructured tuple element, find the sibling variable name."""
         idx = st.get("tuple_index")
         if idx is None:
             return None
-        for other in ast.get("statements", []):
+        for other in pine_ast.get("statements", []):
             if (
                 other.get("type") == "indicator_call"
                 and other.get("tuple_index") == (1 if idx == 0 else 0)
@@ -346,17 +520,14 @@ class PineCodeGenerator:
     # Helpers: only emit what the translated code actually references
     # ------------------------------------------------------------------
 
-    def _required_helpers(self, ast: Dict, env: Dict[str, str]) -> str:
+    def _required_helpers(self, pine_ast: Dict, env: Dict[str, str]) -> str:
         all_exprs = list(env.values())
-        for st in ast.get("statements", []):
+        for st in pine_ast.get("statements", []):
             if st.get("type") == "if_statement":
                 all_exprs.append(str(st["condition"]))
         blob = " ".join(all_exprs)
 
         needed = set()
-        for func, helper in self.SUPPORTED_FUNCS.items():
-            if helper and re.search(rf"\b{helper}\(", helper) and False:
-                pass
         for func in ("ema", "sma", "rsi", "highest", "lowest"):
             if re.search(rf"ta\.{func}\(", blob):
                 needed.add(self.SUPPORTED_FUNCS[func])
@@ -372,6 +543,9 @@ class PineCodeGenerator:
             needed.add("_cross_below")
         if re.search(r"ta\.atr\(", blob) or re.search(r"ta\.supertrend\(", blob):
             needed.add("_tr_atr")
+        # Pine history reference: buySignal[1], close[2], ...
+        if re.search(r"[A-Za-z_]\w*\s*\[\s*\d+\s*\]", blob):
+            needed.add("_hist")
 
         helpers = []
         if "_ema" in needed:
@@ -432,22 +606,22 @@ class PineCodeGenerator:
             needed.add("_supertrend_line")
             helpers.append(
                 "def _supertrend(high, low, close, period, factor):\n"
-                "    \"\"\"Pine ta.supertrend: +1 bull, -1 bear.\"\"\"\n"
+                "    \"\"\"Pine ta.supertrend direction: -1 up, +1 down.\"\"\"\n"
                 "    n = len(close)\n"
                 "    atr = _tr_atr(high, low, close, period)\n"
                 "    hl2 = (high + low) / 2.0\n"
                 "    upper = hl2 + factor * atr\n"
                 "    lower = hl2 - factor * atr\n"
-                "    direction = np.ones(n, dtype=int)\n"
+                "    direction = -np.ones(n, dtype=int)\n"
                 "    for i in range(1, n):\n"
                 "        if not (upper[i] < upper[i - 1] or close[i - 1] > upper[i - 1]):\n"
                 "            upper[i] = upper[i - 1]\n"
                 "        if not (lower[i] > lower[i - 1] or close[i - 1] < lower[i - 1]):\n"
                 "            lower[i] = lower[i - 1]\n"
-                "        if direction[i - 1] == 1:\n"
-                "            direction[i] = -1 if close[i] < lower[i] else 1\n"
+                "        if direction[i - 1] == -1:\n"
+                "            direction[i] = 1 if close[i] < lower[i] else -1\n"
                 "        else:\n"
-                "            direction[i] = 1 if close[i] > upper[i] else -1\n"
+                "            direction[i] = -1 if close[i] > upper[i] else 1\n"
                 "    return direction"
             )
             helpers.append(
@@ -455,7 +629,7 @@ class PineCodeGenerator:
                 "    \"\"\"The supertrend price line, given a direction array.\"\"\"\n"
                 "    atr = _tr_atr(high, low, close, period)\n"
                 "    hl2 = (high + low) / 2.0\n"
-                "    return np.where(direction == 1, hl2 - factor * atr, hl2 + factor * atr)"
+                "    return np.where(direction == -1, hl2 - factor * atr, hl2 + factor * atr)"
             )
         if "_changed" in needed:
             helpers.append(
@@ -492,6 +666,21 @@ class PineCodeGenerator:
             helpers.append(
                 "def _lowest(src, period):\n"
                 "    return pd.Series(src).rolling(period).min().values"
+            )
+        if "_hist" in needed:
+            helpers.append(
+                "def _hist(src, offset):\n"
+                '    """Pine `src[offset]`: the value `offset` bars earlier.\n'
+                "\n"
+                "    The warm-up bars repeat the first value rather than `na`, so\n"
+                '    a "new condition" test (`x and not x[1]`) cannot fire on bar 0.\n'
+                '    """\n'
+                "    src = np.asarray(src)\n"
+                "    out = np.empty(len(src), dtype=src.dtype)\n"
+                "    out[:] = src[0] if len(src) else 0\n"
+                "    if offset < len(src):\n"
+                "        out[offset:] = src[: len(src) - offset]\n"
+                "    return out"
             )
 
         return "\n\n\n".join(helpers)

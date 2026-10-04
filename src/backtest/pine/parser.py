@@ -45,8 +45,10 @@ class PineScriptParser:
         """
         statements = []
 
-        # Keep original lines with their indentation for proper parsing
-        original_lines = pine_code.split('\n')
+        # Keep original lines with their indentation for proper parsing.
+        # Pine expressions may span several lines, so logical statements are
+        # rebuilt before the line-by-line walk below.
+        original_lines = self._join_continuations(pine_code.split('\n'))
 
         i = 0
         while i < len(original_lines):
@@ -102,7 +104,7 @@ class PineScriptParser:
             if tuple_match:
                 names = [n.strip() for n in tuple_match.group(1).split(",")]
                 expr = tuple_match.group(2).strip()
-                func_match = re.match(r"(ta|math)\.(\w+)\((.*)\)", expr)
+                func_match = re.fullmatch(r"(ta|math)\.(\w+)\((.*)\)", expr)
                 if func_match:
                     namespace = func_match.group(1)
                     func_name = func_match.group(2)
@@ -144,8 +146,12 @@ class PineScriptParser:
                     i += 1
                     continue
 
-                # Check if it's a function call
-                func_match = re.match(r'(ta|math)\.(\w+)\((.*)\)', expr)
+                # Check if the whole expression is an indicator call. It must
+                # match in full: `math.abs(close - st) / close * 100` is an
+                # expression *containing* a call, and a prefix match would
+                # silently drop the trailing arithmetic (that 25% range gate
+                # compared raw points, not percent).
+                func_match = re.fullmatch(r'(ta|math)\.(\w+)\((.*)\)', expr)
                 if func_match:
                     namespace = func_match.group(1)
                     func_name = func_match.group(2)
@@ -176,6 +182,10 @@ class PineScriptParser:
             if if_match:
                 condition_str = if_match.group(1).strip()
                 condition = self._parse_condition(condition_str)
+                # Keep the source text: a condition spanning `and`/`or` terms
+                # cannot be read from the single-operator regex below, and the
+                # codegen translates the whole expression itself.
+                condition["raw"] = condition_str
 
                 # Parse body (indented lines)
                 body = []
@@ -234,6 +244,57 @@ class PineScriptParser:
             i += 1
 
         return {"type": "script", "statements": statements}
+
+    # ------------------------------------------------------------------
+    # Logical-line rebuild: Pine spreads one expression over several lines
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _continues(stripped: str) -> bool:
+        """True when a line is not a complete Pine expression yet.
+
+        Covers both spread styles seen in real scripts: an assignment whose
+        right-hand side starts on the next line (``ceSetup =``), and a term
+        ending on a boolean/arith/comparison operator or an open bracket.
+        """
+        if stripped.endswith("="):
+            return True
+        if re.search(r"\b(?:and|or|not|xor|else)\s*$", stripped):
+            return True
+        if re.search(r"[+\-*/<>,=&|]\s*$", stripped):
+            return True
+        return (
+            stripped.count("(") != stripped.count(")")
+            or stripped.count("[") != stripped.count("]")
+        )
+
+    def _join_continuations(self, lines: List[str]) -> List[str]:
+        """Merge continuation lines into single logical statements.
+
+        Indentation of the statement's first line is preserved so the if-body
+        walk below still recognises block contents.
+        """
+        merged: List[str] = []
+        buf: str | None = None
+        indent = ""
+        for raw in lines:
+            content = raw.split("//")[0].strip()
+            if not content:
+                if buf is None:
+                    merged.append(raw)  # blank / comment line between statements
+                continue  # never terminates an open expression
+            if buf is None:
+                indent = raw[: len(raw) - len(raw.lstrip())]
+                buf = content
+            else:
+                buf = f"{buf} {content}"
+            if self._continues(buf):
+                continue
+            merged.append(indent + buf)
+            buf = None
+        if buf is not None:
+            merged.append(indent + buf)
+        return merged
 
     def _parse_strategy_call(self, func: str, args_str: str) -> Dict[str, Any] | None:
         """Parse one strategy.<entry|close|exit>(...) call into a statement.
