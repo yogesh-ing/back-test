@@ -307,18 +307,35 @@ class QuoteProvider(Protocol):
 
 
 def _execution_quote(provider: Any, instrument_token: str, side: str) -> dict[str, Any]:
-    """Fill-price quote for one leg (Gap-PRD P4 seam).
+    """Fill-price quote for one leg (PRD §4.1 cross-the-spread seam).
 
-    When the provider offers ``execution_quote`` (the opt-in
-    :class:`~backtest.options.quote_providers.BidAskQuoteProvider` wrapper),
-    fills cross the spread — buy at ask, sell at bid. Every other provider
-    keeps the V1 behaviour byte-identical: fill at LTP.
+    When the provider offers ``execution_quote`` (the
+    :class:`~backtest.options.quote_providers.BidAskQuoteProvider` wrapper the
+    runner path installs by default), fills cross the spread — buy at ask, sell
+    at bid — and a one-sided or zero book raises ``NoExecutableQuoteError``
+    rather than pricing the leg off LTP. Providers without the seam keep the
+    older behaviour: fill at LTP.
     """
     execution_quote = getattr(provider, "execution_quote", None)
     if callable(execution_quote):
         quote = execution_quote(instrument_token, side)
         # Guard against duck-typing accidents (e.g. MagicMock providers in
         # tests "have" every attribute): only trust a real quote dict.
+        if isinstance(quote, dict):
+            return quote
+    return provider.get_quote(instrument_token)
+
+
+def _mark_quote(provider: Any, instrument_token: str, side: str) -> dict[str, Any]:
+    """Mark price for a held leg — what closing it right now would fetch.
+
+    A provider with a ``mark_quote`` seam marks conservatively (PRD §4.2): bid
+    on a long leg, ask on a short one, never LTP. Providers without it mark off
+    LTP as before.
+    """
+    mark_quote = getattr(provider, "mark_quote", None)
+    if callable(mark_quote):
+        quote = mark_quote(instrument_token, side)
         if isinstance(quote, dict):
             return quote
     return provider.get_quote(instrument_token)
@@ -748,7 +765,9 @@ class OptionPaperBroker:
             leg_outcomes: list[tuple[OptionPosition, bool, Decimal, str | None]] = []
             for position in group_positions:
                 try:
-                    quote = quote_provider.get_quote(position.instrument_token)
+                    quote = _mark_quote(
+                        quote_provider, position.instrument_token, position.side
+                    )
                 except Exception as exc:  # noqa: BLE001 — record failure before re-raising
                     raised_exc = exc
                     leg_outcomes.append((position, True, ZERO, str(exc)))

@@ -63,6 +63,7 @@ from backtest.data.sources_policy import (
 )
 from backtest.forward.feed_quality import get_quality_monitor
 from backtest.options.quote_providers import (
+    BidAskQuoteProvider,
     SyntheticChainGenerator,
     SyntheticQuoteProvider,
 )
@@ -177,6 +178,10 @@ class ChainBus:
     per TTL and quotes share one TTL cache). A live acquire **requires** a
     quote broker client — there is no silent synthetic substitution on the
     live path (the caller decides the fallback and labels it).
+
+    PRD §4.1/§4.2: the live feed is handed out wrapped in
+    :class:`BidAskQuoteProvider` (fills cross the spread, held legs mark off
+    the far side). ``source_name`` reads ``live:<broker>+bidask``.
     """
 
     def __init__(self) -> None:
@@ -192,9 +197,10 @@ class ChainBus:
     ) -> Any:
         """Return the shared feed for ``underlying``, +1 subscriber.
 
-        A broker source (mstock/dhan) → the shared :class:`LiveChainProvider`;
-        needs a broker client exposing ``get_option_chain`` /
-        ``get_option_quote``, and there is no silent synthetic substitution.
+        A broker source (mstock/dhan) → the shared :class:`LiveChainProvider`,
+        spread-wrapped (``BidAskQuoteProvider``); needs a broker client
+        exposing ``get_option_chain`` / ``get_option_quote``, and there is no
+        silent synthetic substitution.
         No source named → the data-source policy's default feed, never a
         hard-coded one, so a caller that forgets ``source=`` on a deployment
         with synthetic off cannot quietly end up on generated candles.
@@ -213,8 +219,14 @@ class ChainBus:
             if entry is None:
                 from backtest.options.quote_providers import LiveChainProvider
 
+                # The spread wrapper is part of the SHARED feed, not something
+                # each caller adds on top: wrapping per-acquire would break the
+                # one-object-per-underlying contract (identity + refcount), and
+                # wrapping only on the runner path would make the first acquirer
+                # decide whether the dashboard's unwrapped entry ever crosses.
                 entry = _FeedEntry(
-                    feed=LiveChainProvider(broker), key=(key, source_key, "")
+                    feed=BidAskQuoteProvider(LiveChainProvider(broker)),
+                    key=(key, source_key, ""),
                 )
                 self._live[key] = entry
                 logger.info("live chain provider registered: %s (%s)", key, source_key)
@@ -329,10 +341,21 @@ def option_quote_provider_for(
 
     * ``source="mstock"``/``"dhan"`` + an authenticated broker of the same
       name (explicit or via the session manager) → the shared
-      :class:`LiveChainProvider` (``"live:<broker>"``): real chains, real
-      LTP, one API budget per underlying (ChainBus refcount).
+      :class:`LiveChainProvider` wrapped in :class:`BidAskQuoteProvider`
+      (``"live:<broker>+bidask"``): real chains, real LTP, one API budget per
+      underlying (ChainBus refcount) — and fills that cross the spread while
+      held legs mark off the far side (PRD §4.1/§4.2).
     * otherwise → the synthetic pair (``"synthetic:bs"``), **but only if the
       data-source policy allows synthetic at all**.
+
+    The bus wraps broker feeds once, at entry creation, rather than leaving it
+    to each call site, because "paper filled at LTP" is not evidence of
+    anything: a long call bought at the last traded price and marked at the
+    last traded price never pays the spread it would have to cross twice in a
+    real session, so the paper P&L is systematically better than live would
+    have been. The synthetic demo feed stays unwrapped — it is labelled
+    ``synthetic:bs`` precisely because nobody trades on it, and its
+    Black-Scholes bid/ask is a made-up ₹0.50 half-spread.
 
     The fallback used to be unconditional: ask for mStock with no session and
     you got Black-Scholes chains, labelled honestly but trading anyway — which
@@ -353,7 +376,7 @@ def option_quote_provider_for(
         name = getattr(broker, "broker_name", None)
         if broker is not None and (name is None or name == source_key):
             provider = get_chain_bus().acquire(underlying, source=source_key, broker=broker)
-            return provider, getattr(provider, "source_name", f"live:{source_key}")
+            return provider, provider.source_name
         if not synthetic_enabled():
             raise SourceDisabledError(
                 f"option runner on {underlying} asked for source={source_key} but there is "

@@ -1087,9 +1087,10 @@ class StrategyRunner:
             # derived from the resolved provider, not from config.source: a
             # requested "mstock"/"dhan" that fell back to synthetic must
             # release the synthetic entry, or stop() leaks the refcount.
-            live_label = f"live:{config.source.lower()}"
+            # Live labels are ``live:<source>`` (+ ``+bidask`` when the bus
+            # handed out the spread-crossing wrapper).
             self._chain_source = (
-                str(config.source).lower() if quote_label == live_label else "synthetic"
+                str(config.source).lower() if quote_label.startswith("live:") else "synthetic"
             )
             self._chain_released = False  # one release per acquire (stop is idempotent)
             self.options_bridge = OptionsBridge(
@@ -1388,7 +1389,7 @@ class StrategyRunner:
             )
             return
 
-        if label != f"live:{src}":
+        if not label.startswith("live:"):
             # Session vanished between the pre-check and the acquire; the helper
             # already re-acquired synthetic, so release that extra ref and bail.
             try:

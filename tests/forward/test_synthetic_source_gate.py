@@ -327,7 +327,7 @@ def test_the_chain_bus_still_serves_the_testing_profile():
         assert bus.generator_count() == 0
         broker = type("_Client", (), {})()
         live = bus.acquire("BANKNIFTY", source="dhan", broker=broker)
-        assert live.__class__.__name__ == "LiveChainProvider", "dhan is a broker feed"
+        assert live.inner.__class__.__name__ == "LiveChainProvider", "dhan is a broker feed"
         assert bus.release("BANKNIFTY", source="dhan") == 0
     finally:
         sp.reset_source_policy()
