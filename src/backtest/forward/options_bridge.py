@@ -74,6 +74,7 @@ from backtest.options.exit_policy import (
     EXIT_MANUAL_STOP,
     EXIT_MANUAL_TARGET,
     EXIT_SIGNAL_FLIP,
+    PRICE_MEASURED_REASONS,
     RISK_REASONS,
     ExitConfig,
     ExitDecision,
@@ -1526,10 +1527,11 @@ class OptionsBridge:
                 bar_date=self._bar_dt.date() if self._bar_dt else None,
                 expiry=structure.expiry,
             )
-            price_exit = decision is not None and getattr(
-                decision, "reason", None
-            ) in ("stop_loss", "target")
-            if price_exit and self._mark_untrusted(structure):
+            if (
+                decision is not None
+                and decision.reason in PRICE_MEASURED_REASONS
+                and self._mark_untrusted(structure)
+            ):
                 self._log_mtm_failure_throttled(
                     f"{self.underlying}:risk_exit",
                     f"price-driven {decision.reason} suppressed on {self.underlying} "
@@ -1686,8 +1688,7 @@ class OptionsBridge:
         # Next-bar only: same-bar re-entry impossible even if reenter=true
         if self._exit_bar_index is not None and self._exit_bar_index == self._bar_index:
             return False
-        # V1.1 knob: max_reentries_per_day default 2
-        max_per_day = self.expression.get("exit", {}).get("max_reentries_per_day", 2)
+        max_per_day = self.exit_policy.config.max_reentries_per_day
         if hasattr(self, "_reentries_today") and self._reentries_today >= max_per_day:
             return False
         return self.exit_policy.should_reenter(self.last_exit.get("direction"), view)
