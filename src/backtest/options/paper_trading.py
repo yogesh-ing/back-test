@@ -21,11 +21,12 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Any, Protocol
 
+from backtest.live.market_status import IST, MARKET_CLOSE_TIME, MARKET_OPEN_TIME
 from backtest.options.execution_gate import V1_ALLOWED_STRUCTURES, check_intent
 from backtest.strategy.intent import (
     OptionLeg,
@@ -36,9 +37,86 @@ logger = logging.getLogger("backtest.options.paper_trading")
 
 ZERO = Decimal("0")
 
-#: Number of consecutive failed MTM attempts before a leg/structure mark is
-#: flagged stale (R1, §8 Q2 default = 2 bars).
-STALE_AFTER_BARS = 2
+#: How old a held leg's last successful mark may get before the mark counts as
+#: stale (PRD §4.1/§8.1 freshness SLA). Measured in market-session seconds, not
+#: bar counts: a feed that stops delivering bars produces no *failed* marks at
+#: all, so counting failures never notices the freeze. Sized to clear the R6
+#: watchdog (60 s pass, 120 s repair age) so a healthy book never trips it;
+#: calibrate per underlying against the soak's measured latency distribution.
+STALE_AFTER_SECONDS = 180.0
+
+#: Marks may age only while the exchange is trading (§4.4: the exchange clock is
+#: authoritative), so the session window is part of the metric, not a filter.
+_SESSION_OPEN = MARKET_OPEN_TIME
+_SESSION_CLOSE = MARKET_CLOSE_TIME
+#: Days of session time an age may span before the arithmetic stops counting.
+#: A mark that old is past every SLA in use, and the loop stays bounded.
+_MAX_AGE_DAYS = 30
+
+
+def _now_utc() -> datetime:
+    """The freshness clock's single 'now' — patch this to test ageing deterministically."""
+    return datetime.now(timezone.utc)
+
+
+def _utc(dt: datetime | None) -> datetime | None:
+    """Normalise a possibly-naive timestamp to aware UTC (marks are naive UTC)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _session_seconds_between(mark: datetime, reference: datetime) -> float:
+    """Seconds of NSE session time in ``[mark, reference]`` (both aware UTC).
+
+    Time outside 09:15–15:30 IST is not counted: nobody can refresh a mark while
+    the exchange is shut, so a book carried overnight has not aged. Weekends are
+    skipped by the weekday rule; a market holiday is counted as a full session
+    because the holiday calendar is a DB read and this runs on every dashboard
+    row — over-reporting age errs toward halting, which is the safe side.
+    """
+    start = mark.astimezone(IST)
+    end = reference.astimezone(IST)
+    if end <= start:
+        return 0.0
+    total = 0.0
+    day = start.date()
+    sessions = 0
+    while day <= end.date() and sessions < _MAX_AGE_DAYS:
+        if day.weekday() < 5:
+            open_dt = datetime.combine(day, _SESSION_OPEN, tzinfo=IST)
+            close_dt = datetime.combine(day, _SESSION_CLOSE, tzinfo=IST)
+            total += max(
+                0.0,
+                (min(close_dt, end) - max(open_dt, start)).total_seconds(),
+            )
+            sessions += 1
+        day += timedelta(days=1)
+    return total
+
+
+def session_is_open(now: datetime | None = None) -> bool:
+    """Whether the NSE session is trading at ``now`` (naive timestamps are UTC).
+
+    Pure clock arithmetic: the freshness gate asks this on every mark, so it may
+    not reach for the holiday master, which is a database read. Weekends are shut
+    by the weekday rule and a market holiday counts as open — over-reporting
+    staleness halts entries, which is the safe direction.
+    """
+    reference = _utc(now) or _now_utc()
+    ist_time = reference.astimezone(IST).time()
+    return _SESSION_OPEN <= ist_time <= _SESSION_CLOSE
+
+
+def _age_seconds(last_updated: datetime | None, now: datetime | None) -> float | None:
+    """Market-session seconds since ``last_updated``, or ``None`` with no mark."""
+    stamp = _utc(last_updated)
+    if stamp is None:
+        return None
+    reference = _utc(now) or _now_utc()
+    return max(0.0, _session_seconds_between(stamp, reference))
 
 
 def _iso_utc(dt: datetime | None) -> str | None:
@@ -122,9 +200,29 @@ class OptionPosition:
         """ISO-8601 UTC timestamp of the last successful quote mark (R1)."""
         return _iso_utc(self.last_updated)
 
-    def is_mark_stale(self, stale_after_bars: int = STALE_AFTER_BARS) -> bool:
-        """True when MTM has failed at least ``stale_after_bars`` times in a row."""
-        return self.status == PositionStatus.OPEN and self.mtm_failures >= int(stale_after_bars)
+    def mark_age_seconds(self, now: datetime | None = None) -> float | None:
+        """Market-session seconds since this leg's last mark (``None`` if never marked)."""
+        if self.status != PositionStatus.OPEN:
+            return None
+        return _age_seconds(self.last_updated, now)
+
+    def is_mark_stale(
+        self,
+        stale_after_seconds: float = STALE_AFTER_SECONDS,
+        now: datetime | None = None,
+    ) -> bool:
+        """True when the last successful mark is older than the freshness SLA.
+
+        Session time, not failed attempts: a stalled feed stops producing bars
+        (and so stops producing failures), which is exactly the case the SLA
+        must catch.
+        """
+        age = self.mark_age_seconds(now)
+        return (
+            self.status == PositionStatus.OPEN
+            and age is not None
+            and age > float(stale_after_seconds)
+        )
 
     @property
     def total_quantity(self) -> int:
@@ -261,14 +359,10 @@ class StructurePosition:
         open_legs = [leg for leg in self.legs if leg.status == PositionStatus.OPEN]
         if not open_legs:
             open_legs = list(self.legs)
-        stamps = [leg.last_updated for leg in open_legs if leg.last_updated is not None]
+        stamps = [_utc(leg.last_updated) for leg in open_legs if leg.last_updated is not None]
         if not stamps:
             return None
-        norm = [
-            dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
-            for dt in stamps
-        ]
-        return min(norm).isoformat()
+        return min(stamps).isoformat()
 
     @property
     def mtm_failures(self) -> int:
@@ -282,9 +376,24 @@ class StructurePosition:
                 return leg.last_quote_error
         return None
 
-    def is_mark_stale(self, stale_after_bars: int = STALE_AFTER_BARS) -> bool:
+    def mark_age_seconds(self, now: datetime | None = None) -> float | None:
+        """Oldest mark across open legs — the structure is as fresh as its worst leg."""
+        ages = [
+            age
+            for leg in self.legs
+            if leg.status == PositionStatus.OPEN
+            for age in (leg.mark_age_seconds(now),)
+            if age is not None
+        ]
+        return max(ages) if ages else None
+
+    def is_mark_stale(
+        self,
+        stale_after_seconds: float = STALE_AFTER_SECONDS,
+        now: datetime | None = None,
+    ) -> bool:
         return any(
-            leg.is_mark_stale(stale_after_bars)
+            leg.is_mark_stale(stale_after_seconds, now)
             for leg in self.legs
             if leg.status == PositionStatus.OPEN
         )

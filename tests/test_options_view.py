@@ -34,7 +34,7 @@ from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRun
 from backtest.strategy.base import Strategy
 from backtest.strategy.intent import Direction, MarketView
 from backtest.strategy import registry as _registry
-from options_support import research_profile
+from options_support import pin_session_clock, research_profile, stale_marks
 
 if "silent_option_fixture" not in _registry._REGISTRY:
 
@@ -615,12 +615,15 @@ def test_the_action_and_order_styles_exist():
 
 
 @requires_node
-def test_stale_mark_live_drill_renders_badge_tooltip_and_refresh_button(option_runner, tmp_path):
+def test_stale_mark_live_drill_renders_badge_tooltip_and_refresh_button(
+    option_runner, tmp_path, monkeypatch
+):
     """AC #2 & AC #10 (Live drill): Kill the quote session on a running option
     runner, wait 3 bars, and verify the rendered dashboard visibly shows
     '⚠ stale mark' badge, 'last good quote ... — ...' tooltip, 'stale-mark-row'
     highlight, and '↻ Refresh marks' button in matrix, positions, and deep-dive.
     """
+    pin_session_clock(monkeypatch)
     bridge = option_runner.options_bridge
     assert bridge is not None
     assert bridge.open_structure_id is not None
@@ -645,9 +648,14 @@ def test_stale_mark_live_drill_renders_badge_tooltip_and_refresh_button(option_r
     for bar in _bars([25_700, 25_750, 25_800], day_offset=12):
         option_runner.process_candle_event("NIFTY", bar)
 
+    # The kill leaves the marks frozen, so age them past the SLA in session time
+    # (§8.1) — the drill must not depend on the wall clock it runs at.
+    stale_marks(bridge, bridge.stale_after_seconds + 1)
+
     row = option_runner.get_state()
     detail = option_runner.get_detail()
     assert row["mark_stale"] is True
+    assert bridge.mark_age_seconds() > bridge.stale_after_seconds
     assert "session killed" in (row["quote_error"] or "")
     assert row["mark_ts"] is not None
 

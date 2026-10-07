@@ -50,7 +50,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional
 
 import pandas as pd
 
-from backtest.data.base import CANONICAL_TIMEFRAMES, DataSource
+from backtest.data.base import CANONICAL_TIMEFRAMES, TIMEFRAME_MINUTES, DataSource
 from backtest.data.frame_source import FrameSource
 from backtest.data.source_tags import SOURCE_TAG_VALUES, SOURCE_TAGS, source_tag_for
 from backtest.data.sources_policy import (
@@ -1097,6 +1097,10 @@ class StrategyRunner:
                 capital=config.allocated_capital,
                 expression=config.instrument.get("expression"),
                 quote_provider=provider,
+                # Marks land on bar close (plus the portfolio watchdog), so the
+                # freshness SLA is sized off the bar cadence — see OptionsBridge.
+                bar_cadence_seconds=60.0
+                * TIMEFRAME_MINUTES.get(config.timeframe, 0),
             )
             self.options_bridge.runner_id = self.instance_id
             self.options_bridge.runner_name = self.config.name
@@ -2134,12 +2138,17 @@ class StrategyRunner:
             and self.options_bridge.mark_stale
             and not self.options_bridge._has_open_structure()
         ):
+            # Freshness SLA (PRD §4.1): a mark older than stale_after_seconds is
+            # not a price, so the entry is refused rather than simulated.
+            age = self.options_bridge.mark_age_seconds()
             self._log_signal(
                 symbol,
                 "OPTION_BLOCKED",
                 None,
                 bar["close"],
-                "entry paused while option mark is stale",
+                "entry paused: option mark "
+                f"{int(age) if age is not None else '?'}s old, "
+                f"SLA {int(self.options_bridge.stale_after_seconds)}s",
             )
             view = None
         if (

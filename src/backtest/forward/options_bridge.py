@@ -77,9 +77,10 @@ from backtest.options.greeks import BlackScholes
 from backtest.options.expiry import EXIT_REASON_SETTLEMENT, ExpiryManager
 from backtest.options.expiry_policy import NearestExpiryPolicy
 from backtest.options.paper_trading import (
-    STALE_AFTER_BARS,
+    STALE_AFTER_SECONDS,
     OptionPaperBroker,
     PositionStatus,
+    session_is_open,
 )
 from backtest.options.quote_providers import (
     SyntheticQuoteProvider,
@@ -99,6 +100,17 @@ logger = logging.getLogger("backtest.forward.options_bridge")
 #: Sentinel for "argument not supplied" in :meth:`OptionsBridge.set_manual_rule`
 #: — distinct from an explicit ``None``, which CLEARS the level.
 _UNSET: Any = object()
+
+
+def _market_is_open(now_utc: Optional[datetime] = None) -> bool:
+    """Whether the NSE session is trading right now (marks are only expected then).
+
+    Session arithmetic rather than the holiday calendar: the DB-backed calendar
+    used here put a retrying database connect on every mark, which stalls the
+    runner when the database is unreachable.
+    """
+    return session_is_open(now_utc)
+
 
 #: structure_type → (structure instance, option side of the chain)
 STRUCTURES: dict[str, tuple[Any, str]] = {
@@ -158,6 +170,11 @@ class OptionsBridge:
         ``backtest/options/execution_gate.py``). Defaults to the V1 set: long
         call / long put. The check runs here *and* again in the broker, so a
         structure the contract forbids cannot open from either layer.
+    bar_cadence_seconds:
+        Width of one bar in market seconds, passed by the runner. Marks arrive
+        once per bar (plus the 60 s R6 watchdog), so the freshness SLA may never
+        be tighter than the cadence the book is actually marked on — a daily
+        runner would otherwise read as stale minutes after every mark.
     """
 
     def __init__(
@@ -167,6 +184,7 @@ class OptionsBridge:
         option_broker: Optional[OptionPaperBroker] = None,
         quote_provider: Optional[Any] = None,
         allowed_structures: Optional[Iterable[str]] = None,
+        bar_cadence_seconds: Optional[float] = None,
     ) -> None:
         self.expression: dict[str, Any] = {**DEFAULT_EXPRESSION, **(expression or {})}
         self.allowed_structures: frozenset[str] = frozenset(
@@ -266,11 +284,12 @@ class OptionsBridge:
         self._reentry_day: Optional[Any] = None
 
         # -- MTM Staleness Observability (R1, R4, R6) -----------------------
-        try:
-            raw_stale = self.expression.get("stale_after_bars", STALE_AFTER_BARS)
-            self.stale_after_bars: int = max(1, int(raw_stale or STALE_AFTER_BARS))
-        except (TypeError, ValueError):
-            self.stale_after_bars = STALE_AFTER_BARS
+        # Freshness is a market-session SLA (PRD §4.1/§8.1), not a bar count: a
+        # feed that stops delivering bars produces no failed marks at all.
+        # Explicit ``stale_after_seconds`` in the expression wins; otherwise the
+        # runner's bar cadence plus the module grace (which clears the 60 s R6
+        # watchdog pass without ever flagging a healthy book).
+        self.stale_after_seconds = self._resolve_stale_after_seconds(bar_cadence_seconds)
         #: True while the owning runner is RUNNING (default True for standalone
         #: bridge use; StrategyRunner syncs this to ``status == STATUS_RUNNING``
         #: so paused/stopped runners report ``mark_stale=False`` per §5).
@@ -522,7 +541,7 @@ class OptionsBridge:
         stale_positions = sum(
             1
             for s in open_structures
-            if self.runner_running and s.is_mark_stale(self.stale_after_bars)
+            if self.runner_running and s.is_mark_stale(self.stale_after_seconds)
         )
         return {
             "open_positions": len(broker.get_open_positions()),
@@ -536,6 +555,8 @@ class OptionsBridge:
             "last_spot": self.last_spot,
             "last_mtm_ts": self.last_mtm_ts,
             "mark_ts": self.mark_ts,
+            "mark_age_seconds": self.mark_age_seconds(),
+            "stale_after_seconds": self.stale_after_seconds,
             "mark_stale": self.mark_stale,
             "quote_error": self.quote_error,
             "stale_positions": stale_positions,
@@ -569,15 +590,73 @@ class OptionsBridge:
         stamps = [s.mark_ts for s in open_structures if s.mark_ts]
         return min(stamps) if stamps else None
 
-    @property
-    def mark_stale(self) -> bool:
-        """True when runner is RUNNING and structure has ≥ STALE_AFTER_BARS failed marks (R1)."""
+    def _resolve_stale_after_seconds(self, bar_cadence_seconds: Optional[float]) -> float:
+        """Freshness SLA width: expression override → one bar cadence + grace.
+
+        The grace is the module default, sized for the 60 s R6 watchdog. Adding
+        one bar's *market* width keeps a daily runner from reading stale during
+        the overnight gap its own cadence demands, while still halting it a few
+        minutes into the session after the next daily bar failed to arrive.
+        """
+        grace = float(STALE_AFTER_SECONDS)
+        default = grace + max(0.0, float(bar_cadence_seconds or 0.0))
+        raw = self.expression.get("stale_after_seconds")
+        if raw is None:
+            return default
+        try:
+            return max(1.0, float(raw))
+        except (TypeError, ValueError):
+            logger.warning(
+                "[options-bridge] expression has a non-numeric stale_after_seconds "
+                "(%r) — using %ss",
+                raw,
+                int(default),
+            )
+            return default
+
+    def mark_age_seconds(self, now: Optional[datetime] = None) -> Optional[float]:
+        """Market-session seconds since the oldest mark on the open book (§8.1)."""
+        ages = [
+            age
+            for structure in self.option_broker.get_open_structures()
+            for age in (structure.mark_age_seconds(now),)
+            if age is not None
+        ]
+        return max(ages) if ages else None
+
+    def _mark_untrusted(self, structure: Any) -> bool:
+        """Whether price-driven decisions must not act on this book's marks.
+
+        Either a failed mark (``mtm_failures``) or an SLA-exceeded age: the
+        price the stop/target would compare against is not a price.
+        """
+        return bool(
+            structure.mtm_failures > 0
+            or structure.is_mark_stale(self.stale_after_seconds)
+        )
+
+    def _stale_now(self, now: Optional[datetime] = None) -> bool:
+        """Freshness SLA check — the body of :attr:`mark_stale`, clock-injectable."""
         if not self.runner_running:
             return False
-        return any(
-            s.is_mark_stale(self.stale_after_bars)
-            for s in self.option_broker.get_open_structures()
-        )
+        if not _market_is_open(now):
+            # Marks are only expected while the session is trading: the R6
+            # watchdog goes silent at the close, so a book held overnight is
+            # not a stale book — and flagging it would badge the UI and fire a
+            # staleness episode every evening (MTM-Staleness PRD AC #9).
+            return False
+        age = self.mark_age_seconds(now)
+        return age is not None and age > self.stale_after_seconds
+
+    @property
+    def mark_stale(self) -> bool:
+        """True when a RUNNING runner holds a mark older than the freshness SLA.
+
+        Market-session time, not a count of failed marks (§4.1/§8.1): a quote
+        feed that stops delivering bars records no failures at all, so counting
+        failures never sees the freeze this SLA exists to catch.
+        """
+        return self._stale_now()
 
     @property
     def quote_error(self) -> Optional[str]:
@@ -685,7 +764,7 @@ class OptionsBridge:
                         # R1: per-leg mark freshness contract
                         "mark_ts": leg.mark_ts,
                         "mark_stale": bool(
-                            self.runner_running and leg.is_mark_stale(self.stale_after_bars)
+                            self.runner_running and leg.is_mark_stale(self.stale_after_seconds)
                         ),
                         "quote_error": leg.last_quote_error,
                         "mtm_failures": leg.mtm_failures,
@@ -701,7 +780,7 @@ class OptionsBridge:
             current = _net_premium("current_price")
             unrealized = float(structure.total_unrealized_pnl)
             structure_stale = bool(
-                self.runner_running and structure.is_mark_stale(self.stale_after_bars)
+                self.runner_running and structure.is_mark_stale(self.stale_after_seconds)
             )
             rows.append(
                 {
@@ -959,9 +1038,7 @@ class OptionsBridge:
         if self.manual_stop_loss is None and self.manual_target is None:
             return None
         structure = self.option_broker.get_structure(self.open_structure_id or "")
-        if structure is not None and (
-            structure.mtm_failures > 0 or structure.is_mark_stale(self.stale_after_bars)
-        ):
+        if structure is not None and self._mark_untrusted(structure):
             self._log_mtm_failure_throttled(
                 f"{self.underlying}:manual_exit",
                 f"manual stop/target suppressed on {self.underlying} while mark is stale/failed",
@@ -1308,11 +1385,11 @@ class OptionsBridge:
                     if is_f:
                         failing_count += 1
                         leg.record_mtm_failure(err_msg)
-                        # Step 3: a watchdog/manual repair that still fails must
-                        # surface mark_stale immediately rather than hiding for
-                        # another bar cycle.
-                        if leg.mtm_failures < self.stale_after_bars:
-                            leg.mtm_failures = self.stale_after_bars
+                        # Step 3: the failure is surfaced now (``quote_error``,
+                        # ``mtm_failures``, throttled log) and the SLA flags the
+                        # mark stale once the last good price is older than
+                        # ``stale_after_seconds`` — the watchdog runs every 60 s,
+                        # so the book never hides a dead feed for a bar cycle.
                     else:
                         leg.last_quote_error = None
             else:
@@ -1442,11 +1519,10 @@ class OptionsBridge:
                 bar_date=self._bar_dt.date() if self._bar_dt else None,
                 expiry=structure.expiry,
             )
-            if (
-                decision is not None
-                and getattr(decision, "reason", None) in ("stop_loss", "target")
-                and (structure.mtm_failures > 0 or structure.is_mark_stale(self.stale_after_bars))
-            ):
+            price_exit = decision is not None and getattr(
+                decision, "reason", None
+            ) in ("stop_loss", "target")
+            if price_exit and self._mark_untrusted(structure):
                 self._log_mtm_failure_throttled(
                     f"{self.underlying}:risk_exit",
                     f"price-driven {decision.reason} suppressed on {self.underlying} "
