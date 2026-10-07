@@ -59,6 +59,13 @@ from typing import Any, Deque, Iterable, Optional
 
 from backtest.data.sources_policy import SourceDisabledError, synthetic_chain_generator
 from backtest.options.execution_gate import (
+    REASON_EXPIRY_TOO_NEAR,
+    REASON_NO_CONTRACT,
+    REASON_NO_EXPIRY,
+    REASON_NO_FRESH_QUOTE,
+    REASON_NO_LOT_SIZE,
+    REASON_NO_STRIKE,
+    ContractValidityError,
     V1_ALLOWED_STRUCTURES,
     check_structure_type,
 )
@@ -234,8 +241,8 @@ class OptionsBridge:
         #: always picked the NEAREST expiry, so a structure spawned on expiry
         #: day was cash-settled on the very next bar (instant churn). With
         #: ``expression["expiry_min_days"] = N`` entry selects the nearest
-        #: expiry at least N days out (falls back to nearest when none
-        #: qualify, so the knob can never block trading entirely).
+        #: expiry at least N days out; a calendar that offers none halts the
+        #: entry with EXPIRY_BELOW_MIN_DAYS rather than trading the near one.
         try:
             self.expiry_min_days: int = max(0, int(self.expression.get("expiry_min_days", 0) or 0))
         except (TypeError, ValueError):
@@ -1624,15 +1631,20 @@ class OptionsBridge:
             # Custom generators may not accept ``reference`` — keep working.
             expiries = generator.available_expiries(underlying)
             reference = None
-        # expiry_min_days (2026-09-24): skip expiries too close to the bar
-        # clock so an entry on expiry day rides the NEXT expiry instead of
-        # being settled one bar after it opens. Unfiltered fallback keeps
-        # trading alive on calendars that cannot satisfy the knob.
+        # expiry_min_days (2026-09-24): skip expiries too close to the bar clock
+        # so an entry on expiry day does not get settled one bar after it opens.
+        # A calendar that cannot satisfy the knob is a halt, not a licence to
+        # trade the too-near expiry anyway (PRD §4.2 — no substitution).
         if self.expiry_min_days and reference is not None:
             cutoff = reference + timedelta(days=self.expiry_min_days)
             filtered = [e for e in expiries if e >= cutoff]
-            if filtered:
-                expiries = filtered
+            if not filtered:
+                raise ContractValidityError(
+                    REASON_EXPIRY_TOO_NEAR,
+                    f"{underlying}: no expiry at least {self.expiry_min_days} days out "
+                    f"on {reference} (calendar offers {expiries})",
+                )
+            expiries = filtered
         return NearestExpiryPolicy().select_expiry(expiries, reference_date=reference)
 
     def _entry_dte_block(self) -> Optional[dict[str, Any]]:
@@ -1648,6 +1660,11 @@ class OptionsBridge:
         generator = self._generator()
         try:
             expiry = self._select_expiry(generator, self.underlying)
+        except ContractValidityError as exc:
+            # A calendar that cannot satisfy expiry_min_days halts the entry —
+            # reporting would otherwise swallow it and the trade would go out on
+            # a contract the exit rule closes on the next bar.
+            return {"rejected": True, "reason": str(exc)}
         except Exception:  # noqa: BLE001 — never block on a calendar hiccup
             return None
         if expiry is None:
@@ -1837,7 +1854,11 @@ class OptionsBridge:
 
         expiry = self._select_expiry(generator, underlying)
         if expiry is None:
-            raise ValueError(f"no available expiry for {underlying}")
+            raise ContractValidityError(
+                REASON_NO_EXPIRY,
+                f"{underlying}: the chain exposes no expiry as of "
+                f"{self._bar_dt.date() if self._bar_dt else 'today'}",
+            )
         if option_type == "BOTH":
             # Two-sided structure (e.g. short strangle): build a nested
             # {strike: {"CE": c, "PE": c}} map — the flat shape cannot hold
@@ -1867,12 +1888,17 @@ class OptionsBridge:
 
         strikes = self._pick_strikes(structure_type, spot, chain, view.direction)
         if not strikes:
-            raise ValueError("no suitable strike found in the chain")
-
+            raise ContractValidityError(
+                REASON_NO_STRIKE,
+                f"{underlying}: no strike on the {expiry} chain within tolerance of {spot}",
+            )
+        self._validate_entry_contracts(strikes, chain, option_type)
         intent = structure.build(view, strikes, chain, expiry, strategy_name=strategy_name)
         quantity = int(self.expression.get("quantity", 1) or 1)
         if quantity > 1:
             intent = self._scale_intent(intent, quantity)
+
+        self._validate_entry_intent(intent)
 
         try:
             positions = self.option_broker.execute_structure(intent, self.quote_provider)
@@ -1908,6 +1934,69 @@ class OptionsBridge:
             "positions": len(positions),
             "direction": view.direction.value,
         }
+
+    def _validate_entry_contracts(
+        self, strikes: list[Any], chain: Any, option_type: str
+    ) -> None:
+        """The strikes the selector picked must name chain contracts with real terms.
+
+        Checked before the intent is built: a leg with no lot size cannot even be
+        constructed, and a guessed lot would size the premium outlay and every
+        rupee stop in the book off a number the exchange never published.
+        """
+        for strike in strikes:
+            contract = chain.get(strike)
+            if option_type == "BOTH":
+                contract = (contract or {}).get("CE") or (contract or {}).get("PE")
+            if contract is None:
+                raise ContractValidityError(
+                    REASON_NO_CONTRACT,
+                    f"{self.underlying} {strike}: the chain has no contract at this strike",
+                )
+            if int(getattr(contract, "lot_size", 0) or 0) <= 0:
+                raise ContractValidityError(
+                    REASON_NO_LOT_SIZE,
+                    f"{getattr(contract, 'trading_symbol', strike)}: the chain row "
+                    "carries no lot size — refusing to guess one",
+                )
+
+    def _validate_entry_intent(self, intent: Any) -> None:
+        """Ask the market, right now, whether every leg is still quotable.
+
+        A fill off whatever the provider's TTL cache happened to hold is not a
+        decision — a dead broker session answers with zeros that a cache happily
+        replays until the row expires (§4.2).
+        """
+        for leg in intent.legs:
+            token = str(getattr(leg, "instrument_token", "") or "")
+            symbol = str(getattr(leg, "trading_symbol", "") or "")
+            self._require_fresh_quote(
+                token or symbol, str(getattr(leg, "side", "BUY") or "BUY")
+            )
+
+    def _require_fresh_quote(self, token: str, side: str) -> None:
+        """Re-read one leg's quote at decision time instead of filling off a cache.
+
+        ``invalidate`` first: a row that is minutes old is no evidence the market
+        still offers that price, and a dead broker session answers with zeros
+        that a TTL cache happily replays.
+        """
+        invalidate = getattr(self.quote_provider, "invalidate", None)
+        if callable(invalidate):
+            invalidate(token)
+        reader = getattr(self.quote_provider, "execution_quote", None)
+        if callable(reader):
+            # NoExecutableQuoteError when there is no side to cross against is
+            # already a coded halt — let it stand rather than rename it.
+            quote = reader(token, side)
+        else:
+            quote = self.quote_provider.get_quote(token)
+        if not quote or quote.get("error") or float(quote.get("ltp") or 0.0) <= 0:
+            reason = (quote or {}).get("error") or "empty row or zero ltp"
+            raise ContractValidityError(
+                REASON_NO_FRESH_QUOTE,
+                f"{token}: no quote to {side} against ({reason})",
+            )
 
     def _pick_strikes(
         self,

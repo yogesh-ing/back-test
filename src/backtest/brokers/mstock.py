@@ -935,7 +935,16 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                     return default
                 return value if value == value else default  # NaN check
 
-            lot_size = int(_num("lot_size", _num("contract_size", 50.0)))
+            # Lot size comes from the master or nothing. Guessing one would size
+            # the position (and every stop in rupees) off a number the exchange
+            # never published for this contract.
+            lot_size = int(_num("lot_size", _num("contract_size", 0.0)))
+            if lot_size <= 0:
+                logger.warning(
+                    "option contract %s has no lot size on the instrument master — skipped",
+                    symbol,
+                )
+                return None
             tick = Decimal(str(_num("tick_size", 0.05)))
 
             return OptionContract(

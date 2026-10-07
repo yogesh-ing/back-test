@@ -49,10 +49,31 @@ REASON_STRUCTURE_TYPE = "STRUCTURE_NOT_IN_V1"
 REASON_LEG_COUNT = "MULTI_LEG_NOT_IN_V1"
 REASON_LEG_SIDE = "SHORT_OPTION_NOT_IN_V1"
 REASON_OPTION_SIDE = "OPTION_SIDE_MISMATCH"
+#: Contract validity at the decision (§4.2: halt with an explicit reason, never
+#: substitute a contract, a lot size, or a quote the market is not offering).
+REASON_NO_EXPIRY = "NO_EXPIRY_ON_CALENDAR"
+REASON_EXPIRY_TOO_NEAR = "EXPIRY_BELOW_MIN_DAYS"
+REASON_NO_CONTRACT = "NO_CHAIN_CONTRACT"
+REASON_NO_STRIKE = "NO_STRIKE_IN_TOLERANCE"
+REASON_NO_LOT_SIZE = "NO_CHAIN_LOT_SIZE"
+REASON_NO_FRESH_QUOTE = "NO_FRESH_QUOTE"
 
 
 class StructureNotAllowedError(ValueError):
     """An intent the execution gate refuses. Carries its rejection ``reason``."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"{reason}: {detail}")
+        self.reason = reason
+        self.detail = detail
+
+
+class ContractValidityError(ValueError):
+    """The contract the entry would trade is not a valid one — refuse it.
+
+    Same shape as :class:`StructureNotAllowedError` so a soak counts rejection
+    classes off ``reason`` rather than off log text.
+    """
 
     def __init__(self, reason: str, detail: str) -> None:
         super().__init__(f"{reason}: {detail}")
