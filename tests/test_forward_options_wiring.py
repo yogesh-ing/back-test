@@ -16,6 +16,8 @@ from backtest.forward.options_bridge import DEFAULT_EXPRESSION, OptionsBridge
 from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRunner
 from backtest.forward.portfolio_manager import PortfolioManager
 from backtest.forward.risk_supervisor import GlobalRiskConfig
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
+from options_support import research_profile
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +113,7 @@ class TestOptionRunnerFlow:
     def _runner(self, config=None):
         runner = StrategyRunner(config or _option_config(), ledger=OrderLedger())
         runner.start()
+        research_profile(runner)
         return runner
 
     def test_rally_opens_bull_call_spread(self):
@@ -217,7 +220,10 @@ class TestCoexistence:
             auto_start_feed=False,
         )
         try:
+            # bull call spread book: the V1 gate refuses it, so widen the runner
+            # before any bar reaches it (entry is refused on the first signal).
             opt_id = manager.add_runner(_option_config(), start=True)
+            research_profile(manager.get_runner(opt_id))  # bull call spread book
             eq_id = manager.add_runner(
                 RunnerConfig(
                     name="eq-runner", strategy_name="sma_crossover",
@@ -246,18 +252,19 @@ class TestCoexistence:
 
 class TestOptionsBridge:
     def test_default_expression_is_direction_aware(self):
-        assert DEFAULT_EXPRESSION["type"]["BULLISH"] == "bull_call_spread"
-        assert DEFAULT_EXPRESSION["type"]["BEARISH"] == "bear_put_spread"
+        assert DEFAULT_EXPRESSION["type"]["BULLISH"] == "long_call"
+        assert DEFAULT_EXPRESSION["type"]["BEARISH"] == "long_put"
 
     def test_none_view_is_a_noop(self):
-        bridge = OptionsBridge(capital=100_000)
+        bridge = OptionsBridge(capital=100_000, allowed_structures=RESEARCH_STRUCTURES)
         assert bridge.on_market_view(None, "s") is None
 
     def test_fixed_structure_type_overrides_direction(self):
         from backtest.strategy.intent import Direction, MarketView
 
         bridge = OptionsBridge(
-            capital=1_000_000, expression={"type": "long_put"}
+            capital=1_000_000, expression={"type": "long_put"},
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         view = MarketView(
             direction=Direction.BULLISH, confidence=0.9,
@@ -271,7 +278,7 @@ class TestOptionsBridge:
 
         from backtest.strategy.intent import Direction, MarketView
 
-        bridge = OptionsBridge(capital=1_000_000)
+        bridge = OptionsBridge(capital=1_000_000, allowed_structures=RESEARCH_STRUCTURES)
         view = MarketView(
             direction=Direction.BULLISH, confidence=0.9,
             underlying="NIFTY", spot_price=Decimal("25100"),

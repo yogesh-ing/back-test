@@ -55,9 +55,13 @@ import time
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Deque, Optional
+from typing import Any, Deque, Iterable, Optional
 
 from backtest.data.sources_policy import SourceDisabledError, synthetic_chain_generator
+from backtest.options.execution_gate import (
+    V1_ALLOWED_STRUCTURES,
+    check_structure_type,
+)
 from backtest.options.exit_policy import (
     EXIT_DTE,
     EXIT_MANUAL_STOP,
@@ -121,9 +125,14 @@ _STRICKES_NEEDED = {
 #: pricing input — premiums come from the quote provider).
 DEFAULT_RISK_FREE_RATE = 0.06
 
-#: Default expression: direction-aware spreads, ATM strikes, one lot.
+#: Default expression: direction-aware long premium, ATM strikes, one lot.
+#: V1 buys a call when bullish and a put when bearish — the same mapping the
+#: builder's ``direction_map`` compiles to. The bridge's STRUCTURES registry is
+#: deliberately wider (research profile); what it may *execute* is capped by
+#: ``allowed_structures`` (backtest/options/execution_gate.py). A research run
+#: that wants spreads passes the expression *and* the wider whitelist.
 DEFAULT_EXPRESSION: dict[str, Any] = {
-    "type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"},
+    "type": {"BULLISH": "long_call", "BEARISH": "long_put"},
     "strike_selection": "atm",
     "quantity": 1,
 }
@@ -144,6 +153,11 @@ class OptionsBridge:
         The quote feed has no ungated default: with ``quote_provider=None`` the
         bridge builds a synthetic Black-Scholes feed only while the data-source
         policy enables synthetic, and raises ``SourceDisabledError`` otherwise.
+    allowed_structures:
+        Execution-gate whitelist for this bridge (see
+        ``backtest/options/execution_gate.py``). Defaults to the V1 set: long
+        call / long put. The check runs here *and* again in the broker, so a
+        structure the contract forbids cannot open from either layer.
     """
 
     def __init__(
@@ -152,9 +166,17 @@ class OptionsBridge:
         expression: Optional[dict[str, Any]] = None,
         option_broker: Optional[OptionPaperBroker] = None,
         quote_provider: Optional[Any] = None,
+        allowed_structures: Optional[Iterable[str]] = None,
     ) -> None:
         self.expression: dict[str, Any] = {**DEFAULT_EXPRESSION, **(expression or {})}
-        self.option_broker = option_broker or OptionPaperBroker(capital=float(capital))
+        self.allowed_structures: frozenset[str] = frozenset(
+            allowed_structures
+            if allowed_structures is not None
+            else V1_ALLOWED_STRUCTURES
+        )
+        self.option_broker = option_broker or OptionPaperBroker(
+            capital=float(capital), allowed_structures=self.allowed_structures
+        )
         # Policy-gated feed construction (2026-09-30). This used to answer
         # ``quote_provider=None`` with a fresh Black-Scholes book AND attach a
         # generated chain to ANY provider that lacked a generator surface —
@@ -1723,6 +1745,7 @@ class OptionsBridge:
     def _execute(self, view: MarketView, structure_type: str, strategy_name: str) -> dict[str, Any]:
         from backtest.options.paper_trading import InsufficientMarginError
 
+        check_structure_type(structure_type, self.allowed_structures)
         structure, option_type = STRUCTURES[structure_type]
         underlying = str(view.underlying or "NIFTY")
         generator = self._generator()

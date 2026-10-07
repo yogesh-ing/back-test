@@ -26,6 +26,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Any, Protocol
 
+from backtest.options.execution_gate import V1_ALLOWED_STRUCTURES, check_intent
 from backtest.strategy.intent import (
     OptionLeg,
     TradeIntent,
@@ -370,6 +371,13 @@ class OptionPaperBroker:
         ``calculate_structure()`` on every execution, alongside the legacy
         ``commission_per_lot`` charge. Costs never block execution: a fee
         calculation error is logged and the trade proceeds.
+    allowed_structures:
+        Execution-gate whitelist (see
+        :mod:`backtest.options.execution_gate`). Defaults to the V1 set —
+        one long call or one long put — so a structure the V1 contract forbids
+        cannot fill here even when it arrives as a hand-built intent. A
+        research profile that genuinely needs spreads passes
+        ``RESEARCH_STRUCTURES`` explicitly.
     """
 
     def __init__(
@@ -380,6 +388,7 @@ class OptionPaperBroker:
         fee_calculator: Any | None = None,
         on_structure_opened: Any | None = None,
         on_structure_closed: Any | None = None,
+        allowed_structures: Any | None = None,
     ) -> None:
         self.capital = Decimal(str(capital))
         self.available_cash = Decimal(str(capital))
@@ -387,6 +396,11 @@ class OptionPaperBroker:
         self.commission_per_lot = Decimal(str(commission_per_lot))
         self.fee_calculator = fee_calculator
         self._statutory_fees_paid = ZERO
+        self.allowed_structures = frozenset(
+            allowed_structures
+            if allowed_structures is not None
+            else V1_ALLOWED_STRUCTURES
+        )
 
         # Gap G4.2 observers — fired after every state transition so the
         # persistence layer (or tests) can mirror the book. Exceptions in an
@@ -436,11 +450,15 @@ class OptionPaperBroker:
 
         Raises
         ------
+        StructureNotAllowedError
+            If the intent fails the execution gate (see ``allowed_structures``).
         InsufficientMarginError
             If available cash is insufficient for the net debit.
         LotSizeValidationError
             If any leg has invalid lot size.
         """
+        check_intent(intent, self.allowed_structures)
+
         ts = timestamp or datetime.utcnow()
 
         # Validate lot sizes

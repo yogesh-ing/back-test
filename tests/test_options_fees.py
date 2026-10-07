@@ -27,6 +27,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.paper_trading import OptionPaperBroker
 from backtest.simulator import (
     BrokerProfile,
@@ -407,6 +408,7 @@ class TestOptionPaperBrokerFeeIntegration:
             capital=500_000.0,
             commission_per_lot=0.0,  # isolate the fee-calculator path
             fee_calculator=fee_calculator,
+            allowed_structures=RESEARCH_STRUCTURES,
         )
 
     def _quote_provider(self, ltp: str = "120.50"):
@@ -415,7 +417,7 @@ class TestOptionPaperBrokerFeeIntegration:
         return provider
 
     def test_fee_calculator_is_optional_and_backward_compatible(self):
-        broker = OptionPaperBroker(capital=100_000.0, commission_per_lot=0.0)
+        broker = OptionPaperBroker(capital=100_000.0, commission_per_lot=0.0, allowed_structures=RESEARCH_STRUCTURES)
         assert broker.fee_calculator is None
         # A structure still executes exactly as before.
         from backtest.strategy.intent import Direction, MarketView, OptionLeg, TradeIntent

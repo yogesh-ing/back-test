@@ -52,6 +52,7 @@ from typing import Any
 
 from backtest.brokers.base import BrokerOrder, BrokerOrderId
 from backtest.brokers.mstock import MStockBroker, MStockOrderError
+from backtest.options.execution_gate import V1_ALLOWED_STRUCTURES, check_intent
 from backtest.strategy.intent import TradeIntent, OptionLeg
 
 logger = logging.getLogger("backtest.options.live_trading")
@@ -165,6 +166,11 @@ class LiveOptionTrader:
         How often to poll for order status updates.
     poll_timeout_seconds:
         Max time to wait for all legs to fill before giving up.
+    allowed_structures:
+        Execution-gate whitelist (see
+        :mod:`backtest.options.execution_gate`). Defaults to the V1 set, checked
+        before any broker call — a short-option or multi-leg intent never
+        reaches ``place_order`` here, whatever built it.
     """
 
     def __init__(
@@ -175,6 +181,7 @@ class LiveOptionTrader:
         poll_interval_seconds: float = 2.0,
         poll_timeout_seconds: float = 60.0,
         confirm_live: bool = False,
+        allowed_structures: Any | None = None,
     ) -> None:
         # Fail-closed arming (see module docstring): live orders require ALL
         # THREE gates. Any gate missing raises BEFORE any broker call — the
@@ -221,6 +228,11 @@ class LiveOptionTrader:
         self.retry = retry_config or RetryConfig()
         self.poll_interval = poll_interval_seconds
         self.poll_timeout = poll_timeout_seconds
+        self.allowed_structures = frozenset(
+            allowed_structures
+            if allowed_structures is not None
+            else V1_ALLOWED_STRUCTURES
+        )
 
         # Tracking
         self._results: dict[str, StructureResult] = {}
@@ -249,7 +261,14 @@ class LiveOptionTrader:
         Returns
         -------
         ``StructureResult`` with per-leg outcomes.
+
+        Raises
+        ------
+        StructureNotAllowedError
+            If the intent fails the execution gate — before any broker call.
         """
+        check_intent(intent, self.allowed_structures)
+
         ts = timestamp or datetime.utcnow()
         structure_id = str(uuid.uuid4())
 

@@ -43,9 +43,11 @@ from backtest.forward.paper_runner import (
     RunnerConfig,
     StrategyRunner,
 )
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.exit_policy import EXIT_MANUAL_STOP, EXIT_MANUAL_TARGET
 from backtest.simulator.execution import free_executor
 from backtest.strategy.intent import Direction, MarketView
+from options_support import research_profile
 
 BASE_DAY = date(2026, 9, 10)  # mid-month: no expiry rule fires by accident
 
@@ -93,6 +95,7 @@ def _equity_runner(**overrides) -> StrategyRunner:
     kwargs.update(overrides)
     runner = StrategyRunner(RunnerConfig(**kwargs), ledger=OrderLedger())
     runner.start()
+    research_profile(runner)
     return runner
 
 
@@ -129,6 +132,7 @@ def _option_runner(**overrides) -> StrategyRunner:
     kwargs.update(overrides)
     runner = StrategyRunner(RunnerConfig(**kwargs), ledger=OrderLedger())
     runner.start()
+    research_profile(runner)
     return runner
 
 
@@ -495,7 +499,7 @@ class TestOptionStructureControl:
     def test_no_implied_vol_means_no_invented_greeks(self):
         """Greeks need a vol: use the chain's when there is one, and report
         nothing (not zeros) when there is not."""
-        bridge = OptionsBridge(capital=100_000)
+        bridge = OptionsBridge(capital=100_000, allowed_structures=RESEARCH_STRUCTURES)
 
         class Leg:
             instrument_token = "MISSING"
@@ -510,7 +514,7 @@ class TestOptionStructureControl:
         assert bridge._leg_vol(Known()) == pytest.approx(0.12)
 
     def test_the_bridge_refuses_levels_with_nothing_open(self):
-        bridge = OptionsBridge(capital=100_000)
+        bridge = OptionsBridge(capital=100_000, allowed_structures=RESEARCH_STRUCTURES)
         with pytest.raises(ValueError):
             bridge.set_manual_rule(stop_loss=10.0)
 
@@ -1263,6 +1267,7 @@ class TestAutoRetry:
         kwargs.update(overrides)
         runner = StrategyRunner(RunnerConfig(**kwargs), ledger=OrderLedger())
         runner.start()
+        research_profile(runner)
         return runner
 
     def test_a_policy_is_off_by_default(self):

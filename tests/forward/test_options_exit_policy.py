@@ -22,6 +22,7 @@ import pytest
 
 from backtest.forward.options_bridge import OptionsBridge
 from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRunner
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.exit_policy import (
     EXIT_DTE,
     EXIT_SIGNAL_FLIP,
@@ -37,6 +38,7 @@ from backtest.options.quote_providers import (
     SyntheticQuoteProvider,
 )
 from backtest.strategy.intent import Direction, MarketView
+from options_support import research_profile
 
 EXPIRY = date(2027, 1, 28)  # far from any bar used here, unless the test says otherwise
 
@@ -76,6 +78,7 @@ def _bridge(expression: dict | None = None, capital: float = 1_000_000.0) -> Opt
         capital=capital,
         expression=expression or {"type": "long_call"},
         quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+        allowed_structures=RESEARCH_STRUCTURES,
     )
 
 
@@ -100,6 +103,7 @@ def _runner(exit_cfg: dict, expression_extra: dict | None = None, **overrides):
     kwargs.update(overrides)
     runner = StrategyRunner(RunnerConfig(**kwargs), ledger=OrderLedger())
     runner.start()
+    research_profile(runner)
     return runner
 
 

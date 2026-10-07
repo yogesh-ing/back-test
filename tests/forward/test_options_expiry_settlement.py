@@ -32,6 +32,7 @@ import pytest
 
 from backtest.forward.options_bridge import OptionsBridge
 from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRunner
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.exit_policy import EXIT_DTE
 from backtest.options.expiry import EXIT_REASON_SETTLEMENT
 from backtest.options.paper_trading import PositionStatus
@@ -40,6 +41,7 @@ from backtest.options.quote_providers import (
     SyntheticQuoteProvider,
 )
 from backtest.strategy.intent import Direction, MarketView
+from options_support import research_profile
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +82,7 @@ def _ride_to_settlement_bridge(capital: float = 1_000_000.0) -> OptionsBridge:
             "exit": {"min_days_to_expiry": None, "signal_flip": False},
         },
         quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+        allowed_structures=RESEARCH_STRUCTURES,
     )
 
 
@@ -107,6 +110,7 @@ def _runner(**expression_exit):
         ledger=OrderLedger(),
     )
     runner.start()
+    research_profile(runner)
     return runner
 
 
@@ -220,6 +224,7 @@ class TestExpirySettlement:
             capital=1_000_000.0,
             expression={"type": "long_call", "exit": {"signal_flip": False}},
             quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         structure = _open_at_bar(bridge, date(2026, 9, 2))
         expiry = structure.expiry
@@ -266,6 +271,7 @@ class TestRoll:
                 "exit": {"min_days_to_expiry": None, "signal_flip": False},
             },
             quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         first = _open_at_bar(bridge, date(2026, 9, 2))
         first_id, first_expiry = first.structure_id, first.expiry

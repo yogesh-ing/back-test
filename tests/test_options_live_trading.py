@@ -23,6 +23,7 @@ import pytest
 
 from backtest.brokers.base import BrokerOrder, BrokerOrderId
 from backtest.brokers.mstock import MStockBroker, MStockOrderError
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.strategy.intent import (
     Direction,
     MarketView,
@@ -101,6 +102,13 @@ def _make_mock_broker() -> MStockBroker:
     broker._session_token = "test_token"
     broker._expires_at = datetime(2099, 1, 1)
     return broker
+
+
+def _research_trader(broker, **kwargs) -> LiveOptionTrader:
+    """Trader widened to the research profile — the multi-leg mechanics tests
+    submit spreads, which the V1 execution gate refuses by design."""
+    kwargs.setdefault("allowed_structures", RESEARCH_STRUCTURES)
+    return LiveOptionTrader(broker=broker, **kwargs)
 
 
 def _make_filled_order(order_id: str = "ORD123") -> MagicMock:
@@ -216,8 +224,7 @@ class TestDryRun:
         broker.place_order.assert_not_called()
 
     def test_dry_run_records_leg_results(self):
-        broker = _make_mock_broker()
-        trader = LiveOptionTrader(broker=broker, dry_run=True)
+        trader = _research_trader(_make_mock_broker(), dry_run=True)
 
         intent = _make_bull_call_spread_intent()
         result = trader.execute_structure(intent)
@@ -344,7 +351,9 @@ class TestLiveExecutionSuccess:
             [_make_filled_order("ORD002")],
         ]
 
-        trader = LiveOptionTrader(broker=broker, dry_run=False, confirm_live=True, poll_timeout_seconds=1.0)
+        trader = _research_trader(
+            broker, dry_run=False, confirm_live=True, poll_timeout_seconds=1.0
+        )
         intent = _make_bull_call_spread_intent()
         result = trader.execute_structure(intent)
 
@@ -379,8 +388,10 @@ class TestLiveExecutionRollback:
             [_make_filled_order("ORD001")],  # leg 1 poll → filled
         ]
 
-        trader = LiveOptionTrader(
-            broker=broker, dry_run=False, confirm_live=True,
+        trader = _research_trader(
+            broker,
+            dry_run=False,
+            confirm_live=True,
             retry_config=RetryConfig(max_retries=1, base_delay_seconds=0.01),
             poll_timeout_seconds=1.0,
         )
@@ -498,8 +509,7 @@ class TestOrderPayload:
 class TestIntegrationDryRun:
     def test_full_workflow_dry_run(self):
         """T4.12: Execute a bull call spread in dry-run mode."""
-        broker = _make_mock_broker()
-        trader = LiveOptionTrader(broker=broker, dry_run=True)
+        trader = _research_trader(_make_mock_broker(), dry_run=True)
 
         intent = _make_bull_call_spread_intent()
         result = trader.execute_structure(intent)

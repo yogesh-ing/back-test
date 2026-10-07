@@ -34,6 +34,7 @@ from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRun
 from backtest.strategy.base import Strategy
 from backtest.strategy.intent import Direction, MarketView
 from backtest.strategy import registry as _registry
+from options_support import research_profile
 
 if "silent_option_fixture" not in _registry._REGISTRY:
 
@@ -143,6 +144,7 @@ def option_runner():
     """A runner with one **closed** structure and one **open** one."""
     runner = StrategyRunner(_option_runner_config(), ledger=OrderLedger())
     runner.start()
+    research_profile(runner)
 
     for bar in _bars([25_000, 25_010, 25_020, 25_030, 25_040]):
         runner.process_candle_event("NIFTY", bar)
@@ -182,6 +184,7 @@ def snapshots(option_runner, tmp_path):
         ledger=OrderLedger(),
     )
     equity.start()
+    research_profile(equity)
     for bar in _bars([1_400, 1_410, 1_420]):
         bar = dict(bar, ts=bar["ts"].replace("2026-10-01", "2026-10-01"))
         equity.process_candle_event("RELIANCE", bar)
@@ -468,6 +471,7 @@ def test_live_api_payload_renders_option_columns(api_client, tmp_path):
     iid = created.get_json()["instance_id"]
 
     runner = get_portfolio_manager().get_runner(iid)
+    research_profile(runner)  # bull call spread: widen before the first bar
     for bar in _bars([25_000, 25_010, 25_020, 25_030, 25_040]):
         runner.process_candle_event("NIFTY", bar)
     bridge = runner.options_bridge

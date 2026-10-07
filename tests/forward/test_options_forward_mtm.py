@@ -32,11 +32,13 @@ from backtest.forward.paper_runner import (
     RunnerConfig,
     StrategyRunner,
 )
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.quote_providers import (
     SyntheticChainGenerator,
     SyntheticQuoteProvider,
 )
 from backtest.strategy.intent import Direction, MarketView
+from options_support import research_profile
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +99,8 @@ def _option_config(**overrides):
 def _running_option_runner(**overrides):
     runner = StrategyRunner(_option_config(**overrides), ledger=OrderLedger())
     runner.start()
+    # These tests mark a two-leg bull call spread; the V1 gate would refuse it.
+    research_profile(runner)
     return runner
 
 
@@ -122,7 +126,7 @@ def open_structure_runner():
 
 class TestBridgeOnBar:
     def test_no_open_structure_is_a_noop(self):
-        bridge = OptionsBridge(capital=1_000_000)
+        bridge = OptionsBridge(capital=1_000_000, allowed_structures=RESEARCH_STRUCTURES)
         assert bridge.on_bar("NIFTY", 24800.0, "2026-09-15T09:15:00") is None
 
     def test_entry_bar_starts_at_zero_pnl(self):
@@ -234,6 +238,7 @@ class TestBarClockTheta:
             capital=1_000_000,
             expression={"type": "long_call"},
             quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         view = MarketView(
             direction=Direction.BULLISH,
@@ -398,6 +403,7 @@ class TestEquityRunnersUnaffected:
         )
         runner = StrategyRunner(config, ledger=OrderLedger())
         runner.start()
+        research_profile(runner)
         for bar in _bars(RISING):
             runner.process_candle_event("NIFTY", bar)
 
@@ -419,6 +425,7 @@ class TestEquityRunnersUnaffected:
         )
         runner = StrategyRunner(config, ledger=OrderLedger())
         runner.start()
+        research_profile(runner)
         for bar in _bars(RISING):
             runner.process_candle_event("NIFTY", bar)
         assert runner.equity() == float(runner.portfolio.calculate_total_equity())
@@ -468,7 +475,7 @@ class TestMtmStalenessObservability:
         # 1. Open a structure on bridge1 with numeric token "49228"
         broker1 = _LiveBroker({"NIFTY261024800CE": 120.0})
         provider1 = LiveChainProvider(broker1)
-        bridge1 = OptionsBridge(capital=500_000, quote_provider=provider1)
+        bridge1 = OptionsBridge(capital=500_000, quote_provider=provider1, allowed_structures=RESEARCH_STRUCTURES)
         from backtest.options.paper_trading import OptionPosition, StructurePosition
 
         leg = OptionPosition(
@@ -502,7 +509,7 @@ class TestMtmStalenessObservability:
         # 2. Simulate process restart: fresh LiveChainProvider (empty registry)
         broker2 = _LiveBroker({"NIFTY261024800CE": 165.0})
         provider2 = LiveChainProvider(broker2)
-        bridge2 = OptionsBridge(capital=500_000, quote_provider=provider2)
+        bridge2 = OptionsBridge(capital=500_000, quote_provider=provider2, allowed_structures=RESEARCH_STRUCTURES)
         restore_bridge(bridge2, snap)
 
         # 3. First bar after resume refreshes leg marks from live quotes
@@ -576,6 +583,7 @@ class TestMtmStalenessObservability:
         """
         runner = StrategyRunner(_option_runner_config(), ledger=OrderLedger())
         runner.start()
+        research_profile(runner)
         for bar in _bars(RISING[:4]):
             runner.process_candle_event("NIFTY", bar)
         assert runner.options_bridge is not None
@@ -681,6 +689,7 @@ class TestMtmStalenessObservability:
             iid = pm.add_runner(_option_runner_config(name="WD-NIFTY"))
             runner = pm.get_runner(iid)
             runner.start()
+            research_profile(runner)
             bridge = runner.options_bridge
             assert bridge is not None
 
@@ -763,6 +772,7 @@ class TestMtmStalenessObservability:
             iid = pm.add_runner(_option_runner_config(name="MANUAL-REFRESH"))
             runner = pm.get_runner(iid)
             runner.start()
+            research_profile(runner)
             bridge = runner.options_bridge
             broker = _CountingBroker()
             provider = LiveChainProvider(broker)
@@ -905,6 +915,7 @@ class TestMtmStalenessObservability:
             iid = pm.add_runner(_option_runner_config(name="OFF-HOURS"))
             runner = pm.get_runner(iid)
             runner.start()
+            research_profile(runner)
             bridge = runner.options_bridge
             spy = _SpyBroker()
             bridge.quote_provider = LiveChainProvider(spy)
@@ -962,6 +973,7 @@ class TestMtmStalenessObservability:
                 "quantity": 1,
                 "exit": {"stop_loss_pct": 0.20},
             },
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         bridge.on_bar("NIFTY", 25_000.0, "2026-10-01T09:15:00")
         bridge.on_market_view(_bull_view(25_000.0), "test")
@@ -1004,6 +1016,7 @@ class TestMtmStalenessObservability:
         """
         runner = StrategyRunner(_option_runner_config(), ledger=OrderLedger())
         runner.start()
+        research_profile(runner)
         for bar in _bars(RISING[:4]):
             runner.process_candle_event("NIFTY", bar)
 

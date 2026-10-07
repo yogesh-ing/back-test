@@ -1,6 +1,8 @@
 # PRD — Option strategy authoring and paper → live rollout
 
-**Version:** 2.0 (supersedes v1 of 2026-10-06) · **Status:** revised draft incorporating architect review R1; submitted for sign-off · **not an implementation authorization**
+**Version:** 2.1 (supersedes v2.0 of 2026-10-06) · **Status:** Phase 0 delivered 2026-10-07 (§1.1); sign-offs A and B granted; **Phase 1 authorized** (operator, 2026-10-07) — Phases 2–4 authorized only per gate exit (§5)
+
+**Revision note (v2.1).** Phase 0 contract audit executed against the code at `main` 063dbf2. Headline results: the paper/live decision-logic duplication feared in v2 §1 does **not** exist (one decision path already lives in `OptionsBridge`); but several capabilities the PRD described as "reuse these" were verified **not present** — the single order gateway, the engine-level structure whitelist, cross-the-spread paper fills, timestamp-based freshness SLA, no-substitute contract validity, and the append-only journal. These move from "audit assumptions" to "Phase 1 build list" (§1.1). `forward/execution_engine.py` is production-dead — the live seam is `OptionsBridge` called directly by `paper_runner`.
 
 **Revision note.** v2 changes from v1: exit mechanics specified (new decision 7); paper fill and mark policies specified; transaction cost model added; time authority and session calendar specified; all seven architecture decisions resolved or scoped to Phase 0 calibration; acceptance gates quantified; test matrix expanded (engine-level structure whitelist, version-bound live enablement, append-only journal, parallel paper/live decision diff, regulatory drift drills); Review-screen disclosures added; Pine import gate made CI-reproducible; sign-off split into three separable approvals.
 
@@ -12,19 +14,72 @@
 
 **B. V1 product contract** — this document, including the resolved decisions (§3) and execution semantics (§4). Approval of this document approves the contract.
 
-**C. Phase implementation authorization** — granted per phase at each gate exit (§5), never in advance. Approval of this document authorizes **Phase 0 only**.
+**C. Phase implementation authorization** — granted per phase at each gate exit (§5), never in advance. Approval of this document authorizes **Phase 0 only**. *(Recorded: A and B granted; Phase 0 delivered §1.1; Phase 1 authorized by the operator on 2026-10-07. Phases 2–4 remain gated.)*
 
 ---
 
 ## 1. Why this fits the current code
 
 - `templates/option_strategy_template.py` already expresses the separation: `generate_market_view(candles) -> MarketView | None` emits bullish/bearish conviction; the bridge owns chain, strike, structure and orders. Strategies must not import broker/data modules (`docs/STRATEGY-AUTHORING.md`).
-- `src/backtest/forward/options_bridge.py` and `src/backtest/forward/execution_engine.py` already form a forward execution seam. `src/backtest/playbooks/models.py` captures structure, strike, quantity and exit configuration; `src/backtest/options/{paper_trading,live_trading}.py` own the two execution paths. Reuse these; do not invent a parallel order stack.
+- **Decision seam (corrected in v2.1):** `src/backtest/forward/options_bridge.py` is the seam — it is called directly by the paper runner and owns both entry decisions (`on_market_view`, `options_bridge.py:274`) and exit decisions (`on_bar`, `options_bridge.py:757`). `src/backtest/forward/execution_engine.py` exists but is **production-dead**: nothing on the options path calls it. `src/backtest/playbooks/models.py` captures structure, strike, quantity and exit configuration; `src/backtest/options/{paper_trading,live_trading}.py` are the two execution adapters. **Reuse the bridge; do not invent a parallel order stack, and do not revive `execution_engine.py`.**
 - **Portfolio is common to every strategy and instrument.** Equity and option fills feed the existing portfolio/segment accounting and risk controls, preserving paper/live capital boundaries. Options may carry instrument-specific execution state, but not a second authoritative portfolio, capital pool, or risk total. The portfolio exposes consolidated cash, realized/unrealized P&L, exposure and emergency flatten across equity and options; each instrument's execution book reconciles into that shared view.
 - `docs/OPTIONS-FORWARD-TESTING.md` records the forward plumbing as done, **but** `docs/OPTIONS-PAPER-LIVE.md` says broker-data paper runs have not been restarted after the 2026-09-30 wipe. **Code completion is not operational proof.**
 - Historical options backtests are disabled (`docs/OPTIONS-BACKTEST-PRD.md`, `src/backtest/api/backtest.py`): the DB lacks historical chains. No option backtest will be advertised and no synthetic-chain P&L will be shown as evidence of edge.
 - The Pine converter is intentionally limited: v5/v6 subset; indicator scripts are not orders; persistent `var` / `:=` logic is rejected; the validate endpoint returns `SYNTAX_ONLY` without an engine. Launch is not coupled to arbitrary Pine conversion.
-- **Added in v2:** Phase 0's first audit item is whether `paper_trading.py` and `live_trading.py` duplicate decision logic. If they do, deduplication into a single decision path is a Phase 1 prerequisite, not a parallel workstream.
+- **Phase 0 dedup audit — verdict (was v2's open item):** `paper_trading.py` and `live_trading.py` do **not** duplicate decision logic. Both are thin adapters that execute a structure the bridge already chose; every entry/exit decision is made once in `OptionsBridge` (`on_market_view` `options_bridge.py:274`, `on_bar` `options_bridge.py:757`) via `ExitPolicy.evaluate` (`options/exit_policy.py:294`). **No dedup prerequisite.** The remaining gap is the *gateway around* that decision path, not a second copy of it (§1.1).
+
+### 1.1 Phase 0 audit findings (delivered 2026-10-07, against `main` 063dbf2)
+
+Each §1 / §3 / §4 claim checked against code. "Present" means the mechanism exists **and is on the options execution path**; otherwise it is listed as Phase 1 build work.
+
+| # | PRD claim | Verdict | Evidence / gap |
+|---|---|---|---|
+| 1 | One decision path | ✅ **Present** | `OptionsBridge.on_market_view:274` + `on_bar:757`; adapters do not decide. §3.1 prerequisite satisfied. |
+| 2 | Single order gateway holding portfolio ledger + restart reconciliation | ❌ **Not present** | Runner constructs `OptionsBridge` directly (`forward/paper_runner.py:1095`) and calls the adapters; no gateway layer exists. **Build.** |
+| 3 | Engine-level structure whitelist (long CE / long PE only) | ❌ **Not present** | `STRUCTURES` accepts `bull_call_spread`, `bear_put_spread` and `strangle` → `ShortStrangle()` (`options_bridge.py:100-109`), i.e. **short-option intents are executable today**. `DEFAULT_EXPRESSION` itself maps to spreads (`options_bridge.py:125-129`). **Build — §6 forged-intent tests.** |
+| 4 | Cross-the-spread paper fills (buy ask / sell bid), never LTP | ⚠️ **Built, opt-in — off by default** | `BidAskQuoteProvider` (`quote_providers.py:544`) does exactly this via `execution_quote`, but only when a book is explicitly wrapped; unwrapped books "fill at LTP exactly as before" (`:552`). Its `get_quote` is a **passthrough**, so MTM/Greeks/dashboards keep marking off LTP — §4.2's mark = bid is not in effect. It also **fail-opens to LTP** when bid/ask is missing/zero (`:554-556`), where §4.1 requires a halt. **Build: wrap by default on the runner path, mark off bid, fail closed.** |
+| 5 | Timestamp-based freshness SLA | ⚠️ **Partial — wrong clock** | A halt gate already exists (`paper_runner.py:2133-2147` blocks entries while `OptionsBridge.mark_stale`), but staleness is **failed-mark bar count** (`mark_stale` `options_bridge.py:551`, `OptionPosition/Structure.is_mark_stale` `paper_trading.py:124`/`:282`, `stale_after_bars`) — not elapsed exchange time. `mark_ts` (`options_bridge.py:544`, ISO-8601 of the last successful mark) is the right hook: keep the gate, change the metric to §8.1 thresholds. **Build.** |
+| 6 | No-substitute contract validity, chain-derived step / lot size | ⚠️ **Partial** | Entry has a real halt: `_entry_dte_block` refuses a structure the expiry rule would immediately close (`options_bridge.py:333`, `:1540`). But expiry *selection* still substitutes — when no expiry satisfies `expiry_min_days` it falls back to the unfiltered nearest (`:1529-1538`) — and there is no fresh-quote gate per selected strike with distinct rejection codes. **Build: remove the substitution, add per-strike fresh-quote gate + chain-derived step/lot.** |
+| 7 | Exit precedence: emergency > risk caps > DTE/session > stop/target/flip | ⚠️ **Wrong tiering** | `ExitPolicy._risk_decision` fires stop → target → **DTE last** (`exit_policy.py:345-382`), and there is **no risk-cap tier** inside it. `forward/execution_engine.py` (with `EXIT_PRECEDENCE`, `evaluate_emergency_exit`) is **production-dead** — only its own unit tests import it (`tests/engine/test_exit_precedence.py:101`, `:212`). **Build: move DTE above stop/target, add the risk-cap tier on the options path.** |
+| 8 | Append-only intent journal + idempotency | ❌ **Not present** | Options persistence covers trade structures/chain snapshots (`options/persistence.py`, `options/chain_snapshots.py`) — no append-only intent/fill journal, no idempotency key. **Build.** |
+| 9 | Blind-retry hazard | ❌ **Present defect** | `_submit_leg_with_retry` retries on any `MStockOrderError` (`live_trading.py:361-373`) without distinguishing "submit outcome unknown", violating §6 "never retry an uncertain order blindly". **Fix in #8.** |
+| 10 | Versioned statutory fee stack in paper **and** live | ⚠️ **Lives, but unwired for options** | `fees.py` implements the NSE stack for equities; the bridge builds its broker without a `fee_calculator` (`options_bridge.py:157`). **Wire + unit-test.** |
+| 11 | Portfolio is common across instruments | ⚠️ **Partial** | `paper_runner.flatten_all` does not close option structures (emergency flatten gap). **Build.** |
+| 12 | Re-entry default false | ⚠️ **Config exists, default differs** | `ExitPolicy.should_reenter` (`exit_policy.py:278`) honours `config.reenter`; verify the runner/builder default is `False`. **Verify in build.** |
+| 13 | Pine converter limits (§7) | ✅ **Present** | v5/v6 subset; `var` / `:=` rejected; validate endpoint syntax-only (`pine/api.py:96`). No change needed. |
+| 14 | No historical options backtests | ✅ **Present** | `CHAIN_SOURCES = ()` and the API gate hold; synthetic chain profiles stay test-only. |
+
+**Consequence for sequencing.** Phase 0 is complete as an audit; its deliverable is this table plus the Phase 1 build list below. Nothing in §3's *decisions* changes — only the §1 claim that most of the machinery is already on the path.
+
+**Traced seam (the §5 Phase 0 diagram, linear form):**
+
+```
+strategy.generate_market_view(df)            forward/paper_runner.py:2121
+  → OptionsBridge.on_market_view(view, name)  paper_runner.py:2164 → options_bridge.py:274
+      ├ expiry      _select_expiry (:1514)  + entry guard _entry_dte_block (:333/:1540)
+      ├ strike      ATMSelector / DeltaSelector (:83, options/selector.py)
+      ├ structure   STRUCTURES registry (:100)  ← whitelist target (§1.1 row 3)
+      └ TradeIntent/OptionLeg built (:1844)
+  → OptionPaperBroker.execute_structure(intent, quote_provider)  options_bridge.py:1779
+      → paper_trading.py:414          (paper adapter)        ‖ live_trading.py:232 (broker adapter)
+  → exit decisions, per bar           OptionsBridge.on_bar (:757) → ExitPolicy.evaluate (exit_policy.py:294)
+  → portfolio roll-up                 paper_runner.py:2823 (unrealized) / :2839 (premium at risk)
+```
+
+Two facts fall out of the trace. Entry and exit decisions are made in **one place** (the bridge) — §3.1's premise holds. And there is **no layer between the bridge and the adapters** that could hold the gateway duties of §3.1 (journal, idempotency, portfolio ledger, restart reconciliation): `paper_runner.py:1095` constructs the bridge and calls through to `execute_structure` directly. That absence, not duplicated logic, is Phase 1's real work.
+
+**Phase 1 build list (order is dependency order, not calendar):**
+
+1. Structure whitelist at the execution gate + forged-intent tests (#13 in the tracker). **Delivered 2026-10-07:** `src/backtest/options/execution_gate.py` is checked in `OptionsBridge._execute`, `OptionPaperBroker.execute_structure` and `LiveOptionTrader.execute_structure`, defaulting to `{long_call, long_put}`; `DEFAULT_EXPRESSION` now maps BULLISH→long_call / BEARISH→long_put; multi-leg mechanics are reachable only through an explicitly requested `RESEARCH_STRUCTURES` profile (synthetic backtest driver, research tests). Proofs: `tests/test_options_execution_gate.py`.
+2. Cross-the-spread fills + conservative mark policy wired into the paper runner path (#14).
+3. Timestamp freshness SLA replacing bar-count staleness for decisions (#15).
+4. No-substitute contract validity with chain-derived strike step and lot size (#16).
+5. Exit-precedence tiers corrected (risk caps added; DTE above stop/target) (#17).
+6. Append-only intent journal + idempotency keys; no blind retry on uncertain submit (#18).
+7. Statutory fee stack active in the options bridge, paper and live identically (#19).
+8. Single order gateway around the existing decision path; `flatten_all` closes option structures; re-entry default `False` proven (#20).
+
+Then, and only then, the §5 Phase 1 soak (≥ 20 trading days, ≥ 40 intents, ≥ 10 each CE and PE).
 
 ---
 
@@ -47,8 +102,8 @@ User chooses **NIFTY or BANKNIFTY**, a supported signal preset (initially EMA tr
 
 | # | Decision | Resolution |
 |---|---|---|
-| 1 | Authoritative seam | **One decision path** (signal → contract selection → risk → intent) with two execution adapters (paper simulator, broker) behind a single order gateway. Portfolio ledger and restart reconciliation live in the gateway, not the adapters. Phase 0 verifies no duplicated decision logic between `paper_trading.py` and `live_trading.py`; if found, dedup is a Phase 1 prerequisite. |
-| 2 | Structures | **Buy CE / buy PE only**, ATM, single expiry policy. Max loss per structure = premium paid + fees, full stop. No spreads, no short options, no multi-leg in V1 — each multiplies the failure matrix (SPAN/margin, leg-level partial fills, combo-vs-leg exit semantics) before basics are proven. |
+| 1 | Authoritative seam | **One decision path** (signal → contract selection → risk → intent) with two execution adapters (paper simulator, broker) behind a single order gateway. Portfolio ledger and restart reconciliation live in the gateway, not the adapters. **Phase 0 verdict: the single decision path already exists** in `OptionsBridge` (§1.1 row 1) — what is missing is the gateway around it, which is Phase 1 build work, not a dedup refactor. |
+| 2 | Structures | **Buy CE / buy PE only**, ATM strike (±1 ladder offset permitted by Amendment A-1, builder design doc §0 — same failure matrix, still one leg long premium), single expiry policy. Max loss per structure = premium paid + fees, full stop. No spreads, no short options, no multi-leg in V1 — each multiplies the failure matrix (SPAN/margin, leg-level partial fills, combo-vs-leg exit semantics) before basics are proven. |
 | 3 | Freshness / stale halt | Tiered mechanism decided now: **fresh → warn → halt new intents**; held positions marked conservatively (§4.3). Thresholds calibrated from Phase 0 measurements (§8). No valid expiry/strike (below min DTE, or no strike within tolerance of reference): **halt with explicit reason, never substitute.** |
 | 4 | Flip and stop units | Per §2.1: flip exits at market and waits for the next confirmed signal bar; neutral holds. Stops in premium %; targets premium multiple or underlying points; DTE as time stop. Fill-price reference: cross-the-spread execution price, logged. |
 | 5 | Live release gate | Fully numeric operational criteria plus parallel paper/live decision diff, executed kill-switch drill, ops runbook, two-person sign-off — §5 Phase 3. No Sharpe threshold. |
@@ -75,7 +130,7 @@ Dependency gates, not calendar promises. **Paper readiness precedes live; builde
 
 | Phase | Deliverable | Exit criterion / proof |
 |---|---|---|
-| **0. Contract audit & calibration** | Traced `MarketView → playbook → OptionsBridge → paper/live broker → portfolio` seam diagram; failure matrix; reproducible current-state tests; dedup verdict on paper/live decision logic; **measured** quote-latency distribution (REST vs websocket), broker API rate limits; proposed calibrated numbers for §8 | Architect-reviewed artifacts. No assumed readiness from docs. |
+| **0. Contract audit & calibration** *(delivered 2026-10-07 — §1.1)* | Traced `MarketView → playbook → OptionsBridge → paper/live broker → portfolio` seam; failure matrix; dedup verdict on paper/live decision logic; **measured** quote-latency distribution (REST vs websocket), broker API rate limits; proposed calibrated numbers for §8 | Architect-reviewed artifacts. No assumed readiness from docs. **Delivered verdict:** decision path single ✅, gateway/whitelist/fills/SLA/journal ❌ → Phase 1 build list (§1.1). Quote-latency and rate-limit measurement is the remaining §8 item and runs during the Phase 1 soak. |
 | **1. Paper reliability** | Real broker-sourced chains/quotes in paper; contract/lot verification; fills/rejections; independent MTM and close/expiry accounting; restart recovery; segment risk; fee model live | **(a)** ≥ 20 consecutive trading days of market-hours soak spanning ≥ 1 full expiry cycle per underlying. **(b)** ≥ 40 executed intents, both CE and PE represented (≥ 10 each). **(c)** 100% intent→fill→journal reconciliation; zero unexplained cash breaks above fee-rounding tolerance (§8); zero unrecovered restarts. **(d)** Every failure class observed or injected ≥ 1×: stale-feed halt-and-recover, broker reject, partial fill, restart mid-position, expiry-day square-off, competing runners on one segment, funds-insufficiency reject, **lot-size change drill**, **expiry-calendar change drill**. **(e)** Slippage report: realized paper fills vs decision-snapshot mid, distribution by exit reason. Stale/missing data halts rather than simulates. |
 | **2. Guided builder MVP** | Typed config, exact rule preview, supported preset → `MarketView`, linked versioned playbook, draft and paper launch | Golden-bar signal tests; draft and paper produce identical rules; unsupported combinations rejected; **structure whitelist at the execution gate proven against forged short/multi-leg intents**; preview disclosures (§2.4) render; no live button enabled by a syntax-only check. |
 | **3. Live controlled rollout** | Same signal/playbook contract on the broker-backed adapter; manual enable, 1 lot, kill switch | **All of:** broker sandbox order-state machine tests passing (ack/fill/partial/reject/timeout/duplicate/restart); **parallel paper/live decision diff over the pilot with zero divergences** (any divergence is a release blocker); pilot capped at 1 lot per runner with daily-loss circuit breaker; **kill-switch drill executed** — including restart mid-position and emergency flatten — not merely documented; ops runbook exists (break-glass, incident classes, escalation); two-person sign-off recorded in the audit journal; **live enablement bound to the exact (signal config version, playbook version, engine version) tuple — any bump resets live evidence to paper-only.** |

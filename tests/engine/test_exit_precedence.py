@@ -17,6 +17,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from backtest.forward.options_bridge import OptionsBridge
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.exit_policy import ExitConfig, ExitPolicy
 from backtest.options.paper_trading import OptionPaperBroker
 from backtest.options.quote_providers import SyntheticChainGenerator, SyntheticQuoteProvider
@@ -37,8 +38,10 @@ def _view(direction, underlying="NIFTY", spot=25000):
 def _bridge_with_config(exit_cfg, capital=1000000):
     gen = SyntheticChainGenerator()
     provider = SyntheticQuoteProvider(chain_generator=gen)
-    broker = OptionPaperBroker(capital=capital)
-    return OptionsBridge(capital=capital, expression={"type": "bull_call_spread", "strike_selection": "atm", "quantity": 1, "exit": exit_cfg}, option_broker=broker, quote_provider=provider)
+    # Re-entry is exercised on a two-leg spread, which the V1 execution gate
+    # refuses — these bridges take the research profile.
+    broker = OptionPaperBroker(capital=capital, allowed_structures=RESEARCH_STRUCTURES)
+    return OptionsBridge(capital=capital, expression={"type": "bull_call_spread", "strike_selection": "atm", "quantity": 1, "exit": exit_cfg}, option_broker=broker, quote_provider=provider, allowed_structures=RESEARCH_STRUCTURES)
 
 
 def test_stop_beats_target():

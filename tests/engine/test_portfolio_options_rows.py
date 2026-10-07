@@ -16,6 +16,7 @@ from backtest.options.quote_providers import SyntheticChainGenerator, SyntheticQ
 from backtest.strategy.intent import Direction, MarketView
 from backtest.forward.portfolio_manager import reset_portfolio_manager
 from backtest.forward.paper_runner import RunnerConfig
+from options_support import research_profile
 
 
 def _view(direction, underlying="NIFTY", spot=25000):
@@ -43,6 +44,7 @@ def test_runner_options_rows_visible():
     )
     instance_id = mgr.add_runner(config, start=False)
     runner = mgr.get_runner(instance_id)
+    research_profile(runner)  # two-leg structure: V1 gate would refuse it
 
     assert runner.options_bridge is not None
 
