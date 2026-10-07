@@ -139,6 +139,10 @@ def _option_runner(**overrides) -> StrategyRunner:
 def _open_option_structure(runner: StrategyRunner, spot: float = 24_800.0):
     bridge = runner.options_bridge
     assert bridge is not None
+    # These fixtures drive a bull call spread through the position-management
+    # surface, which the V1 whitelist refuses — opt the runner into the
+    # research profile so the multi-leg mechanics stay reachable in tests.
+    research_profile(runner)
     # Anchor the bridge's bar clock to the fixture's replay day BEFORE the
     # entry. The bridge selects the expiry "as of the bar clock (falls back
     # to today)" — without this anchor the first entry (no bar seen yet)
