@@ -53,7 +53,7 @@ from backtest.brokers.base import (
 from backtest.instruments.option import OptionContract
 from backtest.instruments.base import ExerciseType, SettlementType
 
-__all__ = ["MStockBroker", "MStockOrderError"]
+__all__ = ["MStockBroker", "MStockOrderError", "OrderOutcomeUnknown"]
 
 logger = logging.getLogger("backtest.brokers.mstock")
 
@@ -98,6 +98,14 @@ _AUTH_RETRY_STATUSES = (502, 503, 504)
 AUTH_RETRY_ATTEMPTS = 4
 AUTH_RETRY_BASE_SLEEP = 0.8  # linear backoff: 0.8, 1.6, 2.4 s between attempts
 
+# Order placement outcomes. A 4xx or an error payload on a 200 is mStock's
+# verdict: the ticket was refused, so nothing exists at the exchange and the
+# caller may act on that. These statuses are not a verdict — the request may
+# have been accepted and only the answer was lost (gateway 5xx, throttled
+# connection, timeout). Retrying one could double-place an order, so they
+# surface as :class:`OrderOutcomeUnknown` and the caller must reconcile.
+_UNCERTAIN_ORDER_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
 # Fallback session lifetime when the API response carries no expiry hint.
 # Defaults to a trading-session length (6.5h); override via
 # MSTOCK_SESSION_TTL_MINUTES in .env.
@@ -121,6 +129,26 @@ class MStockOrderError(RuntimeError):
     Raised when there is no active session, the order has no broker id,
     mStock answers non-2xx, or the payload carries an error reason. The
     message is user-facing (no stack traces or internal details).
+
+    ``status_code`` is the HTTP status when mStock answered one, else ``None``.
+    Callers use it to tell a definite rejection (4xx / error payload — nothing
+    at the exchange) from an outcome that is merely unknown.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class OrderOutcomeUnknown(MStockOrderError):
+    """The call to mStock failed without an answer — the order may exist.
+
+    A gateway 5xx, a rate limit, a connection/timeout failure, or a 2xx that
+    carried no order id all leave the same question: is that ticket at the
+    exchange or not? Nothing may be inferred from the silence, so this is the
+    one error class the execution seam must not retry — it must reconcile
+    against the order book first (Options V1 PRD §6, "never retry an uncertain
+    order blindly").
     """
 
 
@@ -362,17 +390,37 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         """Place ``order`` — ``POST /openapi/typea/orders/regular`` (form packet).
 
         Returns the broker's order id (what modify/cancel reference).
+
+        Raises :class:`MStockOrderError` when mStock clearly refused the order,
+        and :class:`OrderOutcomeUnknown` when the call ended without a usable
+        answer — a lost connection, a gateway 5xx / 429, or a 2xx that carried
+        no order id. In that case the ticket may exist at the exchange, so the
+        caller reconciles against the order book instead of placing again.
         """
         token = self._require_session()
-        payload = self._request(
-            "POST",
-            _ORDER_PLACEMENT_PATH,
-            token,
-            form=self._map_order_to_broker_payload(order),
-        )
+        packet = self._map_order_to_broker_payload(order)
+        try:
+            payload = self._request("POST", _ORDER_PLACEMENT_PATH, token, form=packet)
+        except requests.RequestException as exc:
+            # The request may have reached mStock before the socket died. The
+            # exception text carries the URL, so the message stays generic.
+            raise OrderOutcomeUnknown(
+                f"mStock order call got no answer ({exc.__class__.__name__}) "
+                "— the order may still exist"
+            ) from exc
+        except MStockOrderError as exc:
+            code = exc.status_code
+            if code is not None and (code in _UNCERTAIN_ORDER_STATUSES or code >= 500):
+                raise OrderOutcomeUnknown(str(exc), status_code=code) from exc
+            raise
         order_id = self._extract_order_id(payload)
         if order_id is None:
-            raise MStockOrderError("mStock did not return an order id for the placed order")
+            # A 2xx we could not read an id from is still an accepted call as
+            # far as the exchange is concerned — do not treat it as a reject.
+            raise OrderOutcomeUnknown(
+                "mStock did not return an order id for the placed order — "
+                "the order may still exist"
+            )
         logger.info("mStock order placed: %s %s x%s", order.side, order.symbol, order.quantity)
         return BrokerOrderId(order_id)
 
@@ -610,7 +658,8 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
 
         if not resp.ok:
             raise MStockOrderError(
-                _rejection_reason(payload) or f"mStock {method} failed (HTTP {resp.status_code})"
+                _rejection_reason(payload) or f"mStock {method} failed (HTTP {resp.status_code})",
+                status_code=resp.status_code,
             )
         reason = _rejection_reason(payload)
         if reason:

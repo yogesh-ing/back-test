@@ -81,6 +81,14 @@ from backtest.options.exit_policy import (
     ExitPolicy,
     _label,
 )
+from backtest.options.intent_journal import (
+    KIND_DECIDED,
+    KIND_EXECUTED,
+    KIND_HALTED,
+    KIND_REJECTED,
+    decision_key,
+    intent_key,
+)
 from backtest.options.greeks import BlackScholes
 from backtest.options.expiry import EXIT_REASON_SETTLEMENT, ExpiryManager
 from backtest.options.expiry_policy import NearestExpiryPolicy
@@ -193,6 +201,7 @@ class OptionsBridge:
         quote_provider: Optional[Any] = None,
         allowed_structures: Optional[Iterable[str]] = None,
         bar_cadence_seconds: Optional[float] = None,
+        intent_journal: Optional[Any] = None,
     ) -> None:
         self.expression: dict[str, Any] = {**DEFAULT_EXPRESSION, **(expression or {})}
         self.allowed_structures: frozenset[str] = frozenset(
@@ -200,6 +209,10 @@ class OptionsBridge:
             if allowed_structures is not None
             else V1_ALLOWED_STRUCTURES
         )
+        #: Append-only intent journal (PRD decision 8). ``None`` records nothing
+        #: — the runner wires it, so a decision is auditable without the paper
+        #: path taking a dependency on a database it may not have.
+        self.intent_journal: Optional[Any] = intent_journal
         self.option_broker = option_broker or OptionPaperBroker(
             capital=float(capital), allowed_structures=self.allowed_structures
         )
@@ -381,12 +394,14 @@ class OptionsBridge:
 
         dte_block = self._entry_dte_block()
         if dte_block is not None:
+            self._journal_halt(dte_block.get("reason"), code="dte_block")
             return dte_block
 
         try:
             return self._execute(view, structure_type, strategy_name)
         except Exception as exc:  # noqa: BLE001 — a bad bar must not kill the runner
             logger.warning("[options-bridge] %s execution failed: %s", structure_type, exc)
+            self._journal_halt(exc, code=str(getattr(exc, "reason", "") or type(exc).__name__))
             return {"rejected": True, "reason": str(exc)}
 
     def pop_exit_event(self) -> Optional[dict[str, Any]]:
@@ -396,6 +411,74 @@ class OptionsBridge:
         happens inside the pricing hook and still needs a signal-log entry.
         """
         return self._exit_events.popleft() if self._exit_events else None
+
+    # ------------------------------------------------------------------ #
+    # Intent journal (PRD decision 8)
+    # ------------------------------------------------------------------ #
+
+    def _journal(
+        self,
+        kind: str,
+        *,
+        intent_id: str,
+        structure_id: Optional[str] = None,
+        detail: Optional[dict[str, Any]] = None,
+        strategy_name: Optional[str] = None,
+        structure_type: Optional[str] = None,
+        underlying: Optional[str] = None,
+    ) -> None:
+        """Append one journal event — best-effort, never blocks a decision.
+
+        With no journal wired this is a no-op: the paper path must run the same
+        whether or not the durable record is attached, but a *failed* write is
+        logged, because a missing event is a reconciliation hole.
+        """
+        if self.intent_journal is None:
+            return
+        try:
+            self.intent_journal.append(
+                intent_id=intent_id,
+                kind=kind,
+                structure_id=structure_id,
+                strategy_name=strategy_name or None,
+                structure_type=structure_type,
+                underlying=underlying or self.underlying,
+                detail=detail,
+            )
+        except Exception:  # noqa: BLE001 — journaling must not break trading
+            logger.warning(
+                "[options-bridge] intent journal write failed for %s", kind, exc_info=True
+            )
+
+    def _journal_intent(
+        self,
+        kind: str,
+        intent: Any,
+        *,
+        structure_id: Optional[str] = None,
+        detail: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """Journal an event keyed by the decision itself; return the intent id."""
+        intent_id = intent_key(intent, clock=self._bar_dt)
+        self._journal(
+            kind,
+            intent_id=intent_id,
+            structure_id=structure_id,
+            detail=detail,
+            strategy_name=intent.strategy_name,
+            structure_type=intent.structure_type,
+            underlying=str(intent.view.underlying),
+        )
+        return intent_id
+
+    def _journal_halt(self, reason: Any, code: str = "") -> None:
+        """Journal a pre-trade rejection that never produced an intent."""
+        text = str(reason)
+        self._journal(
+            KIND_HALTED,
+            intent_id=decision_key("halt", text, code=code, clock=self._bar_dt),
+            detail={"code": code, "reason": text},
+        )
 
     @property
     def bars_in_trade(self) -> int:
@@ -1574,7 +1657,35 @@ class OptionsBridge:
             )
         except Exception as exc:  # noqa: BLE001 — a failed close must not kill the runner
             logger.warning("[options-bridge] close failed for %s: %s", structure_id[:8], exc)
+            self._journal(
+                KIND_HALTED,
+                intent_id=decision_key(
+                    "halt", f"close {structure_id}", code="close_failed", clock=self._bar_dt
+                ),
+                structure_id=structure_id,
+                detail={"code": "close_failed", "reason": str(exc)},
+                structure_type=structure.structure_type,
+                underlying=structure.underlying,
+            )
             return None
+
+        self._journal(
+            KIND_EXECUTED,
+            intent_id=decision_key(
+                "close", structure_id, code=decision.reason, clock=self._bar_dt
+            ),
+            structure_id=structure_id,
+            detail={
+                "simulated": True,
+                "action": "close",
+                "reason": decision.reason,
+                "pnl": float(realized),
+                "bars_held": bars_held,
+            },
+            strategy_name=strategy_name,
+            structure_type=structure.structure_type,
+            underlying=structure.underlying,
+        )
 
         event = {
             "exited": True,
@@ -1901,13 +2012,38 @@ class OptionsBridge:
 
         self._validate_entry_intent(intent)
 
+        # Decision first, fill second: the journal must show a halt between the
+        # two if the process dies, and both events share the decision's key so
+        # replaying this bar cannot book the structure twice.
+        self._journal_intent(KIND_DECIDED, intent)
+
         try:
             positions = self.option_broker.execute_structure(intent, self.quote_provider)
         except InsufficientMarginError as exc:
+            self._journal_intent(
+                KIND_REJECTED, intent, detail={"reason": str(exc)}
+            )
             return {"rejected": True, "reason": str(exc)}
 
         self.open_structure_id = positions[0].structure_id if positions else None
         self.executed_count += 1
+        self._journal_intent(
+            KIND_EXECUTED,
+            intent,
+            structure_id=self.open_structure_id,
+            detail={
+                "simulated": True,
+                "fills": [
+                    {
+                        "symbol": getattr(p, "trading_symbol", ""),
+                        "side": getattr(p, "side", ""),
+                        "quantity": getattr(p, "quantity", 0),
+                        "price": str(getattr(p, "entry_price", "0")),
+                    }
+                    for p in positions
+                ],
+            },
+        )
         # Entry bookkeeping for the exit rules (B1): age, direction, and the
         # net premium that percentage stops/targets are measured against.
         self._entry_bar_index = self._bar_index
