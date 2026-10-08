@@ -673,6 +673,14 @@ class OptionsBridge:
             "bars_in_trade": self.bars_in_trade if self.open_structure_id else 0,
         }
 
+    def flatten_all(self, reason: str = "emergency_flatten") -> int:
+        """Emergency-close any open structure at current mark. Returns 0 or 1."""
+        if self.open_structure_id is None:
+            return 0
+        decision = ExitDecision(reason=reason, detail="operator emergency flatten")
+        result = self._exit_structure(decision, ts=None, strategy_name="flatten", queue=False)
+        return 1 if result else 0
+
     # ------------------------------------------------------------------ #
     # Book metrics (task A2) — the runner folds these into its own numbers
     # ------------------------------------------------------------------ #

@@ -1517,6 +1517,9 @@ class StrategyRunner:
                     continue
                 self._emit_close(symbol, price, reason=reason)
                 count += 1
+        # Also close any open option structure (single-structure V1 model).
+        if self.options_bridge is not None:
+            count += self.options_bridge.flatten_all(reason=reason)
         return count
 
     # ------------------------------------------------------------------ #
