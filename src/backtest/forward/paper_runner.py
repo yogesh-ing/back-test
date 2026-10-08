@@ -63,6 +63,7 @@ from backtest.forward.options_bridge import OptionsBridge
 from backtest.simulator.engine_loop import OrderQueue, run_engine_loop
 from backtest.simulator.enums import OrderSide, OrderType, TimeInForce
 from backtest.simulator.execution import OrderExecutor, free_executor
+from backtest.simulator.fees import CommissionCalculator
 from backtest.simulator.order import Order as SimOrder
 from backtest.simulator.portfolio import Portfolio, PortfolioLimits
 from backtest.simulator.position_sizing import all_in_size
@@ -1101,6 +1102,7 @@ class StrategyRunner:
                 # freshness SLA is sized off the bar cadence — see OptionsBridge.
                 bar_cadence_seconds=60.0
                 * TIMEFRAME_MINUTES.get(config.timeframe, 0),
+                fee_calculator=CommissionCalculator.for_broker("zerodha"),
             )
             self.options_bridge.runner_id = self.instance_id
             self.options_bridge.runner_name = self.config.name

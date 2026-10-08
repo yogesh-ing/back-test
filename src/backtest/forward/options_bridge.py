@@ -202,6 +202,7 @@ class OptionsBridge:
         allowed_structures: Optional[Iterable[str]] = None,
         bar_cadence_seconds: Optional[float] = None,
         intent_journal: Optional[Any] = None,
+        fee_calculator: Any | None = None,
     ) -> None:
         self.expression: dict[str, Any] = {**DEFAULT_EXPRESSION, **(expression or {})}
         self.allowed_structures: frozenset[str] = frozenset(
@@ -214,7 +215,9 @@ class OptionsBridge:
         #: path taking a dependency on a database it may not have.
         self.intent_journal: Optional[Any] = intent_journal
         self.option_broker = option_broker or OptionPaperBroker(
-            capital=float(capital), allowed_structures=self.allowed_structures
+            capital=float(capital),
+            allowed_structures=self.allowed_structures,
+            fee_calculator=fee_calculator,
         )
         # Policy-gated feed construction (2026-09-30). This used to answer
         # ``quote_provider=None`` with a fresh Black-Scholes book AND attach a
