@@ -4,6 +4,11 @@
  * collectParamsFrom(container)
  * applyOverridesInto(container, overrides)
  */
+// Compare uses anonymous per-slot containers. Keep a stable, unique namespace
+// per element; a shared fallback name would point labels at the wrong slot.
+const paramFormNamespaces = new WeakMap();
+let paramFormSequence = 0;
+
 function renderParamsInto(container, params, overrides) {
     if (!container) return;
     const keys = Object.keys(params || {});
@@ -11,9 +16,14 @@ function renderParamsInto(container, params, overrides) {
         container.innerHTML = '<p class="muted small">No parameters</p>';
         return;
     }
-    container.innerHTML = keys.map((key) => {
+    if (!paramFormNamespaces.has(container)) {
+        paramFormNamespaces.set(container, "form-" + (++paramFormSequence));
+    }
+    const namespace = paramFormNamespaces.get(container);
+    container.innerHTML = keys.map((key, index) => {
         const spec = params[key];
         const label = spec.label || key;
+        const inputId = "param-" + namespace + "-" + index + "-" + key.replace(/[^a-zA-Z0-9_-]/g, "_");
         const tooltip = spec.tooltip ? `<div class="hint">${spec.tooltip}</div>` : "";
         if (spec.type === "bool") {
             const def = (overrides && key in overrides) ? overrides[key] : (spec.default === true || spec.default === "true");
@@ -25,8 +35,8 @@ function renderParamsInto(container, params, overrides) {
         const min = spec.min != null ? `min="${spec.min}"` : "";
         const max = spec.max != null ? `max="${spec.max}"` : "";
         const def = (overrides && key in overrides) ? overrides[key] : (spec.default ?? "");
-        return `<div class="param-row"><label>${label}</label>
-            <input class="input" type="${isNum ? "number" : "text"}" step="${step}" ${min} ${max}
+        return `<div class="param-row"><label for="${inputId}">${label}</label>
+            <input id="${inputId}" class="input" type="${isNum ? "number" : "text"}" step="${step}" ${min} ${max}
                    value="${def}" data-param="${key}">${tooltip}</div>`;
     }).join("");
 }

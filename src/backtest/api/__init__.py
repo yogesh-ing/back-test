@@ -9,19 +9,29 @@ Blueprints:
   (``/api/broker/login|verify-totp|status|logout``), auth epic Task 2.1
 * ``portfolio_bp``   — multi-strategy portfolio command center
   (``/api/portfolio/*`` + SSE stream), forward-testing multi-strategy epic
+* ``intelligence_bp`` — portfolio Greeks/concentration/correlation, market
+  regime and the alert lifecycle (``/api/alerts/*``)
+* ``reporting_bp``    — consolidated P&L, tax annexures and contract-note
+  reconciliation (``/api/reporting/*``)
 
 Mounted by :func:`backtest.web.app.create_app`.
 """
 
+from backtest.api.analytics import analytics_bp
 from backtest.api.backtest import backtest_bp
 from backtest.api.broker_auth import broker_auth_bp
 from backtest.api.data_manager import data_bp
 from backtest.api.forward import forward_bp
+from backtest.api.intelligence import intelligence_bp
+from backtest.api.playbooks import playbooks_bp
+from backtest.api.reporting import reporting_bp
 from backtest.api.portfolio import portfolio_bp
+from backtest.api.settings import settings_bp
 from backtest.api.strategies import strategies_bp
 from backtest.api.symbols import symbols_bp
 
 __all__ = [
+    "analytics_bp",
     "strategies_bp",
     "symbols_bp",
     "backtest_bp",
@@ -29,4 +39,8 @@ __all__ = [
     "broker_auth_bp",
     "data_bp",
     "portfolio_bp",
+    "intelligence_bp",
+    "playbooks_bp",
+    "reporting_bp",
+    "settings_bp",
 ]

@@ -1,0 +1,35 @@
+issues:
+
+Backtest and compate back test:
+
+	1. did not show all the symboles, if it is due to the data is not available for these then it should prompt a message saying please load a data using data tab for the symbole or instrucment
+	also it is not showing any indices 
+
+	we are collecting the 1 min candel data then why not the timefram do not have 1 min 5 min 10min 15 min 30 min 
+
+	there should be qty extbox also which will calculate the effective price and vise versa
+
+	for option the statrgy ewill take care oif which expiry to choose
+
+
+Portfolio overview:
+	1. did not show all the symboles in the instrument section when seleting the equity, (we can discuss, IMV if the strategy is said to be for equity then it will show all the equity instruments)
+	2. when we choose option strategy we have Nifty , bank nifty in instrument dropdown and also have underlaying as Static Nifty value why this redudent fields it is making confusion
+	3. for equity trade we should be having the quantity textbox too. so User can either choose the quantity with will create the sum of amount or choose the sume amount which will decide the quantity preference is sum of amount by default
+	4. on portfolio by default positions tab should be shown before equity curve 
+
+
+
+Stategy builder :
+	1. before saving any strategy it should be able to translate the paython code into readable form so that use can understand 
+	when ever the startegy is converted show below things
+	entry criteria: 
+	entry stike price (if options): (e.g. AMT+2 CE expiry current week dt./ ITM PE expiry current month dt.)
+	take profit criteria:
+	take stop loss criteria: 
+
+	if any of this thhing is missing then hightlight to user
+	
+	2. Going forward all strategy will have the segment option link to it so that would be easy when back testing and real trading paper / live
+	3.
+

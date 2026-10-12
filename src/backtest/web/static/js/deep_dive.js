@@ -17,6 +17,7 @@
     overlay: null,
     body: null,
     chart: null,
+    watchChart: null,
   };
 
   // Money (components/currency.js, loaded first in base.html) is the single
@@ -48,6 +49,15 @@
       .then((data) => {
         if (!data.success) throw new Error(data.error || "failed");
         render(data.runner);
+        // Watch series (PnL-vs-spot, 2026-09-24): live option runners only —
+        // the endpoint 404s for unknown ids and returns an empty series for
+        // runners without capture, so this is a silent no-op elsewhere.
+        return fetch("/api/portfolio/watch/series/" + id)
+          .then((r) => r.json())
+          .then((watch) => {
+            if (watch && watch.success) renderWatchChart(watch.series, watch.label);
+          })
+          .catch(() => {}); // the drawer must open even if the series fails
       })
       .catch((err) => {
         $("dd-body").innerHTML = '<div class="card-error">Error: ' + esc(err.message) + "</div>";
@@ -60,6 +70,7 @@
     $("drawer-overlay").hidden = true;
     setTimeout(() => { el.hidden = true; }, 200);
     if (drawer.chart) { drawer.chart.destroy(); drawer.chart = null; }
+    if (drawer.watchChart) { drawer.watchChart.destroy(); drawer.watchChart = null; }
   }
 
   function positionsHtml(r) {
@@ -109,21 +120,21 @@
       '<th class="num">P&amp;L</th><th class="num">Expiry</th><th class="num">Bars</th>' +
       '</tr></thead><tbody>' +
       rows.map((s) =>
-        '<tr><td>' + esc(s.structure) + ' <span class="muted">(' + esc(s.side) + ')</span></td>' +
+        '<tr' + (s.markStale ? ' class="stale-mark-row"' : "") + '><td>' + esc(s.structure) + ' <span class="muted">(' + esc(s.side) + ')</span></td>' +
         '<td>' + esc(s.strikes) + " " + esc(s.optionType) + '</td>' +
         '<td class="num">' + s.lots + '</td>' +
         '<td class="num">' + s.entryPrice.toFixed(2) + '</td>' +
-        '<td class="num">' + s.currentPrice.toFixed(2) + '</td>' +
+        '<td class="num">' + s.currentPrice.toFixed(2) + OptionView.staleBadgeHtml(s) + '</td>' +
         '<td class="num ' + pnlClass(s.pnl) + '">' + fmtSigned(s.pnl) +
           '<div class="cell-sub">' + (s.pnlPct * 100).toFixed(1) + '% of premium</div></td>' +
         '<td class="num">' + esc(s.expiryText) + '</td>' +
         '<td class="num">' + s.barsHeld + '</td></tr>' +
         s.legs.map((leg) =>
-          '<tr class="opt-leg"><td class="muted">↳ leg</td>' +
+          '<tr class="opt-leg' + (leg.markStale ? " stale-mark-row" : "") + '"><td class="muted">↳ leg</td>' +
           '<td>' + esc(leg.tradingSymbol || "") + '</td>' +
           '<td class="num">' + leg.qty + '</td>' +
           '<td class="num">' + leg.entryPrice.toFixed(2) + '</td>' +
-          '<td class="num">' + leg.currentPrice.toFixed(2) + '</td>' +
+          '<td class="num">' + leg.currentPrice.toFixed(2) + OptionView.staleBadgeHtml(leg) + '</td>' +
           '<td class="num ' + pnlClass(leg.pnl) + '">' + fmtSigned(leg.pnl) + '</td>' +
           '<td class="num muted">' + esc(leg.side) + " " + esc(leg.optionType) + '</td>' +
           '<td class="num muted">' + leg.strike.toLocaleString("en-IN") + '</td></tr>').join("")
@@ -215,6 +226,72 @@
         '">' + esc(s) + "</span>").join("") + "</div></div>";
   }
 
+  /**
+   * Watch chart (2026-09-24): spot vs option MTM PnL, twin axes — the same
+   * shape the 15:30 PNG export writes into charts/<date>/. Rendered only
+   * when the runner has captured watch points (live mStock option runners);
+   * the section is removed entirely for everyone else.
+   */
+  function renderWatchChart(series, label) {
+    if (!series || !series.length) return;
+    const sec = $("dd-watch-section");
+    if (!sec || typeof Chart === "undefined") return;
+    if (drawer.watchChart) { drawer.watchChart.destroy(); drawer.watchChart = null; }
+
+    const labels = series.map((p) => {
+      const t = String(p.ts || "");
+      // 1-min bars stamp "YYYY-MM-DDTHH:MM:SS" — show HH:MM only.
+      return t.length >= 16 ? t.slice(11, 16) : t;
+    });
+    const spots = series.map((p) => p.spot);
+    const pnls = series.map((p) => p.option_pnl);
+
+    sec.hidden = false;
+    drawer.watchChart = new Chart($("dd-watch-chart").getContext("2d"), {
+      type: "line",
+      data: {
+        labels: labels,
+        datasets: [
+          {
+            label: "Spot",
+            data: spots,
+            borderColor: "#38bdf8",
+            backgroundColor: "rgba(56,189,248,.08)",
+            yAxisID: "y",
+            borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: true,
+          },
+          {
+            label: "Option P&L",
+            data: pnls,
+            borderColor: "#f87171",
+            backgroundColor: "rgba(248,113,113,.10)",
+            yAxisID: "y1",
+            borderWidth: 1.8, pointRadius: 0, tension: 0.2, fill: true,
+          },
+        ],
+      },
+      options: {
+        responsive: true, animation: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { labels: { color: "#94a3b8", boxWidth: 12 } },
+          tooltip: { callbacks: { label: (c) => c.dataset.label + ": " + Money.signed(Math.round(c.parsed.y), 0) } },
+        },
+        scales: {
+          x: { ticks: { color: "#94a3b8", maxTicksLimit: 10, maxRotation: 0 }, grid: { display: false } },
+          y: {
+            position: "left", title: { display: true, text: "Spot", color: "#38bdf8" },
+            ticks: { color: "#38bdf8" }, grid: { color: "rgba(148,163,184,.1)" },
+          },
+          y1: {
+            position: "right", title: { display: true, text: "P&L", color: "#f87171" },
+            ticks: { color: "#f87171" }, grid: { drawOnChartArea: false },
+          },
+        },
+      },
+    });
+  }
+
   function render(r) {
     $("dd-title").textContent = r.name;
     $("dd-subtitle").textContent = r.strategy_name + " · " + r.target_label +
@@ -231,6 +308,12 @@
       "</div>" +
       '<div class="dd-section"><h4>Instance Equity Curve</h4>' +
       '<canvas id="dd-equity-chart" height="120"></canvas></div>' +
+      // Watch chart: hidden until the series fetch returns points (live
+      // option runners only — synthetic runners never capture, so nobody
+      // else ever sees an empty section).
+      '<div class="dd-section" id="dd-watch-section" hidden><h4>Spot vs Option P&amp;L' +
+      '<span class="muted" style="font-weight:400"> (watch)</span></h4>' +
+      '<canvas id="dd-watch-chart" height="140"></canvas></div>' +
       '<div class="dd-section"><h4>' +
       (OptionView.isOption(r) ? "Active Option Book" : "Active Open Positions") +
       "</h4>" + positionsHtml(r) + "</div>" +
@@ -277,6 +360,12 @@
           p.hidden = p.dataset.ddpanel !== b.dataset.ddtab;
         });
       }));
+
+    // A re-open of the drawer over a previous open must reset the watch
+    // section (render() ran before the new series fetch resolved).
+    const sec = $("dd-watch-section");
+    if (sec) sec.hidden = true;
+    if (drawer.watchChart) { drawer.watchChart.destroy(); drawer.watchChart = null; }
   }
 
   /** Human summary of an option runner's exit plan (mirrors the spawn form). */

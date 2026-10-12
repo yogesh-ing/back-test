@@ -1,50 +1,233 @@
+{% from "_macros.html" import icon %}
+{% set navigation = [
+    ('Workspace', [
+        ('portfolio', '/portfolio', 'Portfolio', 'portfolio'),
+        ('analytics', '/analytics', 'Analytics', 'chart'),
+        ('risk', '/risk', 'Risk management', 'shield'),
+        ('reporting', '/reporting', 'P&L reports', 'report')
+    ]),
+    ('Research', [
+        ('backtest', '/backtest', 'Backtest', 'flask'),
+        ('compare', '/compare', 'Compare strategies', 'compare'),
+        ('optimize', '/optimize', 'Optimization', 'sliders'),
+        ('strategy_builder', '/strategy-builder', 'Strategy builder', 'code')
+    ]),
+    ('Operations', [
+        ('forward', '/forward', 'Engine playground', 'activity'),
+        ('data', '/data', 'Market data', 'database'),
+        ('settings', '/settings', 'Settings', 'settings')
+    ])
+] %}
+{% set page_labels = {'portfolio': 'Portfolio', 'analytics': 'Analytics', 'risk': 'Risk management', 'reporting': 'P&L reports', 'backtest': 'Backtest', 'compare': 'Compare strategies', 'optimize': 'Optimization', 'strategy_builder': 'Strategy builder', 'forward': 'Engine playground', 'data': 'Market data', 'settings': 'Settings'} %}
+{% set source_name = {'synthetic': 'Synthetic data', 'csv': 'CSV data', 'db': 'Historical data', 'mstock': 'mStock data', 'dhan': 'Dhan data'}.get(config.get('BACKTEST_SOURCE'), 'Data source') %}
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0c1117">
     <title>{% block title %}Trading Bot{% endblock %}</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <!-- Apply the visual preference before painting. Storage can be blocked. -->
+    <script>
+        try {
+            var preferredTheme = localStorage.getItem('trading-workspace.theme');
+            if (preferredTheme === 'light' || preferredTheme === 'dark') {
+                document.documentElement.dataset.theme = preferredTheme;
+            }
+        } catch (error) { /* A blocked preference store must never block the app. */ }
+    </script>
+    <link rel="preload" href="{{ url_for('static', filename='fonts/inter-latin-variable.woff2') }}" as="font" type="font/woff2" crossorigin>
+    <link rel="icon" href="{{ url_for('static', filename='brand-mark.svg') }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/workspace.css') }}">
+    <script src="{{ url_for('static', filename='vendor/chart.umd-4.4.1.js') }}"></script>
     {% block head %}{% endblock %}
 </head>
-<body data-active="{{ active }}"
+<body data-active="{{ active }}" data-source="{{ config.get('BACKTEST_SOURCE', '') }}"
       data-currency-code="{{ currency_code }}" data-currency-symbol="{{ currency_symbol }}"
       data-currency-locale="{{ currency_locale }}" data-replay-speed="{{ replay_speed }}">
-    <nav class="topnav">
-        <div class="brand">🤖 Trading Bot</div>
-        <div class="nav-links">
-            <a href="/dashboard"  class="nav-link" data-key="dashboard">Dashboard</a>
-            <a href="/backtest"   class="nav-link" data-key="backtest">Backtest</a>
-            <a href="/compare"    class="nav-link" data-key="compare">Compare</a>
-            <a href="/forward"    class="nav-link" data-key="forward">Forward Test</a>
-            <a href="/portfolio"  class="nav-link" data-key="portfolio">Portfolio</a>
-            <a href="/options"    class="nav-link" data-key="options">Options</a>
-            <a href="/data"       class="nav-link" data-key="data">Data</a>
+    <a class="skip-link" href="#main-content">Skip to workspace</a>
+    <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" aria-label="Close navigation" tabindex="-1" hidden></button>
+
+    <aside id="app-sidebar" class="app-sidebar" aria-label="Trading workspace navigation">
+        <div class="sidebar-brand-row">
+            <a class="brand" href="/" aria-label="Trading Bot home">
+                <span class="brand-mark">{{ icon('bars', 25) }}</span>
+                <span class="brand-copy">Trading Bot<span class="brand-caption">RESEARCH &amp; EXECUTION</span></span>
+            </a>
+            <button id="sidebar-close" class="icon-button mobile-only" type="button" aria-label="Close navigation">{{ icon('close') }}</button>
         </div>
-        <button id="broker-status" class="broker-status" type="button"
-                title="Broker connection status" aria-label="Broker connection status">
-            <span id="broker-status-dot" class="broker-dot" data-state="unknown">⚪</span>
-            <span id="broker-status-name">Broker</span>
-        </button>
-    </nav>
+        <div class="workspace-identity">
+            <span class="workspace-avatar">T</span>
+            <div><strong>Trading workspace</strong><span>Your decision center</span></div>
+        </div>
+        <nav class="sidebar-nav" aria-label="Primary navigation">
+            {% for group, links in navigation %}
+            <div class="nav-group">
+                <div class="nav-group-label">{{ group }}</div>
+                <div class="nav-links">
+                    {% for key, href, label, symbol in links %}
+                    <a href="{{ href }}" class="nav-link{{ ' active' if active == key else '' }}" data-key="{{ key }}"{% if active == key %} aria-current="page"{% endif %}>
+                        {{ icon(symbol, 18) }}<span>{{ label }}</span>
+                        {% if active == key %}<span class="nav-active-dot" aria-hidden="true"></span>{% endif %}
+                    </a>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endfor %}
+        </nav>
+        <div class="sidebar-footer">
+            <button id="workspace-help" class="sidebar-help" type="button">{{ icon('help', 18) }}<span>Workspace guide</span><kbd>?</kbd></button>
+            <div class="sidebar-footnote">Research with context.<br>Execute with control.</div>
+        </div>
+    </aside>
 
-    <main class="container">
-        {% block content %}{% endblock %}
-    </main>
+    <div id="app-workspace" class="app-workspace">
+        <header class="topnav app-topbar">
+            <div class="topbar-location">
+                <button id="sidebar-toggle" class="icon-button mobile-only" type="button" aria-label="Open navigation" aria-controls="app-sidebar" aria-expanded="false">{{ icon('menu', 20) }}</button>
+                <div class="breadcrumbs"><span>Workspace</span>{{ icon('chevron-right', 13) }}<strong>{{ page_labels.get(active, 'Trading Bot') }}</strong>{% if mode is defined and mode %}{{ icon('chevron-right', 13) }}<span>{{ mode | capitalize }}</span>{% endif %}</div>
+            </div>
+            <div class="topbar-controls">
+                <button id="command-open" class="command-open" type="button" aria-label="Search workspace pages">{{ icon('search', 15) }}<span>Jump to…</span><kbd>Ctrl K</kbd></button>
+                <span class="environment-chip" title="Active price data source. This is not an execution-mode indicator."><span class="status-dot" aria-hidden="true"></span>{{ source_name }}</span>
+                <span id="market-status-chip"
+                      class="market-status-chip"
+                      data-state="{% if market_status.day_state == 'HOLIDAY' %}HOLIDAY{% elif market_status.day_state == 'WEEKEND' %}WEEKEND{% else %}{{ market_status.session_state }}{% endif %}"
+                      data-market='{{ market_status | tojson }}'
+                      title="NSE Trading Hours: 09:15 - 15:30 IST.{% if market_status.next_open_formatted %} Next open: {{ market_status.next_open_formatted }}.{% endif %}{% if market_status.holiday_name %} Holiday: {{ market_status.holiday_name }}.{% endif %}{% if market_status.gap_warning %} Calendar warning: {{ market_status.gap_warning }}{% endif %}">
+                    <span class="market-status-dot" aria-hidden="true"></span>
+                    <span id="market-status-text" class="market-status-text">
+                        {%- if market_status.day_state == 'HOLIDAY' -%}
+                            NSE CLOSED · {{ market_status.holiday_name | truncate(18, True, '…') if market_status.holiday_name else 'HOLIDAY' }}
+                        {%- elif market_status.day_state == 'WEEKEND' -%}
+                            NSE CLOSED · WEEKEND
+                        {%- elif market_status.session_state == 'OPEN' -%}
+                            NSE OPEN
+                        {%- elif market_status.session_state == 'PRE_OPEN' -%}
+                            PRE-OPEN
+                        {%- else -%}
+                            NSE CLOSED
+                        {%- endif -%}
+                    </span>
+                </span>
+                <button id="data-freshness-chip"
+                        class="data-freshness-chip"
+                        data-state="{{ data_freshness.level }}"
+                        type="button"
+                        title="{{ data_freshness.title }}">
+                    <span class="freshness-dot" aria-hidden="true"></span>
+                    <span id="data-freshness-label" class="freshness-text">{{ data_freshness.label }}</span>
+                </button>
+                <button id="halt-pill" class="halt-pill halt-pill-unknown" type="button" title="Checking portfolio risk — click to view Risk Board">
+                    <span id="halt-pill-dot" aria-hidden="true">⚪</span><span id="halt-pill-text">Checking</span>
+                </button>
+                <button id="broker-status" class="broker-status" type="button" title="Broker connections" aria-label="Broker connections">
+                    <span id="broker-strip" class="broker-strip"></span>
+                    <span id="broker-status-dot" class="broker-dot" data-state="unknown" aria-hidden="true">⚪</span>
+                    <span id="broker-status-name">Brokers</span>{{ icon('chevron-down', 13) }}
+                </button>
+                <button id="data-fetch-indicator" class="data-fetch-indicator" type="button" hidden title="Data fetch in progress — click to stop">
+                    <span id="data-fetch-spinner">⟳</span><span id="data-fetch-count">0/0</span>
+                </button>
+                <button id="theme-toggle" class="icon-button theme-toggle" type="button" aria-label="Switch to light theme" title="Switch to light theme"><span class="theme-icon-light">{{ icon('sun', 19) }}</span><span class="theme-icon-dark">{{ icon('moon', 19) }}</span></button>
+            </div>
+        </header>
 
-    <div id="toast-stack" class="toast-stack"></div>
+        <!-- Always-visible survival layer, driven by actual portfolio state. -->
+        <div id="risk-strip" class="risk-strip risk-strip-safe" hidden>
+            <div class="risk-strip-collapsed" id="risk-strip-collapsed">
+                <div class="risk-strip-left">
+                    <span id="risk-strip-feed" class="risk-strip-feed">Checking feed</span>
+                    <span class="risk-strip-sep">·</span>
+                    <span id="risk-strip-dloss" class="risk-strip-metric">{% if market_status.day_state != 'TRADING_DAY' %}Daily Loss (prev session){% else %}Daily Loss (today){% endif %}: —</span>
+                    <div class="risk-strip-mini-bar"><div id="risk-strip-dloss-bar" class="risk-strip-bar-fill"></div></div>
+                    <span id="risk-strip-dd" class="risk-strip-metric">DD: —</span>
+                    <div class="risk-strip-mini-bar"><div id="risk-strip-dd-bar" class="risk-strip-bar-fill"></div></div>
+                    <span id="risk-strip-deployed" class="risk-strip-metric">Deployed: —</span>
+                    <div class="risk-strip-mini-bar"><div id="risk-strip-deployed-bar" class="risk-strip-bar-fill"></div></div>
+                    <span id="risk-strip-positions" class="risk-strip-metric">Pos: —</span>
+                </div>
+                <div class="risk-strip-right">
+                    <button id="risk-strip-expand" class="btn btn-ghost btn-small" type="button" title="Expand breakdown">Details</button>
+                    <button id="risk-strip-flatten" class="btn btn-danger btn-danger-outline btn-small" type="button">{{ icon('stop', 13) }} Flatten all</button>
+                </div>
+            </div>
+            <div class="risk-strip-expanded" id="risk-strip-expanded" hidden>
+                <div class="risk-strip-expanded-head">
+                    <strong id="risk-strip-expanded-title">{% if market_status.day_state != 'TRADING_DAY' %}Daily Loss (prev session){% else %}Daily Loss (today){% endif %} breakdown · last 6 hours</strong>
+                    <button id="risk-strip-collapse" class="btn btn-ghost btn-small" type="button">Close</button>
+                </div>
+                <div class="risk-strip-expanded-body">
+                    <div class="risk-strip-chart-wrap"><canvas id="risk-strip-chart" height="60"></canvas></div>
+                    <div class="risk-strip-details"><div id="risk-strip-detail-stats" class="risk-strip-stats"></div><div id="risk-strip-top-losers" class="risk-strip-losers"></div></div>
+                </div>
+            </div>
+        </div>
 
+        <main class="container" id="main-content" tabindex="-1">
+            {% block content %}{% endblock %}
+        </main>
+        <footer class="workspace-footer"><span>Trading Bot<span class="footer-separator">/</span>Research &amp; execution</span><span title="Active market data archive used for historical simulation">{{ currency_code }}<span class="footer-separator">·</span>Data: {{ source_name }}</span></footer>
+    </div>
+
+    <!-- Navigation only: this dialog never runs or deploys a strategy. -->
+    <dialog id="workspace-command" class="command-dialog" aria-label="Find a workspace page">
+        <div class="command-search-row">{{ icon('search', 20) }}<input id="command-search" type="search" placeholder="Where would you like to go?" aria-label="Search pages" autocomplete="off"><button class="icon-button" data-dialog-close="workspace-command" type="button" aria-label="Close page search">{{ icon('close') }}</button></div>
+        <div id="command-results" class="command-results">
+            {% for group, links in navigation %}{% for key, href, label, symbol in links %}
+            <a href="{{ href }}" class="command-result" data-search="{{ label | lower }} {{ group | lower }}">{{ icon(symbol, 18) }}<span>{{ label }}<small>{{ group }}</small></span>{{ icon('arrow-up-right', 15) }}</a>
+            {% endfor %}{% endfor %}
+        </div>
+        <p id="command-empty" class="command-empty muted" hidden>No matching pages. Try “portfolio” or “backtest”.</p>
+        <div class="command-footer"><span><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>Enter</kbd> to open</span><span><kbd>Esc</kbd> to close</span></div>
+    </dialog>
+
+    <dialog id="workspace-guide" class="guide-dialog" aria-labelledby="workspace-guide-title">
+        <div class="modal-head"><div><div class="eyebrow">A deliberate workflow</div><h2 id="workspace-guide-title">From idea to execution</h2></div><button class="icon-button" data-dialog-close="workspace-guide" type="button" aria-label="Close workspace guide">{{ icon('close') }}</button></div>
+        <div class="guide-steps">
+            <a href="/backtest"><span class="step-number">01</span><div><strong>Build evidence</strong><p>Backtest, compare and optimize. Check data provenance and out-of-sample performance.</p></div>{{ icon('arrow-up-right') }}</a>
+            <a href="/portfolio/paper"><span class="step-number">02</span><div><strong>Practice without exposure</strong><p>Deploy into the paper bucket. Inspect signals, positions, costs and risk limits.</p></div>{{ icon('arrow-up-right') }}</a>
+            <a href="/settings"><span class="step-number">03</span><div><strong>Prepare for live trading</strong><p>Verify broker connections, cost models and segment limits. Live trading requires explicit arming.</p></div>{{ icon('arrow-up-right') }}</a>
+        </div>
+        <div class="guide-note">{{ icon('shield', 17) }}Historical results do not guarantee future returns. Navigation and theme changes never place an order.</div>
+    </dialog>
+
+    <div id="toast-stack" class="toast-stack" role="status" aria-live="polite"></div>
+    {% if config.get("PORTFOLIO_INTELLIGENCE_ENABLED", True) %}
+    <div id="alert-widget" class="alert-widget" data-state="minimized" aria-live="polite"></div>
+    {% endif %}
     {% include "components/broker_auth_modal.html" %}
+    {% include "components/broker_board.html" %}
+
+    <div id="risk-flatten-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="risk-flatten-title" hidden>
+        <div class="modal modal-sm">
+            <div class="modal-head"><h3 id="risk-flatten-title">{{ icon('alert', 20) }} Emergency flatten</h3><button class="modal-close" data-close="risk-flatten-modal" type="button" aria-label="Close emergency flatten confirmation">✕</button></div>
+            <div class="modal-body" id="risk-flatten-body"><p>This will immediately close all open positions across all runners.</p><div id="risk-flatten-stats" class="muted"></div></div>
+            <div class="modal-foot"><button class="btn btn-ghost" data-close="risk-flatten-modal" type="button">Cancel</button><button id="risk-flatten-confirm" class="btn btn-danger" type="button">Yes, flatten everything</button></div>
+        </div>
+    </div>
 
     <script src="{{ url_for('static', filename='js/components/currency.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/chart_theme.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/workspace.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/data_fetch_indicator.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/option_config.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/option_view.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/position_actions.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/orders_tab.js') }}"></script>
     <script src="{{ url_for('static', filename='js/session_state.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/toast.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/loader.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/market_chip.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/freshness_chip.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/risk_strip.js') }}"></script>
     <script src="{{ url_for('static', filename='js/broker_status.js') }}"></script>
     <script src="{{ url_for('static', filename='js/broker_auth_modal.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/broker_board.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/playbooks.js') }}"></script>
+    {% if config.get("PORTFOLIO_INTELLIGENCE_ENABLED", True) %}<script src="{{ url_for('static', filename='js/components/alert_widget.js') }}"></script>{% endif %}
     {% block scripts %}{% endblock %}
 </body>
 </html>

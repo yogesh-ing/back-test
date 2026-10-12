@@ -148,6 +148,9 @@ class SyntheticFeed:
             "low": round(max(0.01, low), 4),
             "close": round(close, 4),
             "volume": volume,
+            # Source tag for the manager's source-isolated fan-out: synthetic
+            # bars must only ever drive synthetic-source runners (2026-09-30).
+            "_source": "synthetic",
         }
 
     def emit_one(self, ts: Optional[datetime] = None, crash: bool = False) -> int:

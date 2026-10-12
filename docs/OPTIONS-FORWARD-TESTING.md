@@ -8,10 +8,8 @@
 >
 > Companion docs: [OPTIONS-PAPER-LIVE.md](OPTIONS-PAPER-LIVE.md) (options
 > pipeline) · [FORWARD-TESTING.md](FORWARD-TESTING.md) (forward engine) ·
-> [Gap-Analysis-Remediation-PRD.md](Gap-Analysis-Remediation-PRD.md) (§P2 is
-> the same finding as A2 below). For offline mechanism/regression evidence, see
-> [OPTIONS-DETERMINISTIC-REPLAY.md](OPTIONS-DETERMINISTIC-REPLAY.md); it does
-> not test restart recovery or replace the mandatory live soak.
+> [archive/Gap-Analysis-Remediation-PRD.md](archive/Gap-Analysis-Remediation-PRD.md) (§P2 is
+> the same finding as A2 below).
 
 ## Why this tracker exists
 
@@ -56,25 +54,28 @@ then NIFTY collapses 7,000 pts over 24 bars:
 | **C1** | Spawn UI: instrument / structure / strike / quantity controls | C · Reach | DONE | A2 |
 | **C2** | Portfolio matrix + deep-dive: option columns, premium, Greeks | C · Reach | DONE | C1 |
 | **D1** | Index-scale synthetic spot for NIFTY / BANKNIFTY | D · Realism | DONE | A1 |
-| **D2** | Injectable quote provider (`synthetic` \| `live:mstock`) + badge | D · Realism | TODO | A1 |
-| **D3** | Persist forward option books across restarts | D · Realism | TODO | A2 |
+| **D2** | Injectable quote provider (`synthetic` \| `live:mstock`) + badge | D · Realism | DONE | A1 |
+| **D3** | Persist forward option books across restarts | D · Realism | DONE | A2 |
 | **E1** | Fix lint baseline (`options/expiry.py` unused imports) | E · Hygiene | DONE | — |
-| **E2** | Stop options tests leaking state through the dev SQLite DB | E · Hygiene | TODO | — |
+| **E2** | Stop options tests leaking state through the dev SQLite DB | E · Hygiene | DONE | — |
 
 Phases: **A** makes the numbers move, **B** makes the runner able to leave a
 trade, **C** makes it reachable from the browser, **D** makes the numbers
 honest, **E** keeps the gate green.
 
-**Progress: A1, A2, B1, B2, B3, C1, C2, D1 and E1 are done** — an option runner
+**Progress: all phases are done** — A1, A2, B1, B2, B3, C1, C2, D1 and E1
+landed as tracked below; **D2** shipped 2026-09-17 via the P1.1 live-options
+wiring (live chains/LTP behind the generator duck type), **D3** shipped
+2026-09-17 via the P2.4 state persistence (option books ride the manager
+state snapshot), and **E2** was verified green 2026-09-28. An option runner
 prices every bar, is counted by the equity/bucket/breaker maths, opens *and
-closes* on its own rules, settles at expiry and rolls, reports what it did in the
-trade log, the metrics and the equity curve, can be **spawned** from the browser
-with a structure / strike selection / exit plan, is **read back** in the matrix
-and the deep-dive drawer with option-shaped columns, and now runs on an
-**index-scale** synthetic spot (NIFTY ~24,500, 50-point strikes, 75-lot
-contracts) instead of a ₹392 small-cap. What remains is **D2/D3** — an injectable
-live quote provider, and option books that survive a restart — plus **E2**, which
-is waiting on D3's persistence work.
+closes* on its own rules, settles at expiry and rolls, reports what it did in
+the trade log, the metrics and the equity curve, can be **spawned** from the
+browser with a structure / strike selection / exit plan, is **read back** in
+the matrix and the deep-dive drawer with option-shaped columns, and runs on
+an **index-scale** synthetic spot (NIFTY ~24,500, 50-point strikes, 75-lot
+contracts) instead of a ₹392 small-cap. One 2026-09-30 caveat applies to D2:
+the synthetic fallback it described is now config-gated — see the D2 section.
 
 ---
 
@@ -209,18 +210,27 @@ spawn), and every bar the bridge manages an open structure.
 
 | Rule | Key | Fires when |
 |---|---|---|
+| risk cap | `max_loss_inr` (default off) | mark ≤ −₹X of structure P&L — the platform's hard ceiling on the trade |
+| days to expiry | `min_days_to_expiry` (default **1**) | `(expiry − bar_date).days ≤ N` → squares off with the established `auto_square_off` reason |
 | stop loss | `stop_loss_pct` / `stop_loss_points` | mark ≤ −X% of net premium, or ≤ −₹X |
 | take profit | `take_profit_pct` / `take_profit_points` | mark ≥ +X% of net premium, or ≥ +₹X |
-| days to expiry | `min_days_to_expiry` (default **1**) | `(expiry − bar_date).days ≤ N` → squares off with the established `auto_square_off` reason |
 | time stop | `max_bars` | held ≥ N bars |
 | signal flip | `signal_flip` (default on) | view turns against the structure's direction |
 | signal neutral | `neutral_bars` (default off) | N consecutive bars with no view / a NEUTRAL view |
 | reverse | `reenter` (default off) | a flip-close immediately opens the opposite structure |
+| reversal budget | `max_reentries_per_day` (default **2**) | how many flip re-entries one day may take |
 
-Precedence is risk-before-opinion (stop → target → DTE → time → flip →
-neutral), so a gap-down reports the stop, not the flip. Percent rules are
-skipped for credit structures (a percentage of a negative premium is
+Precedence is the one the builder PRD fixes (§2 "Risk & exits", with the
+emergency flatten owned by the runner, above all of these): **cap → square-off →
+stop → target → time → flip → neutral**, so a gap-down reports the stop and a bar
+that is both near expiry and through the stop reports the square-off. Percent
+rules are skipped for credit structures (a percentage of a negative premium is
 meaningless).
+
+The cap, stop and target read their trigger off the structure's mark
+(`PRICE_MEASURED_REASONS`), so the bridge suppresses exactly those three while a
+mark is stale or failed — a bad price is not a price. The square-off and time
+stop keep firing: they never consulted the mark.
 
 Supporting behaviour, all deliberately conservative:
 
@@ -237,8 +247,9 @@ Supporting behaviour, all deliberately conservative:
 
 **Acceptance criteria.**
 
-- [x] Every rule has a unit test (percent, points, time, DTE, flip, neutral,
-      precedence, credit-structure skip, disabled rules).
+- [x] Every rule has a unit test (cap, percent, points, time, DTE, flip,
+      neutral, precedence, credit-structure skip, disabled rules), including
+      the tier ordering above and the stale-mark suppression set.
 - [x] A bullish→bearish flip closes the bull call spread on that bar;
       `reenter: true` opens the bear put spread on the same bar.
 - [x] `exit_reason` is set on the closed structure (`signal_flip`,
@@ -678,20 +689,43 @@ draws, grid/lot/premium scale, and both end-to-end runners). Full gate:
 
 ## D2 — Injectable quote provider
 
-**Status:** TODO
+**Status:** DONE (2026-09-17, via P1.1 live-options wiring — mechanism differs
+from the sketch below: routing keys off the runner's `source` field, not an
+`expression["quotes"]` knob)
 
-**Change.** `expression["quotes"] = "synthetic" | "live"` (live requires an
-authenticated broker session) resolved through the existing
-`web/options_api.get_quote_provider()` chain, with the result surfaced as
-`quote_source` on the runner state so nobody reads synthetic percentages as
-real fills.
+**Shipped.** `LiveChainProvider`/`LiveQuoteProvider` serve real chains + LTP
+behind the generator duck type when `source=mstock` && authenticated, with a
+**labelled** `synthetic:bs` fallback when no session; `quote_source` is
+surfaced on the bridge summary/runner state (`options_bridge.py`) so nobody
+reads synthetic percentages as real fills. 31 tests:
+`tests/test_live_options_wiring.py`.
+
+**Gate change (2026-09-30) — the fallback is no longer unconditional.** The
+data-source routing decision made `config/data_sources.yaml` the single
+control: with synthetic off (the shipped default), a session-less option
+runner no longer falls back to `synthetic:bs` — it **refuses to build a
+bridge** (`SourceDisabledError` in
+`feed_registry.option_quote_provider_for` / `options_bridge`). Only the
+`testing` profile (`BACKTEST_DATA_PROFILE=testing`) restores the labelled
+fallback. Routing still keys off the runner's `source` field.
+
+**Original sketch (superseded).** `expression["quotes"] = "synthetic" | "live"`
+resolved through the `web/options_api.get_quote_provider()` chain.
 
 ## D3 — Persist forward option books
 
-**Status:** TODO
+**Status:** DONE (2026-09-17, via P2.4 state persistence — mechanism differs
+from the sketch below: runner option books ride the manager state snapshot,
+not `StructurePersistence`)
 
-**Change.** Reuse `options/persistence.StructurePersistence` for runner books
-(keys or a parent id per runner), rehydrate on `PortfolioManager` bootstrap.
+**Shipped.** `forward/state_store.py` serialises, for option runners, the
+complete option book (`OptionPosition`/`StructurePosition` legs, broker cash,
+bar clock) into the `PORTFOLIO_STATE_PATH` snapshot; `PortfolioManager`
+rehydrates it on bootstrap (persisted RUNNING comes back PAUSED, fail-closed).
+16 tests: `tests/forward/test_state_persistence.py`.
+
+**Original sketch (superseded).** Reuse
+`options/persistence.StructurePersistence` for runner books.
 
 ## E1 — Lint baseline
 
@@ -711,7 +745,9 @@ top). Done while editing that file for B2.
 
 ## E2 — Options tests leak state through the dev SQLite DB
 
-**Status:** TODO
+**Status:** DONE (verified 2026-09-28: `tests/test_options_integration.py`
+back-to-back runs are green — the leaking test now sets
+`OPTIONS_PERSISTENCE=off` with a docstring explaining why)
 
 **Problem (found 2026-09-15 while validating A1).** `tests/test_options_integration.py`
 is not idempotent: `OPTIONS_PERSISTENCE` defaults to `auto`, so the options API

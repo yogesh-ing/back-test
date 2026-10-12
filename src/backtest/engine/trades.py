@@ -50,6 +50,11 @@ class Trade:
     pnl: float  # equity-based, costs included
     result: str  # "Win" | "Loss" | "Flat"
     is_open: bool = False
+    #: Bars the position was actually held, inclusive of both ends. Recorded
+    #: HERE because the walk is the only place that knows the bar positions —
+    #: everything downstream reads it rather than re-deriving a duration from
+    #: exposure (PRD backTest-enhance §2: avg/median trade duration).
+    bars_held: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -89,7 +94,7 @@ def walk_trades(
     entry_side = 0
     prev = 0.0
 
-    def close_trade(exit_i: int, *, is_open: bool) -> None:
+    def close_trade(exit_i: int, *, is_open: bool, bars: int) -> None:
         entry_equity = float(eq.iloc[entry_i - 1]) if entry_i > 0 else float(eq.iloc[0])
         pnl = float(eq.iloc[exit_i]) - entry_equity
         trades.append(
@@ -103,6 +108,7 @@ def walk_trades(
                 pnl=round(pnl, 6),
                 result=_classify(pnl),
                 is_open=is_open,
+                bars_held=bars,
             )
         )
 
@@ -113,7 +119,13 @@ def walk_trades(
         if entry_i is not None and (cur == 0 or sign_changed):
             # Flip bar carries the new position's return and both costs, so the
             # closing trade stops one bar earlier; a flat bar keeps its exit cost.
-            close_trade(i - 1 if sign_changed else i, is_open=False)
+            # Either way the position was held from entry_i up to bar i-1, and
+            # NOT on bar i — so a trade that exits on a flat bar must not be
+            # credited with a bar it was not in. `bars` is passed in rather than
+            # derived from exit_i precisely because exit_i means different
+            # things in the two cases, and guessing it wrong inflates every
+            # average holding period on the page.
+            close_trade(i - 1 if sign_changed else i, is_open=False, bars=i - entry_i)
             entry_i = None
 
         if cur != 0 and entry_i is None:
@@ -122,7 +134,8 @@ def walk_trades(
         prev = cur
 
     if entry_i is not None:  # still held at the last bar
-        close_trade(len(index) - 1, is_open=True)
+        # Here the last bar IS part of the position, so it counts.
+        close_trade(len(index) - 1, is_open=True, bars=len(index) - entry_i)
 
     return trades
 

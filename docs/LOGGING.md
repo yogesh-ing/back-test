@@ -73,11 +73,11 @@ several can run at once (`GET /api/forward/sessions` lists them):
 | Forward bot seems stuck | `[forward:<id>] replay paused (… clock frozen)` — the server clock is at 0 bars/s (`--replay-speed 0`) |
 | Two tabs race each other forward | no longer possible: `/status` is a pure read; the clock is server-side |
 | Backtest runs, results are empty | `sma_crossover produced NO signals on DEMO (262 bars, params={'fast':200,'slow':250})` + `[engine] result is flat` | Shorten the indicator windows or widen the date range — warmup must fit inside it |
-| Metric card disagrees with the trade table | `[adapter] metrics say trades=4 win_rate=100.00% but the trade table has 2 round trips with 0 wins` | Known defects **G1/G2** in `instructions/TASK-TRACKER.md` |
+| Metric card disagrees with the trade table | `[adapter] trades don't reconcile for X/Y: Σpnl=… vs total_pnl=…` | Known defects **G1/G2** in `instructions/TASK-TRACKER.md` |
 | `1D` and `1H` give identical charts | `[synthetic] interval 'hour' is not supported — returning daily business bars` | Only `--source db` honours timeframes today (**G6**) |
-| `403` on forward Start | `[forward] /start refused for X/Y: broker session not authenticated (client=…) — open the broker auth modal or use mode=synthetic` | Authenticate, or switch the page's Mode to Synthetic |
+| `403` on forward Start | `[forward] /start refused for X/Y: broker session not authenticated (client=…) — open the broker auth modal or use mode=paper` | Authenticate via the broker chip — or use paper mode (live mode is refused by design: `[forward] /start refused live mode … live_execution_not_wired`, the web replay only simulates fills) |
 | `400` "data error: …" | the data source's own warning line right above it | Read the source line: missing symbol, too few bars, no CSV file |
-| Data fetch job silently did nothing | `[data] DEMO: API returned no bars …` / `[data] fetch job finished: 0/200 symbols ok, 200 failed` / `api_key=MISSING` | Set `MSTOCK_API_KEY`, check the instruments table |
+| Data fetch job silently did nothing | `[data] DEMO: API returned no bars …` / `[data] fetch job finished: 0/200 symbols ok, 200 failed` / `[data] fetch job starting: … api_key=MISSING — every request will fail` | Set `MSTOCK_API_KEY`, check the instruments table |
 | A new strategy file never shows up | `Skipping strategy module backtest.strategies.foo: SyntaxError: …` | Fix the file; the app keeps running on purpose |
 
 ## Library use

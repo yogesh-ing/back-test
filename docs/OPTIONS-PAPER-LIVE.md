@@ -7,6 +7,13 @@ paper book, then (when you choose to) through the live mStock order path.
 > NSE/NFO segment, up to 4 legs per structure. Stock options, American
 > exercise and physical settlement are rejected by `OptionContract.validate()`.
 
+> **Status note (2026-10).** All paper-trade data was **wiped 2026-09-30**
+> (the synthetic data it was built on was misleading); the `bak_*` backup
+> tables and the pre-wipe JSON were kept. A fresh paper run on mStock broker
+> data was planned but has **not yet been restarted** — the paper book below
+> starts empty. Forward/paper trading reads from the broker feed; synthetic
+> data is config-gated with no fallback (`config/data_sources.yaml`).
+
 ---
 
 ## 1. The pipeline
@@ -154,7 +161,7 @@ from backtest.options.live_trading import LiveOptionTrader, RetryConfig
 broker = MStockBroker(...)          # authenticated session (login + TOTP)
 trader = LiveOptionTrader(
     broker,
-    dry_run=True,                   # log payloads, place nothing
+    dry_run=True,                   # default — log payloads, place nothing
     retry_config=RetryConfig(max_retries=3, base_delay_seconds=1.0),
 )
 
@@ -166,9 +173,24 @@ Behaviour you can rely on:
 - **Legs submit sequentially.** If a leg fails after retries, every
   previously filled leg is **cancelled (rollback)** — a structure never ends
   up half-open by accident.
-- **Dry-run first.** `dry_run=True` is the default posture for bring-up: it
-  logs the exact payloads (`POST /openapi/typea/orders/regular`) and places
-  nothing. Flip to `False` only after verifying the logs.
+- **Dry-run is the default — fail-closed.** `dry_run=True` is the *code
+  default* (architect review 2026-09-17 §3.2): it logs the exact payloads
+  (`POST /openapi/typea/orders/regular`) and places nothing. Arming real
+  orders requires **all three gates** at construction, or the constructor
+  raises `ValueError` before touching the broker:
+
+  | Gate | Switch | Meaning |
+  |---|---|---|
+  | 1 | `dry_run=False` | explicit opt-out of the safe default |
+  | 2 | `confirm_live=True` | deliberate, per-instance confirmation (never inherited from a copy-pasted config) |
+  | 3 | `ALLOW_LIVE_ORDERS=1` (environment) | ops-level kill-switch — a desk can disable all live placement centrally, without a deploy |
+
+  ```python
+  trader = LiveOptionTrader(broker, dry_run=False, confirm_live=True)  # + env ALLOW_LIVE_ORDERS=1
+  ```
+
+  Arming is logged loudly (`LIVE MODE ARMED`) and every live submission is
+  logged. `trader.confirm_live` reads `True` only when actually armed.
 - **Status polling.** Fill confirmation polls order status with
   `poll_interval_seconds` / `poll_timeout_seconds`; partial fills and
   rejections surface on `LegResult` and `StructureResult`.
@@ -279,7 +301,8 @@ quote-implied vol.
 ## 6. Fees (the honest part)
 
 Option costs are **not** just ₹20 brokerage. The full NFO stack for one
-NIFTY lot (75 units at a ₹120.50 premium), mStock flat plan, FY 2024-25:
+NIFTY lot (75 units at a ₹120.50 premium), mStock flat plan, re-verified
+2026-09-28 (F&O STT per Budget 2026, effective 2026-04-01):
 
 | Component | Rate | Amount |
 |---|---|---|
@@ -288,7 +311,7 @@ NIFTY lot (75 units at a ₹120.50 premium), mStock flat plan, FY 2024-25:
 | SEBI turnover | ₹10/crore | 0.01 |
 | IPFT | ₹10/crore | 0.01 |
 | Stamp duty | 0.003%, **buy side only** | 0.27 |
-| STT | 0.1% of premium, **sell side only** | — (buy) / 9.04 (sell) |
+| STT | 0.15% of premium, **sell side only** | — (buy) / 13.56 (sell) |
 | GST | 18% on brokerage + exchange + SEBI + IPFT (never on STT/stamp) | 4.17 |
 | **Total (buy leg)** | | **27.63** |
 
@@ -371,14 +394,15 @@ settlement price is not wired.
 
 ## 8. Dashboard
 
-`/options` in the web app shows the live paper book (5-second polling):
+The manual `/options` page was **removed 2026-09-22** (GAP-3, owner
+decision) — see the module docstring in `web/options_api.py`. What remains:
 
-- Summary cards — equity, cash, realized P&L, margin used, open counts
-- Portfolio Greeks grid — net delta/gamma/theta/vega with red/green colouring
-- Positions and structures tables — Close button per structure
-- Expiry alerts panel
+- the book singleton (portfolio merge + emergency flatten) and the JSON
+  endpoints listed below;
+- the manual option trade UI, which now lives in **Portfolio → Playbooks**
+  via option runner instances (see OPTIONS-FORWARD-TESTING.md).
 
-JSON API:
+The JSON API:
 
 | Method | Endpoint | Purpose |
 |---|---|---|
@@ -400,9 +424,9 @@ V1 dashboard binds to a single process-wide `OptionPaperBroker`
 | Fee stack rates (validated vs contract note) | Paper fills at LTP ± slippage, no order book |
 | mStock option chain + quote fetch (`get_option_chain`) | No partial-fill simulation on paper legs |
 | Black-Scholes Greeks + IV solver | Margin is a SPAN *approximation* (floors) |
-| Atomic multi-leg semantics (both paper and live paths) | Statutory fees recorded but not yet cash-bearing on paper |
-| Rollback on failed live legs | One paper book per process, in-memory only |
-| DeltaSelector uses a distance heuristic, not true delta | Restart wipes broker/manager state |
+| Atomic multi-leg semantics (both paper and live paths) | ~~Statutory fees recorded but not yet cash-bearing on paper~~ **fees are cash-bearing since Gap G4.1** (`tests/test_options_gap_remediation.py::TestCashBearingFees`) |
+| Rollback on failed live legs | One paper book per process (but DB-persisted since Gap G4.2 — survives restart) |
+| DeltaSelector uses a distance heuristic, not true delta | ~~Restart wipes broker/manager state~~ **persistence landed:** dashboard book via G4.2 (`trade_structures`), runners via P2.4 (`PORTFOLIO_STATE_PATH`) |
 
 ## 10. Tests
 

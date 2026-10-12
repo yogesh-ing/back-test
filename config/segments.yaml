@@ -1,0 +1,52 @@
+# =============================================================================
+# Multi-Broker Capital Allocation — Segments (PRD-001 §4.1)
+# =============================================================================
+#
+# A SEGMENT is a user-defined partition of capital with a dedicated broker
+# and risk envelope. Runners are created INTO a segment; their orders route
+# to the segment's broker; each segment gets its own independent circuit
+# breakers (reusing the per-bucket machinery), while GLOBAL breakers
+# evaluate the SUM across all segments.
+#
+# Rules:
+#   * broker  — must be a registered broker (mstock | dhan | ...).
+#   * mode    — paper | live. Paper ignores the broker for execution
+#               (paper broker everywhere); flip to live when ready.
+#   * allocated_capital — capital earmarked for this segment (INR).
+#   * risk    — optional per-segment breaker overrides:
+#               daily_loss_limit (INR), max_drawdown_pct (percent, e.g. 15),
+#               max_deployed_capital (INR).
+#
+# Everything here is OPTIONAL: with no segments defined the platform
+# behaves exactly as the single-broker V1 (runners without a segment use
+# the legacy default execution path).
+
+segments:
+
+  options_index:
+    display_name: "Index Options"
+    broker: mstock
+    mode: paper            # start paper, flip to live when ready
+    allocated_capital: 1200000
+    risk:
+      daily_loss_limit: 50000
+      max_drawdown_pct: 15
+      max_deployed_capital: 1200000
+
+  equity_intraday:
+    display_name: "Equity Intraday"
+    broker: dhan
+    mode: paper            # start paper, flip to live when ready
+    allocated_capital: 800000
+    risk:
+      daily_loss_limit: 30000
+      max_drawdown_pct: 12
+      max_deployed_capital: 800000
+
+# Data routing (PRD §5): ONE broker feeds the PortfolioManager tick loop.
+# Runner `source` (synthetic/replay/mstock/dhan) is unchanged; `fallback`
+# is a V2 feature — V1 fires a feed-quality alert and the operator
+# switches manually.
+data:
+  primary: mstock
+  fallback: dhan

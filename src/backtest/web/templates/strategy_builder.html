@@ -1,0 +1,586 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, page_header %}
+{% block title %}Strategy Builder · Trading Bot{% endblock %}
+
+{% block content %}
+<div class="screen-page builder-page">
+  {{ page_header('Research / Strategy authoring', 'Strategy builder', 'Import supported Pine v5/v6 strategies. Unsupported trading logic is rejected rather than silently omitted.') }}
+
+  <div class="strategy-editor-grid">
+    <!-- Left: input -->
+    <div>
+      <label for="pine-name" class="muted" style="display:block; margin-bottom:4px;">Strategy name (optional — defaults to the Pine script's title)</label>
+      <input id="pine-name" class="input" type="text" placeholder="e.g. my_ema_cross" style="width:100%; margin-bottom:10px;">
+
+      <label for="pine-segment" class="muted" style="display:block; margin-bottom:4px;">Segment (required — every strategy runs in one capital partition, so backtest → paper → live share it)</label>
+      <select id="pine-segment" class="input" style="width:100%; margin-bottom:10px;">
+        <option value="">Loading segments…</option>
+      </select>
+
+      <label for="pine-code" class="muted" style="display:block; margin-bottom:4px;">Pine Script v5 or v6 source</label>
+      <textarea id="pine-code" class="input" rows="20" spellcheck="false"
+        placeholder='//@version=5&#10;strategy("EMA Cross")&#10;...'
+        style="width:100%; font-family:monospace; font-size:13px; resize:vertical;"></textarea>
+
+      <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
+        <button id="pine-convert" class="btn btn-primary" type="button">{{ icon('code', 14) }} Convert strategy</button>
+        <button id="pine-validate" class="btn btn-ghost" type="button" disabled>Check syntax / backtest availability</button>
+        <button id="pine-save" class="btn btn-ghost" type="button" disabled hidden>💾 Save as plugin</button>
+        <button id="pine-copy-prompt" class="btn btn-ghost" type="button" title="Complex strategies may need manual conversion — copy the LLM prompt and use ChatGPT/Claude">📋 Copy LLM prompt</button>
+      </div>
+      <div id="pine-error" class="error-text" style="margin-top:10px; color:var(--danger-text,#e0938f); white-space:pre-wrap;" hidden></div>
+    </div>
+
+    <!-- Right: output -->
+    <div>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+        <label for="pine-output" class="muted">Converted Python strategy</label>
+        <span id="pine-meta" class="muted" style="font-size:12px;"></span>
+      </div>
+      <textarea id="pine-output" class="input" rows="24" readonly
+        style="width:100%; font-family:monospace; font-size:12px; background:var(--surface-2,#212a36);"></textarea>
+      <div id="pine-status" class="muted" style="margin-top:10px; font-size:12px;"></div>
+
+      <!-- Readable translation (issues.txt S1): rendered on every conversion —
+           entry criteria, entry strike (options), take profit, stop loss.
+           Anything the script left out must be typed in here by the user;
+           Save only appears once every required criterion has a value. -->
+      <div id="pine-summary" class="strategy-summary" style="margin-top:10px;" hidden></div>
+      <div id="pine-gate" class="muted" style="margin-top:6px; font-size:12px;" hidden></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var nameEl = document.getElementById('pine-name');
+  var segEl = document.getElementById('pine-segment');
+  var codeEl = document.getElementById('pine-code');
+  var outEl = document.getElementById('pine-output');
+  var metaEl = document.getElementById('pine-meta');
+  var errEl = document.getElementById('pine-error');
+  var statusEl = document.getElementById('pine-status');
+  var summaryEl = document.getElementById('pine-summary');
+  var gateEl = document.getElementById('pine-gate');
+  var convertBtn = document.getElementById('pine-convert');
+  var validateBtn = document.getElementById('pine-validate');
+  var saveBtn = document.getElementById('pine-save');
+  var promptBtn = document.getElementById('pine-copy-prompt');
+
+  var converted = null; // {python_code, metadata, strategy_name}
+  var lastReadable = null;    // server-computed readable from the last convert
+  var missingKeys = [];       // required-but-absent criteria (server verdict)
+
+  var MONEYNESS_OPTIONS = [
+    'ATM', 'ATM+1', 'ATM+2', 'ATM+3', 'ATM+4', 'ATM+5',
+    'ATM-1', 'ATM-2', 'ATM-3', 'ATM-4', 'ATM-5', 'ITM', 'OTM'
+  ];
+  var OPTION_TYPES = ['CE', 'PE', 'Both (CE+PE)'];
+  var EXPIRY_CYCLES = ['current week dt.', 'next week dt.', 'current month dt.', 'next month dt.'];
+
+  var INPUT_PLACEHOLDER = {
+    entry: 'e.g. enter long when close crosses above EMA-20 and RSI(14) > 50',
+    entry_strike: 'e.g. ATM+2 CE expiry current week dt.',
+    expiry: 'e.g. current week dt.',
+    take_profit: 'e.g. exit at +1.5×ATR from entry (limit price formula)',
+    stop_loss: 'e.g. exit at −1×ATR below entry (stop price formula)'
+  };
+
+  function setError(msg) {
+    errEl.hidden = !msg;
+    errEl.textContent = msg || '';
+  }
+  function setStatus(msg) {
+    statusEl.textContent = msg || '';
+  }
+  function escapeHtml(v) {
+    return String(v === null || v === undefined ? '' : v).replace(/[&<>"']/g, function (c) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+
+  function getMissingCriteria() {
+    if (!converted || !lastReadable) return [];
+    var gaps = [];
+
+    // 1. Segment selection
+    if (!segEl.value) {
+      gaps.push('segment selection');
+    }
+
+    // 2. Entry criteria
+    var entryInput = document.getElementById('pine-crit-entry');
+    var entryVal = (entryInput ? entryInput.value.trim() : '') || (lastReadable && lastReadable.entry);
+    if (!entryVal) gaps.push('entry criteria');
+
+    // 3. Entry strike price (if options)
+    var isOpt = isOptionsStrategy();
+    if (isOpt) {
+      var mEl = document.getElementById('pine-opt-moneyness');
+      var tEl = document.getElementById('pine-opt-type');
+      var eEl = document.getElementById('pine-opt-expiry');
+      var mVal = mEl ? mEl.value : (lastReadable && lastReadable.opt_moneyness);
+      var tVal = tEl ? tEl.value : (lastReadable && lastReadable.opt_type);
+      var eVal = eEl ? eEl.value : (lastReadable && (lastReadable.opt_expiry || lastReadable.expiry));
+      var hasStrike = (mVal && tVal && eVal) || (lastReadable && lastReadable.entry_strike && lastReadable.expiry);
+      if (!hasStrike) gaps.push('entry strike price (if options)');
+    }
+
+    // 4. Take profit criteria
+    var tpInput = document.getElementById('pine-crit-take_profit');
+    var tpVal = (tpInput ? tpInput.value.trim() : '') || (lastReadable && lastReadable.take_profit);
+    if (!tpVal) gaps.push('take profit criteria');
+
+    // 5. Take stop loss criteria
+    var slInput = document.getElementById('pine-crit-stop_loss');
+    var slVal = (slInput ? slInput.value.trim() : '') || (lastReadable && lastReadable.stop_loss);
+    if (!slVal) gaps.push('take stop loss criteria');
+
+    return gaps;
+  }
+
+  function isOptionsStrategy() {
+    if (!lastReadable) return false;
+    var seg = segEl ? segEl.value : '';
+    return !!(lastReadable.is_options || (seg && seg.indexOf('options') !== -1));
+  }
+
+  // Save is HIDDEN (not just disabled) until every required criterion has a
+  // value — detected in the script or selected/typed by the user.
+  function updateSaveGate() {
+    if (!converted) return;
+    var gaps = getMissingCriteria();
+    if (gaps.length) {
+      saveBtn.hidden = true;
+      saveBtn.disabled = true;
+      gateEl.hidden = false;
+      gateEl.innerHTML = '<strong class="strategy-field-flag">Save is hidden</strong> '
+        + 'until required criteria are resolved: ' + escapeHtml(gaps.join(', '));
+    } else {
+      saveBtn.hidden = false;
+      saveBtn.disabled = false;
+      gateEl.hidden = false;
+      gateEl.innerHTML = '<span style="color:var(--success-text,#98c379); font-weight:600;">All required criteria declared ✓</span> — you can validate and save now.';
+    }
+  }
+
+  function updateStrikePreview() {
+    var mEl = document.getElementById('pine-opt-moneyness');
+    var tEl = document.getElementById('pine-opt-type');
+    var eEl = document.getElementById('pine-opt-expiry');
+    var prevEl = document.getElementById('pine-opt-preview');
+    var rowEl = document.getElementById('pine-row-strike');
+    var flagEl = document.getElementById('pine-strike-flag');
+
+    if (!mEl || !tEl || !eEl) return;
+    var m = mEl.value;
+    var t = tEl.value;
+    var e = eEl.value;
+
+    if (m && t && e) {
+      var comb = m + ' ' + t + ' expiry ' + e;
+      if (prevEl) {
+        prevEl.textContent = comb;
+        prevEl.style.color = 'var(--text-strong, #fff)';
+      }
+      if (rowEl) {
+        rowEl.classList.remove('summary-missing');
+        rowEl.classList.add('summary-ok');
+      }
+      if (flagEl) {
+        flagEl.innerHTML = '<span style="color:var(--success-text,#98c379); font-weight:600;">✓ Configured</span>';
+      }
+    } else {
+      if (prevEl) {
+        prevEl.textContent = '(incomplete — select moneyness, type & expiry)';
+        prevEl.style.color = 'var(--muted, #8b949e)';
+      }
+      if (rowEl) {
+        rowEl.classList.add('summary-missing');
+        rowEl.classList.remove('summary-ok');
+      }
+      if (flagEl) {
+        flagEl.innerHTML = '<strong class="strategy-field-flag">⚠ MISSING</strong> — select below:';
+      }
+    }
+    updateSaveGate();
+  }
+
+  function setSummary(readable) {
+    summaryEl.innerHTML = '';
+    gateEl.hidden = true;
+    if (!readable || typeof readable !== 'object') {
+      summaryEl.hidden = true;
+      lastReadable = null;
+      return [];
+    }
+    lastReadable = readable;
+    var isOpt = isOptionsStrategy();
+
+    // Auto-preselect segment if not chosen
+    if (segEl && !segEl.value) {
+      for (var i = 0; i < segEl.options.length; i++) {
+        var optVal = segEl.options[i].value;
+        if (isOpt && (optVal === 'options_index' || optVal.indexOf('options') !== -1)) {
+          segEl.value = optVal;
+          break;
+        } else if (!isOpt && optVal === 'equity_intraday') {
+          segEl.value = optVal;
+          break;
+        }
+      }
+    }
+
+    // Determine initial dropdown values for options
+    var initMoneyness = readable.opt_moneyness || '';
+    var initType = readable.opt_type || '';
+    var initExpiry = readable.opt_expiry || readable.expiry || '';
+
+    // If options string already has components, parse them
+    if (isOpt && readable.entry_strike) {
+      var s = String(readable.entry_strike);
+      if (!initMoneyness) {
+        var mMatch = s.match(/(ATM[+-]\d+|ATM|ITM[+-]\d+|ITM|OTM[+-]\d+|OTM)/i);
+        if (mMatch) initMoneyness = mMatch[1].toUpperCase();
+      }
+      if (!initType) {
+        if (/CE\s*\+\s*PE/i.test(s)) initType = 'Both (CE+PE)';
+        else if (/\bCE\b/i.test(s)) initType = 'CE';
+        else if (/\bPE\b/i.test(s)) initType = 'PE';
+      }
+      if (!initExpiry) {
+        var eMatch = s.match(/(current\s*week\s*dt\.?|next\s*week\s*dt\.?|current\s*month\s*dt\.?|next\s*month\s*dt\.?)/i);
+        if (eMatch) initExpiry = eMatch[1].toLowerCase().replace(/\.?$/, ' dt.');
+      }
+    }
+
+    var hasStrike = !!(initMoneyness && initType && initExpiry) || !!(readable.entry_strike && readable.expiry);
+    var previewStrikeText = (initMoneyness && initType && initExpiry)
+      ? (initMoneyness + ' ' + initType + ' expiry ' + initExpiry)
+      : (readable.entry_strike || '(incomplete — select moneyness, type & expiry)');
+
+    // 1. Entry criteria row
+    var entryHtml = '';
+    if (readable.entry) {
+      entryHtml = '<div class="summary-row summary-ok"><strong>entry criteria:</strong> ' + escapeHtml(readable.entry) + '</div>';
+    } else {
+      entryHtml = '<div class="summary-row summary-missing"><strong>entry criteria:</strong> <strong class="strategy-field-flag">⚠ MISSING</strong> — not in Pine script, specify below:'
+        + '<div style="margin-top:4px;"><input id="pine-crit-entry" class="input" type="text" placeholder="'
+        + escapeHtml(INPUT_PLACEHOLDER.entry) + '" style="width:100%; font-size:13px;"></div></div>';
+    }
+
+    // 2. Entry strike price (if options) row
+    var strikeHtml = '';
+    if (!isOpt) {
+      strikeHtml = '<div class="summary-row summary-na"><strong>entry stike price (if options):</strong> <em>n/a — equity strategy (no strike/expiry required)</em></div>';
+    } else {
+      var strikeFlagHtml = hasStrike
+        ? '<span style="color:var(--success-text,#98c379); font-weight:600;">✓ Configured</span>'
+        : '<strong class="strategy-field-flag">⚠ MISSING</strong> — select below:';
+
+      strikeHtml = '<div id="pine-row-strike" class="summary-row ' + (hasStrike ? 'summary-ok' : 'summary-missing') + '">'
+        + '<div style="display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap;">'
+        + '<div><strong>entry stike price (if options):</strong> <span class="muted" style="font-size:11px;">(e.g. ATM+2 CE expiry current week dt. / ITM PE expiry current month dt.)</span></div>'
+        + '<div id="pine-strike-flag">' + strikeFlagHtml + '</div>'
+        + '</div>'
+        + '<div style="display:flex; gap:8px; margin-top:6px; flex-wrap:wrap; align-items:center;">'
+        + '<div style="flex:1; min-width:110px;">'
+        + '<label for="pine-opt-moneyness" style="font-size:11px; color:var(--muted); display:block; margin-bottom:2px;">Moneyness</label>'
+        + '<select id="pine-opt-moneyness" class="input" style="width:100%; font-size:12px; padding:4px 6px;">'
+        + '<option value="">-- Moneyness --</option>'
+        + MONEYNESS_OPTIONS.map(function (m) {
+            return '<option value="' + m + '"' + (m === initMoneyness ? ' selected' : '') + '>' + m + '</option>';
+          }).join('')
+        + '</select>'
+        + '</div>'
+        + '<div style="flex:1; min-width:90px;">'
+        + '<label for="pine-opt-type" style="font-size:11px; color:var(--muted); display:block; margin-bottom:2px;">Option Type</label>'
+        + '<select id="pine-opt-type" class="input" style="width:100%; font-size:12px; padding:4px 6px;">'
+        + '<option value="">-- Type --</option>'
+        + OPTION_TYPES.map(function (t) {
+            return '<option value="' + t + '"' + (t === initType ? ' selected' : '') + '>' + t + '</option>';
+          }).join('')
+        + '</select>'
+        + '</div>'
+        + '<div style="flex:1; min-width:130px;">'
+        + '<label for="pine-opt-expiry" style="font-size:11px; color:var(--muted); display:block; margin-bottom:2px;">Expiry Cycle</label>'
+        + '<select id="pine-opt-expiry" class="input" style="width:100%; font-size:12px; padding:4px 6px;">'
+        + '<option value="">-- Expiry --</option>'
+        + EXPIRY_CYCLES.map(function (e) {
+            return '<option value="' + e + '"' + (e === initExpiry ? ' selected' : '') + '>' + e + '</option>';
+          }).join('')
+        + '</select>'
+        + '</div>'
+        + '</div>'
+        + '<div style="margin-top:6px; font-size:12px; display:flex; align-items:center; gap:6px;">'
+        + '<span class="muted">Live preview:</span>'
+        + '<code id="pine-opt-preview" style="padding:2px 6px; border-radius:3px; background:var(--surface-1,#181f2a); font-weight:600;' + (hasStrike ? ' color:var(--text-strong,#fff);' : ' color:var(--muted,#8b949e);') + '">'
+        + escapeHtml(previewStrikeText) + '</code>'
+        + '</div>'
+        + '</div>';
+    }
+
+    // 3. Take profit criteria row
+    var tpHtml = '';
+    if (readable.take_profit) {
+      tpHtml = '<div class="summary-row summary-ok"><strong>take profit criteria:</strong> ' + escapeHtml(readable.take_profit) + '</div>';
+    } else {
+      tpHtml = '<div class="summary-row summary-missing"><strong>take profit criteria:</strong> <strong class="strategy-field-flag">⚠ MISSING</strong> — not in Pine script, specify below:'
+        + '<div style="margin-top:4px;"><input id="pine-crit-take_profit" class="input" type="text" placeholder="'
+        + escapeHtml(INPUT_PLACEHOLDER.take_profit) + '" style="width:100%; font-size:13px;"></div></div>';
+    }
+
+    // 4. Take stop loss criteria row
+    var slHtml = '';
+    if (readable.stop_loss) {
+      slHtml = '<div class="summary-row summary-ok"><strong>take stop loss criteria:</strong> ' + escapeHtml(readable.stop_loss) + '</div>';
+    } else {
+      slHtml = '<div class="summary-row summary-missing"><strong>take stop loss criteria:</strong> <strong class="strategy-field-flag">⚠ MISSING</strong> — not in Pine script, specify below:'
+        + '<div style="margin-top:4px;"><input id="pine-crit-stop_loss" class="input" type="text" placeholder="'
+        + escapeHtml(INPUT_PLACEHOLDER.stop_loss) + '" style="width:100%; font-size:13px;"></div></div>';
+    }
+
+    // Optional signal exit
+    var exitHtml = readable.exit
+      ? '<div class="summary-row summary-ok"><strong>Signal exit (optional):</strong> ' + escapeHtml(readable.exit) + '</div>'
+      : '';
+
+    var optionsNotice = isOpt
+      ? '<div class="summary-row summary-na" style="margin-top:8px; font-size:11px;"><strong>Note:</strong> Options strategies require live options quotes; validate execution via Forward Testing.</div>'
+      : '';
+
+    var gaps = getMissingCriteria();
+    var headHtml = gaps.length
+      ? '<div class="strategy-summary-head strategy-field-flag">⚠ Missing: ' + escapeHtml(gaps.join(', '))
+        + ' — fill them in and Save will appear.</div>'
+      : '<div class="strategy-summary-head" style="color:var(--success-text,#98c379);">All required criteria declared ✓</div>';
+
+    summaryEl.innerHTML = headHtml + entryHtml + strikeHtml + tpHtml + slHtml + exitHtml + optionsNotice;
+    summaryEl.hidden = false;
+
+    // Attach listeners
+    ['entry', 'take_profit', 'stop_loss'].forEach(function (key) {
+      var input = document.getElementById('pine-crit-' + key);
+      if (input) input.addEventListener('input', updateSaveGate);
+    });
+
+    if (isOpt) {
+      ['pine-opt-moneyness', 'pine-opt-type', 'pine-opt-expiry'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener('change', updateStrikePreview);
+      });
+    }
+
+    return gaps;
+  }
+
+  function loadSegments() {
+    fetch('/api/segments')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var segs = (d && d.segments) || [];
+        if (!segs.length) {
+          segEl.innerHTML = '<option value="">No segments configured</option>';
+          setError('No segments are configured in config/segments.yaml — add one before saving strategies.');
+          return;
+        }
+        segEl.innerHTML = '<option value="">Choose a segment…</option>' + segs.map(function (s) {
+          var label = s.display_name ? s.name + ' — ' + s.display_name : s.name;
+          return '<option value="' + escapeHtml(s.name) + '">' + escapeHtml(label) + '</option>';
+        }).join('');
+      })
+      .catch(function () {
+        segEl.innerHTML = '<option value="">Segments unavailable</option>';
+      });
+  }
+
+  convertBtn.addEventListener('click', function () {
+    setError('');
+    setStatus('Converting…');
+    converted = null;
+    validateBtn.disabled = true;
+    saveBtn.disabled = true;
+    saveBtn.hidden = true;
+    fetch('/api/pine/convert', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pine_code: codeEl.value, strategy_name: nameEl.value || undefined })
+    }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        if (!res.ok || !res.d.success) {
+          outEl.value = '';
+          metaEl.textContent = '';
+          setError(res.d.error || 'Conversion failed.');
+          setStatus('');
+          return;
+        }
+        converted = res.d;
+        outEl.value = res.d.python_code;
+        var m = res.d.metadata || {};
+        metaEl.textContent = m.indicators_used && m.indicators_used.length
+          ? 'indicators: ' + m.indicators_used.join(', ')
+          : '';
+        validateBtn.disabled = false;
+
+        // The readable translation is the gate: shown on every conversion;
+        // every missing required criterion must be typed in, and Save only
+        // becomes visible when the checklist is complete.
+        var missing = setSummary(m.readable);
+        updateSaveGate();
+        var note = (m.warnings || []).join(' ');
+        if (missing.length) {
+          setStatus('Converted, but ' + missing.join(', ') + ' missing — type them into the highlighted fields above to unlock Save.' + (note ? ' Note: ' + note : ''));
+        } else {
+          setStatus('Converted ✓ — review rules and run a real backtest before trading.' + (note ? ' Note: ' + note : ''));
+        }
+      })
+      .catch(function (e) { setError('Network error: ' + e); setStatus(''); });
+  });
+
+  validateBtn.addEventListener('click', function () {
+    if (!converted) return;
+    setError('');
+    setStatus('Checking generated code…');
+    fetch('/api/pine/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        python_code: converted.python_code,
+        strategy_name: converted.strategy_name,
+        days: 30
+      })
+    }).then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.is_valid) {
+          var m = d.backtest_metrics || {};
+          setStatus(d.validation_status === 'SYNTAX_ONLY' ? 'Syntax checked only — backtest not run. Review signals in a real backtest before trading.' : 'Backtest completed — ' + JSON.stringify(m));
+        } else {
+          setStatus('Validation FAIL' + (d.rejection_reason ? ' — ' + d.rejection_reason : ''));
+        }
+      })
+      .catch(function (e) { setError('Network error: ' + e); setStatus(''); });
+  });
+
+  saveBtn.addEventListener('click', function () {
+    // issues.txt S1 follow-up + S2: the server re-checks BOTH the criteria
+    // completeness and the segment link; this payload carries the final
+    // merged view (detected values plus whatever the user typed).
+    if (!converted) return;
+    var segment = segEl.value;
+    if (!segment) {
+      setError('Choose a segment before saving — it links the strategy to its capital partition for backtest, paper and live.');
+      return;
+    }
+    var detected = lastReadable || {};
+    var isOpt = isOptionsStrategy();
+    var criteria = {};
+    var sources = {};
+
+    var entryInput = document.getElementById('pine-crit-entry');
+    var entryVal = (entryInput ? entryInput.value.trim() : '') || String(detected.entry || '').trim();
+    if (entryVal) {
+      criteria.entry = entryVal;
+      sources.entry = (entryInput && entryInput.value.trim()) ? 'user' : 'detected';
+    }
+
+    if (isOpt) {
+      var mEl = document.getElementById('pine-opt-moneyness');
+      var tEl = document.getElementById('pine-opt-type');
+      var eEl = document.getElementById('pine-opt-expiry');
+      var mVal = mEl ? mEl.value : (detected.opt_moneyness || '');
+      var tVal = tEl ? tEl.value : (detected.opt_type || '');
+      var eVal = eEl ? eEl.value : (detected.opt_expiry || detected.expiry || '');
+
+      var combined = (mVal && tVal && eVal) ? (mVal + ' ' + tVal + ' expiry ' + eVal) : '';
+      var strikeVal = combined || String(detected.entry_strike || '').trim();
+      var expiryVal = eVal || String(detected.expiry || '').trim();
+
+      if (strikeVal) {
+        criteria.entry_strike = strikeVal;
+        criteria.expiry = expiryVal;
+        criteria.opt_moneyness = mVal;
+        criteria.opt_type = tVal;
+        criteria.opt_expiry = eVal;
+        sources.entry_strike = (mEl && mEl.value) ? 'user' : 'detected';
+        sources.expiry = (eEl && eEl.value) ? 'user' : 'detected';
+      }
+    }
+
+    var tpInput = document.getElementById('pine-crit-take_profit');
+    var tpVal = (tpInput ? tpInput.value.trim() : '') || String(detected.take_profit || '').trim();
+    if (tpVal) {
+      criteria.take_profit = tpVal;
+      sources.take_profit = (tpInput && tpInput.value.trim()) ? 'user' : 'detected';
+    }
+
+    var slInput = document.getElementById('pine-crit-stop_loss');
+    var slVal = (slInput ? slInput.value.trim() : '') || String(detected.stop_loss || '').trim();
+    if (slVal) {
+      criteria.stop_loss = slVal;
+      sources.stop_loss = (slInput && slInput.value.trim()) ? 'user' : 'detected';
+    }
+
+    var exitInput = document.getElementById('pine-crit-exit');
+    var exitVal = (exitInput ? exitInput.value.trim() : '') || String(detected.exit || '').trim();
+    if (exitVal) {
+      criteria.exit = exitVal;
+      sources.exit = (exitInput && exitInput.value.trim()) ? 'user' : 'detected';
+    }
+
+    criteria.sources = sources;
+    setError('');
+    setStatus('Saving…');
+    fetch('/api/pine/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        python_code: converted.python_code,
+        strategy_name: converted.strategy_name,
+        metadata: converted.metadata || {},
+        segment: segment,
+        criteria: criteria
+      })
+    }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        var d = res.d;
+        if (!res.ok || !d.success) {
+          setError(d.error || 'Save failed.');
+          setStatus('');
+          return;
+        }
+        if (d.loaded === false) {
+          setError(d.load_error || 'Saved but failed to load into the registry — see app log.');
+          setStatus('Saved to ' + d.plugin_path + ' but NOT loaded.');
+        } else {
+          setStatus('Saved ✓ ' + d.plugin_path + ' — linked to segment "' + d.segment + '", criteria recorded, loaded into the registry (no restart needed).');
+        }
+      })
+      .catch(function (e) { setError('Network error: ' + e); setStatus(''); });
+  });
+
+  segEl.addEventListener('change', function () {
+    if (converted && lastReadable) {
+      setSummary(lastReadable);
+    }
+    updateSaveGate();
+  });
+
+  promptBtn.addEventListener('click', function () {
+    fetch('/api/pine/prompt')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (navigator.clipboard && d.prompt) {
+          navigator.clipboard.writeText(d.prompt).then(function () {
+            setStatus('LLM prompt copied — paste into ChatGPT/Claude with your Pine code.');
+          });
+        } else {
+          setError(d.prompt ? 'Clipboard unavailable.' : 'Prompt endpoint unavailable.');
+        }
+      });
+  });
+
+  loadSegments();
+})();
+</script>
+{% endblock %}

@@ -74,13 +74,19 @@ Used when stop_loss or take_profit is set:
 | Sharpe Ratio | `sharpe` | Return / volatility |
 | Max Drawdown | `max_drawdown` | Worst peak-to-trough decline |
 | Calmar Ratio | `calmar` | CAGR / abs(max_drawdown) |
+| Sortino Ratio | `sortino` | Mean return / downside deviation (negative returns only) |
 | Win Rate | `win_rate` | Share of **closed** trades with P&L > 0 (0.0 when nothing has closed) |
 | Num Trades | `num_trades` | Round trips, **including** a position still open at the last bar |
 | Closed / Open | `closed_trades`, `open_trades` | The split behind those two numbers |
 | Win / Loss count | `winning_trades`, `losing_trades` | Ties (P&L == 0) are neither |
 | Trade P&L | `realised_pnl`, `avg_trade_pnl`, `best_trade_pnl`, `worst_trade_pnl` | Per-trade equity deltas, closed trades only |
+| Profit Factor | `profit_factor` | Gross profit / gross loss across closed trades (0.0 when nothing lost) |
+| Expectancy | `expectancy` | Mean P&L per closed trade |
 | Exposure | `exposure` | % of time in market |
 | Final Equity | `final_equity` | End dollar value |
+| Risk & tail (PRD §2.1, `metrics_risk.py`) | `var_95`/`es_95`/`var_99`/`es_99`, `cvar_95` (= ES 95%), rupee forms `var_95_inr`/`cvar_95_inr`, `omega`, `skewness`, `kurtosis` (excess), `ulcer_index` | Emitted by `compute_metrics` alongside the core metrics |
+| Drawdown detail | `max_drawdown_duration_days`, `max_drawdown_recovery_days`, `time_in_drawdown_pct`, `drawdowns_over_10pct`, `drawdown_episodes` | Also emitted by `compute_metrics` |
+| Trade quality & confidence | `payoff_ratio`, `max_consecutive_wins`/`max_consecutive_losses`, `avg_trade_duration_bars`/`median_trade_duration_bars`, `sharpe_std_error`, `sharpe_ci_low/high`, `trade_count_flag` | Closed trades only |
 
 ## Trade Accounting (`engine/trades.py`)
 

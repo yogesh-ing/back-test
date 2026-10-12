@@ -167,7 +167,7 @@ class TestFuturesAndOptions:
         buy = calc.calculate(**LAKH, side="buy", segment=TradeSegment.FUTURES)
         sell = calc.calculate(**LAKH, side="sell", segment=TradeSegment.FUTURES)
         assert buy.get("stt") == D("0")
-        assert sell.get("stt") == D("20.00")  # 0.02%
+        assert sell.get("stt") == D("50.00")  # 0.05% (Budget 2026, eff. 2026-04-01; was 0.02%)
 
     def test_options_have_the_highest_exchange_charge(self):
         calc = CommissionCalculator.for_broker("india_zero")

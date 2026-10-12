@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from backtest.data.source_tags import app_source_tag
+from backtest.data.sources_policy import default_backtest_source, default_broker_source
 from backtest.engine.backtester import BacktestConfig
 from backtest.engine.plotting import plot_comparison, plot_result
 from backtest.logging_config import configure_logging
@@ -235,11 +236,14 @@ def papertrade_command(args):
     if args.mode == "walkforward":
         if not args.from_date or not args.to_date:
             raise ValueError("--from and --to required for walkforward mode")
-        source = build_source(args.source, data_root=args.data_root)
+        # A walk-forward replays HISTORY, so an unnamed source is the
+        # deployment's historical one (db), not a generated fallback.
+        source_name = args.source or default_backtest_source()
+        source = build_source(source_name, data_root=args.data_root)
         # Ticket #10: surface the canonical taxonomy tag at the point of use
         # (imported, never re-declared) — the CLI/UI must not hide which
         # classification a run was started under.
-        print(f"data_source_tag={app_source_tag(args.source)} (--source={args.source})")
+        print(f"data_source_tag={app_source_tag(source_name)} (--source={source_name})")
         names = [n.strip() for n in args.strategies.split(",") if n.strip()]
         allocations = {name: args.capital for name in names}
         result = run_walkforward(
@@ -259,11 +263,15 @@ def papertrade_command(args):
         if not args.from_date or not args.to_date:
             raise ValueError("--from and --to required for live mode")
         state_file = args.state_file or ".live_papertrade_state.json"
-        source = build_source(args.source, data_root=args.data_root)
+        # Live paper trading takes bars from the broker feed — that is the
+        # whole classification (live data, paper risk), so an unnamed source
+        # resolves to the broker rather than to generated candles.
+        source_name = args.source or default_broker_source()
+        source = build_source(source_name, data_root=args.data_root)
         # Ticket #10: surface the canonical taxonomy tag at the point of use
         # (imported, never re-declared) — the CLI/UI must not hide which
         # classification a run was started under.
-        print(f"data_source_tag={app_source_tag(args.source)} (--source={args.source})")
+        print(f"data_source_tag={app_source_tag(source_name)} (--source={source_name})")
         names = [n.strip() for n in args.strategies.split(",") if n.strip()]
         allocations = {name: args.capital for name in names}
         result = run_live_papertrade(
@@ -314,7 +322,10 @@ def build_parser():
 
     run_parser = sub.add_parser("run", parents=[common])
     run_parser.add_argument("--strategy", required=True)
-    run_parser.add_argument("--source", default="synthetic")
+    # The default is the DATA POLICY's answer, not a literal: a deployment with
+    # synthetic off runs on the database, and only the test profile's policy
+    # answers "synthetic". build_source() then re-checks whatever is named.
+    run_parser.add_argument("--source", default=default_backtest_source())
     run_parser.add_argument("--symbol", default="DEMO")
     run_parser.add_argument("--from", dest="from_date", required=True)
     run_parser.add_argument("--to", dest="to_date", required=True)
@@ -334,7 +345,7 @@ def build_parser():
 
     compare_parser = sub.add_parser("compare", parents=[common])
     compare_parser.add_argument("--strategies", required=True)
-    compare_parser.add_argument("--source", default="synthetic")
+    compare_parser.add_argument("--source", default=default_backtest_source())
     compare_parser.add_argument("--symbol", default="DEMO")
     compare_parser.add_argument("--from", dest="from_date", required=True)
     compare_parser.add_argument("--to", dest="to_date", required=True)
@@ -367,7 +378,10 @@ def build_parser():
     papertrade_parser = sub.add_parser("papertrade", parents=[common])
     papertrade_parser.add_argument("--mode", choices=["walkforward", "live"], default="walkforward")
     papertrade_parser.add_argument("--strategies", required=True)
-    papertrade_parser.add_argument("--source", default="synthetic")
+    # Resolved per mode below: walkforward replays history (the database), live
+    # paper-trades on the broker feed. An empty default means "ask the policy",
+    # never "assume generated candles".
+    papertrade_parser.add_argument("--source", default="")
     papertrade_parser.add_argument("--symbol", default="DEMO")
     papertrade_parser.add_argument("--interval", default="1day")
     papertrade_parser.add_argument("--from", dest="from_date", default=None)

@@ -6,29 +6,35 @@ dashboard (which holds a different book) or the expiry pipeline — and the
 expiry pipeline never ran inside a runner. A stop-loss that cannot stop out is
 not a forward test.
 
-Covers the rules (stop / target / DTE / time / flip / neutral), their
-precedence, `reenter`, the same-bar re-entry guard, the entry-side DTE guard,
-and the runner wiring that turns a close into an `OPTION_EXIT` signal.
+Covers the rules (cap / DTE / stop / target / time / flip / neutral), their
+precedence, the stale-mark suppression set, `reenter` and its per-day budget,
+the same-bar re-entry guard, the entry-side DTE guard, and the runner wiring
+that turns a close into an `OPTION_EXIT` signal.
 
 See ``docs/OPTIONS-FORWARD-TESTING.md`` → task B1.
 """
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+import logging
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from backtest.forward.options_bridge import OptionsBridge
 from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRunner
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.exit_policy import (
     EXIT_DTE,
+    EXIT_RISK_CAP,
     EXIT_SIGNAL_FLIP,
     EXIT_SIGNAL_NEUTRAL,
     EXIT_STOP_LOSS,
     EXIT_TAKE_PROFIT,
     EXIT_TIME_STOP,
+    PRICE_MEASURED_REASONS,
+    RISK_REASONS,
     ExitConfig,
     ExitPolicy,
 )
@@ -37,6 +43,7 @@ from backtest.options.quote_providers import (
     SyntheticQuoteProvider,
 )
 from backtest.strategy.intent import Direction, MarketView
+from options_support import SESSION_NOW, pin_session_clock, research_profile, stale_marks
 
 EXPIRY = date(2027, 1, 28)  # far from any bar used here, unless the test says otherwise
 
@@ -76,6 +83,7 @@ def _bridge(expression: dict | None = None, capital: float = 1_000_000.0) -> Opt
         capital=capital,
         expression=expression or {"type": "long_call"},
         quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+        allowed_structures=RESEARCH_STRUCTURES,
     )
 
 
@@ -100,6 +108,7 @@ def _runner(exit_cfg: dict, expression_extra: dict | None = None, **overrides):
     kwargs.update(overrides)
     runner = StrategyRunner(RunnerConfig(**kwargs), ledger=OrderLedger())
     runner.start()
+    research_profile(runner)
     return runner
 
 
@@ -114,8 +123,10 @@ class TestExitConfig:
         assert cfg.signal_flip is True
         assert cfg.neutral_bars == 0
         assert cfg.stop_loss_pct is None and cfg.take_profit_pct is None
+        assert cfg.max_loss_inr is None
         assert cfg.min_days_to_expiry == 1  # don't ride into settlement
         assert cfg.reenter is False
+        assert cfg.max_reentries_per_day == 2
 
     def test_expression_overrides(self):
         cfg = ExitConfig.from_expression(
@@ -165,6 +176,23 @@ class TestExitConfig:
 
     def test_round_trips_to_dict(self):
         cfg = ExitConfig(stop_loss_pct=0.25, reenter=True)
+        assert ExitConfig.from_expression(cfg.to_dict()) == cfg
+
+    def test_cap_and_reentry_knobs_are_known_keys(self, caplog):
+        """``max_reentries_per_day`` is honoured by the bridge, so the config must
+        not report it as junk on every runner that sets it."""
+        with caplog.at_level(logging.WARNING, logger="backtest.options.exit_policy"):
+            cfg = ExitConfig.from_expression({"max_loss_inr": 5000, "max_reentries_per_day": 1})
+        assert cfg.max_loss_inr == 5000
+        assert cfg.max_reentries_per_day == 1
+        assert not [r for r in caplog.records if "unknown exit keys" in r.getMessage()]
+
+    def test_zero_reentries_means_never_reverse(self):
+        """0 is a setting, not "fall back to the default"."""
+        assert ExitConfig.from_expression({"max_reentries_per_day": 0}).max_reentries_per_day == 0
+
+    def test_round_trips_the_new_fields(self):
+        cfg = ExitConfig(max_loss_inr=5000.0, max_reentries_per_day=1, reenter=True)
         assert ExitConfig.from_expression(cfg.to_dict()) == cfg
 
 
@@ -356,7 +384,13 @@ class TestBridgeExits:
         bridge.on_market_view(_view(Direction.BEARISH), "s")  # signal exit
         assert bridge.pop_exit_event() is None  # not queued for the bar drain
 
-    def test_reentry_opens_the_reverse_structure(self):
+    def test_reentry_opens_the_reverse_structure_next_bar(self):
+        """U2.2: flip + ``reenter`` closes on this bar, reverses on the NEXT bar.
+
+        Same-bar re-entry is impossible by design (it churned −₹41,844 in the
+        2026-09-16 forward experiment): the exit-bar view must leave the book
+        flat; only a view on a later bar may open the reverse structure.
+        """
         bridge = _bridge(
             {
                 "type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"},
@@ -368,11 +402,42 @@ class TestBridgeExits:
 
         result = bridge.on_market_view(_view(Direction.BEARISH), "s")
 
-        assert result.get("exited") is None  # this is an entry, not an exit
-        assert result["structure_type"] == "bear_put_spread"
+        # Exit bar: the flip closes, nothing re-opens yet.
+        assert result["exited"] is True
         assert bridge.closed_count == 1
-        assert len(bridge.option_broker.get_open_structures()) == 1
-        assert bridge.option_broker.get_open_structures()[0].structure_type == "bear_put_spread"
+        assert bridge.option_broker.get_open_structures() == []
+
+        # Next bar: the bar clock advances, then the bearish view re-enters.
+        bridge.on_bar("NIFTY", 24_700.0, "2026-09-11T09:15:00")
+        entry = bridge.on_market_view(_view(Direction.BEARISH), "s")
+        assert entry is not None and not entry.get("rejected")
+        opens = bridge.option_broker.get_open_structures()
+        assert len(opens) == 1
+        assert opens[0].structure_type == "bear_put_spread"
+
+    def test_max_reentries_per_day_limits_the_day_to_one_reversal(self):
+        """The knob reaches the policy config instead of a raw expression lookup."""
+        bridge = _bridge(
+            {
+                "type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"},
+                "exit": {
+                    "reenter": True,
+                    "max_reentries_per_day": 1,
+                    "min_days_to_expiry": None,
+                },
+            }
+        )
+        _open(bridge)
+        assert bridge.on_market_view(_view(Direction.BEARISH), "s")["exited"] is True
+
+        bridge.on_bar("NIFTY", 24_700.0, "2026-09-11T09:15:00")
+        assert bridge.on_market_view(_view(Direction.BEARISH), "s") is not None
+        assert bridge.executed_count == 2  # the day's one reversal is used up
+
+        closed = bridge.on_market_view(_view(Direction.BULLISH), "s")
+        assert closed["exited"] is True
+        assert bridge.open_structure_id is None
+        assert bridge.executed_count == 2, "a second reversal the same day is refused"
 
     def test_no_same_bar_reentry_after_a_stop(self):
         """A stop-out must not immediately re-open the same trade."""
@@ -428,6 +493,181 @@ class TestBridgeExits:
 
 
 # ---------------------------------------------------------------------------
+# Precedence tiers (#17): cap → square-off → stop/target → time → opinion
+# ---------------------------------------------------------------------------
+
+
+def _fresh_marks(bridge: OptionsBridge) -> None:
+    """Restore the book's marks to "just now" (undo :func:`stale_marks`)."""
+    for leg in bridge.option_broker.get_open_positions():
+        leg.last_updated = SESSION_NOW
+
+
+class TestRiskCapTier:
+    """The per-trade cap is the platform's ceiling, so it is read before anything
+    the strategy configured — a mis-set stop must not widen the loss past it."""
+
+    def test_cap_fires_and_names_the_cap(self):
+        policy = ExitPolicy(
+            ExitConfig(
+                max_loss_inr=5000, stop_loss_points=500, take_profit_points=100,
+                min_days_to_expiry=None,
+            )
+        )
+        decision = policy.evaluate(unrealized_pnl=Decimal("-6000"))
+        assert decision.reason == EXIT_RISK_CAP
+        assert "cap" in decision.detail
+
+    def test_cap_beats_the_calendar_and_the_flip(self):
+        policy = ExitPolicy(ExitConfig(max_loss_inr=1000, min_days_to_expiry=5))
+        decision = policy.evaluate(
+            view=_view(Direction.BEARISH),
+            structure_direction=Direction.BULLISH,
+            unrealized_pnl=Decimal("-1500"),
+            bar_date=date(2026, 10, 28),
+            expiry=date(2026, 10, 29),
+        )
+        assert decision.reason == EXIT_RISK_CAP
+
+    def test_no_cap_until_one_is_configured(self):
+        """A guessed default cap would flatten every trade — opt-in like the stops."""
+        assert ExitConfig().max_loss_inr is None
+        assert ExitPolicy().evaluate(unrealized_pnl=Decimal("-999999")) is None
+
+    def test_a_viewless_bar_still_honours_the_cap(self):
+        assert EXIT_RISK_CAP in RISK_REASONS
+
+    def test_only_mark_measured_tiers_depend_on_the_mark(self):
+        """The bridge suppresses exactly this set while a mark is untrusted, so
+        membership is the contract: the price tiers in, the clock tiers out."""
+        assert PRICE_MEASURED_REASONS == {EXIT_RISK_CAP, EXIT_STOP_LOSS, EXIT_TAKE_PROFIT}
+        assert EXIT_DTE not in PRICE_MEASURED_REASONS
+        assert EXIT_TIME_STOP not in PRICE_MEASURED_REASONS
+
+
+class TestSquareOffPrecedence:
+    """The reorder: a scheduled close answers before the strategy's own levels."""
+
+    def test_square_off_beats_a_stop_and_a_target_on_the_same_bar(self):
+        policy = ExitPolicy(
+            ExitConfig(stop_loss_pct=0.5, take_profit_pct=0.5, min_days_to_expiry=1)
+        )
+        for pnl in (Decimal("-1000"), Decimal("1000")):
+            decision = policy.evaluate(
+                unrealized_pnl=pnl,
+                basis=Decimal("2000"),
+                bar_date=date(2026, 10, 28),
+                expiry=date(2026, 10, 29),
+            )
+            assert decision.reason == EXIT_DTE
+
+    def test_square_off_beats_the_flip(self):
+        policy = ExitPolicy(ExitConfig(min_days_to_expiry=1))
+        decision = policy.evaluate(
+            view=_view(Direction.BEARISH),
+            structure_direction=Direction.BULLISH,
+            bar_date=date(2026, 10, 28),
+            expiry=date(2026, 10, 29),
+        )
+        assert decision.reason == EXIT_DTE
+
+    def test_time_stop_still_follows_the_price_tiers(self):
+        policy = ExitPolicy(
+            ExitConfig(stop_loss_points=500, max_bars=3, min_days_to_expiry=None)
+        )
+        assert policy.evaluate(unrealized_pnl=Decimal("-600"), bars_held=9).reason == EXIT_STOP_LOSS
+        assert policy.evaluate(bars_held=3).reason == EXIT_TIME_STOP
+
+
+class TestBridgeTierOrdering:
+    def test_risk_cap_closes_the_structure(self):
+        bridge = _bridge(
+            {
+                "type": "long_call",
+                "quantity": 1,
+                "exit": {"max_loss_inr": 100, "min_days_to_expiry": None},
+            }
+        )
+        _open(bridge)
+        bridge.on_bar("NIFTY", 21_000.0, "2026-10-05T09:15:00")
+
+        event = bridge.pop_exit_event()
+        assert event is not None and event["reason"] == EXIT_RISK_CAP
+        assert bridge.open_structure_id is None
+
+    def test_square_off_wins_when_the_same_bar_also_breaks_the_stop(self):
+        bridge = _bridge(
+            {"type": "long_call", "quantity": 1, "exit": {"stop_loss_pct": 0.1}}
+        )
+        structure = _open(bridge)
+        bridge.on_bar("NIFTY", 24_800.0, "2026-10-05T09:15:00")
+        # The bar the square-off is due on, with the mark already through the stop.
+        bridge.exit_policy = ExitPolicy(
+            ExitConfig(stop_loss_pct=0.1, min_days_to_expiry=1)
+        )
+        bar_day = structure.expiry - timedelta(days=1)
+
+        bridge.on_bar("NIFTY", 21_000.0, f"{bar_day.isoformat()}T09:15:00")
+
+        event = bridge.pop_exit_event()
+        assert event["reason"] == EXIT_DTE, "a scheduled close is not a price judgement"
+
+
+class TestPriceTierSuppression:
+    """A stale mark is not a price: the mark-measured tiers must not act on one,
+    while the calendar tier keeps firing (it never read the mark anyway)."""
+
+    @pytest.mark.parametrize(
+        "spot,exit_cfg,expected",
+        [
+            (21_000.0, {"stop_loss_pct": 0.1}, EXIT_STOP_LOSS),
+            (21_000.0, {"max_loss_inr": 100}, EXIT_RISK_CAP),
+            (31_000.0, {"take_profit_pct": 0.1}, EXIT_TAKE_PROFIT),
+        ],
+    )
+    def test_mark_tiers_wait_for_a_trustworthy_mark(
+        self, monkeypatch, spot, exit_cfg, expected
+    ):
+        pin_session_clock(monkeypatch)
+        bridge = _bridge({"type": "long_call", "quantity": 1})
+        _open(bridge)
+        bridge.on_bar("NIFTY", spot, "2026-10-05T09:15:00")
+        # Armed only after the bar that moved the mark, so the level is already
+        # breached and the sole variable left is whether the mark can be trusted.
+        bridge.exit_policy = ExitPolicy(
+            ExitConfig(min_days_to_expiry=None, **exit_cfg)
+        )
+
+        stale_marks(bridge, bridge.stale_after_seconds + 1)
+        assert bridge._mark_untrusted(
+            bridge.option_broker.get_structure(bridge.open_structure_id)
+        )
+        assert bridge._evaluate_exit(view=None) is None, "no exit off a mark that is not a price"
+
+        _fresh_marks(bridge)
+        assert bridge._evaluate_exit(view=None).reason == expected
+
+    def test_a_due_square_off_survives_a_bad_mark(self, monkeypatch):
+        """The stop below it is suppressed, the calendar tier above it is not."""
+        pin_session_clock(monkeypatch)
+        bridge = _bridge({"type": "long_call", "quantity": 1})
+        structure = _open(bridge)
+        bridge.on_bar("NIFTY", 21_000.0, "2026-10-05T09:15:00")
+        bridge.exit_policy = ExitPolicy(ExitConfig(stop_loss_pct=0.1, min_days_to_expiry=1))
+        stale_marks(bridge, bridge.stale_after_seconds + 1)
+        bridge._bar_dt = datetime.fromisoformat(
+            f"{(structure.expiry - timedelta(days=1)).isoformat()}T09:15:00"
+        )
+
+        decision = bridge._evaluate_exit(view=None)
+        assert decision.reason == EXIT_DTE, "the square-off is scheduled, not mark-driven"
+
+        _fresh_marks(bridge)
+        # Trusted mark: the stop fires, and the square-off still outranks it.
+        assert bridge._evaluate_exit(view=None).reason == EXIT_DTE
+
+
+# ---------------------------------------------------------------------------
 # Runner wiring: an exit is a first-class event in the runner's log
 # ---------------------------------------------------------------------------
 
@@ -445,29 +685,29 @@ class TestExpiryCalendar:
     generator = SyntheticChainGenerator()
 
     def test_november_reference_rolls_into_december(self):
-        """Nov's expiry (Nov 26) has passed on Nov 30 → December's, not January's."""
-        assert self.generator.next_monthly_expiry(date(2026, 11, 30)) == date(2026, 12, 31)
+        """Nov's expiry (Nov 24, last Tuesday) has passed on Nov 30 → December's, not January's."""
+        assert self.generator.next_monthly_expiry(date(2026, 11, 30)) == date(2026, 12, 29)
 
     def test_december_reference(self):
-        assert self.generator.next_monthly_expiry(date(2026, 12, 1)) == date(2026, 12, 31)
-        # Expiry day itself is still the nearest expiry...
-        assert self.generator.next_monthly_expiry(date(2026, 12, 31)) == date(2026, 12, 31)
-        # ...and the next day rolls the year over into January.
-        assert self.generator.next_monthly_expiry(date(2027, 1, 1)) == date(2027, 1, 28)
+        assert self.generator.next_monthly_expiry(date(2026, 12, 1)) == date(2026, 12, 29)
+        # Dec 29 has passed by Dec 31, so the nearest expiry rolls into January.
+        assert self.generator.next_monthly_expiry(date(2026, 12, 31)) == date(2027, 1, 26)
+        # ...and a New-Year reference gets January's expiry (last Tuesday).
+        assert self.generator.next_monthly_expiry(date(2027, 1, 1)) == date(2027, 1, 26)
 
     def test_every_month_of_a_year_is_computable(self):
         for month in range(1, 13):
             for day in (1, 15, 28):
                 expiry = self.generator.next_monthly_expiry(date(2026, month, day))
-                assert expiry.weekday() == 3  # Thursday
+                assert expiry.weekday() == 1  # Tuesday (NSE monthly expiry from Sep 2025)
                 assert expiry >= date(2026, month, day)
 
     def test_expiries_follow_the_reference_date(self):
         """A replay reference gets that era's expiries, not the wall clock's."""
         late = self.generator.available_expiries("NIFTY", reference=date(2026, 12, 20))
         assert late == sorted(late)
-        assert late[0] == date(2026, 12, 31)
-        assert late[1] == date(2027, 1, 28)
+        assert late[0] == date(2026, 12, 29)
+        assert late[1] == date(2027, 1, 26)
         # default = today
         assert self.generator.available_expiries("NIFTY")[0] == self.generator.next_monthly_expiry()
 

@@ -30,8 +30,10 @@ def test_synthetic_source_deterministic():
 def test_all_strategies_auto_registered():
     """Test 3: every built-in strategy auto-registers on discovery.
 
-    Updated as the registry legitimately grows: price_move (earlier PRD) and
-    directional_options (Gap G3.1 — the first options-aware strategy)."""
+    Updated as the registry legitimately grows: price_move (earlier PRD),
+    directional_options (Gap G3.1), and the 2026-09-22 stress-test batch
+    (momentum_roc, bollinger_reversion, macd_trend, ema_pullback) added to
+    diversify the multi-strategy portfolio for risk-module validation."""
     strategies = list_strategies()
     expected = {
         "sma_crossover",
@@ -40,8 +42,15 @@ def test_all_strategies_auto_registered():
         "donchian_breakout",
         "price_move",
         "directional_options",
+        "momentum_roc",
+        "bollinger_reversion",
+        "macd_trend",
+        "ema_pullback",
     }
-    assert set(strategies) == expected
+    # Subset (not equality): test modules like test_strategy_conformance.py
+    # register their own scratch strategies into the same global registry, so
+    # an equality check breaks whenever that module is collected first.
+    assert expected.issubset(set(strategies)), set(strategies) - expected
 
 
 def test_unknown_strategy_param_raises():

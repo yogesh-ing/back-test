@@ -58,6 +58,9 @@ function makeElement(id, skipChildren) {
             if (sel === ".broker-auth-spinner") return this._spinner || null;
             return null;
         },
+        // flat stub DOM: elements have no ancestors, so closest() finds none.
+        // The modal's applyBrokerFields() is null-safe on this result.
+        closest(_sel) { return null; },
         focus() { this._focused = true; },
     };
     // sub-elements for button spinner (leaf nodes — no further children)
@@ -219,7 +222,7 @@ await test("open() when unauthenticated shows the credentials view", async () =>
     assert.equal($("broker-auth-step-credentials").hidden, false);
     assert.equal($("broker-auth-step-totp").hidden, true);
     assert.equal($("broker-auth-step-authenticated").hidden, true);
-    assert.match($("broker-auth-title").textContent, /mStock Login/);
+    assert.match($("broker-auth-title").textContent, /Login/); // broker-aware title ("mStock Login" via the registry default, "Broker Login" as the fallback)
     BrokerAuthUI.close();
 });
 
@@ -254,7 +257,9 @@ await test("login with empty fields shows inline error, no fetch", async () => {
     $("broker-auth-username").value = "";
     $("broker-auth-password").value = "";
     $("broker-auth-login-btn").click();
-    assert.equal(fetchLog.length, 0);
+    // open() fires a /api/broker/status fetch (remember-session sync) — the
+    // assertion is that no LOGIN attempt was made.
+    assert.equal(fetchLog.filter((f) => f.url === "/api/broker/login").length, 0);
     assert.match($("broker-auth-credentials-error").textContent, /required/);
     BrokerAuthUI.close();
 });
@@ -269,11 +274,12 @@ await test("successful login clears password and transitions to TOTP view", asyn
     await flush();
     // password must be cleared immediately
     assert.equal($("broker-auth-password").value, "");
-    // fetch was called with username + password
-    assert.equal(fetchLog.length, 1);
-    assert.equal(fetchLog[0].url, "/api/broker/login");
-    assert.equal(fetchLog[0].body.username, "user1");
-    assert.equal(fetchLog[0].body.password, "secret");
+    // fetch was called with username + password (login row only — the
+    // remember-session status fetch from open() is also in the log)
+    const loginCalls = fetchLog.filter((f) => f.url === "/api/broker/login");
+    assert.equal(loginCalls.length, 1);
+    assert.equal(loginCalls[0].body.username, "user1");
+    assert.equal(loginCalls[0].body.password, "secret");
     // should show TOTP view
     assert.equal($("broker-auth-step-credentials").hidden, true);
     assert.equal($("broker-auth-step-totp").hidden, false);

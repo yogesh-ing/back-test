@@ -13,7 +13,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal as D
 from unittest.mock import MagicMock
 
@@ -21,6 +21,7 @@ import pandas as pd
 import pytest
 
 from backtest.instruments.base import OptionType
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.paper_trading import (
     FakeQuoteProvider,
     OptionPaperBroker,
@@ -204,6 +205,7 @@ class TestCashBearingFees:
         broker = OptionPaperBroker(
             capital=100_000.0, slippage_pct=0.0, commission_per_lot=0.0,
             fee_calculator=CommissionCalculator.for_broker("mstock"),
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         quotes = FakeQuoteProvider(default_price=120.50)
         broker.execute_structure(self._intent([("L1", "BUY")]), quotes)
@@ -220,6 +222,7 @@ class TestCashBearingFees:
         broker = OptionPaperBroker(
             capital=100_000.0, slippage_pct=0.0, commission_per_lot=0.0,
             fee_calculator=CommissionCalculator.for_broker("mstock"),
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         quotes = FakeQuoteProvider(default_price=120.50)
         positions = broker.execute_structure(self._intent([("L1", "BUY")]), quotes)
@@ -233,7 +236,7 @@ class TestCashBearingFees:
         assert broker.available_cash < cash_before_close + D_("9750.00")
 
     def test_no_calculator_stays_free(self):
-        broker = OptionPaperBroker(capital=100_000.0, slippage_pct=0.0, commission_per_lot=0.0)
+        broker = OptionPaperBroker(capital=100_000.0, slippage_pct=0.0, commission_per_lot=0.0, allowed_structures=RESEARCH_STRUCTURES)
         quotes = FakeQuoteProvider(default_price=120.50)
         broker.execute_structure(self._intent([("L1", "BUY")]), quotes)
         assert broker.total_statutory_fees_paid == D_("0")
@@ -246,6 +249,7 @@ class TestCashBearingFees:
         broker = OptionPaperBroker(
             capital=9_050.0, slippage_pct=0.0, commission_per_lot=0.0,
             fee_calculator=CommissionCalculator.for_broker("mstock"),
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         quotes = FakeQuoteProvider(default_price=120.50)
         # Premium 9037.50 alone fits in 9050, but + 27.63 fees does not.
@@ -329,13 +333,77 @@ def app(monkeypatch):
     reset_option_state()
 
 
+def _pin_pricing_clock(days_before_expiry: int = 7) -> None:
+    """Pin the synthetic pricing clock N days before the chain's expiry.
+
+    Date-rot guard (2026-09-28): the wall-clock DTE swings from ~30 days
+    (just after a monthly expiry) to ~0 (on expiry day), which swings ATM
+    premiums by ~6× and flips the 2%-of-capital pre-trade loss cap. One test
+    (``test_open_long_call_201``) was already pinned this way on 2026-09-24
+    — this extends the same fix to every trade-driver test via the ``client``
+    fixture, so the suite prices in the SAME premium regime on any run date.
+    """
+    from backtest.web.options_api import get_quote_provider
+
+    try:
+        provider = get_quote_provider()
+    except Exception:  # noqa: BLE001 — pinning must never break a test setup
+        return
+    generator = getattr(provider, "generator", None) or getattr(
+        getattr(provider, "inner", None), "generator", None
+    )
+    if generator is None:
+        return
+    expiry = generator.next_monthly_expiry()
+    # set_reference lives on the inner synthetic provider, not the TTL cache.
+    inner = getattr(provider, "inner", provider)
+    if hasattr(inner, "set_reference"):
+        inner.set_reference(
+            datetime.combine(expiry - timedelta(days=days_before_expiry), datetime.min.time())
+        )
+
+
 @pytest.fixture()
 def client(app):
+    _pin_pricing_clock()
     return app.test_client()
 
 
 class TestTradeDriverApi:
+    # -- dashboard wiring helpers (pinned-clock tests) -----------------------
+
+    @staticmethod
+    def _dashboard_quote_provider():
+        from backtest.web.options_api import get_quote_provider
+
+        try:
+            return get_quote_provider()
+        except Exception:  # noqa: BLE001 — helper must never break the test
+            return None
+
+    @classmethod
+    def _dashboard_generator(cls):
+        quotes = cls._dashboard_quote_provider()
+        return getattr(quotes, "generator", None) or getattr(
+            getattr(quotes, "inner", None), "generator", None
+        )
+
     def test_open_long_call_201(self, client):
+        # Pin the pricing clock 30 days out: on an expiry DAY (e.g.
+        # 2026-09-24) the wall-clock ATM premium is a legitimate ~₹45, which
+        # would break the premium sanity check below. Date-brittle failure,
+        # fixed 2026-09-24.
+        generator = self._dashboard_generator()
+        if generator is not None:
+            expiry = generator.next_monthly_expiry()
+            provider = self._dashboard_quote_provider()
+            # set_reference lives on the inner synthetic provider, not the
+            # TTL cache wrapper.
+            inner = getattr(provider, "inner", provider)
+            if inner is not None and hasattr(inner, "set_reference"):
+                inner.set_reference(
+                    datetime.combine(expiry - timedelta(days=7), datetime.min.time())
+                )
         resp = client.post(
             "/api/options/trade",
             json={"underlying": "NIFTY", "structure_type": "long_call", "quantity": 1},
@@ -349,15 +417,18 @@ class TestTradeDriverApi:
         assert pos["side"] == "BUY" and pos["strike"] == "24800"
         assert float(pos["entry_price"]) > 100  # BS-priced, not ₹100 fake
 
-    def test_open_spread_two_legs(self, client):
+    def test_spread_is_refused_at_the_api(self, client):
+        """The dashboard is an "any source" path, so V1 buys one option there:
+        a multi-leg spread is refused before any quote or order."""
         resp = client.post(
             "/api/options/trade",
             json={"underlying": "NIFTY", "structure_type": "bull_call_spread", "quantity": 1},
         )
-        assert resp.status_code == 201
-        out = resp.get_json()
-        assert len(out["positions"]) == 2
-        assert {p["side"] for p in out["positions"]} == {"BUY", "SELL"}
+        assert resp.status_code == 400
+        body = resp.get_json()
+        assert "STRUCTURE_NOT_IN_V1" in body["error"]
+        assert "bull_call_spread" in body["error"]
+        assert get_option_broker().get_open_structures() == [], "refusal leaves no book"
 
     def test_open_put_side_uses_pe_chain(self, client):
         resp = client.post(
@@ -384,13 +455,44 @@ class TestTradeDriverApi:
         assert scaled.legs[0].lot_size == 75
 
     def test_oversized_quantity_rejected_by_risk_policy(self, client):
-        """3 lots of ATM premium ≈ 5% of capital > the 2% per-trade loss cap."""
+        """3 lots of ATM premium ≈ 5% of capital > the 2% per-trade loss cap.
+
+        The pricing clock is pinned 30 days out — on expiry day the ATM
+        premium collapses and 3 lots no longer breach the cap (date-brittle,
+        fixed 2026-09-24).
+        """
+        generator = self._dashboard_generator()
+        if generator is not None:
+            expiry = generator.next_monthly_expiry()
+            provider = self._dashboard_quote_provider()
+            inner = getattr(provider, "inner", provider)
+            if inner is not None and hasattr(inner, "set_reference"):
+                inner.set_reference(
+                    datetime.combine(expiry - timedelta(days=7), datetime.min.time())
+                )
         resp = client.post(
             "/api/options/trade",
             json={"underlying": "NIFTY", "structure_type": "long_call", "quantity": 3},
         )
         assert resp.status_code == 400
         assert resp.get_json().get("rejected") is True
+
+    def test_insufficient_cash_is_a_clean_400(self, client):
+        """Gap-PRD P3: the broker's own hard cash guard used to surface as
+        '500 execution failed'. It is a client-side rejection — same family
+        as the PreTradeRiskCheck — so it must map to 400 + rejected."""
+        broker = get_option_broker()
+        # Drain the cash but leave ``capital`` at ₹10L: PreTradeRiskCheck
+        # (which reads capital) passes, so execution reaches the hard guard.
+        broker.available_cash = D("10")
+        resp = client.post(
+            "/api/options/trade",
+            json={"underlying": "NIFTY", "structure_type": "long_call", "quantity": 1},
+        )
+        assert resp.status_code == 400
+        out = resp.get_json()
+        assert out.get("rejected") is True
+        assert "available" in out["error"]
 
     def test_invalid_structure_400(self, client):
         resp = client.post("/api/options/trade", json={"structure_type": "iron_condor"})

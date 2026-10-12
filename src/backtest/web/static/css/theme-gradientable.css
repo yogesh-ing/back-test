@@ -1,0 +1,223 @@
+/* ============================================================
+   Theme overlay: Gradient Able (codedthemes) × Trading Bot dark
+   ------------------------------------------------------------
+   Loaded AFTER app.css. Overrides design tokens and shared
+   component classes only — no template markup changes.
+
+   What is borrowed from Gradient Able:
+     - Brand palette       #4099ff / #2ed8b6 / #ffb64d / #ff5370
+     - Signature gradients linear-gradient(45deg, C, C-lightened)
+     - Soft card shadow    0 1px 2.94px 0.06px rgba(4,26,55,.16)
+       (lifted for dark: rgba(0,0,0,.35)) and hover elevation
+       0px 8px 24px rgba(27,46,94,.12)
+     - Card hover lift, rounded 10px, subtle border cards
+     - Stat "order-card" gradient tiles
+
+   What is deliberately NOT borrowed (performance / fit):
+     - 21k-line compiled stylesheet, Bootstrap, Poppins webfont,
+       6 icon-font families (≈4 MB). Dark desk keeps system font
+       and emoji glyph icons → zero extra network weight.
+
+   Utility classes (opt-in, template-faithful):
+     .bg-grd-primary .bg-grd-success .bg-grd-warning .bg-grd-danger
+     .bg-light-primary/-success/-warning/-danger  .g-card-hover
+   ============================================================ */
+
+:root {
+    /* Gradient Able brand colors (adapted for dark surfaces) */
+    --ga-blue: #4099ff;
+    --ga-blue-2: #73b4ff;
+    --ga-green: #2ed8b6;
+    --ga-green-2: #59e0c5;
+    --ga-amber: #ffb64d;
+    --ga-amber-2: #ffc978;
+    --ga-red: #ff5370;
+    --ga-red-2: #ff7b91;
+
+    /* remap app tokens → Gradient Able hues, dark-tuned */
+    --primary: var(--ga-blue);
+    --primary-hover: var(--ga-blue-2);
+    --accent: var(--ga-blue);
+    --success: #2a9d8f;
+    --success-text: var(--ga-green);
+    --danger: #d94f68;
+    --danger-text: var(--ga-red-2);
+    --warning: #d9a354;
+    --warning-text: var(--ga-amber);
+    --info: var(--ga-blue);
+
+    --radius: 10px;
+    --shadow: 0 1px 2.94px 0.06px rgba(4, 26, 55, 0.16);   /* GA card shadow */
+    --shadow-hover: 0 8px 24px rgba(27, 46, 94, 0.45);     /* GA hover, dark-lifted */
+}
+
+/* Gradient Able "order-card" gradients — exact template values */
+.bg-grd-primary { background: linear-gradient(45deg, #4099ff, #73b4ff) !important; }
+.bg-grd-success { background: linear-gradient(45deg, #2ed8b6, #59e0c5) !important; }
+.bg-grd-warning { background: linear-gradient(45deg, #ffb64d, #ffc978) !important; }
+.bg-grd-danger  { background: linear-gradient(45deg, #ff5370, #ff7b91) !important; }
+
+/* Light tint chips (template bg-light-* pattern) */
+.bg-light-primary { background: rgba(64, 153, 255, 0.12) !important; color: var(--ga-blue) !important; }
+.bg-light-success { background: rgba(46, 216, 182, 0.12) !important; color: var(--ga-green) !important; }
+.bg-light-warning { background: rgba(255, 182, 77, 0.12) !important; color: var(--ga-amber) !important; }
+.bg-light-danger  { background: rgba(255, 83, 112, 0.12) !important; color: var(--ga-red) !important; }
+
+/* ---------------- surfaces ---------------- */
+.card {
+    background: linear-gradient(180deg, #1c2430 0%, #1a2029 100%);
+    border: 1px solid rgba(64, 153, 255, 0.08);
+    box-shadow: var(--shadow);
+    transition: box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.g-card-hover:hover {
+    box-shadow: var(--shadow-hover);
+    transform: translateY(-2px);
+}
+
+/* gradient top accent line on cards (GA dashboard flavor) */
+.card > .card-header:first-child {
+    border-top: 2px solid transparent;
+    border-image: linear-gradient(90deg, var(--ga-blue), var(--ga-green)) 1;
+    border-image-slice: 1 0 0 0;
+}
+
+/* ---------------- top navigation: GA gradient header ---------------- */
+.topnav {
+    background: linear-gradient(90deg, #4099ff 0%, #2e7fd9 55%, #234f7d 100%);
+    border-bottom: none;
+    box-shadow: 0 1px 2.94px 0.06px rgba(4, 26, 55, 0.16);
+}
+
+.topnav .brand {
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(4, 26, 55, 0.25);
+}
+
+.topnav .nav-link {
+    color: rgba(255, 255, 255, 0.82);
+}
+
+.topnav .nav-link:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.14);
+}
+
+/* active nav link — app.css marks it via body[data-active="<key>"] pairs */
+body[data-active="dashboard"] .topnav .nav-link[data-key="dashboard"],
+body[data-active="backtest"]  .topnav .nav-link[data-key="backtest"],
+body[data-active="compare"]   .topnav .nav-link[data-key="compare"],
+body[data-active="forward"]   .topnav .nav-link[data-key="forward"],
+body[data-active="risk"]      .topnav .nav-link[data-key="risk"],
+body[data-active="optimize"]   .topnav .nav-link[data-key="optimize"],
+body[data-active="portfolio"]  .topnav .nav-link[data-key="portfolio"],
+body[data-active="analytics"]  .topnav .nav-link[data-key="analytics"],
+body[data-active="strategy_builder"] .topnav .nav-link[data-key="strategy_builder"],
+body[data-active="reporting"]  .topnav .nav-link[data-key="reporting"],
+body[data-active="settings"]   .topnav .nav-link[data-key="settings"],
+body[data-active="data"]       .topnav .nav-link[data-key="data"] {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.22);
+    box-shadow: inset 0 -2px 0 rgba(255, 255, 255, 0.85);
+}
+
+.topnav .halt-pill,
+.topnav .broker-status {
+    background: rgba(255, 255, 255, 0.14);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+}
+
+.topnav .halt-pill:hover,
+.topnav .broker-status:hover {
+    background: rgba(255, 255, 255, 0.24);
+}
+
+/* ---------------- buttons ---------------- */
+.btn-primary,
+.btn.btn-primary {
+    background: linear-gradient(45deg, #4099ff, #73b4ff);
+    border: none;
+    color: #fff;
+}
+
+.btn-primary:hover,
+.btn.btn-primary:hover {
+    background: linear-gradient(45deg, #2e8ae8, #5da8ff);
+    box-shadow: 0 4px 14px rgba(64, 153, 255, 0.35);
+}
+
+.btn-success { background: linear-gradient(45deg, #2ed8b6, #59e0c5); border: none; color: #06342b; }
+.btn-danger  { background: linear-gradient(45deg, #ff5370, #ff7b91); border: none; color: #fff; }
+
+/* ---------------- forms ---------------- */
+.form-control,
+input, select, textarea {
+    border-color: #2a3442;
+}
+
+.form-control:focus,
+input:focus, select:focus, textarea:focus {
+    border-color: var(--ga-blue);
+    box-shadow: 0 0 0 0.2rem rgba(64, 153, 255, 0.18);
+}
+
+/* ---------------- tables ---------------- */
+.table thead th,
+table thead th {
+    color: var(--ga-blue);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.78rem;
+}
+
+.table tbody tr:hover,
+table tbody tr:hover {
+    background: rgba(64, 153, 255, 0.05);
+}
+
+/* ---------------- badges / progress ---------------- */
+.badge.bg-light-success,
+.badge-success { box-shadow: none; }
+
+.progress-bar {
+    background: linear-gradient(90deg, #4099ff, #2ed8b6);
+}
+
+/* ---------------- recent-runs tile row (backtest page) ---------------- */
+.recent-runs { margin-bottom: 24px; }
+
+.recent-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px;
+}
+
+.recent-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 14px;
+}
+
+.recent-tile {
+    cursor: pointer; padding: 14px 16px;
+}
+
+.recent-tile-top {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    margin-bottom: 4px;
+}
+
+.recent-tile-top strong {
+    font-size: 0.92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.recent-tile-sub { font-size: 0.78rem; margin-bottom: 10px; }
+
+.recent-tile-stats {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    font-size: 0.76rem; color: var(--text);
+    border-top: 1px dashed var(--border); padding-top: 8px;
+}
+
+/* ---------------- scrollbars ---------------- */
+::-webkit-scrollbar-thumb { background: #2e3d52; }
+::-webkit-scrollbar-thumb:hover { background: #3d5070; }

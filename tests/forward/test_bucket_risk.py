@@ -18,7 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from forward.test_live_engine import FakeLiveBroker, ThresholdStrategy, _bar, _run_live_until
+from forward.helpers import FakeLiveBroker, ThresholdStrategy, _run_live_until
 
 from backtest.simulator.errors import ValidationError
 
@@ -308,5 +308,9 @@ def test_run_backtest_resolves_paper_bucket(monkeypatch):
 
     monkeypatch.setattr(backtest_runner, "resolve_bucket_risk", spy)
     result = backtest_runner.run_backtest(candles, "buy_and_hold", {}, "TEST", 100_000)
-    assert calls and calls[0] == ("paper", "synthetic")
+    # A canonical backtest replays historical candles, so it classifies as
+    # ``replay`` — the word ``synthetic`` must not appear in a source slot by
+    # default now that generated data is a config-gated feed. Both tags sit in
+    # the paper bucket, so the limits (and P&L) are identical.
+    assert calls and calls[0] == ("paper", "replay")
     assert result is not None

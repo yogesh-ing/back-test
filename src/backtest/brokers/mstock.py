@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -52,7 +53,7 @@ from backtest.brokers.base import (
 from backtest.instruments.option import OptionContract
 from backtest.instruments.base import ExerciseType, SettlementType
 
-__all__ = ["MStockBroker", "MStockOrderError"]
+__all__ = ["MStockBroker", "MStockOrderError", "OrderOutcomeUnknown"]
 
 logger = logging.getLogger("backtest.brokers.mstock")
 
@@ -83,6 +84,28 @@ _TYPEA_HEADERS = {
 
 _TOTP_PATTERN = re.compile(r"\d{6}")
 
+# Transient-gateway retry for the two auth POSTs (login + verify-totp).
+# mStock's gateway intermittently answers 502/503/504 under load — the very
+# same flakiness already worked around for the historical fetcher
+# (`_get_historical_with_retry`, ae437e3). The auth path never got that
+# protection, so a single 502 surfaced as "mStock request failed (HTTP 502)"
+# and forced the user to re-submit the TOTP 2-3 times until a request landed
+# on a healthy gateway (observed live 2026-10-03 11:34). Only the 5xx statuses
+# are retried: a wrong credential or wrong code is a 401/403 and must fail
+# fast, never retried — resubmitting a rejected TOTP could waste its 30s
+# window or trip the broker's lockout.
+_AUTH_RETRY_STATUSES = (502, 503, 504)
+AUTH_RETRY_ATTEMPTS = 4
+AUTH_RETRY_BASE_SLEEP = 0.8  # linear backoff: 0.8, 1.6, 2.4 s between attempts
+
+# Order placement outcomes. A 4xx or an error payload on a 200 is mStock's
+# verdict: the ticket was refused, so nothing exists at the exchange and the
+# caller may act on that. These statuses are not a verdict — the request may
+# have been accepted and only the answer was lost (gateway 5xx, throttled
+# connection, timeout). Retrying one could double-place an order, so they
+# surface as :class:`OrderOutcomeUnknown` and the caller must reconcile.
+_UNCERTAIN_ORDER_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
 # Fallback session lifetime when the API response carries no expiry hint.
 # Defaults to a trading-session length (6.5h); override via
 # MSTOCK_SESSION_TTL_MINUTES in .env.
@@ -106,6 +129,26 @@ class MStockOrderError(RuntimeError):
     Raised when there is no active session, the order has no broker id,
     mStock answers non-2xx, or the payload carries an error reason. The
     message is user-facing (no stack traces or internal details).
+
+    ``status_code`` is the HTTP status when mStock answered one, else ``None``.
+    Callers use it to tell a definite rejection (4xx / error payload — nothing
+    at the exchange) from an outcome that is merely unknown.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class OrderOutcomeUnknown(MStockOrderError):
+    """The call to mStock failed without an answer — the order may exist.
+
+    A gateway 5xx, a rate limit, a connection/timeout failure, or a 2xx that
+    carried no order id all leave the same question: is that ticket at the
+    exchange or not? Nothing may be inferred from the silence, so this is the
+    one error class the execution seam must not retry — it must reconcile
+    against the order book first (Options V1 PRD §6, "never retry an uncertain
+    order blindly").
     """
 
 
@@ -306,6 +349,30 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             return self._session_token
         return None
 
+    def restore_session(self, token: str, expires_at: Any) -> None:
+        """Seed the in-memory session from a remembered token (2026-09-24).
+
+        Used by the remember-session-today feature: the session manager
+        hands back a token persisted earlier the same day. No temp auth
+        context is set — TOTP re-auth would start a fresh login flow.
+
+        The store keeps expiries as aware datetimes (``_parse_expiry``
+        re-attaches the local zone), while this broker's session clock is
+        naive-local everywhere (see ``_now``). Coerce the incoming value to
+        naive-local so ``get_session_status`` does not raise
+        ``TypeError: can't subtract offset-naive and offset-aware datetimes``
+        — which used to fail-close /api/broker/status into "Unknown Broker"
+        and blank the whole broker strip after a restart (2026-10-01).
+        """
+        if isinstance(expires_at, str):
+            expires_at = datetime.fromisoformat(expires_at)
+        if expires_at is not None and expires_at.tzinfo is not None:
+            expires_at = expires_at.astimezone().replace(tzinfo=None)
+        self._session_token = token
+        self._expires_at = expires_at
+        self._temp_auth_context = None
+        logger.info("mStock session restored from remembered token (expires %s)", expires_at)
+
     def logout(self) -> None:
         """Clear all in-memory session state (token, expiry, temp context)."""
         had_session = self._session_token is not None
@@ -323,17 +390,37 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         """Place ``order`` — ``POST /openapi/typea/orders/regular`` (form packet).
 
         Returns the broker's order id (what modify/cancel reference).
+
+        Raises :class:`MStockOrderError` when mStock clearly refused the order,
+        and :class:`OrderOutcomeUnknown` when the call ended without a usable
+        answer — a lost connection, a gateway 5xx / 429, or a 2xx that carried
+        no order id. In that case the ticket may exist at the exchange, so the
+        caller reconciles against the order book instead of placing again.
         """
         token = self._require_session()
-        payload = self._request(
-            "POST",
-            _ORDER_PLACEMENT_PATH,
-            token,
-            form=self._map_order_to_broker_payload(order),
-        )
+        packet = self._map_order_to_broker_payload(order)
+        try:
+            payload = self._request("POST", _ORDER_PLACEMENT_PATH, token, form=packet)
+        except requests.RequestException as exc:
+            # The request may have reached mStock before the socket died. The
+            # exception text carries the URL, so the message stays generic.
+            raise OrderOutcomeUnknown(
+                f"mStock order call got no answer ({exc.__class__.__name__}) "
+                "— the order may still exist"
+            ) from exc
+        except MStockOrderError as exc:
+            code = exc.status_code
+            if code is not None and (code in _UNCERTAIN_ORDER_STATUSES or code >= 500):
+                raise OrderOutcomeUnknown(str(exc), status_code=code) from exc
+            raise
         order_id = self._extract_order_id(payload)
         if order_id is None:
-            raise MStockOrderError("mStock did not return an order id for the placed order")
+            # A 2xx we could not read an id from is still an accepted call as
+            # far as the exchange is concerned — do not treat it as a reject.
+            raise OrderOutcomeUnknown(
+                "mStock did not return an order id for the placed order — "
+                "the order may still exist"
+            )
         logger.info("mStock order placed: %s %s x%s", order.side, order.symbol, order.quantity)
         return BrokerOrderId(order_id)
 
@@ -454,15 +541,48 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         self._temp_auth_context = None
         return {"success": False, "message": message, "requires_totp": False}
 
-    def _post(self, path: str, form: dict[str, str], rejected_default: str) -> dict[str, Any]:
-        """POST a urlencoded form to a TypeA endpoint and return the payload.
+    def _post(
+        self,
+        path: str,
+        form: dict[str, str],
+        rejected_default: str,
+        attempts: int = AUTH_RETRY_ATTEMPTS,
+        base_sleep: float = AUTH_RETRY_BASE_SLEEP,
+    ) -> dict[str, Any]:
+        """POST a urlencoded form to a TypeA auth endpoint, returning the payload.
 
         Raises :class:`_MStockAuthError` with a user-facing message when the
         request is rejected (HTTP 401/403, error payload, non-success
         status) — generic messages only, no stack traces or internals.
+
+        A transient gateway 5xx (502/503/504) is retried up to ``attempts``
+        times with linear backoff, absorbing mStock's intermittent 502s so a
+        single TOTP submit lands. Everything else is mStock's actual verdict:
+        a 4xx rejection (wrong credentials / wrong TOTP) or an error payload on
+        a 200 raises immediately on the first attempt — a rejected code is
+        never re-sent. A connection-level error (``requests.RequestException``)
+        propagates untouched for the caller's generic "could not reach" path.
         """
         url = f"{self._base_url()}{path}"
-        resp = requests.post(url, data=form, headers=_TYPEA_HEADERS, timeout=self._http_timeout)
+        last_status: int | None = None
+        for attempt in range(1, attempts + 1):
+            resp = requests.post(
+                url, data=form, headers=_TYPEA_HEADERS, timeout=self._http_timeout
+            )
+            if resp.status_code not in _AUTH_RETRY_STATUSES:
+                return self._parse_auth_response(resp, rejected_default)
+            last_status = resp.status_code
+            logger.warning(
+                "mStock POST %s got HTTP %s (attempt %d/%d)", path, last_status, attempt, attempts
+            )
+            if attempt < attempts:
+                time.sleep(base_sleep * attempt)
+
+        # Still 5xx after exhausting attempts — surface the gateway error.
+        raise _MStockAuthError(f"mStock request failed (HTTP {last_status})")
+
+    def _parse_auth_response(self, resp, rejected_default: str) -> dict[str, Any]:
+        """Turn a non-retryable auth response into a payload or a rejection."""
         try:
             payload: Any = resp.json()
         except ValueError:
@@ -538,7 +658,8 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
 
         if not resp.ok:
             raise MStockOrderError(
-                _rejection_reason(payload) or f"mStock {method} failed (HTTP {resp.status_code})"
+                _rejection_reason(payload) or f"mStock {method} failed (HTTP {resp.status_code})",
+                status_code=resp.status_code,
             )
         reason = _rejection_reason(payload)
         if reason:
@@ -690,17 +811,20 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                     continue
                 row = dict(zip(header, fields))
 
-                # Filter: NFO segment, matching underlying, options only
-                segment = row.get("instrument_segment", "")
-                sym = row.get("trading_symbol", "")
-                inst_type = row.get("instrument_type", "")
+                # Filter: index-option segment, matching underlying, options
+                # only. REAL scriptmaster columns (verified live 2026-09-18):
+                # segment="OPTIDX", instrument_type="CE"/"PE",
+                # tradingsymbol="NIFTY26NOV18950CE". (The old guesses
+                # instrument_segment/trading_symbol/NFO never matched a
+                # single row — every option was silently dropped.)
+                segment = str(row.get("segment", row.get("instrument_segment", "")))
+                sym = str(row.get("tradingsymbol", row.get("trading_symbol", "")))
+                inst_type = str(row.get("instrument_type", ""))
 
-                # Match underlying (e.g. NIFTY in NIFTY24DEC24500CE)
+                # Match underlying (e.g. NIFTY in NIFTY26NOV18950CE)
                 if not sym.startswith(underlying):
                     continue
-                if "OPT" not in inst_type.upper():
-                    continue
-                if segment.upper() != "NFO":
+                if "OPT" not in segment.upper() and inst_type.upper() not in ("CE", "PE"):
                     continue
 
                 contract = self._parse_option_contract(row)
@@ -761,22 +885,45 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             ``{"ltp": float, "bid": float, "ask": float, ...}`` or empty dict.
         """
         token = self._require_session()
-        try:
-            headers = self._session_token_headers(token)
-            url = f"{self._base_url()}{_OPTION_QUOTE_PATH}"
-            resp = requests.get(
-                url, headers=headers,
-                params=[("i", f"NFO:{instrument_token}")],
-                timeout=self._http_timeout,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-            if isinstance(payload, dict) and "data" in payload:
-                return payload["data"] if isinstance(payload["data"], dict) else {}
-            return payload if isinstance(payload, dict) else {}
-        except requests.RequestException:
-            logger.warning("Option quote request failed for %s", instrument_token)
-            return {}
+        headers = self._session_token_headers(token)
+        url = f"{self._base_url()}{_OPTION_QUOTE_PATH}"
+        # REAL API (verified live 2026-09-18): the quote/ltp endpoint keys
+        # on the TRADING SYMBOL ("NFO:NIFTY26SEP23300CE"), not the numeric
+        # instrument_token ("NFO:51201" → "Invalid symbol"). Accept a
+        # bare OptionContract too so callers can pass the contract row
+        # they got from get_option_chain().
+        symbol = getattr(instrument_token, "trading_symbol", None) or str(
+            instrument_token
+        )
+        # One retry on transient failures (live-session lesson 2026-09-21:
+        # rate-limit blips coinciding with a fill turned into ltp=0 phantoms).
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                resp = requests.get(
+                    url, headers=headers,
+                    params=[("i", f"NFO:{symbol}")],
+                    timeout=self._http_timeout,
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+                if isinstance(payload, dict) and "data" in payload:
+                    data = payload["data"] if isinstance(payload["data"], dict) else {}
+                    inner = data.get(f"NFO:{symbol}", data)
+                    if isinstance(inner, dict) and "message" not in inner:
+                        return inner
+                    return {}
+                return payload if isinstance(payload, dict) else {}
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt == 0:
+                    time.sleep(1.0)
+        logger.warning(
+            "Option quote request failed after retry for %s: %s",
+            instrument_token,
+            last_exc,
+        )
+        return {}
 
     @staticmethod
     def _parse_option_contract(row: dict[str, Any]) -> OptionContract | None:
@@ -785,8 +932,8 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         Returns ``None`` if the row cannot be parsed.
         """
         try:
-            symbol = row.get("trading_symbol", "")
-            token = row.get("security_token", row.get("instrument_token", ""))
+            symbol = str(row.get("tradingsymbol", row.get("trading_symbol", "")))
+            token = row.get("instrument_token", row.get("security_token", ""))
 
             from datetime import date
 
@@ -814,13 +961,40 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                 return None
 
             year = 2000 + int(year_suffix)
-            # Expiry: last Thursday of the month (approximate)
-            import calendar
-            last_day = calendar.monthrange(year, month)[1]
-            expiry = date(year, month, last_day)
+            # Expiry: the master carries the REAL expiry date ("2026-11-23")
+            # — use it, fall back to the last-Thursday approximation only
+            # when missing/unparseable.
+            expiry = None
+            raw_expiry = str(row.get("expiry", "") or "").strip()
+            if raw_expiry:
+                try:
+                    expiry = date.fromisoformat(raw_expiry[:10])
+                except ValueError:
+                    pass
+            if expiry is None:
+                import calendar
+                last_day = calendar.monthrange(year, month)[1]
+                expiry = date(year, month, last_day)
 
-            lot_size = int(row.get("lot_size", row.get("contract_size", 25)))
-            tick = Decimal(str(row.get("tick_size", "0.05")))
+            def _num(field: str, default: float) -> float:
+                value = row.get(field)
+                try:
+                    value = float(value)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    return default
+                return value if value == value else default  # NaN check
+
+            # Lot size comes from the master or nothing. Guessing one would size
+            # the position (and every stop in rupees) off a number the exchange
+            # never published for this contract.
+            lot_size = int(_num("lot_size", _num("contract_size", 0.0)))
+            if lot_size <= 0:
+                logger.warning(
+                    "option contract %s has no lot size on the instrument master — skipped",
+                    symbol,
+                )
+                return None
+            tick = Decimal(str(_num("tick_size", 0.05)))
 
             return OptionContract(
                 instrument_token=str(token),

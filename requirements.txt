@@ -17,6 +17,13 @@ psycopg2-binary>=2.9
 # environment variables alone if the file is absent.
 PyYAML>=6.0
 Flask>=2.0
+# Production WSGI server (Linux; gunicorn is POSIX-only — Windows dev keeps
+# using `python -m backtest.web.app`). Boot with:
+#   gunicorn -c gunicorn.conf.py backtest.web.wsgi:app
+gunicorn>=21.2
 # lint gate (ticket #11): tests/test_lint_baseline.py runs flake8 inside the
 # canonical pytest gate so the F-10 zero-findings baseline cannot silently rot.
 flake8>=7.1
+
+# --- Pine Script converter (2026-09-29) ---
+lark>=1.1

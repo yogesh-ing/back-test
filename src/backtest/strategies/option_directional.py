@@ -29,6 +29,15 @@ class DirectionalOptions(Strategy):
     """EMA-momentum directional view for the options expression layer."""
 
     name = "directional_options"
+    # 2026-09-22: declares where its MarketView can be expressed — the spawn
+    # form renders these as a dropdown (no free-text instrument typing) and
+    # runner/create enforces the same set. Keep in sync with the chain
+    # sources (synthetic BS generator + mStock FNO index set).
+    eligible_instruments = ["NIFTY", "BANKNIFTY"]
+    # issues.txt S2: this strategy belongs in the index-options segment —
+    # the spawn form preselects it (backtest → paper → live stay in one
+    # capital partition). Must match a name in config/segments.yaml.
+    default_segment = "options_index"
     description = (
         "Directional options — emits a bullish/bearish MarketView from short-term "
         "EMA momentum; feed it into the expression layer (long call/put, spreads)."

@@ -1,18 +1,9 @@
-"""Portfolio Command Center API (PRD Phase 5 / Tasks 5.1 & 5.2).
+"""Portfolio Command Center API (PRD Phase 5 + Risk Management).
 
-REST + Server-Sent Events surface for the multi-strategy
-:class:`~backtest.forward.portfolio_manager.PortfolioManager`:
-
-* ``GET  /api/portfolio/summary``             — aggregate stats + instance rows
-* ``GET  /api/portfolio/universes``           — symbol universe catalogue
-* ``POST /api/portfolio/runner/create``       — spawn a runner (single or pool)
-* ``POST /api/portfolio/runner/<id>/control`` — pause/resume/stop/flatten/deep_dive
-* ``GET  /api/portfolio/runner/<id>``          — deep-dive detail payload
-* ``POST /api/portfolio/control/<action>``    — pause_all / resume_all / stop_all /
-                                                emergency_flatten / reset_breaker
-* ``POST /api/portfolio/emergency_stop``       — global emergency halt/flatten
-* ``POST /api/portfolio/test/breach``         — demo/test crash injection
-* ``GET  /api/portfolio/stream``               — SSE, JSON snapshot every 1 s
+REST + SSE surface for PortfolioManager plus Risk Board:
+* summary, buckets, equity, audit
+* risk board, aggregated trades, risk config (GET/POST)
+* runner create/control, bulk control, emergency, breach test, stream
 """
 
 from __future__ import annotations
@@ -21,53 +12,64 @@ import json
 import time
 from typing import Tuple
 
-from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
+from flask import Blueprint, Response, current_app, jsonify, request
+from flask import stream_with_context
 
-from backtest.data.universe import is_universe, list_universes
+from backtest.data.sources_policy import default_broker_source
+from backtest.data.universe import (
+    CORRELATION_GROUPS,
+    correlation_group_for,
+    is_universe,
+    list_universes,
+)
 from backtest.forward.paper_runner import TARGET_POOL, TARGET_SINGLE, RunnerConfig
 from backtest.forward.portfolio_manager import get_portfolio_manager
 from backtest.logging_config import get_logger
+from backtest.simulator.bucket_risk import BUCKET_RISK_LIMITS, update_bucket_limits
+from backtest.simulator.errors import SimulatorError
 
 portfolio_bp = Blueprint("portfolio_api", __name__)
 log = get_logger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _manager():
     return get_portfolio_manager()
 
 
-#: Bucket modes accepted by :func:`list_instances` / ``?mode=`` (ticket P4.1).
 VALID_INSTANCE_MODES = ("paper", "live")
 
 
 def list_instances(mode: str | None = None) -> list[dict]:
-    """Command-center instance rows, optionally filtered by bucket mode.
-
-    ``mode`` is ``None`` (all buckets) or one of :data:`VALID_INSTANCE_MODES`;
-    anything else raises :class:`ValueError` (the HTTP layer maps it to 400).
-    """
     return _manager().list_instances(mode)
 
 
 def _error(message: str, status: int = 400) -> Tuple[Response, int]:
-    # Every rejected portfolio request now leaves a trace (these were silent).
     log.warning("rejected (%d): %s", status, message)
     return jsonify({"success": False, "error": message}), status
 
 
+def _default_runner_source() -> str:
+    """What ``source=`` a runner gets when the client did not name one.
+
+    The policy answers it — ``default_broker_source()`` — never a literal here.
+    In a normal deployment synthetic is disabled, so an unnamed runner is a
+    **broker** runner, which is the portfolio's whole point (paper and live both
+    trade mStock data). A process whose policy explicitly enables synthetic (the
+    test suite's ``testing`` profile) keeps getting it by omission, so no test
+    has to name a source it does not care about.
+
+    An empty answer means the config enables no feed at all; callers must refuse
+    that rather than start a runner with nothing to bar from.
+    """
+    return default_broker_source()
+
+
 def _parse_target(data: dict) -> Tuple[str, list, str | None]:
-    """Resolve (target_type, symbols, universe_id) from spawn payload."""
     target_type = str(data.get("target_type", "")).upper()
     target = data.get("target") or data.get("symbol") or data.get("universe") or ""
     symbols = data.get("symbols") or []
     universe_id = data.get("universe_id")
 
-    # Explicit universe id, or a target that names a registered universe.
     if universe_id or is_universe(str(target)):
         uid = universe_id or str(target)
         if not is_universe(uid):
@@ -77,12 +79,10 @@ def _parse_target(data: dict) -> Tuple[str, list, str | None]:
         return TARGET_POOL, get_universe_symbols(uid), uid.upper()
 
     if target_type == TARGET_POOL:
-        # Ad-hoc basket supplied as symbols
         if not symbols:
             raise ValueError("pool runner needs a universe_id or symbols")
         return TARGET_POOL, [str(s).upper() for s in symbols], None
 
-    # Single symbol
     sym = symbols[0] if symbols else target
     if not sym:
         raise ValueError("single runner needs a symbol")
@@ -96,12 +96,25 @@ def _parse_target(data: dict) -> Tuple[str, list, str | None]:
 
 @portfolio_bp.get("/api/portfolio/summary")
 def summary() -> Tuple[Response, int]:
-    """Combined stats + instance rows; ``?mode=paper|live`` scopes a bucket."""
     mode = request.args.get("mode") or None
     try:
-        return jsonify({"success": True, "portfolio": _manager().get_portfolio_summary(mode)}), 200
+        port_summary = _manager().get_portfolio_summary(mode)
+        market_info = port_summary.get("market")
+        return jsonify(
+            {"success": True, "market": market_info, "portfolio": port_summary}
+        ), 200
     except ValueError as exc:
         return _error(str(exc))
+
+
+@portfolio_bp.get("/api/market/status")
+def market_status_route() -> Tuple[Response, int]:
+    try:
+        from backtest.live.market_status import get_market_day_state
+
+        return jsonify({"success": True, **get_market_day_state()}), 200
+    except Exception as exc:  # noqa: BLE001
+        return _error(str(exc), 500)
 
 
 @portfolio_bp.get("/api/portfolio/universes")
@@ -111,13 +124,480 @@ def universes() -> Tuple[Response, int]:
 
 @portfolio_bp.get("/api/portfolio/buckets")
 def buckets() -> Tuple[Response, int]:
-    """Per-bucket aggregates (C4/T1.7). Thin — delegates to the manager.
+    return jsonify(
+        {"success": True, "buckets": _manager().get_bucket_aggregates()}
+    ), 200
 
-    The same data is also embedded in ``/api/portfolio/summary`` and the
-    SSE stream; this endpoint exists for the Overview page which needs
-    bucket data without fetching the full instance list.
+
+@portfolio_bp.get("/api/portfolio/equity/snapshot")
+def equity_snapshot() -> Tuple[Response, int]:
+    mode = request.args.get("mode") or None
+    try:
+        snap = _manager().get_equity_snapshots(mode=mode)
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    return jsonify({"success": True, "snapshot": snap}), 200
+
+
+@portfolio_bp.get("/api/portfolio/audit")
+def audit_log() -> Tuple[Response, int]:
+    scope = request.args.get("scope") or None
+    try:
+        limit = int(request.args.get("limit", 100))
+    except (TypeError, ValueError):
+        limit = 100
+    limit = max(1, min(limit, 1000))
+    try:
+        entries = _manager().get_audit_log(scope=scope, limit=limit)
+    except Exception:
+        entries = []
+    return jsonify({"success": True, "audit": entries, "scope": scope or "all"}), 200
+
+
+# ---------------------------------------------------------------------------
+# Risk Board — Tier 2 & Tier 3
+# ---------------------------------------------------------------------------
+
+
+@portfolio_bp.get("/api/portfolio/risk")
+def risk_board() -> Tuple[Response, int]:
+    mode = request.args.get("mode") or None
+    if mode is not None:
+        mode = str(mode).strip().lower()
+        if mode not in VALID_INSTANCE_MODES:
+            return _error(
+                f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}"
+            )
+
+    mgr = _manager()
+    try:
+        summ = mgr.get_portfolio_summary(mode=mode)
+    except ValueError as exc:
+        return _error(str(exc))
+
+    buckets_data = summ.get("buckets", {}) or mgr.get_bucket_aggregates()
+
+    bucket_limits = {}
+    for bmode, lim in BUCKET_RISK_LIMITS.items():
+        try:
+            bucket_limits[bmode] = lim.to_dict()
+        except Exception:
+            bucket_limits[bmode] = {}
+
+    sup_cfg = mgr.supervisor.config
+    global_config = {
+        "daily_loss_limit": sup_cfg.daily_loss_limit,
+        "max_drawdown_pct": sup_cfg.max_drawdown_pct,
+        "max_leverage": getattr(sup_cfg, "max_leverage", 1.0),
+        "breach_mode": getattr(sup_cfg, "breach_mode", "PAUSE_AND_HOLD"),
+        "correlation_warning_threshold": getattr(
+            sup_cfg, "correlation_warning_threshold", 3
+        ),
+    }
+
+    symbol_exposure: dict[str, dict] = {}
+    correlation_exposure: dict[str, dict] = {}
+    total_gross = 0.0
+    try:
+        runners = mgr.list_instances(mode=mode)
+        for rs in runners:
+            inst_id = rs.get("instance_id")
+            runner = mgr.get_runner(inst_id)
+            if runner is None:
+                continue
+            for sym, pos in runner.positions.items():
+                qty = pos.get("qty", 0) if isinstance(pos, dict) else 0
+                entry = pos.get("entry_price", 0) if isinstance(pos, dict) else 0
+                last_px = (
+                    runner.last_price.get(sym, entry)
+                    if hasattr(runner, "last_price")
+                    else entry
+                )
+                notional = abs(float(qty or 0)) * float(last_px or 0)
+                total_gross += notional
+                if sym not in symbol_exposure:
+                    symbol_exposure[sym] = {
+                        "symbol": sym,
+                        "notional": 0.0,
+                        "qty": 0.0,
+                        "runners": 0,
+                        "sides": set(),
+                    }
+                symbol_exposure[sym]["notional"] += notional
+                symbol_exposure[sym]["qty"] += float(qty or 0)
+                symbol_exposure[sym]["runners"] += 1
+                side = pos.get("side", "LONG") if isinstance(pos, dict) else "LONG"
+                symbol_exposure[sym]["sides"].add(side)
+
+        for sym, data in symbol_exposure.items():
+            grp = correlation_group_for(sym) or "OTHER"
+            if grp not in correlation_exposure:
+                meta = CORRELATION_GROUPS.get(grp, {})
+                correlation_exposure[grp] = {
+                    "group": grp,
+                    "label": meta.get("label", grp),
+                    "threshold": meta.get(
+                        "threshold", sup_cfg.correlation_warning_threshold
+                    ),
+                    "notional": 0.0,
+                    "symbols": [],
+                }
+            correlation_exposure[grp]["notional"] += data["notional"]
+            correlation_exposure[grp]["symbols"].append(sym)
+
+        for v in symbol_exposure.values():
+            v["sides"] = sorted(list(v["sides"]))
+            v["notional"] = round(v["notional"], 2)
+            v["qty"] = round(v["qty"], 6)
+
+        for v in correlation_exposure.values():
+            v["notional"] = round(v["notional"], 2)
+            v["symbols"] = sorted(set(v["symbols"]))
+            v["count"] = len(v["symbols"])
+
+    except Exception as exc:  # noqa: BLE001
+        log.debug("risk exposure breakdown failed: %s", exc)
+
+    trade_stats = {
+        "total_trades": 0,
+        "wins": 0,
+        "losses": 0,
+        "win_rate": 0.0,
+        "total_pnl": 0.0,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "profit_factor": 0.0,
+        "max_consecutive_losses": 0,
+        "best_trade": 0.0,
+        "worst_trade": 0.0,
+    }
+    try:
+        all_trades = []
+        for rs in mgr.list_instances(mode=mode):
+            runner = mgr.get_runner(rs.get("instance_id"))
+            if runner is None:
+                continue
+            all_trades.extend(runner.closed_trades)
+
+        if all_trades:
+            pnls = [float(t.get("pnl", 0)) for t in all_trades]
+            wins = [p for p in pnls if p >= 0]
+            losses = [p for p in pnls if p < 0]
+            trade_stats["total_trades"] = len(pnls)
+            trade_stats["wins"] = len(wins)
+            trade_stats["losses"] = len(losses)
+            trade_stats["win_rate"] = round(len(wins) / len(pnls), 4) if pnls else 0.0
+            trade_stats["total_pnl"] = round(sum(pnls), 2)
+            trade_stats["avg_win"] = round(sum(wins) / len(wins), 2) if wins else 0.0
+            trade_stats["avg_loss"] = round(sum(losses) / len(losses), 2) if losses else 0.0
+            trade_stats["best_trade"] = round(max(pnls), 2) if pnls else 0.0
+            trade_stats["worst_trade"] = round(min(pnls), 2) if pnls else 0.0
+            gross_profit = sum(wins) if wins else 0.0
+            gross_loss = abs(sum(losses)) if losses else 0.0
+            if gross_loss > 0:
+                trade_stats["profit_factor"] = round(gross_profit / gross_loss, 4)
+
+            max_consec = 0
+            cur = 0
+            for p in pnls:
+                if p < 0:
+                    cur += 1
+                    max_consec = max(max_consec, cur)
+                else:
+                    cur = 0
+            trade_stats["max_consecutive_losses"] = max_consec
+    except Exception as exc:  # noqa: BLE001
+        log.debug("risk trade stats failed: %s", exc)
+
+    risk_audit = []
+    try:
+        audit = mgr.get_audit_log(scope=mode or "all", limit=100)
+        keywords = ("HALT", "FLATTEN", "BREAKER", "RISK", "BLOCKED", "EMERGENCY", "PAUSE")
+        for entry in audit:
+            act = str(entry.get("action", "")).upper()
+            if any(k in act for k in keywords):
+                risk_audit.append(entry)
+            elif entry.get("scope") in ("paper", "live"):
+                risk_audit.append(entry)
+        risk_audit = risk_audit[:50]
+    except Exception:
+        risk_audit = []
+
+    total_eq = summ.get("total_equity") or 0.0
+    gross_pct = round(total_gross / total_eq, 4) if total_eq else 0.0
+
+    # Multi-broker Phase D: per-segment breaker cards + per-broker rollup
+    # (the risk page's per-broker cards; PRD §8.5). Derived, never guessed.
+    segments_data: dict = {}
+    by_broker: dict[str, dict] = {}
+    try:
+        segments_data = mgr.get_segment_aggregates()
+        for rs in mgr.list_instances(mode=mode):
+            b = str(rs.get("broker") or ("live" if rs.get("mode") == "live" else "paper"))
+            if b not in by_broker:
+                by_broker[b] = {
+                    "broker": b,
+                    "runner_count": 0,
+                    "equity": 0.0,
+                    "allocated_capital": 0.0,
+                    "daily_pnl": 0.0,
+                    "open_positions": 0,
+                }
+            by_broker[b]["runner_count"] += 1
+            by_broker[b]["equity"] += float(rs.get("equity") or 0.0)
+            by_broker[b]["allocated_capital"] += float(rs.get("allocated_capital") or 0.0)
+            by_broker[b]["daily_pnl"] += float(rs.get("daily_pnl") or 0.0)
+            by_broker[b]["open_positions"] += int(rs.get("open_positions") or 0)
+        for row in by_broker.values():
+            for k in ("equity", "allocated_capital", "daily_pnl"):
+                row[k] = round(row[k], 2)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("risk segment/broker rollup failed: %s", exc)
+
+    payload = {
+        "timestamp": summ.get("timestamp"),
+        "mode": mode or "all",
+        "global_config": global_config,
+        "bucket_limits": bucket_limits,
+        "buckets": buckets_data,
+        "current": {
+            "total_equity": summ.get("total_equity", 0.0),
+            "total_capital": summ.get("total_capital", 0.0),
+            "deployed_capital": summ.get("deployed_capital", 0.0),
+            "deployed_pct": summ.get("deployed_pct", 0.0),
+            "daily_pnl": summ.get("daily_pnl", 0.0),
+            "daily_loss_used": summ.get("daily_loss_used", 0.0),
+            "daily_loss_pct": summ.get("daily_loss_pct", 0.0),
+            "drawdown_pct": summ.get("drawdown_pct", 0.0),
+            "halted": summ.get("halted", False),
+            "halt_reason": summ.get("halt_reason"),
+            "halt_mode": summ.get("halt_mode"),
+            "warnings": summ.get("warnings", []),
+        },
+        "exposure": {
+            "by_symbol": sorted(
+                symbol_exposure.values(),
+                key=lambda x: x["notional"],
+                reverse=True,
+            ),
+            "by_correlation": sorted(
+                correlation_exposure.values(),
+                key=lambda x: x["notional"],
+                reverse=True,
+            ),
+            "total_gross_notional": round(total_gross, 2),
+            "gross_exposure_pct": gross_pct,
+        },
+        "trade_stats": trade_stats,
+        "risk_audit": risk_audit,
+        "capability": summ.get("capability", {}),
+        # Multi-broker Phase D (additive keys — single-broker shape unchanged)
+        "segments": segments_data,
+        "by_broker": sorted(by_broker.values(), key=lambda x: x["broker"]),
+    }
+
+    return jsonify({"success": True, "risk": payload}), 200
+
+
+@portfolio_bp.get("/api/portfolio/trades/aggregated")
+def aggregated_trades() -> Tuple[Response, int]:
+    mode = request.args.get("mode") or None
+    if mode is not None:
+        mode = str(mode).strip().lower()
+        if mode not in VALID_INSTANCE_MODES:
+            return _error(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
+
+    kind = (request.args.get("kind") or "all").lower()
+    if kind not in ("all", "equity", "option"):
+        return _error("kind must be all|equity|option")
+
+    try:
+        limit = int(request.args.get("limit", 200))
+    except (TypeError, ValueError):
+        limit = 200
+    limit = max(1, min(limit, 1000))
+
+    mgr = _manager()
+    trades: list[dict] = []
+    try:
+        for rs in mgr.list_instances(mode=mode):
+            runner = mgr.get_runner(rs.get("instance_id"))
+            if runner is None:
+                continue
+            for t in runner.closed_trades:
+                if kind != "all" and t.get("kind", "equity") != kind:
+                    continue
+                enriched = dict(t)
+                enriched["runner_id"] = rs.get("instance_id")
+                enriched["runner_name"] = rs.get("name")
+                enriched["strategy"] = rs.get("strategy_name")
+                enriched["mode"] = rs.get("mode")
+                trades.append(enriched)
+
+        trades.sort(key=lambda x: x.get("exit_ts") or "", reverse=True)
+        total = len(trades)
+        sliced = trades[:limit]
+
+        pnls = [float(t.get("pnl", 0)) for t in trades]
+        summary = {
+            "total": total,
+            "returned": len(sliced),
+            "total_pnl": round(sum(pnls), 2) if pnls else 0.0,
+            "win_rate": round(sum(1 for p in pnls if p >= 0) / len(pnls), 4)
+            if pnls
+            else 0.0,
+        }
+
+    except Exception as exc:  # noqa: BLE001
+        log.warning("aggregated trades failed: %s", exc)
+        return _error(f"failed to aggregate trades: {exc}", 500)
+
+    return jsonify(
+        {"success": True, "trades": sliced, "summary": summary, "mode": mode or "all", "kind": kind}
+    ), 200
+
+
+@portfolio_bp.get("/api/portfolio/risk/config")
+def risk_config_view() -> Tuple[Response, int]:
+    mgr = _manager()
+
+    # Get per-mode risk configs (new API)
+    if hasattr(mgr, 'get_all_risk_configs'):
+        all_configs = mgr.get_all_risk_configs()
+    else:
+        # Fallback for backward compatibility
+        sup_cfg = mgr.supervisor.config
+        all_configs = {
+            "paper": {
+                "daily_loss_limit": sup_cfg.daily_loss_limit,
+                "max_drawdown_pct": sup_cfg.max_drawdown_pct,
+                "max_leverage": getattr(sup_cfg, "max_leverage", 1.0),
+                "breach_mode": getattr(sup_cfg, "breach_mode", "PAUSE_AND_HOLD"),
+                "correlation_warning_threshold": getattr(
+                    sup_cfg, "correlation_warning_threshold", 3
+                ),
+            },
+            "live": dict(all_configs.get("paper", {})),  # Same as paper for now
+        }
+
+    limits = {k: v.to_dict() for k, v in BUCKET_RISK_LIMITS.items()}
+    corr_safe = {}
+    for gid, meta in CORRELATION_GROUPS.items():
+        corr_safe[gid] = {
+            "label": meta.get("label", gid),
+            "symbols": sorted(list(meta.get("symbols", set()))),
+            "threshold": meta.get("threshold", 3),
+        }
+    return jsonify(
+        {
+            "success": True,
+            "global": all_configs.get("paper", {}),  # Default to paper for legacy callers
+            "modes": all_configs,  # NEW: per-mode configs
+            "buckets": limits,
+            "correlation_groups": corr_safe,
+        }
+    ), 200
+
+
+@portfolio_bp.post("/api/portfolio/risk/config")
+def risk_config_save() -> Tuple[Response, int]:
+    """Persist risk-config changes through the validated update paths.
+
+    Global limits go through ``GlobalRiskConfig.update_limits`` and bucket
+    limits through ``update_bucket_limits`` — raw attribute writes bypass
+    the dataclass validation and can silently install impossible limits
+    (or, worse, weaken the live bucket's source gate). Invalid input gets a
+    400 and NOTHING is changed.
+
+    NEW: Supports per-mode configs via "modes" key:
+    {"modes": {"paper": {...}, "live": {...}}}
     """
-    return jsonify({"success": True, "buckets": _manager().get_bucket_aggregates()}), 200
+    data = request.get_json(silent=True) or {}
+    mgr = _manager()
+    updated = {}
+
+    # NEW: Per-mode risk config updates
+    if "modes" in data and isinstance(data["modes"], dict):
+        if hasattr(mgr, 'set_risk_config'):
+            mode_updates = {}
+            for mode, values in data["modes"].items():
+                if mode not in ("paper", "live"):
+                    return _error(f"Invalid mode: {mode}. Must be 'paper' or 'live'", 400)
+                try:
+                    changed = mgr.set_risk_config(mode, values)
+                    mode_updates[mode] = changed
+                except (ValueError, TypeError) as exc:
+                    return _error(f"invalid {mode} risk config: {exc}", 400)
+            updated["modes"] = mode_updates
+            log.info("risk config modes updated: %s", mode_updates)
+            try:
+                mgr._audit_log(
+                    "RISK_MODE_CONFIG_UPDATE",
+                    scope="all",
+                    detail=f"modes={list(mode_updates.keys())}",
+                )
+            except Exception as exc:  # noqa: BLE001 — the update already landed
+                log.warning("risk mode audit log failed: %s", exc)
+        else:
+            # Fallback: treat as global update
+            data["global"] = data["modes"].get("paper", data["modes"].get("live", {}))
+
+    if "global" in data and isinstance(data["global"], dict):
+        g = data["global"]
+        try:
+            changed = mgr.supervisor.config.update_limits(g)
+            updated["global"] = changed
+            log.info("risk config global updated: %s (changed: %s)", g, changed)
+            try:
+                mgr._audit_log(
+                    "RISK_CONFIG_UPDATE", scope="all", detail=f"global={changed or g}"
+                )
+            except Exception:  # noqa: BLE001 — audit is best-effort, save already succeeded
+                pass
+        except (ValueError, TypeError) as exc:
+            return _error(f"invalid global risk config: {exc}", 400)
+        except Exception as exc:
+            return _error(f"failed to update global config: {exc}", 500)
+        finally:
+            try:
+                mgr.persist_risk_config()
+            except Exception:  # noqa: BLE001 — a config persist must never 500 the API
+                pass
+
+    if "buckets" in data and isinstance(data["buckets"], dict):
+        try:
+            changed_buckets = {}
+            for mode, lim in data["buckets"].items():
+                if mode not in BUCKET_RISK_LIMITS:
+                    return _error(
+                        f"unknown risk bucket {mode!r} (expected paper|live)", 400
+                    )
+                if not isinstance(lim, dict):
+                    return _error(f"bucket {mode!r} payload must be an object", 400)
+                changed_buckets[mode] = update_bucket_limits(mode, lim)
+            updated["buckets"] = changed_buckets
+            log.info(
+                "risk config buckets updated: %s",
+                {k: v for k, v in changed_buckets.items()},
+            )
+            try:
+                keys = list(data["buckets"].keys())
+                mgr._audit_log(
+                    "RISK_BUCKET_UPDATE", scope="all", detail=f"buckets={keys}"
+                )
+            except Exception:  # noqa: BLE001 — audit is best-effort, save already succeeded
+                pass
+        except (ValueError, TypeError, SimulatorError) as exc:
+            return _error(f"invalid bucket risk config: {exc}", 400)
+        except Exception as exc:
+            return _error(f"failed to update buckets: {exc}", 500)
+        finally:
+            try:
+                mgr.persist_risk_config()
+            except Exception:  # noqa: BLE001 — a config persist must never 500 the API
+                pass
+
+    return jsonify({"success": True, "updated": updated}), 200
 
 
 @portfolio_bp.get("/api/portfolio/runner/<instance_id>")
@@ -127,6 +607,36 @@ def runner_detail(instance_id: str) -> Tuple[Response, int]:
     except KeyError:
         return _error(f"unknown runner: {instance_id}", 404)
     return jsonify({"success": True, "runner": detail}), 200
+
+
+@portfolio_bp.post("/api/portfolio/watch/export")
+def watch_export_now() -> Tuple[Response, int]:
+    """Export PnL-vs-spot charts NOW for every live option runner (2026-09-24).
+
+    Writes PNG + CSV into ``charts/<today-IST>/`` — also runs automatically
+    at 15:30 IST via the server-side scheduler, so being away from the
+    browser before close loses nothing.
+    """
+    try:
+        from backtest.forward.watch_export import export_all_watch_runners
+
+        results = export_all_watch_runners(_manager())
+        return jsonify({"success": True, "exported": results}), 200
+    except Exception as exc:  # noqa: BLE001
+        log.warning("watch export failed: %s", exc)
+        return _error(f"watch export failed: {exc}", 500)
+
+
+@portfolio_bp.get("/api/portfolio/watch/series/<instance_id>")
+def watch_series_view(instance_id: str) -> Tuple[Response, int]:
+    """A runner's captured per-bar watch series (for an in-page chart)."""
+    runner = _manager().get_runner(instance_id)
+    if runner is None:
+        return _error(f"unknown runner: {instance_id}", 404)
+    return jsonify(
+        {"success": True, "series": list(getattr(runner, "watch_series", [])),
+         "label": getattr(runner, "last_option_label", None)}
+    ), 200
 
 
 # ---------------------------------------------------------------------------
@@ -156,23 +666,93 @@ def create_runner() -> Tuple[Response, int]:
 
     if not name:
         kind = universe_id or symbols[0]
-        name = f"{strategy_name} · {kind}"
+        tf = str(data.get("timeframe", "1hour"))
+        name = f"{strategy_name}·{kind}·{tf}"
 
     params = data.get("params") or {}
     instrument = data.get("instrument") or {"type": "equity"}
-    # Options forward testing (task C1): the engine routes a strategy's market
-    # view to the options bridge only for single-symbol runners, so a pool-mode
-    # option runner would sit inert (only its risk exits would ever fire).
-    # Refuse it here rather than spawning something that cannot trade.
+    # Lots-per-leg: clamp here too so a bad client value can't produce a
+    # nonsense multiplier on every leg (fail-closed sizing rule).
+    if (
+        isinstance(instrument, dict)
+        and isinstance(instrument.get("expression"), dict)
+        and "quantity" in instrument["expression"]
+    ):
+        try:
+            instrument["expression"]["quantity"] = max(
+                1, min(int(instrument["expression"]["quantity"]), 100)
+            )
+        except (TypeError, ValueError):
+            instrument["expression"]["quantity"] = 1
     if (
         isinstance(instrument, dict)
         and str(instrument.get("type", "equity")).lower() == "option"
         and target_type == TARGET_POOL
     ):
         return _error(
-            "option runners trade a single underlying in V1 — use target_type "
-            "SINGLE_SYMBOL (pool mode would never open a structure)"
+            "option runners trade a single underlying in V1 — use SINGLE_SYMBOL"
         )
+    if (
+        isinstance(instrument, dict)
+        and str(instrument.get("type", "equity")).lower() == "option"
+        and target_type == TARGET_SINGLE
+    ):
+        underlyings = {str(s).strip().upper() for s in (symbols or [])}
+        # 2026-09-22: eligibility comes from the STRATEGY's declared
+        # eligible_instruments when it declares one; strategies that don't
+        # declare fall back to the index default. Declaring eligibility can
+        # only NARROW the allowed set, never widen it (an option runner on
+        # RELIANCE is still nonsense even if the strategy is open).
+        from backtest.strategy.registry import get_strategy
+
+        try:
+            strat_cls = get_strategy(strategy_name)
+            eligible = getattr(strat_cls, "eligible_instruments", None)
+        except KeyError:
+            eligible = None
+        allowed = (
+            {str(i).strip().upper() for i in eligible}
+            if eligible
+            else {"NIFTY", "BANKNIFTY"}
+        )
+        if not underlyings or not underlyings <= allowed:
+            return _error(
+                f"Option strategies trade an index — pick {'/'.join(sorted(allowed))}"
+                + (f" ({strategy_name} is restricted to {sorted(allowed)})" if eligible else "")
+            )
+
+    # Multi-broker Phase B: runners may be created INTO a segment (capital
+    # partition mapped to a broker) or with an explicit execution_broker.
+    # When a segment is given and no explicit mode, the segment's mode wins;
+    # an explicit conflicting mode is refused (fail-closed, no ambiguity).
+    segment = str(data.get("segment") or "").strip().lower() or None
+    execution_broker = str(data.get("execution_broker") or "").strip().lower() or None
+    mode = str(data.get("mode") or "").strip().lower() or None
+    if segment:
+        from backtest.brokers.segments import get_segments_config
+
+        seg_cfg = get_segments_config().get(segment)
+        if seg_cfg is None:
+            return _error(f"unknown segment: {segment}")
+        if mode is None:
+            mode = seg_cfg.mode
+        elif mode != seg_cfg.mode:
+            return _error(
+                f"segment {segment!r} is configured as {seg_cfg.mode} — "
+                f"a {mode} runner cannot be created into it"
+            )
+
+    # A runner always trades on a feed the data-source policy names. Nothing
+    # enabled at all (synthetic off AND no broker source in the config) is a
+    # refusal, not a sourceless runner — a runner with no feed is exactly the
+    # silent substitution this policy exists to stop.
+    runner_source = str(data.get("source") or "").strip().lower() or _default_runner_source()
+    if not runner_source:
+        return _error(
+            "config/data_sources.yaml enables no data source this runner could trade "
+            "on — enable db/mstock (or the testing profile's synthetic) first."
+        )
+
     try:
         config = RunnerConfig(
             name=name,
@@ -184,17 +764,56 @@ def create_runner() -> Tuple[Response, int]:
             timeframe=str(data.get("timeframe", "1hour")),
             strategy_params=params,
             max_pool_positions=int(data.get("max_pool_positions", 5)),
-            position_pct=(
-                float(data["position_pct"]) if data.get("position_pct") is not None else None
+            # 2026-09-24: instance breakers are settable at spawn — a clean
+            # watch session spawns with disabled breakers (0/0) instead of
+            # auto-pausing on the 15%-daily-loss default mid-observation.
+            max_drawdown_pct=(
+                float(data["max_drawdown_pct"])
+                if data.get("max_drawdown_pct") is not None
+                else 0.25
             ),
-            mode=data.get("mode") or "paper",
-            source=data.get("source") or "synthetic",
+            daily_loss_limit_pct=(
+                float(data["daily_loss_limit_pct"])
+                if data.get("daily_loss_limit_pct") is not None
+                else 0.15
+            ),
+            position_pct=(
+                float(data["position_pct"])
+                if data.get("position_pct") is not None
+                else None
+            ),
+            mode=mode or "paper",
+            # The source this client named, or the policy's answer for a runner
+            # (2026-09-30): a deployment with synthetic disabled (the shipped
+            # default) creates broker runners, and the only process that still
+            # gets synthetic by omission is one whose data-source policy
+            # explicitly enables it — i.e. the test suite's own profile. The
+            # empty case was refused above, so this never starts sourceless.
+            source=runner_source,
+            segment=segment,
+            execution_broker=execution_broker,
             instrument=instrument,
+            playbook_id=data.get("playbook_id"),
+            playbook_version=(
+                int(data["playbook_version"])
+                if data.get("playbook_version") is not None
+                else None
+            ),
+            playbook_snapshot=(
+                data.get("playbook_snapshot")
+                or data.get("instrument", {}).get("expression")
+            ),
         )
         auto_start = bool(data.get("auto_start", True))
         instance_id = _manager().add_runner(config, start=auto_start)
     except (ValueError, KeyError, TypeError) as exc:
         return _error(f"invalid runner config: {exc}")
+    except Exception as exc:  # noqa: BLE001 — broker-session refusals get a clear 409
+        from backtest.brokers.execution_router import BrokerSessionExpired
+
+        if isinstance(exc, BrokerSessionExpired):
+            return _error(str(exc), 409)
+        raise
 
     runner = _manager().get_runner(instance_id)
     return (
@@ -264,11 +883,6 @@ def remove_runner(instance_id: str) -> Tuple[Response, int]:
 
 @portfolio_bp.post("/api/portfolio/control/<action>")
 def bulk_control(action: str) -> Tuple[Response, int]:
-    """Bulk control with optional ``?mode=paper|live`` scope (C5).
-
-    ``mode`` scopes the action to one bucket. Omit for master (all buckets).
-    ``reset_breaker`` also accepts ``?mode=`` for scoped reset.
-    """
     manager = _manager()
     action = action.lower()
     mode = request.args.get("mode") or None
@@ -292,7 +906,12 @@ def bulk_control(action: str) -> Tuple[Response, int]:
             return _error(f"unknown bulk action: {action}")
     except RuntimeError as exc:
         return _error(str(exc), 409)
-    log.info("bulk action %s%s affected %d runner(s)", action, f" [{mode}]" if mode else "", n)
+    log.info(
+        "bulk action %s%s affected %d runner(s)",
+        action,
+        f" [{mode}]" if mode else "",
+        n,
+    )
     return (
         jsonify(
             {
@@ -309,11 +928,6 @@ def bulk_control(action: str) -> Tuple[Response, int]:
 
 @portfolio_bp.post("/api/portfolio/emergency_stop")
 def emergency_stop() -> Tuple[Response, int]:
-    """Emergency halt/flatten with optional ``mode`` scope (C5).
-
-    ``mode=None`` (default): master kill — flatten all buckets.
-    ``mode='paper'`` or ``mode='live'``: flatten only that bucket.
-    """
     data = request.get_json(silent=True) or {}
     reason = str(data.get("reason", "manual_emergency"))
     mode = data.get("mode")
@@ -337,11 +951,6 @@ def emergency_stop() -> Tuple[Response, int]:
 
 @portfolio_bp.post("/api/portfolio/test/breach")
 def test_breach() -> Tuple[Response, int]:
-    """Demo/verification: inject a simulated crash to trip circuit breakers.
-
-    Re-baselines daily PnL and (by default) tightens the limits so the breach
-    fires deterministically — this powers PRD acceptance step 5.
-    """
     data = request.get_json(silent=True) or {}
     try:
         crash_pct = float(data.get("crash_pct", 0.25))
@@ -366,32 +975,225 @@ def test_breach() -> Tuple[Response, int]:
 
 
 # ---------------------------------------------------------------------------
-# SSE stream (Task 5.2) — zero-polling live updates
+# Live Order Management (2026-09-23)
+#
+# The positions table and the Orders tab read/write through these four
+# endpoints. Read-side is deliberately thin here: the 1 Hz SSE snapshot already
+# carries ``positions`` + ``orders_summary``, so the UI only calls these for an
+# explicit refresh (Orders tab, deep links) and for every write.
+# ---------------------------------------------------------------------------
+
+
+def _position_rows(mode: str | None) -> Tuple[list[dict], dict]:
+    rows = _manager().list_positions(mode)
+    pnls = [float(r.get("unrealized_pnl") or 0) for r in rows]
+    summary = {
+        "total": len(rows),
+        "equity": sum(1 for r in rows if r.get("kind") == "equity"),
+        "option": sum(1 for r in rows if r.get("kind") == "option"),
+        "stale": sum(1 for r in rows if r.get("stale")),
+        "mark_stale": sum(1 for r in rows if r.get("mark_stale")),
+        "with_stop": sum(1 for r in rows if r.get("stop_loss") is not None),
+        "with_target": sum(1 for r in rows if r.get("target") is not None),
+        # Unrealized P&L of the rows above (frozen marks included; the row
+        # carries ``stale`` so the UI can say which part is not live).
+        "unrealized_pnl": round(sum(pnls), 2) if pnls else 0.0,
+        "winners": sum(1 for p in pnls if p > 0),
+        "losers": sum(1 for p in pnls if p < 0),
+    }
+    return rows, summary
+
+
+@portfolio_bp.get("/api/portfolio/positions")
+def positions() -> Tuple[Response, int]:
+    """Every open position across runners, flattened for the positions table.
+
+    ``mode`` scopes to one bucket (paper/live) exactly like the summary.
+    """
+    mode = request.args.get("mode") or None
+    if mode is not None:
+        mode = str(mode).strip().lower()
+        if mode not in VALID_INSTANCE_MODES:
+            return _error(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
+    try:
+        rows, summary = _position_rows(mode)
+    except ValueError as exc:
+        return _error(str(exc))
+    return jsonify({"success": True, "positions": rows, "summary": summary}), 200
+
+
+@portfolio_bp.post("/api/portfolio/position/action")
+def position_action() -> Tuple[Response, int]:
+    """Manual intervention on one position (the positions table's action column).
+
+    ``action`` ∈ ``modify_stop_loss`` | ``modify_target`` | ``clear_stop_loss``
+    | ``clear_target`` | ``close_fraction`` | ``close_all``.
+
+    Validation failures come back verbatim (409) — the operator typed the
+    number, so they should read exactly why it was refused.
+    """
+    data = request.get_json(silent=True) or {}
+    instance_id = str(data.get("instance_id", "")).strip()
+    if not instance_id:
+        return _error("instance_id is required")
+    try:
+        result = _manager().position_action(instance_id, data)
+    except KeyError as exc:
+        return _error(str(exc), 404)
+    except (ValueError, RuntimeError) as exc:
+        return _error(str(exc), 409)
+    return jsonify({"success": True, **result}), 200
+
+
+@portfolio_bp.post("/api/portfolio/runner/<instance_id>/refresh-marks")
+def refresh_runner_marks(instance_id: str) -> Tuple[Response, int]:
+    """Manual operator trigger for the R6 mark-repair routine (R6 / R7, AC #7).
+
+    Calls the same repair routine as the periodic 60s watchdog timer, enforces
+    a 10s per-runner rate-limit (returning ``cooldown: True`` without hitting
+    the broker), and writes the same audit entry.
+    """
+    iid = str(instance_id or "").strip()
+    if not iid:
+        return _error("instance_id is required")
+    try:
+        result = _manager().refresh_runner_marks(iid)
+    except KeyError as exc:
+        return _error(str(exc), 404)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("refresh-marks failed for %s: %s", iid, exc)
+        return _error(f"refresh-marks failed: {exc}", 500)
+    return jsonify({"success": True, **result}), 200
+
+
+@portfolio_bp.get("/api/portfolio/orders")
+def orders() -> Tuple[Response, int]:
+    """The order ledger: pending / filled / cancelled / rejected + slippage.
+
+    Scope precedence: ``instance_id`` → ``mode`` → whole ledger. ``status``
+    accepts a comma-separated list (``?status=pending,rejected``).
+    """
+    mode = request.args.get("mode") or None
+    if mode is not None:
+        mode = str(mode).strip().lower()
+        if mode not in VALID_INSTANCE_MODES:
+            return _error(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
+    statuses = [
+        s.strip().upper()
+        for s in str(request.args.get("status", "")).split(",")
+        if s.strip()
+    ]
+    known = {"PENDING", "FILLED", "CANCELLED", "REJECTED"}
+    unknown = [s for s in statuses if s not in known]
+    if unknown:
+        return _error(f"unknown status filter(s): {unknown}; expected {sorted(known)}")
+    try:
+        limit = int(request.args.get("limit", 200))
+    except (TypeError, ValueError):
+        limit = 200
+    try:
+        payload = _manager().list_orders(
+            mode=mode,
+            instance_id=request.args.get("instance_id") or None,
+            statuses=statuses or None,
+            limit=limit,
+        )
+    except KeyError as exc:
+        return _error(str(exc), 404)
+    except ValueError as exc:
+        return _error(str(exc))
+    return (
+        jsonify(
+            {
+                "success": True,
+                "orders": payload["orders"],
+                "summary": payload["summary"],
+                "mode": mode or "all",
+            }
+        ),
+        200,
+    )
+
+
+@portfolio_bp.post("/api/portfolio/orders/<client_order_id>/cancel")
+def cancel_order(client_order_id: str) -> Tuple[Response, int]:
+    try:
+        row = _manager().cancel_order(client_order_id)
+    except KeyError as exc:
+        return _error(str(exc), 404)
+    except ValueError as exc:
+        return _error(str(exc), 409)
+    log.info("order %s cancelled", client_order_id)
+    return jsonify({"success": True, "order": row}), 200
+
+
+@portfolio_bp.post("/api/portfolio/orders/<client_order_id>/modify")
+def modify_order(client_order_id: str) -> Tuple[Response, int]:
+    """Amend a working order (Phase 3): new quantity and/or limit price.
+
+    Only a live working order can be amended — a paper order fills or rejects
+    in the same call, so 409 with that explanation is the honest answer rather
+    than a 200 on an amendment that applies to nothing.
+    """
+    payload = request.get_json(silent=True) or {}
+    raw_qty = payload.get("quantity", payload.get("qty"))
+    raw_price = payload.get("limit_price", payload.get("price"))
+    quantity = None
+    limit_price = None
+    try:
+        if raw_qty is not None:
+            quantity = float(raw_qty)
+        if raw_price is not None:
+            limit_price = float(raw_price)
+    except (TypeError, ValueError):
+        return _error("quantity/limit_price must be numbers")
+    try:
+        result = _manager().modify_order(
+            client_order_id, quantity=quantity, limit_price=limit_price
+        )
+    except KeyError as exc:
+        return _error(str(exc), 404)
+    except (ValueError, RuntimeError) as exc:
+        return _error(str(exc), 409)
+    log.info(
+        "order %s amended (qty=%s limit=%s)",
+        client_order_id, result.get("quantity"), result.get("limit_price"),
+    )
+    return jsonify({"success": True, **result}), 200
+
+
+# ---------------------------------------------------------------------------
+# SSE stream
 # ---------------------------------------------------------------------------
 
 
 @portfolio_bp.get("/api/portfolio/stream")
 def stream() -> Response:
-    """Server-Sent Events: broadcast a JSON portfolio snapshot every second."""
     interval = current_app.config.get("PORTFOLIO_SSE_INTERVAL", 1.0)
 
     @stream_with_context
     def event_stream():
-        # SSE hello — lets the client confirm the channel immediately.
-        log.info("SSE stream opened (cadence %.1fs, client=%s)", interval, request.remote_addr)
+        log.info(
+            "SSE stream opened (cadence %.1fs, client=%s)", interval, request.remote_addr
+        )
         errors = 0
         yield ": connected to /api/portfolio/stream\n\n"
         while True:
             try:
-                payload = _manager().get_portfolio_summary()
+                manager = _manager()
+                payload = manager.get_portfolio_summary()
+                intel = getattr(manager, "intelligence", None)
+                if intel is not None and getattr(intel, "enabled", False):
+                    try:
+                        payload["intelligence"] = intel.stream_summary()
+                    except Exception:  # noqa: BLE001 — analytics never break the stream
+                        log.debug("intelligence stream summary failed", exc_info=True)
                 errors = 0
                 yield f"event: portfolio\ndata: {json.dumps(payload, default=str)}\n\n"
             except GeneratorExit:
                 raise
-            except Exception as exc:  # noqa: BLE001 — keep the stream alive
+            except Exception as exc:  # noqa: BLE001
                 errors += 1
-                # Log once, then at most every 10th repeat, so a broken manager
-                # cannot flood the log at 1 Hz.
                 if errors == 1 or errors % 10 == 0:
                     log.warning(
                         "SSE snapshot failed (%d in a row): %s: %s",

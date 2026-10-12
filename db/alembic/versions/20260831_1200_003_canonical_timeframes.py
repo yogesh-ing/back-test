@@ -45,7 +45,8 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     # Drop the old CHECK FIRST — the remaps below would violate it
     # (e.g. 'day' -> '1day' is not a value the old CHECK admits).
-    op.drop_check_constraint("ck_mdc_timeframe", "market_data_cache")
+    # alembic.op has no drop_check_constraint — use raw SQL (Postgres).
+    op.execute("ALTER TABLE market_data_cache DROP CONSTRAINT IF EXISTS ck_mdc_timeframe")
 
     # Remap rows to the canonical names (exact 1:1 equivalents only)
     op.execute(
@@ -68,7 +69,8 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Restores the pre-003 CHECK. Row deletions are NOT undone — they are
     # re-ingestable cache data (re-run the ingest to restore them).
-    op.drop_check_constraint("ck_mdc_timeframe", "market_data_cache")
+    # alembic.op has no drop_check_constraint — use raw SQL (Postgres).
+    op.execute("ALTER TABLE market_data_cache DROP CONSTRAINT IF EXISTS ck_mdc_timeframe")
     op.create_check_constraint(
         "ck_mdc_timeframe",
         "market_data_cache",

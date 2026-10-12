@@ -1,9 +1,18 @@
 {% extends "base.html" %}
-{% block title %}Forward Test · Trading Bot{% endblock %}
+{% from "_macros.html" import icon, page_header %}
+{% block title %}Engine Playground · Trading Bot{% endblock %}
 
 {% block content %}
-<h1 class="page-title">Forward Test</h1>
-<p class="muted small page-sub">Paper forward replay — simulated fills over historical/synthetic bars, watched in real-time (ticket #8: real-fill runs use the engine path; this page never paper-fills a live label).</p>
+{% call page_header('Operations / Session diagnostics', 'Engine playground', 'Watch a single-strategy paper replay in real time. A diagnostics bench for the engine, not a trading book.') %}
+    <a href="/portfolio" class="btn">{{ icon('portfolio', 14) }} Portfolio command center</a>
+{% endcall %}
+<details class="diagnostic-notice">
+    <summary>Diagnostics only · paper replay without portfolio bucket-risk controls</summary>
+    <p>For real books, use the <a href="/portfolio">Portfolio Command Center</a>. Its runners use isolated capital buckets,
+        circuit breakers, an order ledger, restart persistence and alerts. This page uses the raw
+        <code>ForwardTestingEngine</code>: an in-memory session with no bucket risk and fills at the next bar's open.
+        Results are not directly comparable with portfolio runners on gapped data.</p>
+</details>
 
 <div id="prefillBanner" class="banner" hidden>Pre-filled from a backtest / compare result</div>
 
@@ -40,16 +49,24 @@
 <section class="card config-panel">
     <h2 class="card-title">Configuration</h2>
     <div class="forward-grid">
-        <div class="form-row"><label>Strategy</label><select id="strategy" class="input"><option value="">Loading…</option></select></div>
-        <div class="form-row"><label>Symbol</label>
-            <input type="text" id="symbol" class="input" placeholder="e.g. MAZDOCK, INFY" list="symbolList">
-            <datalist id="symbolList"></datalist>
+        <div class="form-row">
+            <label for="strategy">Strategy</label>
+            <select id="strategy" class="input"><option value="">Loading…</option></select>
+            <div id="strategy-segment-info" class="muted small" style="margin-top: 6px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;"></div>
         </div>
-        <div class="form-row"><label>Timeframe</label><select id="timeframe" class="input">
+        <div class="form-row" style="grid-column: 1 / -1;">
+            <label for="symbol-search">Instrument</label>
+            <div id="symbol-tabs" class="sym-tabs"></div>
+            <input id="symbol-search" class="input instrument-search" type="search" placeholder="Search instruments…" autocomplete="off" aria-label="Search instruments">
+            <label class="sr-only" for="symbol">Selected instrument</label>
+            <select id="symbol" class="input"><option>Loading…</option></select>
+            <small id="symbol-status" class="text-muted"></small>
+        </div>
+        <div class="form-row"><label for="timeframe">Timeframe</label><select id="timeframe" class="input">
             <option value="1min">1min</option>
             <option value="day">Day</option>
         </select></div>
-        <div class="form-row"><label>Run mode</label><select id="runMode" class="input">
+        <div class="form-row"><label for="runMode">Run mode</label><select id="runMode" class="input">
             {% for m in bucket_modes %}
             <option value="{{ m }}"
                 {% if m == 'paper' %}selected{% endif %}>
@@ -59,16 +76,16 @@
             </option>
             {% endfor %}
         </select></div>
-        <div class="form-row"><label>Data source</label><select id="dataSource" class="input">
+        <div class="form-row"><label for="dataSource">Data source</label><select id="dataSource" class="input">
             {% for s in source_tags %}
-            <option value="{{ s }}" {% if s == 'synthetic' %}selected{% endif %}>{{ s | upper }}</option>
+            <option value="{{ s }}" {% if s == default_source_tag %}selected{% endif %}>{{ s | upper }}</option>
             {% endfor %}
         </select></div>
         <div class="form-row" style="grid-column: 1 / -1;">
             <small id="taxonomyHint" class="muted">Paper = free-play risk caps; data source only affects data trust (paper accepts all).</small>
         </div>
-        <div class="form-row"><label>Capital ({{ currency_symbol }})</label><input type="number" id="capital" class="input" value="100000" min="1000"></div>
-        <div class="form-row"><label>Replay speed</label><select id="replaySpeed" class="input"
+        <div class="form-row"><label for="capital">Capital ({{ currency_symbol }})</label><input type="number" id="capital" class="input" value="100000" min="1000"></div>
+        <div class="form-row"><label for="replaySpeed">Replay speed</label><select id="replaySpeed" class="input"
                 title="Bars revealed per second by the server clock — it keeps running even if you close this tab">
             <option value="">Default ({{ replay_speed }} bars/s)</option>
             <option value="0.25">Slow — 0.25 bar/s</option>
@@ -77,8 +94,8 @@
             <option value="25">25 bars/s</option>
             <option value="500">Instant-ish — 500 bars/s</option>
         </select></div>
-        <div class="form-row"><label>From Date</label><input type="date" id="fromDate" class="input" value="2024-01-01"></div>
-        <div class="form-row"><label>To Date</label><input type="date" id="toDate" class="input" value="2026-08-28"></div>
+        <div class="form-row"><label for="fromDate">From Date</label><input type="date" id="fromDate" class="input" value="2024-01-01"></div>
+        <div class="form-row"><label for="toDate">To Date</label><input type="date" id="toDate" class="input" value="2026-08-28"></div>
     </div>
     <fieldset class="params-fieldset"><legend>Strategy Params</legend>
         <div id="params-container"><p class="muted small">Select a strategy…</p></div>
@@ -125,6 +142,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/components/symbol_picker.js') }}"></script>
 <script src="{{ url_for('static', filename='js/components/params_form.js') }}"></script>
 <script src="{{ url_for('static', filename='js/components/metrics_cards.js') }}"></script>
 <script src="{{ url_for('static', filename='js/components/trade_table.js') }}"></script>

@@ -79,8 +79,15 @@ def stub() -> _ApiStubBroker:
 
 
 @pytest.fixture()
-def api(stub):
-    """Fresh app + client with the stub broker as the active session broker."""
+def api(stub, tmp_path, monkeypatch):
+    """Fresh app + client with the stub broker as the active session broker.
+
+    The remember-session toggle/token files are pointed at a tmp dir so a
+    developer's real toggle choice can never leak into a test (and a test
+    can never flip the developer's toggle).
+    """
+    monkeypatch.setenv("BROKER_REMEMBER_SESSION_PATH", str(tmp_path))
+    monkeypatch.delenv("BROKER_REMEMBER_SESSION", raising=False)
     reset_default_manager()
     get_session_manager().set_broker(stub)
     app = create_app(source="synthetic")
@@ -99,12 +106,23 @@ def test_status_unauthenticated_shape(api):
     client, _ = api
     resp = client.get("/api/broker/status")
     assert resp.status_code == 200
-    assert resp.get_json() == {
-        "status": "unauthenticated",
-        "broker": "stub",
-        "broker_display_name": "Stub Broker",
-        "expires_at": None,
-    }
+    # 2026-09-24: the payload also carries the remember-session toggle state.
+    # Multi-broker PRD Phase A: the V1 single-broker keys are unchanged; the
+    # payload ADDITIONALLY carries the per-broker `sessions` map and
+    # `expiry_events` (both empty/idle here).
+    body = resp.get_json()
+    assert body["status"] == "unauthenticated"
+    assert body["broker"] == "stub"
+    assert body["broker_display_name"] == "Stub Broker"
+    assert body["expires_at"] is None
+    assert body["remember_session"] == {"enabled": False, "has_saved": False}
+    assert body["expiry_events"] == []
+    sessions = body["sessions"]
+    # The stub session is registered; the real registry brokers report
+    # unauthenticated without being instantiated.
+    assert sessions["stub"]["status"] == "unauthenticated"
+    assert sessions["mstock"]["authenticated"] is False
+    assert sessions["dhan"]["authenticated"] is False
 
 
 def test_status_authenticated_after_full_flow(api):

@@ -215,6 +215,36 @@ class TestReload:
 # ---------------------------------------------------------------------------
 
 
+def _pin_pricing_clock(days_before_expiry: int = 7) -> None:
+    """Pin the dashboard's synthetic pricing clock N days before expiry.
+
+    Date-rot guard (2026-09-28): wall-clock DTE swings ~0→30 days across the
+    monthly expiry roll, swinging ATM premiums enough to trip the 2% pre-trade
+    loss cap and 400 the opening trade these tests depend on. Same fix the
+    repo applied to ``test_open_long_call_201`` on 2026-09-24 (see
+    ``test_options_gap_remediation._pin_pricing_clock``).
+    """
+    from datetime import datetime
+
+    from backtest.web.options_api import get_quote_provider
+
+    try:
+        provider = get_quote_provider()
+    except Exception:  # noqa: BLE001 — pinning must never break a test setup
+        return
+    generator = getattr(provider, "generator", None) or getattr(
+        getattr(provider, "inner", None), "generator", None
+    )
+    if generator is None:
+        return
+    expiry = generator.next_monthly_expiry()
+    inner = getattr(provider, "inner", provider)
+    if hasattr(inner, "set_reference"):
+        inner.set_reference(
+            datetime.combine(expiry - timedelta(days=days_before_expiry), datetime.min.time())
+        )
+
+
 class TestWebRestartRoundTrip:
     def test_positions_survive_restart(self, tmp_path, monkeypatch):
         from backtest.web import options_api
@@ -235,6 +265,7 @@ class TestWebRestartRoundTrip:
         app = create_app(source="synthetic")
         app.config["TESTING"] = True
         client = app.test_client()
+        _pin_pricing_clock()
 
         # Phase 1: open a structure via the dashboard driver.
         resp = client.post(
@@ -276,6 +307,7 @@ class TestWebRestartRoundTrip:
         app = create_app(source="synthetic")
         app.config["TESTING"] = True
         client = app.test_client()
+        _pin_pricing_clock()
 
         resp = client.post(
             "/api/options/trade",

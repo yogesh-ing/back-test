@@ -26,11 +26,16 @@ const OptionView = (function () {
     manual: "Manual",
     signal_flip: "View flipped",
     signal_neutral: "View went neutral",
+    risk_cap: "Risk cap",
     stop_loss: "Stop loss",
     take_profit: "Take profit",
     time_stop: "Time stop",
     auto_square_off: "Squared off pre-expiry",
     expiry_settlement: "Expiry settlement",
+    // Operator-set levels (Live Order Management) — distinct from the
+    // playbook's own stop/target so the trade log says WHO closed it.
+    manual_stop_loss: "Manual stop-loss",
+    manual_target: "Manual target",
   };
 
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -125,6 +130,55 @@ const OptionView = (function () {
     return (n < 0 ? "−" : "") + Math.abs(n).toFixed(2);
   }
 
+  function escAttr(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/"/g, "&quot;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  /** Format an ISO-8601 UTC mark_ts into a compact local timestamp for R2 tooltips. */
+  function formatMarkTs(iso) {
+    if (!iso) return "never";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+  }
+
+  /** R2 hover tooltip: `last good quote <mark_ts local> — <quote_error>`. */
+  function staleTooltip(item) {
+    if (!item) return "";
+    const ts = formatMarkTs(item.mark_ts != null ? item.mark_ts : item.markTs);
+    const err = (item.quote_error != null ? item.quote_error : item.quoteError) || "quote failed";
+    return "last good quote " + ts + " — " + err;
+  }
+
+  /** R2 badge HTML rendered next to a stale mark price. */
+  function staleBadgeHtml(item) {
+    const isStale = !!(item && (item.mark_stale || item.markStale));
+    if (!isStale) return "";
+    return ' <span class="badge badge-stale-mark" title="' + escAttr(staleTooltip(item)) + '">⚠ stale mark</span>';
+  }
+
+  /** True when a runner or its option book has any stale mark (R1/R2/R7). */
+  function isMarkStale(row) {
+    if (!row) return false;
+    if (row.mark_stale) return true;
+    const b = book(row);
+    if (b && b.mark_stale) return true;
+    return openStructures(row).some((s) => !!(s && s.mark_stale));
+  }
+
+  /** Count of stale option structures on a runner row. */
+  function staleCount(row) {
+    if (!row) return 0;
+    if (typeof row.stale_positions === "number") return row.stale_positions;
+    const b = book(row);
+    if (b && typeof b.stale_positions === "number") return b.stale_positions;
+    return openStructures(row).filter((s) => !!(s && s.mark_stale)).length;
+  }
+
   /** Flat rows for the deep-dive open-position table. */
   function structureRows(row) {
     return openStructures(row).map((s) => ({
@@ -147,6 +201,9 @@ const OptionView = (function () {
       expiry: s.expiry,
       expiryText: expiryLabel(s.expiry),
       barsHeld: num(s.bars_held),
+      markTs: s.mark_ts || null,
+      markStale: !!s.mark_stale,
+      quoteError: s.quote_error || null,
       legs: (s.legs_detail || []).map((leg) => ({
         side: leg.side,
         optionType: leg.option_type,
@@ -156,6 +213,9 @@ const OptionView = (function () {
         entryPrice: num(leg.entry_price),
         currentPrice: num(leg.current_price),
         pnl: num(leg.pnl),
+        markTs: leg.mark_ts || null,
+        markStale: !!leg.mark_stale,
+        quoteError: leg.quote_error || null,
       })),
     }));
   }
@@ -275,6 +335,11 @@ const OptionView = (function () {
     positionsCell,
     matrixNotes,
     instrumentLabel,
+    formatMarkTs,
+    staleTooltip,
+    staleBadgeHtml,
+    isMarkStale,
+    staleCount,
   };
 })();
 

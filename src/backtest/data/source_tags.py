@@ -1,6 +1,6 @@
 """Canonical source-tag mapping — single source of truth (ticket F-14).
 
-All three source classes live in :mod:`backtest.data`; the run-classification
+All source classes live in :mod:`backtest.data`; the run-classification
 tags (ticket P1.1) that describe them live here too. Do NOT duplicate this map
 anywhere — import it::
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from backtest.data.db_source import DbSource
+from backtest.data.dhan_live_feed import DhanLiveFeed
 from backtest.data.mstock_live_feed import MStockLiveFeed
 from backtest.data.synthetic import SyntheticSource
 
@@ -29,12 +30,15 @@ __all__ = [
     "app_source_tag",
 ]
 
-#: Source class -> run-classification tag (P1.1 buckets: synthetic / replay
-#: historical DB / mstock live feed). Matches the historical shape exactly.
+#: Source class -> run-classification tag. P1.1 buckets: synthetic (generated /
+#: unknown trust) / replay (historical DB) / live broker feed (mstock, dhan).
+#: Each broker feed owns its own tag so the source-isolated fan-out
+#: (portfolio_manager._source_matches) can route bars per venue.
 SOURCE_TAGS: dict[type, str] = {
     SyntheticSource: "synthetic",
     DbSource: "replay",
     MStockLiveFeed: "mstock",
+    DhanLiveFeed: "dhan",
 }
 
 #: The tag VALUES of :data:`SOURCE_TAGS` — the canonical set for validating a
@@ -56,6 +60,12 @@ APP_SOURCE_TAGS: dict[str, str] = {
     "synthetic": "synthetic",
     "csv": "synthetic",
     "mstock": "mstock",
+    # "dhan" became a first-class taxonomy tag when DhanLiveFeed joined
+    #: :data:`SOURCE_TAGS` — before that it mapped to "mstock" (any live
+    # broker feed = live-feed trust) and a dhan runner was labelled with
+    # another venue's name. The mapping's job is to stop silent re-tagging,
+    # not to rename venues.
+    "dhan": "dhan",
     "db": "replay",
 }
 

@@ -23,17 +23,27 @@ from flask import Flask, g, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
 
 from backtest.api import (
+    analytics_bp,
     backtest_bp,
     broker_auth_bp,
     data_bp,
     forward_bp,
+    intelligence_bp,
     portfolio_bp,
+    reporting_bp,
+    settings_bp,
     strategies_bp,
 )
-from backtest.api.portfolio import list_instances
+from backtest.api.data_guard import data_source_status
+from backtest.api.optimize import optimize_bp
+from backtest.pine.api import pine_bp
+from backtest.api.playbooks import playbooks_bp
+from backtest.api.segments import segments_bp
+from backtest.api.portfolio import _default_runner_source, list_instances
 from backtest.api.symbols import symbols_bp
 from backtest.brokers.session_manager import get_session_manager
-from backtest.data.source_tags import SOURCE_TAG_VALUES
+from backtest.data.source_tags import SOURCE_TAG_VALUES, app_source_tag
+from backtest.data.sources_policy import build_policy
 from backtest.logging_config import (
     bind_request_id,
     configure_logging,
@@ -44,6 +54,19 @@ from backtest.logging_config import (
 from backtest.simulator.bucket_risk import BUCKET_RISK_LIMITS
 
 logger = get_logger(__name__)
+
+
+def _default_source_tag() -> str:
+    """The source the dropdowns pre-select — derived, never a literal.
+
+    A page that opens on a source its own policy would refuse is a form whose
+    first submission is an error, so the selection follows exactly what the
+    runner API picks when the client names nothing
+    (:func:`backtest.api.portfolio._default_runner_source`), mapped into the
+    run-taxonomy vocabulary the selects are built from.
+    """
+    return app_source_tag(_default_runner_source())
+
 
 #: Re-exported for /api/config so the UI can show what the active source honours.
 try:
@@ -241,13 +264,97 @@ def _portfolio_buckets() -> dict[str, dict[str, Any]]:
     return buckets
 
 
+def _warn_if_source_disabled(policy: Any, source: str) -> None:
+    """Say it at startup, not at the first failed request.
+
+    A deployment that boots onto a disabled source is misconfigured; the app
+    still serves pages and the refusal explains itself, but nobody should have
+    to run a backtest to discover it.
+    """
+    if not policy.is_enabled(source):
+        logger.error(
+            "[data-policy] source=%s is DISABLED — backtests and optimizations will be "
+            "refused with 409. %s",
+            source,
+            policy.refusal_for(source),
+        )
+
+
+#: Preference order for the automatic fallback. ``db`` first (real, certifiable,
+#: already on disk), then the broker feeds, then CSV. Synthetic is deliberately
+#: NOT in this list: an operator who disabled it did so on purpose, and silently
+#: serving generated candles as a "fallback" would defeat the whole policy.
+_FALLBACK_PREFERENCE = ("db", "mstock", "dhan", "csv")
+
+
+def resolve_source(policy: Any, requested: str) -> str:
+    """The source the app will actually run on.
+
+    PRD change of direction (2026-09-30): a disabled configured source used to
+    block the Backtest and Optimize tabs behind a ⛔ banner. That punished the
+    ordinary case — synthetic disabled on purpose, real sources enabled — for
+    nothing. When the requested source is disabled the app now falls back to
+    the best *enabled* one (``_FALLBACK_PREFERENCE`` order), logs the
+    substitution loudly, and the UI's source badge simply says what is in use.
+
+    Only an explicit request for a specific source keeps its refusal meaning:
+    if every fallback candidate is also disabled, the requested source is kept
+    and the 409 path still guards it — the app refuses to run rather than
+    pretending a source is fine.
+
+    An empty request (no ``$BACKTEST_SOURCE``) is not a request for synthetic;
+    it means "whatever the config enables", resolved in the same order.
+    """
+    requested = str(requested or "").strip().lower()
+    if policy.is_enabled(requested):
+        return requested
+    if not requested:
+        # Nothing was asked for: take the first source the config enables.
+        # Synthetic leads because it is the historical default and the test
+        # profile's choice — and it can only be chosen by a deployment that
+        # sets ``synthetic: enabled: true``, so production, where the flag is
+        # off, lands on db/mstock exactly as before.
+        for candidate in ("synthetic",) + _FALLBACK_PREFERENCE:
+            if policy.is_enabled(candidate):
+                logger.info(
+                    "[data-policy] no source requested — running on source=%s "
+                    "(enabled sources: %s)",
+                    candidate,
+                    ", ".join(policy.enabled_names()),
+                )
+                return candidate
+        logger.error(
+            "[data-policy] no source requested and NO source is enabled — run "
+            "endpoints will refuse with 409."
+        )
+        return ""
+    for candidate in _FALLBACK_PREFERENCE:
+        if candidate != requested and policy.is_enabled(candidate):
+            logger.warning(
+                "[data-policy] requested source=%s is disabled — falling back to "
+                "source=%s (enabled sources: %s)",
+                requested,
+                candidate,
+                ", ".join(policy.enabled_names()),
+            )
+            return candidate
+    logger.error(
+        "[data-policy] source=%s is disabled and NO enabled fallback exists "
+        "(enabled: %s) — run endpoints will refuse with 409.",
+        requested,
+        ", ".join(policy.enabled_names()) or "none",
+    )
+    return requested
+
+
 def create_app(
-    source: str = "synthetic",
+    source: str = "",
     *,
     log_level: str | int | None = None,
     log_file: str | None = None,
     currency: str | None = None,
     replay_speed: float | None = None,
+    data_source_policy: Any | None = None,
     **overrides: Any,
 ) -> Flask:
     """Create the unified Flask app.
@@ -255,8 +362,10 @@ def create_app(
     Parameters
     ----------
     source:
-        Default candle data source for backtest endpoints
-        (``synthetic`` | ``csv`` | ``mstock`` | ``db``).
+        Candle data source for backtest endpoints (``db`` | ``csv`` | ``mstock``
+        | ``synthetic``). Empty — the default — asks the policy to pick, which
+        is what keeps ``$BACKTEST_SOURCE`` out of the picture as a hidden
+        synthetic switch.
     log_level:
         Logging level for the whole process; ``None`` → ``$BACKTEST_LOG_LEVEL``
         → INFO. ``log_file`` (``None`` → ``$BACKTEST_LOG_FILE``) mirrors output
@@ -270,12 +379,42 @@ def create_app(
         → 1.0.
     """
     configure_logging(log_level, log_file)
+    if source == "mock_broker":
+        # Gap-PRD P5: literal `--source mock_broker` — zero-credential
+        # dry-run. Registers the auto-authenticating MockBroker (orders
+        # logged, never submitted) and runs the DATA pipeline as synthetic,
+        # so every downstream source tag stays a known value.
+        from backtest.brokers.session_manager import enable_mock_broker
+
+        enable_mock_broker()
+        source = "synthetic"
+        logger.warning(
+            "[mock-broker] dry-run venue enabled — no credentials required; "
+            "orders are LOGGED, never submitted; data source runs synthetic"
+        )
     app = Flask(
         __name__,
         template_folder=_TEMPLATE_DIR,
         static_folder=_STATIC_DIR,
     )
-    app.config["BACKTEST_SOURCE"] = source
+    # Resolved once here so a test can substitute a policy without touching the
+    # module-level cache, and so the refusal message is identical everywhere.
+    # ``data_source_policy`` exists because the resolution two lines down has to
+    # use THE SAME policy the request guard will use. A caller that set
+    # ``app.config["DATA_SOURCE_POLICY"]`` after this function returned got an
+    # app that had already resolved its source against the on-disk profile — so
+    # ``BACKTEST_SOURCE`` and the policy disagreed about what the app runs on,
+    # and a guard checking the resolved name refused a source the injected
+    # policy happily allowed (or, worse, allowed one it did not describe).
+    app.config["DATA_SOURCE_POLICY"] = (
+        data_source_policy if data_source_policy is not None else build_policy()
+    )
+    # A disabled configured source falls back to the best enabled one rather
+    # than blocking both tabs (see resolve_source). The REQUESTED source is
+    # remembered under BACKTEST_SOURCE_REQUESTED so provenance labels can
+    # distinguish "asked for synthetic" from "running db instead".
+    app.config["BACKTEST_SOURCE_REQUESTED"] = source
+    app.config["BACKTEST_SOURCE"] = resolve_source(app.config["DATA_SOURCE_POLICY"], source)
     money = _resolve_currency(currency)
     app.config["CURRENCY"] = money["code"]
     app.config["CURRENCY_SYMBOL"] = money["symbol"]
@@ -300,6 +439,31 @@ def create_app(
         backend-owned constants, so templates render their mode/source
         choices from the canonical set instead of re-declaring it.
         """
+        try:
+            from backtest.live.market_status import get_market_day_state
+
+            m_state = get_market_day_state()
+        except Exception:  # noqa: BLE001
+            m_state = {
+                "day_state": "TRADING_DAY",
+                "session_state": "OPEN",
+                "holiday_name": None,
+                "next_open_ts": None,
+                "gap_warning": None,
+                "is_open": True,
+            }
+
+        try:
+            from backtest.api.data_manager import get_data_freshness
+
+            d_fresh = get_data_freshness()
+        except Exception:  # noqa: BLE001 — the chip degrades, the page must not
+            d_fresh = {
+                "db_available": False, "fetching": False, "level": "unknown",
+                "label": "DATA ?", "title": "Freshness check unavailable",
+                "per_timeframe": {}, "target_day": None,
+            }
+
         return {
             "currency_code": app.config["CURRENCY"],
             "currency_symbol": app.config["CURRENCY_SYMBOL"],
@@ -307,6 +471,9 @@ def create_app(
             "replay_speed": app.config["FORWARD_REPLAY_BARS_PER_SECOND"],
             "bucket_modes": sorted(BUCKET_RISK_LIMITS),
             "source_tags": sorted(SOURCE_TAG_VALUES),
+            "default_source_tag": _default_source_tag(),
+            "market_status": m_state,
+            "data_freshness": d_fresh,
         }
 
     _register_request_logging(app)
@@ -314,7 +481,7 @@ def create_app(
 
     logger.info(
         "app created: source=%s currency=%s(%s) replay_speed=%s bars/s log_level=%s python=%s",
-        source,
+        app.config["BACKTEST_SOURCE"],
         app.config["CURRENCY"],
         app.config["CURRENCY_SYMBOL"],
         app.config["FORWARD_REPLAY_BARS_PER_SECOND"],
@@ -345,13 +512,48 @@ def create_app(
     app.register_blueprint(broker_auth_bp)
     app.register_blueprint(data_bp)
     app.register_blueprint(portfolio_bp)
+    app.register_blueprint(intelligence_bp)
+    app.register_blueprint(playbooks_bp)
+    app.register_blueprint(analytics_bp)
+    app.register_blueprint(pine_bp)
+    app.register_blueprint(optimize_bp)
+    app.register_blueprint(segments_bp)
+    app.register_blueprint(settings_bp)
+    app.register_blueprint(reporting_bp)
 
     # SSE broadcast cadence for the portfolio command center.
     app.config.setdefault("PORTFOLIO_SSE_INTERVAL", 1.0)
+    # Portfolio Intelligence: the alert widget renders on every page unless
+    # the app was started with --disable-portfolio-intelligence.
+    app.config.setdefault("PORTFOLIO_INTELLIGENCE_ENABLED", True)
+
+    # U6.3 / D7: drop-in strategy plugins (plugins/strategies/*.py). Import-
+    # clean + conformance-passing files register here; broken files are logged
+    # and skipped — never crash the app.
+    try:
+        from backtest.plugins import discover_plugins
+
+        loaded = discover_plugins()
+        if loaded:
+            logger.info("plugin strategies loaded: %s", ", ".join(loaded))
+    except Exception:  # noqa: BLE001 — plugin loading must never break startup
+        logger.exception("strategy plugin discovery failed — continuing without plugins")
 
     # Broker session expiry monitor (auth epic Task 2.2): idempotent daemon
     # thread, one per process, polls the active broker session every 5 min.
     get_session_manager().start_monitor()
+
+    # PnL-vs-spot end-of-day exporter (2026-09-24): server-side daemon that
+    # fires at 15:30 IST even with no browser open (owner is away before
+    # close), writing charts/<date>/{PNG,CSV} per live option runner.
+    try:
+        from backtest.forward.watch_export import MarketCloseExporter
+
+        _watch_exporter = MarketCloseExporter()
+        _watch_exporter.start()
+        app.config["WATCH_EXPORTER"] = _watch_exporter
+    except Exception:  # noqa: BLE001 — the exporter must never break boot
+        logger.exception("market-close watch exporter failed to start")
 
     # ------------------------------------------------------------------
     # Page routes
@@ -361,7 +563,8 @@ def create_app(
         return render_template(
             "backtest.html",
             active="backtest",
-            source=app.config.get("BACKTEST_SOURCE", "synthetic"),
+            source=app.config["BACKTEST_SOURCE"],
+            data_sources=data_source_status(),
         )
 
     @app.get("/backtest")
@@ -369,16 +572,46 @@ def create_app(
         return render_template(
             "backtest.html",
             active="backtest",
-            source=app.config.get("BACKTEST_SOURCE", "synthetic"),
+            source=app.config["BACKTEST_SOURCE"],
+            data_sources=data_source_status(),
         )
 
-    @app.get("/dashboard")
-    def dashboard_page() -> Any:
-        return render_template("dashboard.html", active="dashboard")
+    @app.get("/api/data-sources")
+    def data_sources() -> Any:
+        """Which sources this deployment may run on, and why not the others."""
+        return jsonify(data_source_status())
 
     @app.get("/compare")
     def compare_page() -> Any:
         return render_template("compare.html", active="compare")
+
+    @app.get("/analytics")
+    def analytics_page() -> Any:
+        strategy_id = request.args.get("strategy") or ""
+        return render_template("analytics.html", active="analytics", selected_strategy=strategy_id)
+
+    @app.get("/optimize")
+    def optimize_page() -> Any:
+        """Parameter optimization: setup form + run history."""
+        return render_template(
+            "optimize.html",
+            active="optimize",
+            selected_strategy=request.args.get("strategy") or "",
+            source=app.config["BACKTEST_SOURCE"],
+            data_sources=data_source_status(),
+        )
+
+    @app.get("/optimize/runs/<run_id>")
+    @app.get("/optimize/runs/<run_id>/progress")
+    @app.get("/optimize/runs/<run_id>/results")
+    def optimize_run_page(run_id: str) -> Any:
+        """One run: live progress while running, results dashboard after."""
+        return render_template("optimize_run.html", active="optimize", run_id=run_id)
+
+    @app.get("/strategy-builder")
+    def strategy_builder_page() -> Any:
+        """Pine Script → Python strategy converter UI."""
+        return render_template("strategy_builder.html", active="strategy_builder")
 
     @app.get("/forward")
     def forward_page() -> Any:
@@ -409,9 +642,22 @@ def create_app(
             instances=list_instances("live"),
         )
 
+    @app.get("/risk")
+    def risk_page() -> Any:
+        return render_template("risk.html", active="risk")
+
+    @app.get("/settings")
+    def settings_page() -> Any:
+        return render_template("settings.html", active="settings")
+
     @app.get("/data")
     def data_page() -> Any:
         return render_template("data_manager.html", active="data")
+
+    @app.get("/reporting")
+    def reporting_page() -> Any:
+        """Consolidated P&L / tax report (PRD-002)."""
+        return render_template("reporting.html", active="reporting")
 
     # Options trading dashboard (Phase 7) — page + JSON API
     from backtest.web.options_api import register_options_routes
@@ -452,15 +698,69 @@ def create_app(
     return app
 
 
+def start_portfolio_intelligence(enabled: bool = True, interval: "float | None" = None) -> None:
+    """Start the alert evaluator thread + alert/history persistence.
+
+    Also starts the outbound notifier (Telegram/email) — it subscribes to the
+    alert broker directly and is deliberately started *before* the
+    intelligence toggle below: breaker-trip alerts are safety messages and
+    must leave the process even when the intelligence layer is disabled.
+
+    Tests never call this (they drive ``evaluate()`` directly). Fail-soft: a
+    broken intelligence layer logs and leaves trading untouched.
+    """
+    try:
+        from backtest.alerts.notifier import start_alert_notifier
+
+        start_alert_notifier()
+    except Exception:  # noqa: BLE001 — notifications are best-effort
+        logger.exception("[alerts] outbound notifier failed to start")
+    try:
+        from backtest.forward.portfolio_manager import get_portfolio_manager
+
+        intel = getattr(get_portfolio_manager(), "intelligence", None)
+        if intel is None:
+            logger.warning("[intelligence] unavailable — alerts disabled")
+            return
+        intel.enabled = bool(enabled)
+        if not enabled:
+            logger.info("[intelligence] disabled (--disable-portfolio-intelligence)")
+            return
+        try:
+            from backtest.db import DatabaseManager
+            from backtest.intelligence.persistence import IntelligencePersister
+
+            db = DatabaseManager.from_env()
+            is_sqlite = str(db.config.url or "").startswith("sqlite")
+            intel.attach_persister(IntelligencePersister(db, ensure_schema=is_sqlite))
+        except Exception:  # noqa: BLE001 — history is best-effort
+            logger.info("[intelligence] alert persistence disabled (no database)", exc_info=True)
+        try:
+            from backtest.options.chain_snapshots import add_snapshot_listener
+
+            add_snapshot_listener(
+                lambda underlying, rows, ts: intel.ingest_chain(
+                    underlying, rows, ts=ts, source="chain_snapshot"
+                )
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("[intelligence] chain snapshot hook unavailable", exc_info=True)
+        intel.start(interval)
+    except Exception:  # noqa: BLE001
+        logger.exception("[intelligence] failed to start — trading unaffected")
+
+
 def run_app(
     host: str = "0.0.0.0",
     port: int = 5000,
-    source: str = "synthetic",
+    source: str = "",
     debug: bool = False,
     log_level: "str | int | None" = None,
     log_file: "str | None" = None,
     currency: "str | None" = None,
     replay_speed: "float | None" = None,
+    enable_portfolio_intelligence: bool = True,
+    alert_refresh_interval: "float | None" = None,
 ) -> None:
     """Boot the app and serve it. Unset options fall back to their env vars."""
     app = create_app(
@@ -471,6 +771,8 @@ def run_app(
         replay_speed=replay_speed,
         debug=debug,
     )
+    app.config["PORTFOLIO_INTELLIGENCE_ENABLED"] = bool(enable_portfolio_intelligence)
+    start_portfolio_intelligence(enable_portfolio_intelligence, alert_refresh_interval)
     routes = sorted(str(r) for r in app.url_map.iter_rules())
     logger.info(
         "serving %d routes on http://%s:%s — %d api endpoints",
@@ -493,9 +795,15 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument(
         "--source",
-        default="synthetic",
-        choices=["synthetic", "csv", "mstock", "db"],
-        help="Data source: synthetic | csv | mstock | db",
+        default=os.getenv("BACKTEST_SOURCE", ""),
+        choices=["", "synthetic", "csv", "mstock", "dhan", "db", "mock_broker"],
+        help=(
+            "Data source: synthetic | csv | mstock | dhan | db | mock_broker. "
+            "Empty (the default) lets config/data_sources.yaml choose, so no "
+            "source hides in a CLI default; a disabled choice falls back per "
+            "the data policy. (mock_broker = synthetic data + zero-credential "
+            "dry-run broker, Gap-PRD P5)"
+        ),
     )
     parser.add_argument("--debug", action="store_true")
     parser.add_argument(
@@ -521,6 +829,26 @@ def main() -> None:
         default=os.getenv("BACKTEST_LOG_FILE"),
         help="also append every log line to this file (env: BACKTEST_LOG_FILE)",
     )
+    parser.add_argument(
+        "--enable-portfolio-intelligence",
+        dest="portfolio_intelligence",
+        action="store_true",
+        default=os.getenv("PORTFOLIO_INTELLIGENCE", "1").strip().lower()
+        not in {"0", "false", "no", "off"},
+        help="portfolio Greeks/regime analytics + alerts (default ON; env: PORTFOLIO_INTELLIGENCE)",
+    )
+    parser.add_argument(
+        "--disable-portfolio-intelligence",
+        dest="portfolio_intelligence",
+        action="store_false",
+        help="turn the alert evaluator and alert widget off",
+    )
+    parser.add_argument(
+        "--alert-refresh-interval",
+        type=float,
+        default=float(os.getenv("ALERT_REFRESH_INTERVAL", "1.0")),
+        help="seconds between alert-rule evaluations (env: ALERT_REFRESH_INTERVAL)",
+    )
     args = parser.parse_args()
     run_app(
         host=args.host,
@@ -531,6 +859,8 @@ def main() -> None:
         log_file=args.log_file,
         currency=args.currency,
         replay_speed=args.replay_speed,
+        enable_portfolio_intelligence=args.portfolio_intelligence,
+        alert_refresh_interval=args.alert_refresh_interval,
     )
 
 

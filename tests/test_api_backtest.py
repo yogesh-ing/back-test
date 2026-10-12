@@ -25,7 +25,24 @@ _VALID = {
     "params": {"fast": 10, "slow": 30},
 }
 
-_FULL_SHAPE = {"config", "metrics", "equity", "drawdown", "trades", "signals"}
+# PRD §3 added three single-run checks to the SAME payload. They are here
+# rather than behind their own fetches so a check can never comment on a
+# different result than the one the cards above it describe.
+_FULL_SHAPE = {
+    "config",
+    "metrics",
+    "equity",
+    "drawdown",
+    "trades",
+    "signals",
+    "provenance",
+    "benchmark",
+    "cost_shock",
+    "monte_carlo",
+    # PRD §5: the advisory readiness traffic light, derived from the four
+    # blocks above it. Asserted for its own sake in tests/test_api_readiness.py.
+    "readiness",
+}
 
 
 # --- single backtest (canonical: BacktestDriver) ----------------------------

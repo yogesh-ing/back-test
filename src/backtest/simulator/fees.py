@@ -39,9 +39,12 @@ survives in :attr:`FeeBreakdown.components`.
 
 Rates
 -----
-Indian rates are FY 2024-25 equity values. **They change**, sometimes
+Point-in-time, last re-verified 2026-09-28. Equity rates are FY 2024-25
+values; F&O STT follows Budget 2026 (futures sell 0.05%, options sell
+0.15% of premium, effective 2026-04-01). **Rates change**, sometimes
 mid-year — verify against a current contract note before trusting a
-cost-sensitive result, and override in ``config/brokers.yaml``.
+cost-sensitive result, and override in ``config/brokers.yaml``. Replays
+of pre-April-2026 F&O data should override the F&O STT fields back.
 """
 
 from __future__ import annotations
@@ -332,14 +335,17 @@ class NoStatutoryFees(FeeSchedule):
 
 @dataclass
 class IndiaEquityFees(FeeSchedule):
-    """NSE/BSE equity charges (FY 2024-25 rates).
+    """NSE/BSE charges — equity per FY 2024-25, F&O STT per Budget 2026.
 
     Rate notes, all as fractions of turnover unless stated:
 
     ==================  ==========================================
     STT delivery        0.1% on **both** buy and sell
     STT intraday        0.025% on the **sell only**
-    Exchange txn (NSE)  0.00297%, both sides
+    STT futures         0.05% on the **sell only** (eff. 2026-04-01)
+    STT options         0.15% of premium, **sell only** (eff. 2026-04-01)
+    Exchange txn (NSE)  0.00297% equity / 0.00173% futures, both sides
+    Exchange txn opts   0.03503% of premium, both sides
     SEBI turnover       0.0001% (₹10 per crore)
     IPFT (NSE)          0.0001% (₹10 per crore)
     Stamp duty          0.015% delivery / 0.003% intraday, **buy only**
@@ -351,6 +357,13 @@ class IndiaEquityFees(FeeSchedule):
     delivery round trip pays STT twice, an intraday round trip pays it once
     at a quarter of the rate.
 
+    Budget 2026 raised the F&O STT rates — futures sell 0.02% → 0.05%,
+    options sell 0.1% → 0.15%, exercise 0.125% → 0.15% — effective
+    2026-04-01. Exercise STT is not modelled (no exercise flows). Replaying
+    pre-April-2026 F&O data? Override ``stt_futures_sell`` /
+    ``stt_options_sell`` back to ``0.0002`` / ``0.001`` (pre-2024-10-01:
+    ``0.000125`` / ``0.000625``).
+
     GST is charged on brokerage and the exchange/SEBI charges, **not** on STT
     or stamp duty — those are taxes themselves and are not taxed again.
     """
@@ -360,8 +373,10 @@ class IndiaEquityFees(FeeSchedule):
 
     stt_delivery: Decimal = Decimal("0.001")
     stt_intraday_sell: Decimal = Decimal("0.00025")
-    stt_futures_sell: Decimal = Decimal("0.0002")
-    stt_options_sell: Decimal = Decimal("0.001")
+    # Budget 2026 (effective 2026-04-01): futures sell 0.02% -> 0.05%,
+    # options sell 0.1% -> 0.15%. Override for pre-April-2026 replays.
+    stt_futures_sell: Decimal = Decimal("0.0005")
+    stt_options_sell: Decimal = Decimal("0.0015")
 
     exchange_txn_equity: Decimal = Decimal("0.0000297")
     exchange_txn_futures: Decimal = Decimal("0.0000173")
@@ -381,7 +396,15 @@ class IndiaEquityFees(FeeSchedule):
 
     def __post_init__(self) -> None:
         for name, value in list(vars(self).items()):
-            if isinstance(value, (int, float, Decimal)) and name not in ("name", "currency"):
+            if name in ("name", "currency"):
+                continue
+            # Strings are coerced too: DB/JSON storage round-trips every rate
+            # as a string ("0.001"), and an uncoerced str field explodes at
+            # multiply time with a confusing TypeError deep in charges().
+            if isinstance(value, str):
+                value = to_decimal(value, name)
+                setattr(self, name, value)
+            if isinstance(value, (int, float, Decimal)):
                 coerced = to_decimal(value, name)
                 if coerced < ZERO:
                     raise ValidationError(f"{name} must not be negative", code="invalid_fee_config")
@@ -772,12 +795,51 @@ def get_broker_preset(name: str) -> BrokerProfile:
     return BROKER_PRESETS[key]()
 
 
-def load_broker_profile(path: str | Path | None = None, broker: str | None = None) -> BrokerProfile:
-    """Load a broker profile from ``config/brokers.yaml``.
+def _load_db_broker_profile(broker: str | None) -> BrokerProfile | None:
+    """Broker profile from the settings-panel DB layer, or None to fall through.
 
-    Falls back to the named preset when the file has no matching entry, so
-    the presets work with no configuration at all.
+    Fail-soft by design: no DB, missing table, or unknown profile all return
+    None so the yaml/preset resolution continues — panel infrastructure must
+    never block a spawn (same posture as IntelligencePersister).
     """
+    try:  # pragma: no cover — exercised via the settings store tests
+        from backtest.api.broker_profiles_store import get_broker_profile_store
+
+        store = get_broker_profile_store()
+        profile_id = broker
+        if profile_id is None:
+            active = store.get_active_broker()
+            profile_id = active
+        if profile_id is None:
+            return None
+        stored = store.get_profile(profile_id)
+        if stored is None:
+            return None
+        from backtest.db.models import BrokerProfileRow
+
+        return BrokerProfile(**BrokerProfileRow(**store._db_shape(stored)).to_profile_kwargs())
+    except Exception as exc:  # noqa: BLE001 — degrade to yaml/preset, never raise
+        logger.debug("DB broker-profile lookup failed (%s) — using yaml/preset", exc)
+        return None
+
+
+def load_broker_profile(path: str | Path | None = None, broker: str | None = None) -> BrokerProfile:
+    """Load a broker profile: DB (settings panel) first, then yaml, then preset.
+
+    Resolution order (certified Cost & Risk Settings design, v2 §0 #5):
+
+    1. **DB** — a ``broker_profiles`` row written by the settings panel
+       (DB-first: panel edits apply without touching yaml).
+    2. **YAML** — ``config/brokers.yaml`` entry (bootstrap / version control).
+    3. **Preset** — the built-in ``BROKER_PRESETS`` defaults.
+
+    An explicit ``path`` bypasses the DB layer entirely — callers validating a
+    specific yaml file get exactly what the file says.
+    """
+    if path is None:
+        db_profile = _load_db_broker_profile(broker)
+        if db_profile is not None:
+            return db_profile
     config_path = Path(path) if path else DEFAULT_BROKER_CONFIG_PATH
     if path is not None and not config_path.exists():
         raise ValidationError(f"broker config not found: {config_path}", code="config_not_found")

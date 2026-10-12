@@ -1,20 +1,14 @@
 {% extends "base.html" %}
-{% from "_macros.html" import badge %}
+{% from "_macros.html" import badge, icon, page_header %}
 {% block title %}Paper Portfolio{% endblock %}
 
 {% block content %}
-<style>
-    .pcc-scope-banner { margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; background: rgba(64,120,255,.08); border: 1px solid rgba(64,120,255,.35); }
-</style>
-<div class="card pcc-header">
-    <div class="pcc-title-row">
-        <div>
-            <a href="/portfolio" style="color:#64748b;text-decoration:none;font-size:.85rem;">← Overview</a>
-            <h1 class="pcc-title">📄 Paper Sandbox</h1>
-            <div class="muted">Instances in the <code>paper</code> bucket only — live instances never appear on this page. No real money at risk.</div>
-        </div>
-    </div>
-    <div class="sandbox-banner">📋 Simulated fills only — experiment freely, no broker connection needed</div>
+{% call page_header('Trading / Simulated execution', 'Paper sandbox', 'Test your strategies in a separate simulated book. Live instances never appear here; no real money is at risk.') %}
+    <a href="/portfolio" class="btn btn-ghost">{{ icon('arrow-left', 14) }} Portfolio overview</a>
+{% endcall %}
+<div class="sandbox-banner">{{ icon('paper', 15) }} Simulated fills only — no broker connection is needed for synthetic data.</div>
+<details class="card initial-instances">
+    <summary>Deployment snapshot · {{ instances | length }} paper instance{{ '' if instances | length == 1 else 's' }}</summary>
     <div class="table-scroll">
         <table class="matrix-table">
             <thead>
@@ -44,11 +38,15 @@
             </tbody>
         </table>
     </div>
-</div>
+</details>
 {% include "_portfolio_center.html" %}
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/components/risk_board.js') }}"></script>
 <script src="{{ url_for('static', filename='js/deep_dive.js') }}"></script>
+<!-- SymbolPicker: required by portfolio.js spawn-form equity picker (see portfolio.html note). -->
+<script src="{{ url_for('static', filename='js/components/symbol_picker.js') }}"></script>
 <script src="{{ url_for('static', filename='js/portfolio.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/portfolio_intelligence.js') }}"></script>
 {% endblock %}

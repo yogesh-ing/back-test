@@ -37,6 +37,7 @@ from flask import Blueprint, current_app, jsonify, request
 from backtest.adapters.backtest_adapter import BacktestAdapter
 from backtest.brokers.session_manager import get_session_manager
 from backtest.data.source_tags import SOURCE_TAG_VALUES, app_source_tag
+from backtest.data.sources_policy import SourceDisabledError, policy_key, require_synthetic
 from backtest.engine.backtest_runner import resolve_interval, resolve_warmup_start, run_quick_screen
 from backtest.engine.backtester import BacktestResult
 from backtest.engine.metrics import compute_metrics
@@ -71,7 +72,16 @@ def _resolve_classification(data: dict) -> tuple[str, str]:
     mode = str(data.get("mode", "paper")).strip().lower()
     source = str(data.get("source", "")).strip().lower()
     if not source:
-        source = app_source_tag(current_app.config.get("BACKTEST_SOURCE", "synthetic"))
+        source = app_source_tag(current_app.config["BACKTEST_SOURCE"])
+    # The label has to be true: a run may not classify itself as generated data
+    # when the deployment's kill-switch has synthetic off. Only that one is
+    # checked — whether db/mstock are *available* in a given profile is a
+    # different question from whether naming them here is legitimate.
+    if policy_key(source) == "synthetic":
+        try:
+            require_synthetic(f"forward {mode}")
+        except SourceDisabledError as exc:
+            raise ValidationError(str(exc)) from exc
     # Canonical gate: validates mode/source AND the source-trust boundary
     # (live refuses synthetic/replay — the T9 "fake data → real money" rule).
     resolve_bucket_risk(mode, source)
@@ -471,10 +481,19 @@ class ForwardSession:
                 "bars_in_memory": n,
                 "total_trades": metrics["total_trades"],
                 "last_bar_ts": _fmt_ts(last_idx) if last_idx is not None else None,
-                "market_open": True,
+                "market_open": self._is_market_open(),
                 "unrealized_pnl": round(sum(p["unrealized_pnl"] for p in positions), 2),
                 "error": self.error,
             }
+
+    @staticmethod
+    def _is_market_open() -> bool:
+        try:
+            from backtest.live.market_status import get_market_day_state
+
+            return bool(get_market_day_state().get("is_open", True))
+        except Exception:  # noqa: BLE001
+            return True
 
     def summary(self) -> dict[str, Any]:
         """Row for the session list — no heavy computation."""
@@ -567,7 +586,7 @@ def _list_sessions() -> list[dict[str, Any]]:
 
 
 def _source() -> Any:
-    name = current_app.config.get("BACKTEST_SOURCE", "synthetic")
+    name = current_app.config["BACKTEST_SOURCE"]
     return build_source(name)
 
 

@@ -1,0 +1,117 @@
+/* Precision design system. Theme changes are visual only, never trading state. */
+@font-face {
+    font-family: "Inter";
+    src: url("../fonts/inter-latin-variable.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: swap;
+}
+@font-face {
+    font-family: "JetBrains Mono";
+    src: url("../fonts/jetbrains-mono-latin-400.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+}
+@font-face {
+    font-family: "JetBrains Mono";
+    src: url("../fonts/jetbrains-mono-latin-500.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 500 800;
+    font-display: swap;
+}
+:root {
+    color-scheme: dark;
+    --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+    --bg: #0c1117;
+    --sidebar-bg: #10161d;
+    --surface: #141c24;
+    --surface-2: #1a242e;
+    --surface-3: #202d38;
+    --input-bg: #111920;
+    --border: #273440;
+    --border-soft: #202c36;
+    --text: #d3dce4;
+    --text-strong: #f0f5f9;
+    --muted: #91a1af;
+    --faint: #7c90a0;
+    --primary: #59d9bb;
+    --primary-hover: #7be5cc;
+    --primary-ink: #092a23;
+    --primary-tint: rgba(89, 217, 187, .09);
+    --primary-shade: rgba(89, 217, 187, .24);
+    --accent: var(--primary);
+    --success: #65d0a5;
+    --success-tint: rgba(101, 208, 165, .08);
+    --success-shade: rgba(101, 208, 165, .26);
+    --success-text: #87dfbb;
+    --danger: #f18491;
+    --danger-fill: #ce435c;
+    --danger-tint: rgba(241, 132, 145, .08);
+    --danger-shade: rgba(241, 132, 145, .28);
+    --danger-text: #f5a3ac;
+    --warning: #e6b970;
+    --warning-tint: rgba(230, 185, 112, .08);
+    --warning-shade: rgba(230, 185, 112, .27);
+    --warning-text: #ebc78e;
+    --info: #86b8ed;
+    --info-tint: rgba(134, 184, 237, .08);
+    --info-shade: rgba(134, 184, 237, .25);
+    --violet: #b6a4e8;
+    --violet-tint: rgba(182, 164, 232, .09);
+    --chart-grid: rgba(145, 161, 175, .09);
+    --chart-fill: rgba(89, 217, 187, .09);
+    --chart-tooltip: #202d38;
+    --backdrop: rgba(3, 8, 13, .75);
+    --radius: 12px;
+    --radius-control: 7px;
+    --shadow: 0 2px 8px rgba(0, 0, 0, .06);
+    --shadow-modal: 0 24px 80px rgba(0, 0, 0, .38);
+    --sidebar-width: 224px;
+    --topbar-height: 64px;
+}
+:root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f4f6f8;
+    --sidebar-bg: #fff;
+    --surface: #fff;
+    --surface-2: #f2f5f7;
+    --surface-3: #e8eef2;
+    --input-bg: #fafcfd;
+    --border: #d7e0e6;
+    --border-soft: #e5ebef;
+    --text: #344757;
+    --text-strong: #122b3c;
+    --muted: #546b7d;
+    --faint: #5d7182;
+    --primary: #117a66;
+    --primary-hover: #0b6655;
+    --primary-ink: #fff;
+    --primary-tint: rgba(17, 122, 102, .07);
+    --primary-shade: rgba(17, 122, 102, .2);
+    --success: #177a53;
+    --success-tint: rgba(23, 122, 83, .06);
+    --success-shade: rgba(23, 122, 83, .2);
+    --success-text: #177a53;
+    --danger: #bc3b52;
+    --danger-fill: #bc3b52;
+    --danger-tint: rgba(188, 59, 82, .06);
+    --danger-shade: rgba(188, 59, 82, .22);
+    --danger-text: #a92c43;
+    --warning: #976017;
+    --warning-tint: rgba(151, 96, 23, .06);
+    --warning-shade: rgba(151, 96, 23, .23);
+    --warning-text: #8f5912;
+    --info: #2a6cae;
+    --info-tint: rgba(42, 108, 174, .06);
+    --info-shade: rgba(42, 108, 174, .2);
+    --violet: #7551b0;
+    --violet-tint: rgba(117, 81, 176, .07);
+    --chart-grid: rgba(98, 119, 135, .12);
+    --chart-fill: rgba(17, 122, 102, .07);
+    --chart-tooltip: #fff;
+    --backdrop: rgba(15, 33, 45, .4);
+    --shadow: 0 2px 8px rgba(18, 43, 60, .03);
+    --shadow-modal: 0 24px 80px rgba(18, 43, 60, .18);
+}

@@ -38,6 +38,9 @@ PG_001 = MIGRATIONS / "001_initial_schema.sql"
 SQL_001 = MIGRATIONS / "001_initial_schema.sqlite.sql"
 SQL_002 = MIGRATIONS / "002_add_mode_source.sqlite.sql"
 PG_002 = MIGRATIONS / "002_add_mode_source.sql"
+#: The ORM mirrors 008's portfolios columns too (segment / execution_broker),
+#: so the schema-parity test applies 008 before comparing against create_all.
+SQL_008 = MIGRATIONS / "008_multi_broker_segments.sqlite.sql"
 
 LEGACY_ID = "11111111-1111-1111-1111-111111111111"
 LEGACY_NAME = "Legacy Run"
@@ -269,8 +272,18 @@ def test_ledger_records_both_migrations(legacy_db: Path):
 
 
 def test_orm_schema_matches_handwritten_after_002(legacy_db: Path):
-    """Applying 001+002 by hand yields the same portfolios columns as the ORM."""
+    """Applying 001+002+008 by hand yields the same portfolios columns as the ORM.
+
+    008 is included because the ORM mirrors its portfolios columns
+    (``segment`` / ``execution_broker``) — a pre-008 comparison would flag
+    them as orm-only even though the mirror is correct.
+    """
     _apply_002(legacy_db)
+    conn = sqlite3.connect(legacy_db)
+    try:
+        _apply(conn, SQL_008)
+    finally:
+        conn.close()
     hand = _portfolios_columns(legacy_db)
 
     orm_engine = create_engine("sqlite://")

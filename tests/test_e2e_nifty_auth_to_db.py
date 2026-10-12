@@ -25,6 +25,7 @@ import pandas as pd
 import requests
 from sqlalchemy import create_engine, text
 
+from backtest.data.base import bar_timestamp
 from backtest.live.auth import get_auth_code, login, verify_totp
 from backtest.live.mstock import MStockClient, _candles_to_frame
 
@@ -112,16 +113,13 @@ def _persist_to_db(bars: list[dict], symbol: str, exchange: str, timeframe: str)
     rows = []
     for bar in bars:
         if isinstance(bar, dict):
-            ts_raw = bar.get("t", bar.get("time", bar.get("timestamp")))
-            ts = pd.Timestamp(ts_raw)
-            if ts.tzinfo is not None:
-                ts = ts.tz_convert("UTC").tz_localize(None)
+            ts = bar_timestamp(bar.get("t", bar.get("time", bar.get("timestamp"))))
             rows.append(
                 {
                     "symbol": symbol,
                     "exchange": exchange,
                     "timeframe": timeframe,
-                    "ts": ts.to_pydatetime(),
+                    "ts": ts,
                     "open": float(bar.get("o", bar.get("open", 0))),
                     "high": float(bar.get("h", bar.get("high", 0))),
                     "low": float(bar.get("l", bar.get("low", 0))),
@@ -131,16 +129,13 @@ def _persist_to_db(bars: list[dict], symbol: str, exchange: str, timeframe: str)
                 }
             )
         elif isinstance(bar, (list, tuple)) and len(bar) >= 6:
-            ts_raw = bar[0]
-            ts = pd.Timestamp(ts_raw)
-            if ts.tzinfo is not None:
-                ts = ts.tz_convert("UTC").tz_localize(None)
+            ts = bar_timestamp(bar[0])
             rows.append(
                 {
                     "symbol": symbol,
                     "exchange": exchange,
                     "timeframe": timeframe,
-                    "ts": ts.to_pydatetime(),
+                    "ts": ts,
                     "open": float(bar[1]),
                     "high": float(bar[2]),
                     "low": float(bar[3]),

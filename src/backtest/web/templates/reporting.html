@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, page_header %}
+{% block title %}Consolidated P&amp;L · Trading Bot{% endblock %}
+
+{% block content %}
+<div class="screen-page reporting-page">
+  {{ page_header('Workspace / Reporting & reconciliation', 'Consolidated P&L', 'Every broker, both books, one statement. Follow your returns from gross profit through costs, net profit and estimated tax.') }}
+  <div class="card reporting-filters">
+    <div class="form-row"><label for="rp-from">From</label><input id="rp-from" class="input" type="date"></div>
+    <div class="form-row"><label for="rp-to">To</label><input id="rp-to" class="input" type="date"></div>
+    <div class="form-row report-brokers"><label for="rp-brokers">Brokers</label><input id="rp-brokers" class="input" type="text" placeholder="All brokers, or comma-separated names"></div>
+    <label class="reporting-check" for="rp-paper"><input id="rp-paper" type="checkbox" checked> Include paper trades</label>
+    <button id="rp-load" class="btn btn-primary" type="button">{{ icon('refresh', 14) }} Generate report</button>
+  </div>
+  <div class="reporting-exports">
+    <button id="rp-pdf" class="btn btn-small" type="button">{{ icon('download', 13) }} PDF statement</button>
+    <button id="rp-itr" class="btn btn-small" type="button">{{ icon('report', 13) }} ITR annexures (xlsx)</button>
+    <button id="rp-trades" class="btn btn-small" type="button">{{ icon('paper', 13) }} Trade ledger (csv)</button>
+    <button id="rp-email" class="btn btn-ghost btn-small" type="button">{{ icon('arrow-up-right', 13) }} Email (dry run)</button>
+    <label class="reporting-check" for="rp-demo"><input id="rp-demo" type="checkbox"> demo book (labelled sample data)</label>
+  </div>
+  <div id="rp-message" class="muted" role="status" style="min-height:18px; margin-bottom:8px;"></div>
+  <div id="rp-banner"></div>
+  <div id="rp-summary"></div>
+  <div id="rp-brokers-block"></div>
+  <div id="rp-tax-block"></div>
+  <div id="rp-reconcile-block"></div>
+  <div id="rp-caveats-block"></div>
+  <div id="rp-ledger-block"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/reporting.js') }}"></script>
+<script>Reporting.init();</script>
+{% endblock %}

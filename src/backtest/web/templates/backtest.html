@@ -1,146 +1,168 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon, page_header %}
 {% block title %}Backtest · Trading Bot{% endblock %}
 
 {% block content %}
-<div class="page-grid">
-    <!-- ================= CONFIG PANEL ================= -->
-    <section class="card config-panel">
-        <h2 class="card-title">Configuration</h2>
+{% call page_header('Research / Historical simulation', 'Backtest', 'Turn a trading idea into evidence. Understand the return, the risk, and what happens between them.') %}
+    <a href="/compare" class="btn btn-ghost">{{ icon('compare', 15) }} Compare strategies</a>
+    <a href="/optimize" class="btn">{{ icon('sliders', 15) }} Optimize parameters</a>
+{% endcall %}
+
+<!-- Server-backed ledger history (run-persistence PRD R4). No run cache in
+     the browser: tiles read GET /api/backtest/runs, opening one reads the
+     stored payload back — nothing here runs a simulation automatically. -->
+<section id="recentRuns" class="recent-runs" hidden></section>
+
+<div class="page-grid backtest-grid">
+    <section class="card config-panel backtest-config" aria-labelledby="configuration-title">
+        <div class="section-eyebrow"><span>Set up your experiment</span>{{ icon('sliders', 15) }}</div>
+        <h2 id="configuration-title" class="card-title">Run configuration</h2>
+        <div id="dataSourceGate" data-status='{{ data_sources | tojson }}'></div>
 
         <div class="form-row">
             <label for="strategy">Strategy</label>
-            <select id="strategy" class="input">
-                <option value="">Loading…</option>
-            </select>
+            <select id="strategy" class="input"><option value="">Loading…</option></select>
+            <div id="strategy-segment-info" class="muted small" style="margin-top: 6px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;"></div>
         </div>
-
         <div class="form-row">
-            <label for="symbol">Symbol</label>
-            <select id="symbol" class="input">
-                <option>RELIANCE</option>
-                <option>HDFCBANK</option>
-                <option>INFY</option>
-                <option>TCS</option>
-            </select>
-            <small id="symbol-status" class="text-muted" style="display:none"></small>
+            <label for="symbol-search">Instrument</label>
+            <div id="symbol-tabs" class="sym-tabs"></div>
+            <input id="symbol-search" class="input instrument-search" type="search" placeholder="Search instruments…" autocomplete="off" aria-label="Search instruments">
+            <label class="sr-only" for="symbol">Selected instrument</label>
+            <select id="symbol" class="input"><option>Loading…</option></select>
+            <small id="symbol-status" class="text-muted"></small>
+            {% if source == 'synthetic' %}
+            <button id="useSyntheticDemo" class="btn btn-ghost btn-small synthetic-instrument" type="button">{{ icon('flask', 12) }} Use generated demo instrument</button>
+            {% endif %}
         </div>
 
-        <div class="form-row">
-            <label for="timeframe">Timeframe</label>
-            <select id="timeframe" class="input">
-                <option value="1D">1D</option>
-                <option value="1H">1H</option>
-                <option value="4H">4H</option>
-                <option value="1W">1W</option>
-            </select>
-        </div>
-
-        <div class="form-row two-col">
-            <div>
-                <label for="fromDate">From</label>
-                <input type="date" id="fromDate" class="input" value="2024-01-01">
+        <div class="form-section">
+            <h3 class="form-section-title">Historical window</h3>
+            <div class="form-row">
+                <label for="timeframe">Timeframe</label>
+                <select id="timeframe" class="input"></select>
+                <small class="text-muted">Available intervals follow the selected instrument's stored data.</small>
             </div>
-            <div>
-                <label for="toDate">To</label>
-                <input type="date" id="toDate" class="input" value="2024-12-31">
+            <div class="form-row two-col">
+                <div><label for="fromDate">From</label><input type="date" id="fromDate" class="input" value="2024-01-01"></div>
+                <div><label for="toDate">To</label><input type="date" id="toDate" class="input" value="2024-12-31"></div>
             </div>
-        </div>
-
-        <div class="form-row">
-            <label for="capital">Capital ({{ currency_symbol }})</label>
-            <input type="number" id="capital" class="input" value="10000" min="1">
+            <div class="form-row">
+                <label for="capital">Initial capital ({{ currency_symbol }})</label>
+                <input type="number" id="capital" class="input" value="10000" min="1">
+            </div>
         </div>
 
         <fieldset class="params-fieldset">
-            <legend>Strategy Params</legend>
+            <legend>Strategy parameters</legend>
             <div id="params-container"><p class="muted small">Select a strategy…</p></div>
         </fieldset>
-
-        <button id="runBtn" class="btn btn-primary btn-block">▶ Run Backtest</button>
+        <div class="engine-option">
+            <label for="fastPreview"><input type="checkbox" id="fastPreview"> Fast preview</label>
+            <small>Approximate engine. Leave off for the canonical, fill-exact backtest.</small>
+        </div>
+        <div class="config-actions">
+            <button id="runBtn" class="btn btn-primary btn-block" type="button">{{ icon('play', 14) }} Run backtest</button>
+            <p>Simulation only. No orders are placed.</p>
+        </div>
+        {# A failed run must stay readable. The message names which dates the
+           instrument DOES have, and a toast that fades in 3s cannot be read,
+           let alone copied into the date fields. Cleared on the next run. #}
+        <div id="runError" class="run-error" role="alert" hidden></div>
     </section>
 
-    <!-- ================= RESULTS PANEL ================= -->
-    <section id="results" class="results-panel" hidden>
+    <section id="results" class="results-panel" aria-label="Backtest results" hidden>
+        <div class="results-overview-head"><h2>Performance overview</h2><span id="backtest-result-caption">Historical simulation</span></div>
+        <div id="persistBadge" class="prov-strip" hidden></div>
+        <div id="resultProvenance" class="prov-strip"></div>
         <div id="metricsCards" class="metrics-grid"></div>
-
-        <div class="card">
-            <div class="tabs">
-                <button class="tab active" data-tab="equity">Equity Curve</button>
-                <button class="tab" data-tab="drawdown">Drawdown</button>
-                <button class="tab" data-tab="signals">Price + Signals</button>
-            </div>
-            <div class="tab-body">
-                <div class="tab-pane active" data-pane="equity"><div class="chart-wrap"><canvas id="equityChart"></canvas></div></div>
-                <div class="tab-pane" data-pane="drawdown"><div class="chart-wrap"><canvas id="drawdownChart"></canvas></div></div>
-                <div class="tab-pane" data-pane="signals"><div class="chart-wrap"><canvas id="signalsChart"></canvas></div></div>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-head">
-                <h2 class="card-title">Trades</h2>
-                <div class="actions">
-                    <button id="saveCompareBtn" class="btn">💾 Save to Compare</button>
-                    <button id="exportCsvBtn" class="btn">📤 Export CSV</button>
-                    <button id="promoteBtn" class="btn btn-accent">▶ Promote to Forward</button>
+        <div id="backtestOutput">
+            <div id="seriesNotice" hidden></div>
+            <div class="card" id="chartCard">
+                <div class="tabs" role="group" aria-label="Performance charts">
+                    <button class="tab active" data-tab="equity" type="button">Equity curve</button>
+                    <button class="tab" data-tab="drawdown" type="button">Drawdown</button>
+                    <button class="tab" data-tab="signals" type="button">Price &amp; signals</button>
+                </div>
+                <div class="tab-body">
+                    <div class="tab-pane active" data-pane="equity"><div class="chart-wrap"><canvas id="equityChart" role="img" aria-label="Historical strategy equity curve"></canvas></div></div>
+                    <div class="tab-pane" data-pane="drawdown"><div class="chart-wrap"><canvas id="drawdownChart" role="img" aria-label="Historical strategy drawdown"></canvas></div></div>
+                    <div class="tab-pane" data-pane="signals"><div class="chart-wrap"><canvas id="signalsChart" role="img" aria-label="Historical prices with buy and sell signals"></canvas></div></div>
                 </div>
             </div>
-            <div id="tradeTable-wrap">
-                <table id="tradeTable" class="data-table">
-                    <thead><tr>
-                        <th data-sort="id">#</th><th data-sort="date">Date</th>
-                        <th data-sort="side">Side</th><th data-sort="entry">Entry</th>
-                        <th data-sort="exit">Exit</th><th data-sort="pnl">PnL</th>
-                        <th>Result</th>
-                    </tr></thead>
-                    <tbody></tbody>
-                </table>
-                <div id="pagination" class="pagination"></div>
+            <div class="card" id="tradeLedgerCard">
+                <div class="card-head">
+                    <h2 class="card-title">Trade ledger</h2>
+                    <div class="actions">
+                        <button id="saveCompareBtn" class="btn btn-small" type="button">{{ icon('save', 13) }} Save to compare</button>
+                        <button id="exportCsvBtn" class="btn btn-small" type="button">{{ icon('download', 13) }} Export CSV</button>
+                        <button id="promoteBtn" class="btn btn-small" type="button">{{ icon('arrow-up-right', 13) }} Open in playground</button>
+                    </div>
+                </div>
+                <div id="tradeTable-wrap">
+                    <table id="tradeTable" class="data-table">
+                        <thead><tr><th data-sort="id">#</th><th data-sort="date">Date</th><th data-sort="side">Side</th><th data-sort="entry">Entry</th><th data-sort="exit">Exit</th><th data-sort="pnl">P&amp;L</th><th>Result</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                    <div id="pagination" class="pagination"></div>
+                </div>
             </div>
+            <div class="diagnostics-heading"><h2>Look beyond the headline</h2><p>Trade quality, robustness and readiness</p></div>
+            <div id="metricSections"></div>
+            <div id="runChecks"></div>
+            <!-- The readiness summary stays below the evidence it qualifies. -->
+            <div id="certification"></div>
+            <div id="tuneThis"></div>
         </div>
     </section>
 
-    <section id="emptyState" class="empty-state card">
-        <p class="muted">Configure a strategy and click <strong>Run Backtest</strong> to see results.</p>
+    <section id="emptyState" class="backtest-empty" aria-label="Your backtest workspace">
+        <div class="card research-canvas">
+            <div class="research-canvas-head">
+                <div><h2>Performance workspace</h2><p class="card-description">The full picture, not just the final number.</p></div>
+                <span class="awaiting-tag"><span class="status-dot" aria-hidden="true"></span>Awaiting a run</span>
+            </div>
+            <div class="preview-metrics" aria-label="Metrics will appear after a backtest">
+                {% for label, hint in [('Total return', 'Net of execution costs'), ('Win rate', 'Closed trades only'), ('Max drawdown', 'Peak-to-trough risk'), ('Sharpe ratio', 'Risk-adjusted return')] %}
+                <div><div class="preview-metric-label">{{ label }}</div><div class="preview-metric-value">—</div><div class="preview-metric-hint">{{ hint }}</div></div>
+                {% endfor %}
+            </div>
+            <div class="empty-chart">
+                <div class="empty-chart-scale" aria-hidden="true"><span>—</span><span>—</span><span>—</span><span>—</span><span>—</span></div>
+                <span class="empty-chart-caption">EQUITY OVER TIME</span>
+                <div class="empty-canvas-center">
+                    <div class="empty-icon">{{ icon('chart', 25) }}</div>
+                    <h3>A good strategy starts with evidence.</h3>
+                    <p>Choose your strategy, instrument and date range. Your results will take shape here.</p>
+                    <div class="empty-instruction">{{ icon('arrow-left', 14) }} Configure a run to get started</div>
+                </div>
+            </div>
+            <div class="research-canvas-foot">{{ icon('shield', 14) }} Historical performance is not a guarantee of future returns.</div>
+        </div>
+        <div class="card research-guide">
+            <div class="research-guide-head"><h2>A more deliberate research process</h2><span>FROM IDEA TO CONFIDENCE</span></div>
+            <div class="research-steps">
+                <div class="research-step"><span class="step-number">01</span><div><h3>Define the idea</h3><p>Choose your rules, data window and starting capital.</p></div></div>
+                <div class="research-step"><span class="step-number">02</span><div><h3>Measure the trade-offs</h3><p>Inspect returns alongside drawdowns, costs and trade quality.</p></div></div>
+                <div class="research-step"><span class="step-number">03</span><div><h3>Challenge the result</h3><p>Compare alternatives and test robustness before going further.</p></div></div>
+            </div>
+        </div>
+        <div class="research-links"><a href="/compare">{{ icon('compare', 13) }} Compare strategies {{ icon('arrow-up-right', 12) }}</a><a href="/portfolio/paper">{{ icon('paper', 13) }} Explore paper trading {{ icon('arrow-up-right', 12) }}</a><a href="/data">{{ icon('database', 13) }} Manage historical data {{ icon('arrow-up-right', 12) }}</a></div>
     </section>
 </div>
 {% endblock %}
 
 {% block scripts %}
-<script>
-  const SOURCE = "{{ source }}";
-  document.addEventListener("DOMContentLoaded", function() {
-    if (SOURCE === "db") {
-      const sel = document.getElementById("symbol");
-      const status = document.getElementById("symbol-status");
-      if (!sel || !status) return;
-      sel.innerHTML = '<option disabled selected>Loading symbols…</option>';
-      status.style.display = "inline";
-      status.textContent = "Fetching available symbols from database…";
-      fetch("/api/symbols")
-        .then(r => r.json())
-        .then(data => {
-          if (!data.symbols || data.symbols.length === 0) {
-            sel.innerHTML = '<option disabled selected>No symbols found</option>';
-            status.textContent = "No data in database.";
-            return;
-          }
-          sel.innerHTML = data.symbols.map(s => `<option value="${s}">${s}</option>`).join("");
-          if (data.symbols.includes("RELIANCE")) {
-            sel.value = "RELIANCE";
-          }
-          status.textContent = `${data.count} symbols available`;
-        })
-        .catch(() => {
-          sel.innerHTML = '<option disabled selected>Error loading symbols</option>';
-          status.textContent = "Could not reach database.";
-        });
-    }
-  });
-</script>
-
 <script src="{{ url_for('static', filename='js/components/params_form.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/provenance.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/symbol_picker.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/timeframes.js') }}"></script>
 <script src="{{ url_for('static', filename='js/components/metrics_cards.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/metric_sections.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/run_checks.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/certification.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/data_source_gate.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/tune_this.js') }}"></script>
 <script src="{{ url_for('static', filename='js/components/trade_table.js') }}"></script>
 <script src="{{ url_for('static', filename='js/charts/equity_chart.js') }}"></script>
 <script src="{{ url_for('static', filename='js/charts/drawdown_chart.js') }}"></script>

@@ -59,8 +59,8 @@ const STRUCTURE = {
         { option_type: "CE", side: "SHORT", strike: 25000, trading_symbol: "NIFTY261025000CE",
           qty: 900, entry_price: 516.02, current_price: 587.8, pnl: -64602.0 },
     ],
-    expiry: "2026-10-29",
-    next_expiry: "2026-10-29",
+    expiry: "2026-10-27",
+    next_expiry: "2026-10-27",
     bars_held: 7,
 };
 
@@ -176,7 +176,7 @@ test("the matrix notes name the structure, strikes, lots, expiry and premium", (
     assert.match(notes[0], /Bull call spread/);
     assert.match(notes[0], /24,950\/25,000 CE/);
     assert.match(notes[0], /12 lots/);
-    assert.match(notes[0], /exp 29 Oct/);
+    assert.match(notes[0], /exp 27 Oct/);
     assert.match(notes[0], /premium 29\.63 → 38\.05/);
     assert.match(notes[1], /premium at risk/);
 });
@@ -217,7 +217,7 @@ test("direction-aware runners say so (the structure is chosen per view)", () => 
 // ---------------------------------------------------------------------------
 
 test("expiries render short and unambiguous", () => {
-    assert.equal(OptionView.expiryLabel("2026-10-29"), "29 Oct");
+    assert.equal(OptionView.expiryLabel("2026-10-27"), "27 Oct");
     assert.equal(OptionView.expiryLabel("2026-01-01"), "1 Jan");
     assert.equal(OptionView.expiryLabel(null), "—");
     assert.equal(OptionView.expiryLabel(""), "—");
@@ -253,7 +253,7 @@ test("structure rows carry everything the open-book table prints", () => {
     assert.equal(s.currentPrice, 38.05);
     assert.equal(s.pnl, 7578.0);
     assert.equal(s.pnlPct, 0.2842);
-    assert.equal(s.expiryText, "29 Oct");
+    assert.equal(s.expiryText, "27 Oct");
     assert.equal(s.barsHeld, 7);
     assert.equal(s.legs.length, 2);
     assert.equal(s.legs[0].tradingSymbol, "NIFTY261024950CE");
@@ -275,7 +275,7 @@ test("book stats cover open, at-risk, marked and closed", () => {
     assert.equal(byKey.premium_at_risk.value, 26667.0);
     assert.equal(byKey.premium_at_risk.money, true);
     assert.equal(byKey.book_pnl.value, 7578.0);
-    assert.equal(byKey.next_expiry.value, "29 Oct");
+    assert.equal(byKey.next_expiry.value, "27 Oct");
     assert.equal(byKey.closed.value, 0);
     assert.equal(byKey.book_realized.pnl, true);
 });
@@ -311,6 +311,7 @@ test("exit reasons read as English", () => {
     assert.equal(OptionView.exitReasonLabel("stop_loss"), "Stop loss");
     assert.equal(OptionView.exitReasonLabel("expiry_settlement"), "Expiry settlement");
     assert.equal(OptionView.exitReasonLabel("signal_flip"), "View flipped");
+    assert.equal(OptionView.exitReasonLabel("risk_cap"), "Risk cap");
     assert.equal(OptionView.exitReasonLabel("auto_square_off"), "Squared off pre-expiry");
     assert.equal(OptionView.exitReasonLabel("who_knows"), "who knows");
     assert.equal(OptionView.exitReasonLabel(null), "—");

@@ -1,81 +1,84 @@
 {% extends "base.html" %}
-{% block title %}Portfolios{% endblock %}
+{% from "_macros.html" import icon, page_header %}
+{% block title %}Portfolio · Trading Bot{% endblock %}
 
 {% block content %}
+{% call page_header('Workspace / Capital & execution', 'Portfolio overview', 'Two separate books. One clear view of your capital, strategies and risk.') %}
+    <a href="/analytics" class="btn btn-ghost">{{ icon('chart', 15) }} Performance analytics</a>
+    <a href="/risk" class="btn">{{ icon('shield', 15) }} Risk management</a>
+{% endcall %}
 
-
-<!-- Bucket summary cards -->
-<div class="card pcc-header portfolio-landing">
-    <div class="pcc-title-row">
-        <div>
-            <h1 class="pcc-title">📊 Portfolio Overview</h1>
-            <div class="muted">Two buckets, one ledger — <strong>live</strong> (real money) and <strong>paper</strong> (simulated).</div>
+<div id="global-risk-header" class="global-risk-header collapsed" hidden>
+    <div class="grh-top" id="grh-toggle">
+        <div class="grh-title">{{ icon('shield', 15) }} Global risk <span class="muted">/</span> <span id="grh-status-text">Checking…</span></div>
+        <div class="grh-summary">
+            <span class="grh-metric"><span id="grh-dloss-text">Daily Loss: —</span><div class="risk-strip-mini-bar"><div id="grh-dloss-bar" class="risk-strip-bar-fill"></div></div></span>
+            <span class="grh-metric"><span id="grh-dd-text">DD: —</span><div class="risk-strip-mini-bar"><div id="grh-dd-bar" class="risk-strip-bar-fill"></div></div></span>
+            <span class="grh-metric"><span id="grh-dep-text">Deployed: —</span></span>
+            <button id="grh-expand-btn" class="btn btn-ghost btn-small" type="button" aria-expanded="false" aria-controls="grh-details">Details</button>
         </div>
     </div>
-    <div class="bucket-cards">
-        {% for mode in bucket_modes %}
-        {% set b = buckets[mode] %}
-        <a class="card bucket-card" href="/portfolio/{{ mode }}">
-            <div class="bucket-name">{{ "🔴 " if mode == "live" else "📄 " }}{{ mode | upper }}</div>
-            <div class="bucket-row"><span>Instances</span><strong>{{ b.count }}</strong></div>
-            <div class="bucket-row"><span>Allocated</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.allocated) }}</strong></div>
-            <div class="bucket-row"><span>Equity</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.equity) }}</strong></div>
-            <div class="bucket-row"><span>Daily P&amp;L</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.daily_pnl) }}</strong></div>
-            <div class="bucket-row"><span>Realized P&amp;L</span><strong>{{ currency_symbol }}{{ "{:,.0f}".format(b.realized_pnl) }}</strong></div>
-            <div class="bucket-go">View {{ mode }} portfolio →</div>
-        </a>
-        {% endfor %}
+    <div class="grh-details" id="grh-details">
+        <div class="grh-detail-card"><div class="metric-label">Daily P&amp;L</div><div class="metric-value" id="grh-daily-pnl">—</div><div class="metric-sub" id="grh-daily-pnl-sub"></div></div>
+        <div class="grh-detail-card"><div class="metric-label">Daily loss limit usage</div><div class="metric-value" id="grh-loss-usage">—</div><div class="pbar"><div id="grh-loss-bar" class="pbar-fill pbar-fill-danger"></div></div></div>
+        <div class="grh-detail-card"><div class="metric-label">Drawdown</div><div class="metric-value" id="grh-dd">—</div><div class="metric-sub" id="grh-dd-sub"></div></div>
+        <div class="grh-detail-card"><div class="metric-label">Top losing runners</div><div id="grh-losers" class="muted small">—</div></div>
     </div>
 </div>
 
-<!-- Live section: full command center (primary) -->
+<div class="bucket-cards">
+    {% for mode in bucket_modes %}
+    {% set b = buckets[mode] %}
+    <a class="card bucket-card" href="/portfolio/{{ mode }}" data-bucket="{{ mode }}" id="bucket-card-{{ mode }}">
+        <div class="bucket-card-top">
+            <div class="bucket-name" aria-label="{{ '🔴 LIVE' if mode == 'live' else '📄 PAPER' }}">{{ icon('activity' if mode == 'live' else 'paper', 17) }} {{ mode | upper }}</div>
+            <span class="bucket-mode-note">{{ 'Real capital · broker execution' if mode == 'live' else 'Simulated capital · no money at risk' }}</span>
+        </div>
+        <div class="bucket-equity-label">Portfolio equity</div>
+        <div class="bucket-equity" id="bucket-equity-{{ mode }}">{{ currency_symbol }}{{ "{:,.0f}".format(b.equity) }}</div>
+        <div class="bucket-summary-grid">
+            <div class="bucket-stat"><span>Allocated capital</span><strong id="bucket-allocated-{{ mode }}">{{ currency_symbol }}{{ "{:,.0f}".format(b.allocated) }}</strong></div>
+            <div class="bucket-stat"><span>Daily P&amp;L</span><strong id="bucket-daily-pnl-{{ mode }}" class="{{ 'pnl-pos' if b.daily_pnl > 0 else 'pnl-neg' if b.daily_pnl < 0 else '' }}">{{ currency_symbol }}{{ "{:,.0f}".format(b.daily_pnl) }}</strong></div>
+            <div class="bucket-stat"><span>Realized P&amp;L</span><strong id="bucket-realized-pnl-{{ mode }}" class="{{ 'pnl-pos' if b.realized_pnl > 0 else 'pnl-neg' if b.realized_pnl < 0 else '' }}">{{ currency_symbol }}{{ "{:,.0f}".format(b.realized_pnl) }}</strong></div>
+            <div class="bucket-stat"><span>Instances</span><strong id="bucket-instances-{{ mode }}">{{ b.count }}</strong></div>
+            <div class="bucket-stat"><span>Running</span><strong id="bucket-running-{{ mode }}">{{ b.running }}</strong></div>
+            <div class="bucket-stat"><span>Open positions</span><strong id="bucket-openpos-{{ mode }}">{{ b.open_positions }}</strong></div>
+        </div>
+        <div class="bucket-mini-risk" id="bucket-mini-risk-{{ mode }}">
+            <span class="mini-gauge"><span class="muted">Loss limit</span><span class="mini-gauge-bar sr-only" id="bmr-{{ mode }}-dloss-bar"></span><span id="bmr-{{ mode }}-dloss">—</span></span>
+            <span class="mini-gauge"><span class="muted">Drawdown</span><span id="bmr-{{ mode }}-dd">—</span></span>
+            <span class="mini-gauge"><span id="bmr-{{ mode }}-pos">—</span></span>
+        </div>
+        <div class="bucket-go">Open {{ 'live portfolio' if mode == 'live' else 'paper sandbox' }}{{ icon('arrow-up-right', 15) }}</div>
+    </a>
+    {% endfor %}
+</div>
+
 <div class="overview-section">
-    <div class="overview-section-header">
-        <span class="section-badge badge-live-sec">🔴 LIVE</span>
-        <span class="overview-section-title">Live Command Center</span>
-        <a href="/portfolio/live" class="section-link">Full view →</a>
-    </div>
+    <div class="overview-section-header"><span class="section-badge badge-live-sec" aria-label="🔴 LIVE">LIVE</span><span class="overview-section-title">Live operations</span><a href="/portfolio/live" class="section-link">Open full view {{ icon('arrow-up-right', 12) }}</a></div>
     {% with mode = "live" %}{% include "_portfolio_center.html" %}{% endwith %}
 </div>
 
-<!-- Paper section: compact summary (secondary) -->
 <div class="overview-section">
-    <div class="overview-section-header">
-        <span class="section-badge badge-paper-sec">📄 PAPER</span>
-        <span class="overview-section-title">Paper Sandbox</span>
-        <a href="/portfolio/paper" class="section-link">Full view →</a>
-    </div>
-    <div class="card" style="padding: 12px 16px;">
-        <div class="muted" style="margin-bottom: 8px;">Simulated fills only — no real money at risk.</div>
-        <table class="paper-summary-table">
-            <thead>
-                <tr>
-                    <th>Instances</th>
-                    <th>Allocated</th>
-                    <th>Equity</th>
-                    <th>Daily P&amp;L</th>
-                    <th>Realized P&amp;L</th>
-                    <th>Status</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% set pb = buckets.get("paper", {}) %}
-                <tr>
-                    <td>{{ pb.count or 0 }}</td>
-                    <td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.allocated or 0) }}</td>
-                    <td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.equity or 0) }}</td>
-                    <td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.daily_pnl or 0) }}</td>
-                    <td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.realized_pnl or 0) }}</td>
-                    <td>{{ pb.running or 0 }} running · {{ pb.paused or 0 }} paused</td>
-                </tr>
-            </tbody>
-        </table>
+    <div class="overview-section-header"><span class="section-badge badge-paper-sec" aria-label="📄 PAPER">PAPER</span><span class="overview-section-title">Paper Sandbox</span><a href="/portfolio/paper" class="section-link">Open sandbox {{ icon('arrow-up-right', 12) }}</a></div>
+    <div class="card">
+        <div class="card-head"><h2 class="card-title">Practice before exposure</h2><span class="muted small">Simulated fills only. No real money at risk.</span></div>
+        <div class="table-scroll">
+            <table class="paper-summary-table">
+                <thead><tr><th>Instances</th><th>Allocated</th><th>Equity</th><th>Daily P&amp;L</th><th>Realized P&amp;L</th><th>Status</th></tr></thead>
+                <tbody>{% set pb = buckets.get("paper", {}) %}<tr><td>{{ pb.count or 0 }}</td><td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.allocated or 0) }}</td><td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.equity or 0) }}</td><td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.daily_pnl or 0) }}</td><td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.realized_pnl or 0) }}</td><td>{{ pb.running or 0 }} running · {{ pb.paused or 0 }} paused</td></tr></tbody>
+            </table>
+        </div>
     </div>
 </div>
-
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/components/landing_risk.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/risk_board.js') }}"></script>
 <script src="{{ url_for('static', filename='js/deep_dive.js') }}"></script>
+<!-- SymbolPicker: required by portfolio.js spawn-form equity picker (see portfolio_paper.html note). -->
+<script src="{{ url_for('static', filename='js/components/symbol_picker.js') }}"></script>
 <script src="{{ url_for('static', filename='js/portfolio.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/portfolio_intelligence.js') }}"></script>
 {% endblock %}

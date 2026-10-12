@@ -1,22 +1,23 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon, page_header %}
 {% block title %}Data Manager · Trading Bot{% endblock %}
 
 {% block content %}
-<div class="page-grid">
+{{ page_header('Operations / Historical price library', 'Market data', 'Build a reliable research foundation. Fetch historical prices, inspect coverage and keep your data library up to date.') }}
+<div class="page-grid data-grid">
     <!-- ================= FETCH PANEL ================= -->
     <section class="card config-panel">
-        <h2 class="card-title">📥 Fetch Market Data</h2>
+        <h2 class="card-title">{{ icon('download', 16) }} Fetch historical data</h2>
         <p class="muted small">Download historical OHLCV data from mStock and store in PostgreSQL.</p>
 
         <div class="form-row">
             <label for="dm-timeframe">Timeframe</label>
             <select id="dm-timeframe" class="input">
-                <option value="1min">1 Minute</option>
+                <option value="1min" selected>1 Minute</option>
                 <option value="5min">5 Minute</option>
                 <option value="15min">15 Minute</option>
-                <option value="30min">30 Minute</option>
-                <option value="60min">1 Hour</option>
-                <option value="day" selected>Day</option>
+                <option value="1hour">1 Hour</option>
+                <option value="1day">Day</option>
             </select>
         </div>
 
@@ -32,24 +33,33 @@
         </div>
 
         <div class="form-row">
-            <label for="dm-symbols">Symbols (optional)</label>
-            <input type="text" id="dm-symbols" class="input" placeholder="RELIANCE,TCS,INFY (or leave empty for all)">
-            <div class="hint">Comma-separated, or leave empty to fetch all NIFTY 200 stocks.</div>
+            <label for="dm-symbol-search">Instruments</label>
+            <div id="dm-symbol-tabs" class="sym-tabs" role="tablist" aria-label="Instrument type"></div>
+            <input type="search" id="dm-symbol-search" class="input" placeholder="Search instruments…" autocomplete="off">
+            <div class="dm-picker-bar">
+                <span id="dm-symbol-count" class="muted small">Loading…</span>
+                <button type="button" id="dm-symbol-clear" class="btn btn-ghost btn-small">Clear</button>
+            </div>
+            <div id="dm-symbol-list" class="dm-symbol-list" role="listbox" aria-multiselectable="true"></div>
+            <div class="hint">Tick the instruments to fetch. With nothing ticked the active tab decides: All = NIFTY 200 stocks + indices, Equity = the 200 stocks, Index = the indices.</div>
         </div>
 
         <div class="form-row" id="dm-token-status">
-            <div class="hint" id="dm-token-msg">🔑 Authenticate via Broker button first.</div>
+            <div class="hint" id="dm-token-msg">Connect a broker using the connections button above to fetch market data.</div>
         </div>
 
         <div class="form-row" id="dm-fetch-controls">
-            <button id="dm-fetchBtn" class="btn btn-primary btn-block">📥 Start Fetch</button>
-            <button id="dm-stopBtn" class="btn btn-danger btn-block" hidden>⏹ Stop</button>
+            <button id="dm-fetchBtn" class="btn btn-primary btn-block">{{ icon('download', 14) }} Start fetch</button>
+            <button id="dm-stopBtn" class="btn btn-danger btn-block" hidden>{{ icon('stop', 14) }} Stop fetch</button>
         </div>
     </section>
 
     <!-- ================= PROGRESS PANEL ================= -->
     <section id="dm-progress-section" class="card" hidden>
-        <h2 class="card-title">⏳ Fetch Progress</h2>
+        <div class="card-head">
+            <h2 class="card-title">{{ icon('clock', 16) }} Fetch progress</h2>
+            <button id="dm-clearProgress" class="btn btn-sm" hidden>{{ icon('close', 13) }} Clear</button>
+        </div>
 
         <div class="progress-bar-wrap">
             <div class="progress-bar" id="dm-progress-bar" style="width: 0%"></div>
@@ -74,14 +84,14 @@
     <!-- ================= INVENTORY PANEL ================= -->
     <section class="card">
         <div class="card-head">
-            <h2 class="card-title">📊 Data Inventory</h2>
-            <button id="dm-refreshBtn" class="btn btn-sm">🔄 Refresh</button>
+            <h2 class="card-title">{{ icon('database', 16) }} Data inventory</h2>
+            <button id="dm-refreshBtn" class="btn btn-sm">{{ icon('refresh', 13) }} Refresh</button>
         </div>
 
         <div class="inventory-summary" id="dm-inv-summary">
-            <span id="dm-inv-symbols">0 symbols</span>
-            <span id="dm-inv-bars">0 bars</span>
-            <span id="dm-inv-timeframes">-</span>
+            <span id="dm-inv-symbols">Loading inventory…</span>
+            <span id="dm-inv-bars"></span>
+            <span id="dm-inv-timeframes"></span>
         </div>
 
         <div class="inventory-table-wrap">
@@ -100,7 +110,7 @@
         </div>
 
         <div id="dm-inv-empty" class="empty-state" hidden>
-            <p class="muted">No data in database yet. Use the fetch panel above to download data.</p>
+            <div class="empty-icon">{{ icon("database", 23) }}</div><h3>Your price library is empty.</h3><p class="muted">Connect mStock and fetch historical bars to begin building your research data.</p>
         </div>
     </section>
 </div>

@@ -135,7 +135,44 @@ def test_trade_ids_are_sequential_and_rows_carry_dates():
             "pnl",
             "result",
             "is_open",
+            # PRD §2: the real holding time, measured on the bar walk. Only the
+            # walk knows the entry/exit bar positions, so it is recorded here
+            # rather than re-derived downstream from exposure.
+            "bars_held",
         } == set(t.to_dict())
+
+
+def test_bars_held_counts_the_bars_the_position_was_actually_in():
+    """A trade that exits on a FLAT bar was not held on that bar.
+
+    The exit cost lands on the flat bar, so `exit_date` includes it — but
+    crediting the trade with a bar it was flat for inflates every average
+    holding period on the page. Bars 1-3 long (3), bars 4-5 short (2).
+    """
+    equity = _series([1000, 1000, 1100, 1150, 1150, 1100, 1050])
+    trades = walk_trades(equity, _series([0, 1, 1, 1, -1, -1, 0]))
+    assert [t.bars_held for t in trades] == [3, 2]
+
+
+def test_a_trade_open_at_the_end_of_the_run_still_reports_the_bars_it_ran():
+    equity = _series([1000, 1000, 1100, 1150, 1200])
+    trades = walk_trades(equity, _series([0, 1, 1, 1, 1]))
+    assert len(trades) == 1
+    assert trades[0].is_open is True
+    # Bars 1-4 inclusive: the position is still open, but it HAS run four bars,
+    # and that much is a fact rather than an estimate.
+    assert trades[0].bars_held == 4
+
+
+def test_bars_held_is_never_zero_or_negative():
+    # Back-to-back flat bars, a same-bar exit and an entry on the last bar: all
+    # the shapes that would produce a 0 or a -1 if the arithmetic slipped.
+    equity = _series([1000, 1000, 1000, 1100, 1100])
+    for pos in ([0, 1, 0, 0, 0], [0, 0, 1, 1, 0], [0, 0, 0, 0, 1]):
+        trades = walk_trades(equity, _series(pos))
+        assert trades, f"expected a trade for {pos}"
+        for t in trades:
+            assert t.bars_held >= 1
 
 
 # ---------------------------------------------------------------------------

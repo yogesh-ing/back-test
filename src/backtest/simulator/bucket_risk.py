@@ -28,7 +28,7 @@ import dataclasses
 import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from backtest.data.source_tags import SOURCE_TAG_VALUES
 from backtest.simulator.errors import ValidationError
@@ -45,6 +45,7 @@ __all__ = [
     "BUCKET_RISK_LIMITS",
     "BUCKET_RISK_FIELDS",
     "resolve_bucket_risk",
+    "update_bucket_limits",
 ]
 
 #: Bucket keys — the only two values ``_classify`` can produce.
@@ -354,3 +355,51 @@ def resolve_bucket_risk(
         limits = base
 
     return mode, limits
+
+
+def update_bucket_limits(mode: str, values: Mapping[str, Any]) -> List[str]:
+    """Apply a validated partial update to a canonical bucket's limits.
+
+    The ONLY sanctioned path for mutating ``BUCKET_RISK_LIMITS`` (used by
+    the risk-config API). Pattern: build a fully validated ``BucketRiskLimits``
+    from the CURRENT values plus the update — any invalid field raises
+    ``ValidationError`` and the live bucket is untouched. Unknown buckets or
+    fields raise (typo-detection), never silently ignored.
+
+    Returns the list of fields that actually changed.
+
+    NOTE: updates mutate the process-wide canonical map and are lost on
+    restart — run config should declare ``risk.buckets.<bucket>`` for
+    durable overrides.
+    """
+    mode = str(mode or "").strip().lower()
+    if mode not in BUCKET_RISK_LIMITS:
+        raise ValidationError(
+            f"unknown risk bucket {mode!r} (expected paper|live)",
+            code="unknown_bucket",
+            bucket=mode,
+        )
+    if not isinstance(values, Mapping):
+        raise ValidationError("values must be a mapping")
+
+    unknown = set(values) - BUCKET_RISK_FIELDS
+    if unknown:
+        raise ValidationError(
+            f"unknown risk limit override(s) for bucket {mode!r}: {sorted(unknown)}",
+            code="unknown_limit_override",
+        )
+
+    base = BUCKET_RISK_LIMITS[mode]
+    merged = {f.name: getattr(base, f.name) for f in dataclasses.fields(BucketRiskLimits)}
+    merged.update(dict(values))
+    BucketRiskLimits(**merged)  # raises on any invalid field
+
+    changed = []
+    for name in merged:
+        if name not in values:
+            continue
+        new_value = getattr(BucketRiskLimits(**merged), name)
+        if getattr(base, name) != new_value:
+            changed.append(name)
+        setattr(base, name, new_value)
+    return changed

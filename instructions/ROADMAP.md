@@ -1,7 +1,9 @@
 # ROADMAP — from backtester to a complete trading system
 
-This is the big-picture, phased plan. Near-term tactical items live in
-[`BACKLOG.md`](./BACKLOG.md); this file is the destination they ladder up to.
+This is the big-picture, phased plan. Near-term tactical items used to live in
+[`BACKLOG.md`](../docs/archive/BACKLOG.md) (archived — its Phase-2 items shipped
+with the optimization engine); current open work is tracked in
+`docs/OPEN-ITEMS-TRACKER.md`. This file is the destination they ladder up to.
 
 **North star:** research a strategy → backtest it → **forward-test (paper) it with
 per-strategy dummy capital** → (much later, carefully) trade it live.

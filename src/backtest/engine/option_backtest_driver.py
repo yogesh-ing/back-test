@@ -41,13 +41,14 @@ Nothing here reads a clock or a random source.  The caller supplies
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Callable, Mapping
 
 import pandas as pd
 
 from backtest.instruments.option import OptionContract
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.expiry import ExpiryManager
 from backtest.options.paper_trading import (
     InsufficientMarginError,
@@ -397,31 +398,27 @@ def capture_equity(broker: OptionPaperBroker, timestamp: datetime) -> EquityPoin
 # ---------------------------------------------------------------------------
 
 
-def _last_thursday(year: int, month: int) -> date:
-    """Last Thursday of the given month — the NSE monthly expiry convention."""
-    if month == 12:
-        first_next = date(year + 1, 1, 1)
-    else:
-        first_next = date(year, month + 1, 1)
-    last_day = first_next - timedelta(days=1)
-    offset = (last_day.weekday() - 3) % 7  # Thursday == 3
-    return last_day - timedelta(days=offset)
-
-
 def next_monthly_expiry(reference: date) -> date:
-    """Last Thursday of the reference month (or next month if it has passed).
+    """NSE monthly expiry for the reference month (or next month if it has passed).
+
+    Last Tuesday from September 2025 onward, last Thursday before that —
+    delegated to :func:`backtest.instruments.expiry_calendar.monthly_expiry`,
+    the single canonical rule shared with the forward chain generator so the
+    backtest and paper/live paths never disagree on the expiry convention.
 
     A pure function of ``reference`` — deliberately **no**
     ``date.today()`` fallback, unlike
     :meth:`SyntheticChainGenerator.next_monthly_expiry`, so the driver
     stays deterministic over historical bars (PRD §9).
     """
-    this_month = _last_thursday(reference.year, reference.month)
+    from backtest.instruments.expiry_calendar import monthly_expiry
+
+    this_month = monthly_expiry(reference.year, reference.month)
     if this_month >= reference:
         return this_month
     if reference.month == 12:
-        return _last_thursday(reference.year + 1, 1)
-    return _last_thursday(reference.year, reference.month + 1)
+        return monthly_expiry(reference.year + 1, 1)
+    return monthly_expiry(reference.year, reference.month + 1)
 
 
 @dataclass(frozen=True)
@@ -516,6 +513,12 @@ class OptionBacktestDriver:
             capital=self.config.capital,
             slippage_pct=self.config.slippage_pct,
             commission_per_lot=self.config.commission_per_lot,
+            # Research profile, deliberately: this is the synthetic-chain
+            # mechanics loop, not the V1 forward path. It prices multi-leg
+            # structures the execution gate (options/execution_gate.py) refuses
+            # for a real runner, and its output is never performance evidence —
+            # historical options backtests stay disabled in the API.
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         self.strategy = strategy or DirectionalOptions(**dict(self.config.strategy_params))
         self.expiry_manager = expiry_manager or ExpiryManager(

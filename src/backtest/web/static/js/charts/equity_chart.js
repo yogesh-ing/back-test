@@ -52,7 +52,7 @@ function renderEquityChart(canvasId, data) {
                 tooltip: {
                     callbacks: {
                         label: (item) =>
-                            `${item.dataset.label}: $${Number(item.parsed.y).toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
+                            `${item.dataset.label}: ${Money.format(item.parsed.y)}`,
                     },
                 },
             },

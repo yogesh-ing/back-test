@@ -6,6 +6,9 @@ const SessionState = (() => {
     const KEY_COMPARE = "compare_slots";
     const KEY_BACKTEST_PREFILL = "backtest_prefill";
     const KEY_FORWARD_PREFILL = "forward_prefill";
+    // PRD §6: the Backtest → Optimize hand-off. Consumed once on read, so a
+    // stale prefill can never re-fill a form the user has since edited.
+    const KEY_OPTIMIZE_PREFILL = "optimize_prefill";
     const MAX_COMPARE_SLOTS = 4;
 
     function read(key) {
@@ -18,7 +21,12 @@ const SessionState = (() => {
     function clear(key) { sessionStorage.removeItem(key); }
 
     return {
-        keys: { compare: KEY_COMPARE, backtestPrefill: KEY_BACKTEST_PREFILL, forwardPrefill: KEY_FORWARD_PREFILL },
+        keys: {
+            compare: KEY_COMPARE,
+            backtestPrefill: KEY_BACKTEST_PREFILL,
+            forwardPrefill: KEY_FORWARD_PREFILL,
+            optimizePrefill: KEY_OPTIMIZE_PREFILL,
+        },
         maxCompareSlots: MAX_COMPARE_SLOTS,
         get: read, set: write, clear,
         get compareSlots() { return read(KEY_COMPARE) || []; },
@@ -33,5 +41,13 @@ const SessionState = (() => {
         set backtestPrefill(v) { write(KEY_BACKTEST_PREFILL, v); },
         get forwardPrefill() { return read(KEY_FORWARD_PREFILL); },
         set forwardPrefill(v) { write(KEY_FORWARD_PREFILL, v); },
+        get optimizePrefill() { return read(KEY_OPTIMIZE_PREFILL); },
+        set optimizePrefill(v) { write(KEY_OPTIMIZE_PREFILL, v); },
+        /** Read-and-clear: a hand-off is consumed once, not left to re-apply. */
+        takeOptimizePrefill() {
+            const v = read(KEY_OPTIMIZE_PREFILL);
+            if (v) clear(KEY_OPTIMIZE_PREFILL);
+            return v;
+        },
     };
 })();

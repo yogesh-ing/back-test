@@ -1,0 +1,619 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, page_header %}
+{% block title %}Cost &amp; Risk Settings{% endblock %}
+
+{% block content %}
+<div class="screen-page settings-page">
+  {% call page_header('Operations / Brokers, costs & mandates', 'Workspace settings', 'Configure broker costs, execution segments and safeguards. Saved edits apply to new runs, never to running strategies.') %}
+      <div class="settings-active"><label for="settings-active-broker">Active broker</label><select id="settings-active-broker" class="input input-select"></select></div>
+      <button id="settings-refresh" class="btn btn-ghost" type="button">{{ icon('refresh', 14) }} Refresh</button>
+  {% endcall %}
+
+  <!-- Global live kill-switch (certified v2 §0 #4: default OFF, overrides all segments) -->
+  <div id="settings-killswitch" class="config-surface" style="margin:16px 0; border:1px solid var(--border,#333); border-radius:10px; padding:14px; display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+    <div class="settings-kill-icon">{{ icon("shield", 24) }}</div>
+    <div style="flex:1; min-width:240px;">
+      <strong>Global live kill-switch</strong>
+      <div class="muted" style="font-size:12px;">OFF = every live run refused, regardless of segment mode. ON = segments with mode=live, a positive daily-loss limit and a contract-note-validated broker may arm live.</div>
+    </div>
+    <span id="killswitch-state" role="status" style="font-weight:bold;">Checking…</span>
+    <button id="killswitch-toggle" class="btn btn-small" type="button" disabled>Checking live gate…</button>
+  </div>
+
+  <!-- Broker profiles — grouped: in use first, the rate catalogue collapses -->
+  <div id="settings-profile-summary" class="muted" style="margin-top:16px; font-size:12px;"></div>
+  <div id="settings-profiles"></div>
+
+  <!-- Segments (Phase 2: risk limits belong to segments, v2 §0 #2) -->
+  <div style="margin-top:26px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <h3 style="margin:0;">{{ icon('layers', 16) }} Segments <span class="muted" style="font-weight:400;">— capital + broker + mode + risk limits per mandate</span></h3>
+      <button id="segment-new" class="btn btn-ghost btn-small" type="button">+ New segment</button>
+    </div>
+    <div id="segments-list" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:14px;"></div>
+    <div id="segment-editor" hidden style="margin-top:14px; border:1px solid var(--border,#333); border-radius:10px; padding:16px;">
+      <h4 id="segment-editor-title" style="margin-top:0;">New segment</h4>
+      <div id="segment-editor-form" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px;"></div>
+      <div style="margin-top:14px; display:flex; gap:10px; align-items:center;">
+        <button id="segment-save" class="btn btn-primary btn-small" type="button">💾 Save segment (audit-trailed)</button>
+        <button id="segment-cancel" class="btn btn-ghost btn-small" type="button">Cancel</button>
+        <span id="segment-save-msg" class="muted"></span>
+      </div>
+      <div id="segment-arming" style="margin-top:12px;"></div>
+      <div id="segment-audit" class="muted" style="margin-top:8px;"></div>
+    </div>
+  </div>
+
+  <!-- Editor -->
+  <div id="settings-editor" hidden style="margin-top:20px; border:1px solid var(--border,#333); border-radius:10px; padding:16px;">
+    <h3 id="settings-editor-title" style="margin-top:0;">Edit profile</h3>
+    <div id="settings-editor-form" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px;"></div>
+    <div style="margin-top:14px; display:flex; gap:10px; align-items:center;">
+      <button id="settings-save" class="btn btn-primary btn-small" type="button">💾 Save (audit-trailed)</button>
+      <button id="settings-cancel" class="btn btn-ghost btn-small" type="button">Cancel</button>
+      <span id="settings-save-msg" class="muted"></span>
+    </div>
+
+    <!-- Contract-note validator -->
+    <div style="margin-top:20px; border-top:1px dashed var(--border,#444); padding-top:14px;">
+      <h4 style="margin:0 0 6px;">🧾 Contract-note validation <span class="muted" style="font-weight:400;">(advisory for paper, mandatory before live)</span></h4>
+      <div class="muted" style="margin-bottom:8px;">Transcribe the component amounts from a real contract note; the platform recomputes them and reconciles line by line. A PASS stamps the profile with the note reference.</div>
+      <div id="settings-validator-form" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:8px;"></div>
+      <div style="margin-top:10px; display:flex; gap:10px; align-items:center;">
+        <button id="settings-validate" class="btn btn-primary btn-small" type="button">🧾 Validate against note</button>
+        <span id="settings-validate-msg"></span>
+      </div>
+    </div>
+
+    <!-- Audit trail -->
+    <div style="margin-top:20px; border-top:1px dashed var(--border,#444); padding-top:14px;">
+      <h4 style="margin:0 0 6px;">📜 Audit trail</h4>
+      <div id="settings-audit" class="muted">No changes recorded.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var profiles = [];
+  var active = null;
+  var editing = null;
+
+  var RATES = [
+    ["stt_delivery", "STT delivery (0.1%)"],
+    ["stt_intraday_sell", "STT intraday sell (0.025%)"],
+    ["exchange_txn_equity", "Exchange txn equity"],
+    ["sebi_turnover", "SEBI turnover"],
+    ["ipft", "IPFT"],
+    ["stamp_duty_delivery", "Stamp duty delivery"],
+    ["stamp_duty_intraday", "Stamp duty intraday"],
+    ["gst_rate", "GST rate (18%)"],
+    ["dp_charges", "DP charges (₹/sell)"],
+  ];
+
+  var RISK_LIMITS = [
+    ["daily_loss_limit", "Daily loss limit ₹ (required for live)"],
+    ["weekly_loss_limit", "Weekly loss limit ₹"],
+    ["max_drawdown_pct", "Max drawdown (e.g. 0.10)"],
+    ["max_positions", "Max open positions"],
+    ["max_gross_exposure_pct", "Max gross exposure (e.g. 0.50)"],
+    ["max_leverage", "Max leverage (>= 1)"],
+  ];
+
+  function el(tag, attrs, text) {
+    var node = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) { node.setAttribute(k, attrs[k]); });
+    if (text) node.textContent = text;
+    return node;
+  }
+
+  function api(method, url, body) {
+    return fetch(url, {
+      method: method,
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    }).then(function (r) {
+      return r.json().then(function (data) { return { ok: r.ok, status: r.status, data: data }; });
+    });
+  }
+
+  function loadAll() {
+    Promise.all([api("GET", "/api/settings/brokers"), api("GET", "/api/settings/active-broker")])
+      .then(function (results) {
+        profiles = results[0].data.profiles || [];
+        active = results[1].data.active_broker;
+        renderProfiles();
+        renderActiveSelect();
+      });
+  }
+
+  var GROUPS = [
+    ["in_use", "In use", "Referenced by a segment, the active broker or the data routing — these price your real runs."],
+    ["configured", "In config/brokers.yaml", "Rates the file defines; no segment points at them yet."],
+    ["catalogue", "Built-in presets", "Rate models you can adopt, compare against or derive from. Nothing here is charged until a segment points at it."]
+  ];
+
+  function grouped(list) {
+    var out = {};
+    GROUPS.forEach(function (g) { out[g[0]] = []; });
+    list.forEach(function (p) {
+      (out[p.group] || out.catalogue).push(p);
+    });
+    return out;
+  }
+
+  function renderActiveSelect() {
+    var sel = document.getElementById("settings-active-broker");
+    sel.innerHTML = "";
+    var none = el("option", { value: "" }, "(from config yaml)");
+    sel.appendChild(none);
+    var buckets = grouped(profiles);
+    GROUPS.forEach(function (g) {
+      var rows = buckets[g[0]] || [];
+      if (!rows.length) return;
+      var optgroup = el("optgroup", { label: g[1] });
+      rows.forEach(function (p) {
+        var opt = el("option", { value: p.profile_id }, p.profile_name + " (" + p.profile_id + ")");
+        if (p.profile_id === active) opt.selected = true;
+        optgroup.appendChild(opt);
+      });
+      sel.appendChild(optgroup);
+    });
+    sel.onchange = function () {
+      var call = sel.value
+        ? api("PUT", "/api/settings/active-broker", { profile_id: sel.value })
+        : Promise.resolve();
+      call.then(loadAll);
+    };
+  }
+
+  function profileCard(p) {
+      var card = el("div", { class: "settings-card", style: "border:1px solid var(--border,#333); border-radius:10px; padding:12px;" });
+      var head = el("div", { style: "display:flex; justify-content:space-between; align-items:center;" });
+      head.appendChild(el("strong", null, p.profile_name));
+      var chip = p.origin === "yaml" || p.matches_file
+        ? ["config/brokers.yaml", "The numbers in force are the file's own — an edit here becomes an audited override"]
+        : p.is_preset
+          ? ["preset", "Built-in preset — edits are audited overrides"]
+          : [null, null];
+      if (chip[0]) head.appendChild(el("span", { class: "muted", title: chip[1] }, chip[0]));
+      card.appendChild(head);
+      card.appendChild(el("div", { class: "muted", style: "margin:4px 0;" }, p.profile_id + " · " + p.currency + " · " + p.default_segment));
+      if (p.validated_on) {
+        card.appendChild(el("div", { style: "color:var(--success-text); font-size:12px;" }, "✅ validated " + p.validated_on + " vs " + p.contract_note_ref));
+      } else {
+        card.appendChild(el("div", { class: "muted", style: "font-size:12px;" }, "Not contract-note validated"));
+      }
+      var rates = p.statutory_rates || {};
+      var summary = el("div", { style: "margin-top:6px; font-size:12px;" });
+      summary.appendChild(el("div", null, "STT delivery: " + (rates.stt_delivery || "—") + " · GST: " + (rates.gst_rate || "—")));
+      var cm = (p.commission_model && p.commission_model.default) || {};
+      summary.appendChild(el("div", null, "Brokerage: " + (cm.model || "—") + (cm.per_trade ? " ₹" + cm.per_trade : "") + (cm.rate ? " " + cm.rate : "")));
+      card.appendChild(summary);
+      (p.usage || []).forEach(function (reason) {
+        card.appendChild(el("div", { class: "muted", style: "font-size:11px; margin-top:4px;" }, "• " + reason));
+      });
+      var btn = el("button", { class: "btn btn-ghost btn-small", type: "button", style: "margin-top:8px;" }, "Edit / validate");
+      btn.onclick = function () { openEditor(p.profile_id); };
+      card.appendChild(btn);
+      return card;
+  }
+
+  function profileGrid(rows) {
+    var grid = el("div", { "data-grid": "1", style: "display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:14px;" });
+    rows.forEach(function (p) { grid.appendChild(profileCard(p)); });
+    return grid;
+  }
+
+  function groupSection(key, rows, headingTag) {
+    var group = GROUPS.filter(function (g) { return g[0] === key; })[0];
+    var section = el("section", { "data-group": key, style: "margin-top:14px;" });
+    var head = el("div", { style: "display:flex; align-items:baseline; gap:8px; flex-wrap:wrap;" });
+    head.appendChild(el(headingTag, { style: "margin:0;" }, group[1] + " (" + rows.length + ")"));
+    head.appendChild(el("span", { class: "muted", style: "font-size:12px;" }, group[2]));
+    section.appendChild(head);
+    section.appendChild(profileGrid(rows));
+    return section;
+  }
+
+  function renderProfiles() {
+    var host = document.getElementById("settings-profiles");
+    host.innerHTML = "";
+    var buckets = grouped(profiles);
+    var inUse = buckets.in_use || [];
+    var rest = (buckets.configured || []).concat(buckets.catalogue || []);
+    var summary = document.getElementById("settings-profile-summary");
+    if (summary) {
+      summary.textContent = inUse.length + " broker(s) in use · " + rest.length
+        + ' more available (collapsed) — nothing outside "In use" prices a run.';
+    }
+
+    host.appendChild(groupSection("in_use", inUse, "h3"));
+
+    if (!rest.length) return;
+    // Collapsed by default: this is where you ADOPT a broker, not where you
+    // trade. Expanding it is how a new broker becomes selectable without
+    // deleting the rate catalogue it was derived from.
+    var details = document.createElement("details");
+    details.style.marginTop = "18px";
+    var toggle = document.createElement("summary");
+    toggle.className = "muted";
+    toggle.style.cursor = "pointer";
+    toggle.textContent = "Show " + rest.length + " other broker(s) — config file + built-in presets";
+    details.appendChild(toggle);
+
+    if ((buckets.configured || []).length) {
+      details.appendChild(groupSection("configured", buckets.configured, "h4"));
+    }
+    if ((buckets.catalogue || []).length) {
+      details.appendChild(groupSection("catalogue", buckets.catalogue, "h4"));
+    }
+    host.appendChild(details);
+  }
+
+  function field(label, value, key) {
+    var wrap = el("div");
+    wrap.appendChild(el("label", { class: "muted", style: "font-size:12px;" }, label));
+    var input = el("input", { class: "input", "data-key": key || "", value: value === null || value === undefined ? "" : value });
+    input.style.width = "100%";
+    wrap.appendChild(input);
+    return wrap;
+  }
+
+  function openEditor(profileId) {
+    api("GET", "/api/settings/brokers/" + profileId).then(function (r) {
+      editing = r.data.profile;
+      document.getElementById("settings-editor").hidden = false;
+      document.getElementById("settings-editor-title").textContent = "Edit profile — " + editing.profile_name;
+      var form = document.getElementById("settings-editor-form");
+      form.innerHTML = "";
+      form.appendChild(field("Profile name", editing.profile_name, "profile_name"));
+      var cm = (editing.commission_model && editing.commission_model.default) || {};
+      form.appendChild(field("Brokerage model (flat|percentage|zero)", cm.model || "zero", "cm_model"));
+      form.appendChild(field("Flat per trade ₹ (flat model)", cm.per_trade || "", "cm_per_trade"));
+      form.appendChild(field("Percentage rate (percentage model)", cm.rate || "", "cm_rate"));
+      RATES.forEach(function (pair) {
+        form.appendChild(field(pair[1], (editing.statutory_rates || {})[pair[0]], "rate_" + pair[0]));
+      });
+      document.getElementById("settings-save-msg").textContent = "";
+      renderValidator();
+      loadAudit();
+      document.getElementById("settings-editor").scrollIntoView({ behavior: "smooth" });
+    });
+  }
+
+  function renderValidator() {
+    var host = document.getElementById("settings-validator-form");
+    host.innerHTML = "";
+    host.appendChild(field("Trade value ₹", 125000, "v_trade_value"));
+    host.appendChild(field("Quantity", 100, "v_quantity"));
+    var side = el("select", { class: "input input-select", "data-key": "v_side" });
+    ["SELL", "BUY"].forEach(function (s) {
+      var opt = el("option", { value: s }, s);
+      if (s === "SELL") opt.selected = true;
+      side.appendChild(opt);
+    });
+    var sideWrap = el("div");
+    sideWrap.appendChild(el("label", { class: "muted", style: "font-size:12px;" }, "Side"));
+    sideWrap.appendChild(side);
+    host.appendChild(sideWrap);
+    var seg = el("select", { class: "input input-select", "data-key": "v_segment" });
+    ["equity_intraday", "equity_delivery", "options", "futures"].forEach(function (s) {
+      var opt = el("option", { value: s }, s);
+      if (s === "equity_intraday") opt.selected = true;
+      seg.appendChild(opt);
+    });
+    var segWrap = el("div");
+    segWrap.appendChild(el("label", { class: "muted", style: "font-size:12px;" }, "Segment"));
+    segWrap.appendChild(seg);
+    host.appendChild(segWrap);
+    host.appendChild(field("Note / document id", "", "v_doc"));
+    ["brokerage", "stt", "exchange_transaction", "sebi_turnover", "ipft", "stamp_duty", "gst"].forEach(function (key) {
+      host.appendChild(field(key + " ₹ (from note)", "", "v_" + key));
+    });
+  }
+
+  function collectEditor() {
+    var body = {
+      profile_name: valueOf("profile_name"),
+      commission_model: { default: {} },
+      statutory_rates: {},
+    };
+    var model = valueOf("cm_model") || "zero";
+    body.commission_model.default = { model: model };
+    if (valueOf("cm_per_trade")) body.commission_model.default.per_trade = valueOf("cm_per_trade");
+    if (valueOf("cm_rate")) body.commission_model.default.rate = valueOf("cm_rate");
+    RATES.forEach(function (pair) {
+      var v = valueOf("rate_" + pair[0]);
+      if (v !== "") body.statutory_rates[pair[0]] = v;
+    });
+    return body;
+  }
+
+  function valueOf(key) {
+    var input = document.querySelector('#settings-editor-form [data-key="' + key + '"]');
+    return input ? input.value.trim() : "";
+  }
+
+  function valNum(key) {
+    var input = document.querySelector('#settings-validator-form [data-key="' + key + '"]');
+    return input ? input.value.trim() : "";
+  }
+
+  document.getElementById("settings-save").onclick = function () {
+    api("PUT", "/api/settings/brokers/" + editing.profile_id, collectEditor()).then(function (r) {
+      var msg = document.getElementById("settings-save-msg");
+      msg.textContent = r.ok ? "✅ saved (applies to new runs)" : "❌ " + (r.data.error || r.status);
+      if (r.ok) { loadAll(); loadAudit(); }
+    });
+  };
+
+  document.getElementById("settings-validate").onclick = function () {
+    var expected = {};
+    ["brokerage", "stt", "exchange_transaction", "sebi_turnover", "ipft", "stamp_duty", "gst"].forEach(function (key) {
+      var v = valNum("v_" + key);
+      if (v !== "") expected[key] = parseFloat(v);
+    });
+    var body = {
+      trade_value: parseFloat(valNum("v_trade_value")),
+      quantity: parseFloat(valNum("v_quantity")),
+      side: valNum("v_side") || "SELL",
+      segment: valNum("v_segment") || "equity_intraday",
+      expected: expected,
+      document_id: valNum("v_doc") || "unreferenced note",
+    };
+    api("POST", "/api/settings/brokers/" + editing.profile_id + "/validate", body).then(function (r) {
+      var msg = document.getElementById("settings-validate-msg");
+      if (r.data.status === "PASS") {
+        msg.innerHTML = '<span style="color:var(--success-text);">✅ PASS — profile stamped vs ' + r.data.stamped + "</span>";
+        loadAll(); loadAudit();
+      } else {
+        var items = (r.data.mismatches || [r.data.error || "validation failed"]).map(function (m) {
+          return "<li>" + m + "</li>";
+        }).join("");
+        msg.innerHTML = '<span style="color:var(--danger-text);">❌ FAIL<ul style="margin:4px 0 0 16px;">' + items + "</ul></span>";
+      }
+    });
+  };
+
+  function loadAudit() {
+    api("GET", "/api/settings/brokers/" + editing.profile_id + "/audit?limit=20").then(function (r) {
+      var host = document.getElementById("settings-audit");
+      var rows = r.data.audit || [];
+      host.innerHTML = rows.length
+        ? rows.map(function (a) {
+            return "<div>• " + a.changed_at + " — " + a.field_changed + ": <code>" +
+              (a.old_value || "∅") + "</code> → <code>" + (a.new_value || "∅") + "</code> (by " + (a.changed_by || "admin") + ")</div>";
+          }).join("")
+        : "No changes recorded.";
+    });
+  }
+
+  document.getElementById("settings-cancel").onclick = function () {
+    document.getElementById("settings-editor").hidden = true;
+    editing = null;
+  };
+  document.getElementById("settings-refresh").onclick = function () {
+    loadAll(); loadKillSwitch(); loadSegments();
+  };
+
+  // ------------------------------------------------------------------
+  // Phase 2 — kill-switch + segments
+  // ------------------------------------------------------------------
+
+  var segments = [];
+
+  function renderKillSwitch(r) {
+    var state = document.getElementById("killswitch-state");
+    var toggle = document.getElementById("killswitch-toggle");
+    var valid = r && r.ok && r.data && typeof r.data.enabled === "boolean";
+    toggle.disabled = !valid;
+    if (!valid) {
+      state.textContent = "Unavailable (state unknown)";
+      state.style.color = "var(--warning-text)";
+      toggle.textContent = "Live gate unavailable";
+      return;
+    }
+    var on = r.data.enabled;
+    state.textContent = on ? "ARMED (global gate)" : "OFF (live blocked)";
+    state.style.color = on ? "var(--warning-text)" : "var(--muted)";
+    toggle.textContent = on ? "Disable live execution" : "Arm live execution";
+  }
+
+  function loadKillSwitch() {
+    return api("GET", "/api/settings/live-kill-switch").then(renderKillSwitch).catch(function () {
+      renderKillSwitch(null);
+    });
+  }
+
+  document.getElementById("killswitch-toggle").onclick = function () {
+    api("GET", "/api/settings/live-kill-switch").then(function (r) {
+      if (!r.ok || typeof r.data.enabled !== "boolean") { renderKillSwitch(r); return; }
+      if (!r.data.enabled && !confirm("Arm live execution? Eligible live segments may place real broker orders. Verify your broker, cost validation and risk limits before continuing.")) return;
+      document.getElementById("killswitch-toggle").disabled = true;
+      api("PUT", "/api/settings/live-kill-switch", { enabled: !r.data.enabled }).then(function (updated) {
+        if (!updated.ok) showToast("Could not update the live execution gate", "error");
+        loadKillSwitch();
+      }).catch(function () { renderKillSwitch(null); });
+    }).catch(function () { renderKillSwitch(null); });
+  };
+
+  function loadSegments() {
+    return api("GET", "/api/settings/segments").then(function (r) {
+      if (!r.ok || !r.data || !Array.isArray(r.data.segments)) {
+        renderSegmentsUnavailable();
+        return;
+      }
+      segments = r.data.segments;
+      renderSegments();
+    }).catch(renderSegmentsUnavailable);
+  }
+
+  function renderSegmentsUnavailable() {
+    var host = document.getElementById("segments-list");
+    host.innerHTML = "";
+    host.appendChild(el("div", { class: "card settings-empty muted", role: "status" },
+      "Segments unavailable — check the database connection, then refresh."));
+  }
+
+  function renderSegments() {
+    var host = document.getElementById("segments-list");
+    host.innerHTML = "";
+    if (!segments.length) {
+      host.appendChild(el("div", { class: "card settings-empty muted" }, "No segments yet — create one to allocate capital and risk limits."));
+    }
+    segments.forEach(function (s) {
+      var card = el("div", { style: "border:1px solid var(--border,#333); border-radius:10px; padding:12px;" });
+      var head = el("div", { style: "display:flex; justify-content:space-between; align-items:center;" });
+      head.appendChild(el("strong", null, s.segment_name || s.segment_id));
+      var modeBadge = el("span", { style: "font-size:12px; color:" + (s.mode === "live" ? "var(--danger-text)" : "var(--info)") }, s.mode.toUpperCase());
+      head.appendChild(modeBadge);
+      card.appendChild(head);
+      card.appendChild(el("div", { class: "muted", style: "margin:4px 0; font-size:12px;" },
+        s.segment_id + " · broker: " + (s.broker_profile_id || "—") + " · capital: " + (s.allocated_capital != null ? "₹" + s.allocated_capital : "—")));
+      var lim = s.risk_limits || {};
+      card.appendChild(el("div", { style: "font-size:12px;" },
+        "Daily loss: " + (lim.daily_loss_limit != null ? "₹" + lim.daily_loss_limit : "⚠️ unset") +
+        " · max pos: " + (lim.max_positions || "—") +
+        " · gross exp: " + (lim.max_gross_exposure_pct || "—")));
+      var row = el("div", { style: "margin-top:8px; display:flex; gap:8px;" });
+      var editBtn = el("button", { class: "btn btn-ghost btn-small", type: "button" }, "Edit / arming");
+      editBtn.onclick = function () { openSegmentEditor(s.segment_id); };
+      row.appendChild(editBtn);
+      var delBtn = el("button", { class: "btn btn-ghost btn-small", type: "button" }, "Delete");
+      delBtn.onclick = function () {
+        if (confirm("Delete segment " + s.segment_id + "?")) {
+          api("DELETE", "/api/settings/segments/" + s.segment_id).then(loadSegments);
+        }
+      };
+      row.appendChild(delBtn);
+      card.appendChild(row);
+      host.appendChild(card);
+    });
+  }
+
+  function segField(label, value, key) {
+    var wrap = el("div");
+    wrap.appendChild(el("label", { class: "muted", style: "font-size:12px;" }, label));
+    var input = el("input", { class: "input", "data-key": key, value: value === null || value === undefined ? "" : value });
+    input.style.width = "100%";
+    wrap.appendChild(input);
+    return wrap;
+  }
+
+  function segValue(key) {
+    var input = document.querySelector('#segment-editor-form [data-key="' + key + '"]');
+    return input ? input.value.trim() : "";
+  }
+
+  function openSegmentEditor(segmentId) {
+    var form = document.getElementById("segment-editor-form");
+    var finish = function (s) {
+      document.getElementById("segment-editor").hidden = false;
+      document.getElementById("segment-editor-title").textContent = segmentId ? ("Edit segment — " + (s.segment_name || segmentId)) : "New segment";
+      form.innerHTML = "";
+      form.appendChild(segField("Segment id", segmentId || "", "seg_id"));
+      if (segmentId) form.querySelector('[data-key="seg_id"]').setAttribute("readonly", "readonly");
+      form.appendChild(segField("Segment name", s.segment_name || "", "seg_name"));
+      var mode = el("select", { class: "input input-select", "data-key": "seg_mode" });
+      ["paper", "live"].forEach(function (m) {
+        var opt = el("option", { value: m }, m);
+        if ((s.mode || "paper") === m) opt.selected = true;
+        mode.appendChild(opt);
+      });
+      var modeWrap = el("div");
+      modeWrap.appendChild(el("label", { class: "muted", style: "font-size:12px;" }, "Mode"));
+      modeWrap.appendChild(mode);
+      form.appendChild(modeWrap);
+      form.appendChild(segField("Allocated capital ₹", s.allocated_capital, "seg_capital"));
+      var broker = el("select", { class: "input input-select", "data-key": "seg_broker" });
+      broker.appendChild(el("option", { value: "" }, "— none —"));
+      profiles.forEach(function (p) {
+        var opt = el("option", { value: p.profile_id }, p.profile_id + (p.validated_on ? " ✅" : " ⚠️"));
+        if (p.profile_id === s.broker_profile_id) opt.selected = true;
+        broker.appendChild(opt);
+      });
+      var brokerWrap = el("div");
+      brokerWrap.appendChild(el("label", { class: "muted", style: "font-size:12px;" }, "Broker profile (✅ = contract-note validated)"));
+      brokerWrap.appendChild(broker);
+      form.appendChild(brokerWrap);
+      RISK_LIMITS.forEach(function (pair) {
+        form.appendChild(segField(pair[1], (s.risk_limits || {})[pair[0]], "lim_" + pair[0]));
+      });
+      document.getElementById("segment-save-msg").textContent = "";
+      loadSegmentAudit(segmentId);
+      loadSegmentArming(segmentId);
+      document.getElementById("segment-editor").scrollIntoView({ behavior: "smooth" });
+    };
+    if (segmentId) {
+      api("GET", "/api/settings/segments/" + segmentId).then(function (r) { finish(r.data.segment); });
+    } else {
+      finish({});
+    }
+  }
+
+  document.getElementById("segment-new").onclick = function () { openSegmentEditor(null); };
+
+  document.getElementById("segment-save").onclick = function () {
+    var id = segValue("seg_id");
+    if (!id) {
+      document.getElementById("segment-save-msg").textContent = "❌ segment id is required";
+      return;
+    }
+    var limits = {};
+    RISK_LIMITS.forEach(function (pair) {
+      var v = segValue("lim_" + pair[0]);
+      if (v !== "") limits[pair[0]] = parseFloat(v);
+    });
+    var body = {
+      segment_name: segValue("seg_name") || id,
+      mode: segValue("seg_mode") || "paper",
+      allocated_capital: segValue("seg_capital") === "" ? null : parseFloat(segValue("seg_capital")),
+      broker_profile_id: segValue("seg_broker") || null,
+      risk_limits: limits,
+    };
+    api("PUT", "/api/settings/segments/" + id, body).then(function (r) {
+      var msg = document.getElementById("segment-save-msg");
+      msg.textContent = r.ok ? "✅ saved (audit-trailed)" : "❌ " + (r.data.error || r.status);
+      if (r.ok) { loadSegments(); loadSegmentAudit(id); loadSegmentArming(id); }
+    });
+  };
+
+  document.getElementById("segment-cancel").onclick = function () {
+    document.getElementById("segment-editor").hidden = true;
+  };
+
+  function loadSegmentArming(segmentId) {
+    var host = document.getElementById("segment-arming");
+    if (!segmentId) { host.innerHTML = ""; return; }
+    api("GET", "/api/settings/segments/" + segmentId + "/arming").then(function (r) {
+      if (r.data.armed) {
+        host.innerHTML = '<span style="color:var(--success-text);">✅ live arming allowed for this segment</span>';
+      } else {
+        var items = (r.data.blockers || []).map(function (b) { return "<li>" + b + "</li>"; }).join("");
+        host.innerHTML = '<span style="color:var(--danger-text);">⛔ live arming blocked:<ul style="margin:4px 0 0 16px;">' + items + "</ul></span>";
+      }
+    });
+  }
+
+  function loadSegmentAudit(segmentId) {
+    var host = document.getElementById("segment-audit");
+    if (!segmentId) { host.innerHTML = ""; return; }
+    api("GET", "/api/settings/segments/" + segmentId + "/audit?limit=15").then(function (r) {
+      var rows = r.data.audit || [];
+      host.innerHTML = rows.length
+        ? rows.map(function (a) {
+            return "<div>• " + a.changed_at + " — " + a.field_changed + ": <code>" +
+              (a.old_value || "∅") + "</code> → <code>" + (a.new_value || "∅") + "</code></div>";
+          }).join("")
+        : "";
+    });
+  }
+
+  loadAll();
+  loadKillSwitch();
+  loadSegments();
+})();
+</script>
+{% endblock %}

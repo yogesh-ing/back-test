@@ -1,3 +1,4 @@
+{% from "_macros.html" import icon %}
 {% set center_mode = mode or "" %}
 <div class="portfolio-page" id="portfolio-page" data-mode="{{ center_mode }}">
 
@@ -18,17 +19,19 @@
     <div class="card pcc-header">
         <div class="pcc-title-row">
             <div>
-                <h1 class="pcc-title">🤖 Portfolio Command Center</h1>
+                <h2 class="pcc-title">{{ "Live command center" if center_mode == "live" else "Paper command center" if center_mode == "paper" else "Portfolio command center" }}</h2>
                 <div class="pcc-conn">
-                    <span id="feed-dot" class="feed-dot">🟢</span>
+                    <span id="feed-dot" class="feed-dot" aria-hidden="true">⚪</span>
                     <span id="feed-label">Feed: connecting…</span>
+                    <span id="bar-countdown" class="muted" style="margin-left:10px; font-size:.75rem;"></span>
                 </div>
             </div>
             <div class="pcc-actions">
-                <button id="btn-add" class="btn btn-primary" type="button">＋ Add Instance</button>
-                <button id="btn-pause-all" class="btn btn-warn" type="button">⏸ Pause All</button>
-                <button id="btn-resume-all" class="btn btn-ghost" type="button">▶ Resume All</button>
-                <button id="btn-emergency" class="btn btn-danger" type="button">🔴 Emergency Flatten</button>
+                <button id="btn-add" class="btn btn-primary" type="button">{{ icon('plus', 14) }} Add instance</button>
+                <button id="btn-pause-all" class="btn btn-warn" type="button">{{ icon('pause', 13) }} Pause all</button>
+                <button id="btn-resume-all" class="btn btn-ghost" type="button">{{ icon('play', 13) }} Resume all</button>
+                <button id="btn-watch-export" class="btn btn-ghost" type="button" title="Save PnL-vs-spot PNG + CSV into charts/ for every live option runner (also auto-runs at 15:30 IST)">{{ icon('download', 13) }} Export charts</button>
+                <button id="btn-emergency" class="btn btn-danger btn-danger-outline" type="button">{{ icon('stop', 13) }} Emergency flatten</button>
             </div>
         </div>
 
@@ -68,21 +71,30 @@
         </div>
     </div>
 
+    <div id="unified-banner" class="execution-note">
+        <details>
+            <summary>{{ icon('info', 13) }} <strong>Unified execution</strong> — one strategy model, separate paper and live books.</summary>
+            <p>Strategy owns <strong>WHAT</strong>; the engine owns <strong>HOW</strong> and paper/live routing.
+                Runner and manual option trades appear in this command center. Use the <strong>Playbooks</strong> tab for reusable option configurations.</p>
+        </details>
+        <button id="btn-dismiss-unified" class="btn btn-ghost btn-small" type="button">Dismiss</button>
+    </div>
+
     <!-- Instance matrix -->
     <div class="card pcc-matrix">
         <div class="matrix-toolbar">
-            <h2 class="card-title">Instance Management Matrix</h2>
+            <h2 class="card-title">Strategy instances</h2>
             <div class="matrix-controls">
                 <input id="matrix-search" type="text" class="input"
-                       placeholder="Search strategy / symbol / name…" autocomplete="off">
-                <select id="matrix-filter" class="input input-select">
+                       placeholder="Search strategy or instrument…" autocomplete="off" aria-label="Search strategy instances">
+                <select id="matrix-filter" class="input input-select" aria-label="Filter instance status">
                     <option value="all">All Statuses</option>
                     <option value="RUNNING">🟢 Running</option>
                     <option value="PAUSED">🟡 Paused</option>
                     <option value="STOPPED">⚫ Stopped</option>
                     <option value="ERROR">🔴 Error</option>
                 </select>
-                <select id="matrix-sort" class="input input-select" title="Sort by">
+                <select id="matrix-sort" class="input input-select" title="Sort by" aria-label="Sort strategy instances">
                     <option value="default">Sort: Default</option>
                     <option value="daily_pnl">Daily P&amp;L</option>
                     <option value="open_pnl">Open P&amp;L</option>
@@ -116,29 +128,352 @@
             </table>
         </div>
         <div id="matrix-empty" class="matrix-empty" hidden>
-            <p>No strategy instances deployed yet.</p>
-            <p class="muted">Click <strong>＋ Add Instance</strong> to spawn your first runner.</p>
+            <div class="empty-icon">{{ icon('layers', 22) }}</div>
+            <h3>Your strategy book starts here.</h3>
+            <p class="muted">No instances deployed in this bucket. Add a strategy to configure its capital, data source and risk limits.</p>
+            <button class="btn" type="button" data-trigger="btn-add">{{ icon('plus', 13) }} Add your first instance</button>
         </div>
     </div>
 
     <!-- Consolidated views -->
     <div class="card pcc-bottom">
         <div class="tabs">
-            <button class="tab active" data-tab="equity" type="button">Combined Equity Curve</button>
-            <button class="tab" data-tab="positions" type="button">Aggregate Open Positions</button>
-            <button class="tab" data-tab="log" type="button">Master Audit Log</button>
+            <!-- issues.txt P4 (2026-10-01): Positions leads and is the default
+                 view — what is held right now answers the operator's first
+                 question; the equity curve is one click away. -->
+            <button class="tab active" data-tab="positions" type="button">Positions</button>
+            <button class="tab" data-tab="equity" type="button">Equity</button>
+            <button class="tab" data-tab="orders" type="button">Orders
+                <span id="orders-tab-badge" class="tab-badge" hidden></span></button>
+            <button class="tab" data-tab="risk" type="button">Risk &amp; intelligence</button>
+            <button class="tab" data-tab="aggregated-trades" type="button">Trade history</button>
+            <button class="tab" data-tab="playbooks" type="button">Playbooks</button>
+            <button class="tab" data-tab="log" type="button">Activity log</button>
         </div>
-        <div class="tab-panel" id="tab-equity">
+        <div class="tab-panel" id="tab-equity" hidden>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <div>
+                    <h3 style="margin:0;">Portfolio equity</h3>
+                    <div class="muted">An on-demand snapshot of your session, daily equity and strategy performance.</div>
+                </div>
+                <button id="btn-equity-snapshot" class="btn btn-primary btn-small" type="button">{{ icon('refresh', 13) }} Refresh snapshot</button>
+            </div>
+            <div id="equity-session-stats" class="equity-stats" hidden></div>
             <canvas id="portfolio-equity-chart" height="90"></canvas>
+            <div class="table-scroll" style="margin-top:12px;">
+            <table class="matrix-table">
+                <thead><tr><th>Runner</th><th>Strategy</th><th>Target</th><th class="num">Equity</th>
+                    <th class="num">Realized P&amp;L</th><th class="num">Today</th>
+                    <th class="num">Win rate</th><th class="num">Trades (today/all)</th></tr></thead>
+                <tbody id="equity-runner-table">
+                    <tr><td colspan="8" class="muted" style="padding:16px">Click “Refresh Snapshot” to compute.</td></tr>
+                </tbody>
+            </table>
+            </div>
         </div>
-        <div class="tab-panel" id="tab-positions" hidden>
+        <div class="tab-panel" id="tab-positions">
+            <div class="pos-toolbar">
+                <div>
+                    <h3 style="margin:0;">Open Positions — the live book</h3>
+                    <div class="muted">What is held <em>right now</em>, with the manual controls.
+                        <span id="pos-summary"></span></div>
+                </div>
+                <div class="pos-toolbar-controls">
+                    <input id="pos-search" class="input" type="text"
+                           placeholder="Filter symbol / instance…" autocomplete="off">
+                    <label class="pos-check muted" title="Hide rows with no stop or target armed">
+                        <input id="pos-rules-only" type="checkbox"> SL/Target only
+                    </label>
+                    <button id="pos-refresh" class="btn btn-ghost btn-small" type="button"
+                            title="Re-render from the latest snapshot">↻ Refresh</button>
+                </div>
+            </div>
             <div class="table-scroll">
                 <table class="matrix-table">
-                    <thead><tr><th>Instance</th><th>Symbol</th><th>Side</th><th class="num">Qty</th>
-                        <th class="num">Entry</th><th class="num">Current</th><th class="num">Unrealized P&amp;L</th></tr></thead>
-                    <tbody id="aggregate-positions"></tbody>
+                    <thead><tr>
+                        <th>Instance</th>
+                        <th>Position</th>
+                        <th>Side</th>
+                        <th class="num">Qty</th>
+                        <th class="num">Entry</th>
+                        <th class="num">Current</th>
+                        <th class="num">Unrealized P&amp;L</th>
+                        <th class="num">Target</th>
+                        <th class="num">Stop</th>
+                        <th class="num" title="Option structures only: net delta per point, theta per day">Δ / Θ</th>
+                        <th>Actions</th>
+                    </tr></thead>
+                    <tbody id="aggregate-positions"><tr><td colspan="11" class="muted" style="padding:16px">Waiting for the first snapshot…</td></tr></tbody>
                 </table>
             </div>
+            <div id="pos-footnote" class="muted pos-footnote"></div>
+        </div>
+        <div class="tab-panel" id="tab-orders" hidden>
+            <div class="pos-toolbar">
+                <div>
+                    <h3 style="margin:0;">Orders — order flow</h3>
+                    <div class="muted">Every order the engine tagged, with its fate: pending, filled,
+                        cancelled or rejected — plus the slippage actually paid.</div>
+                </div>
+                <div class="pos-toolbar-controls">
+                    <select id="orders-status" class="input input-select" style="min-width:130px;">
+                        <option value="">All statuses</option>
+                        <option value="PENDING">⏳ Pending</option>
+                        <option value="FILLED">✅ Filled</option>
+                        <option value="REJECTED">⛔ Rejected</option>
+                        <option value="CANCELLED">🚫 Cancelled</option>
+                    </select>
+                    <input id="orders-search" class="input" type="text"
+                           placeholder="Filter symbol / instance…" autocomplete="off">
+                    <label class="pos-check" title="Show only working orders past the aging thresholds">
+                        <input id="orders-aging-only" type="checkbox"> ⏰ Aging only
+                    </label>
+                    <select id="orders-limit" class="input input-select" style="min-width:80px;">
+                        <option value="50">50</option>
+                        <option value="100" selected>100</option>
+                        <option value="200">200</option>
+                        <option value="500">500</option>
+                    </select>
+                    <button id="orders-refresh" class="btn btn-primary btn-small" type="button">↻ Refresh</button>
+                </div>
+            </div>
+            <div id="orders-summary" class="orders-summary"></div>
+            <div class="table-scroll">
+                <table class="matrix-table">
+                    <thead><tr>
+                        <th>Time</th>
+                        <th>Instance</th>
+                        <th title="Which broker (venue) this order went to — 'paper' for simulated fills">Broker</th>
+                        <th>Symbol</th>
+                        <th>Side</th>
+                        <th class="num">Qty</th>
+                        <th class="num">Ordered @</th>
+                        <th class="num">Filled @</th>
+                        <th class="num">Slippage</th>
+                        <th>Status</th>
+                        <th>Age</th>
+                        <th>Detail</th>
+                        <th>Action</th>
+                    </tr></thead>
+                    <tbody id="orders-body">
+                        <tr><td colspan="12" class="muted" style="padding:16px">Open the tab or press
+                            Refresh to load the order ledger.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="muted pos-footnote">
+                Orders are the execution ledger (equity + paper routing). Option structures execute as a
+                unit on the strategy's own option book — their entries, exits and blocks are on the runner
+                signals and the <strong>Aggregated Trades</strong> tab.<br>
+                <strong>⏰ Order aging:</strong> a working order past
+                <span class="muted">60s</span> is flagged <em>warn</em>, past
+                <span class="muted">5min</span> <em>alert</em> — the engine writes one audit entry per
+                band, because an order that never fills is the quietest failure there is. Only orders at a
+                <strong>venue</strong> can be amended; a simulated order fills or rejects in the same call,
+                so use Cancel and let the strategy re-arm.
+            </div>
+        </div>
+        <div class="tab-panel" id="tab-risk" hidden>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+                <div>
+                    <h3 style="margin:0;">🛡️ Risk Management Board</h3>
+                    <div class="muted">Live risk gauges, bucket limits, exposure breakdown, and stress controls. Self-sufficient system needs all 4 layers in one view.</div>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <select id="risk-mode" class="input input-select" style="min-width:120px;">
+                        <option value="">All Buckets</option>
+                        <option value="paper">Paper Only</option>
+                        <option value="live">Live Only</option>
+                    </select>
+                    <button id="btn-risk-refresh" class="btn btn-primary btn-small" type="button">↻ Refresh Risk</button>
+                    <button id="btn-risk-stress" class="btn btn-warn btn-small" type="button">💥 Stress Test (-25%)</button>
+                    <button id="btn-risk-reset-breaker" class="btn btn-ghost btn-small" type="button">Reset Breaker</button>
+                </div>
+            </div>
+
+            <!-- Portfolio Intelligence (information only — the platform never acts on these) -->
+            <div id="pi-root" class="pi-root" data-pi-root>
+                <div class="pi-intro muted">
+                    📡 <strong>Portfolio Intelligence</strong> — aggregate Greeks, concentration, correlation and market
+                    regime across every runner. Information only: the platform calculates and alerts, strategies
+                    decide, you override. Nothing here closes a position.
+                </div>
+
+                <section class="pi-section card" id="pi-greeks" data-pi-section="greeks">
+                    <button class="pi-section-head" type="button" data-pi-toggle="greeks" aria-expanded="true">
+                        <span class="pi-caret">▾</span> 📊 Portfolio Greeks
+                        <span class="pi-head-summary muted" id="pi-greeks-summary"></span>
+                    </button>
+                    <div class="pi-section-body" id="pi-greeks-body">
+                        <div id="pi-greeks-cards" class="pi-cards"><div class="muted">Loading Greeks…</div></div>
+                        <div id="pi-greeks-warnings" class="pi-warnings"></div>
+                        <div class="pi-two-col">
+                            <div>
+                                <h5 class="pi-subhead">Breakdown by strategy instance</h5>
+                                <div class="table-scroll" style="max-height:280px;">
+                                    <table class="matrix-table pi-table">
+                                        <thead><tr><th>Runner</th><th>Strategy</th><th class="num">Δ</th><th class="num">Γ (per 1%)</th><th class="num">Vega</th><th class="num">Θ / day</th><th class="num">Pos</th><th class="num">Γ share</th></tr></thead>
+                                        <tbody id="pi-greeks-breakdown"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div>
+                                <h5 class="pi-subhead">Scenario analysis <span class="muted">(full revaluation)</span></h5>
+                                <table class="matrix-table pi-table">
+                                    <thead><tr><th>Scenario</th><th class="num">Portfolio P&amp;L</th></tr></thead>
+                                    <tbody id="pi-greeks-scenarios"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="muted pi-foot" id="pi-greeks-foot"></div>
+                    </div>
+                </section>
+
+                <section class="pi-section card" id="pi-concentration" data-pi-section="concentration">
+                    <button class="pi-section-head" type="button" data-pi-toggle="concentration" aria-expanded="true">
+                        <span class="pi-caret">▾</span> 🎯 Concentration
+                        <span class="pi-head-summary muted" id="pi-concentration-summary"></span>
+                    </button>
+                    <div class="pi-section-body" id="pi-concentration-body">
+                        <div class="pi-two-col">
+                            <div>
+                                <h5 class="pi-subhead">By underlying <span class="muted" id="pi-conc-threshold"></span></h5>
+                                <div id="pi-conc-underlying"><div class="muted">Loading…</div></div>
+                            </div>
+                            <div>
+                                <h5 class="pi-subhead">By strike (clustering)</h5>
+                                <div class="table-scroll" style="max-height:240px;">
+                                    <table class="matrix-table pi-table">
+                                        <thead><tr><th>Strike</th><th class="num">Positions</th><th>Types</th><th>Held by</th><th class="num">Exposure</th></tr></thead>
+                                        <tbody id="pi-conc-strikes"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="muted pi-foot" id="pi-concentration-foot"></div>
+                    </div>
+                </section>
+
+                <section class="pi-section card" id="pi-correlation" data-pi-section="correlation">
+                    <button class="pi-section-head" type="button" data-pi-toggle="correlation" aria-expanded="true">
+                        <span class="pi-caret">▾</span> 🔗 Strategy Correlation
+                        <span class="pi-head-summary muted" id="pi-correlation-summary"></span>
+                    </button>
+                    <div class="pi-section-body" id="pi-correlation-body">
+                        <div class="pi-toolbar">
+                            <label class="muted">Group by
+                                <select id="pi-corr-group" class="input input-select">
+                                    <option value="runner">Runner</option>
+                                    <option value="strategy">Strategy</option>
+                                </select>
+                            </label>
+                            <button id="pi-corr-refresh" class="btn btn-ghost btn-small" type="button">↻ Recalculate</button>
+                        </div>
+                        <div id="pi-corr-heatmap" class="table-scroll"><div class="muted">Loading…</div></div>
+                        <div class="muted pi-foot" id="pi-correlation-foot"></div>
+                    </div>
+                </section>
+
+                <section class="pi-section card" id="pi-regime" data-pi-section="regime">
+                    <button class="pi-section-head" type="button" data-pi-toggle="regime" aria-expanded="true">
+                        <span class="pi-caret">▾</span> 🌡️ Market Regime
+                        <span class="pi-head-summary muted" id="pi-regime-summary"></span>
+                    </button>
+                    <div class="pi-section-body" id="pi-regime-body">
+                        <div class="pi-two-col">
+                            <div>
+                                <div id="pi-regime-current"><div class="muted">Loading…</div></div>
+                                <div class="pi-vix-input">
+                                    <label class="muted" for="pi-vix-value">Set India VIX</label>
+                                    <input id="pi-vix-value" class="input" type="number" min="1" max="199" step="0.1" placeholder="e.g. 18.4">
+                                    <button id="pi-vix-submit" class="btn btn-ghost btn-small" type="button">Apply</button>
+                                </div>
+                                <div class="pi-chart-wrap"><canvas id="pi-regime-chart" height="90"></canvas></div>
+                            </div>
+                            <div>
+                                <h5 class="pi-subhead">Strategy regime fit</h5>
+                                <table class="matrix-table pi-table">
+                                    <thead><tr><th>Runner</th><th>Strategy</th><th>Designed for</th><th>Fit</th></tr></thead>
+                                    <tbody id="pi-regime-fit"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="muted pi-foot" id="pi-regime-foot"></div>
+                    </div>
+                </section>
+
+                <section class="pi-section card" id="pi-activity" data-pi-section="activity">
+                    <button class="pi-section-head" type="button" data-pi-toggle="activity" aria-expanded="false">
+                        <span class="pi-caret">▾</span> 📈 Market Activity (OI &amp; liquidity)
+                        <span class="pi-head-summary muted" id="pi-activity-summary"></span>
+                    </button>
+                    <div class="pi-section-body" id="pi-activity-body">
+                        <div id="pi-activity-content"><div class="muted">Loading…</div></div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Gauges -->
+            <div id="risk-gauges" class="risk-gauges-grid" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-bottom:16px;">
+                <div class="muted">Loading risk gauges…</div>
+            </div>
+
+            <!-- CB status + warnings -->
+            <div id="risk-cb-status" style="margin-bottom:12px;"></div>
+            <div id="risk-warnings" class="warning-banner" style="margin-bottom:16px;"></div>
+
+            <!-- Pointer to the Risk page: config editing, per-bucket limits, exposure
+                 breakdown and the audit timeline live there (single authority) —
+                 duplicated here they were two renderers of the same payload drifting apart. -->
+            <div class="card" style="padding:12px; margin-bottom:16px; display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                <div class="muted" style="margin:0;">
+                    🛡️ Global risk config, per-bucket limits & usage, exposure by symbol/correlation
+                    group, closed-trade risk stats and the risk-events audit timeline live on the
+                    <strong>Risk page</strong> — the single authority for those views.
+                </div>
+                <a href="/risk" class="btn btn-ghost btn-small">🛡️ Open full Risk page →</a>
+            </div>
+        </div>
+        <div class="tab-panel" id="tab-aggregated-trades" hidden>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+                <div>
+                    <h3 style="margin:0;">📊 Aggregated Closed Trades</h3>
+                    <div class="muted">All closed trades across runners — the missing post-trade view. Use filters to slice by bucket or instrument.</div>
+                    <div id="agg-trades-summary" class="muted" style="margin-top:4px;"></div>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <select id="agg-trade-kind" class="input input-select" style="min-width:110px;">
+                        <option value="all">All Kinds</option>
+                        <option value="equity">Equity Only</option>
+                        <option value="option">Option Only</option>
+                    </select>
+                    <select id="agg-trade-limit" class="input input-select" style="min-width:90px;">
+                        <option value="50">50</option>
+                        <option value="100" selected>100</option>
+                        <option value="200">200</option>
+                        <option value="500">500</option>
+                    </select>
+                    <button id="btn-agg-trades-refresh" class="btn btn-primary btn-small" type="button">↻ Refresh</button>
+                </div>
+            </div>
+            <div class="table-scroll">
+                <table class="matrix-table">
+                    <thead><tr><th>Symbol</th><th>Runner</th><th>Strategy</th><th>Kind</th><th>Side</th><th class="num">Qty</th><th class="num">Entry → Exit</th><th class="num">PnL</th><th>Exit Reason / Time</th></tr></thead>
+                    <tbody id="agg-trades-body">
+                        <tr><td colspan="9" class="muted" style="padding:16px">Click Refresh to load aggregated trades.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="tab-panel" id="tab-playbooks" hidden>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <div>
+                    <h3 style="margin:0;">Playbooks — Plug-and-Play Option Configs</h3>
+                    <div class="muted">Declarative configs: structure, strikes policy, exits, sizing. Spawn runners FROM playbooks. No new page — embedded.</div>
+                </div>
+                <button id="btn-create-playbook" class="btn btn-primary btn-small" type="button">＋ New Playbook</button>
+            </div>
+            <div id="playbooks-list" class="playbooks-grid">Loading playbooks…</div>
         </div>
         <div class="tab-panel" id="tab-log" hidden>
             <div id="audit-log" class="audit-log"></div>
@@ -154,137 +489,39 @@
 </div>
 
 <!-- Add instance modal -->
+<!-- U6.1: slim spawn form — routing only (architecture §5.1).
+     Trading logic (structure, strikes, exits) lives in Playbooks, not here.
+     Instrument is DERIVED from the strategy's signal_kind, never asked. -->
 <div id="spawn-modal" class="modal-overlay" hidden>
     <div class="modal">
         <div class="modal-head">
-            <h3>Spawn Strategy Instance</h3>
-            <button class="modal-close" data-close="spawn-modal" type="button">✕</button>
+            <h3>Add a strategy instance</h3>
+            <button class="modal-close" data-close="spawn-modal" type="button" aria-label="Close add-instance dialog">✕</button>
         </div>
         <div class="modal-body">
             <div class="form-row">
-                <label>Instance name (optional)</label>
-                <input id="spawn-name" class="input" type="text" placeholder="e.g. RSI-BTC-4H">
+                <label for="spawn-name">Instance name (optional)</label>
+                <input id="spawn-name" class="input" type="text" placeholder="auto: strategy·instrument·timeframe (e.g. macd_trend·RELIANCE·1hour)">
             </div>
             <div class="form-row">
-                <label>Strategy</label>
+                <label for="spawn-strategy">Strategy</label>
                 <select id="spawn-strategy" class="input input-select"></select>
+                <small id="spawn-strategy-hint" class="muted"></small>
+            </div>
+            <div class="form-row" id="spawn-playbook-row">
+                <label for="spawn-playbook">Playbook <span class="muted">(option trading rules — optional)</span></label>
+                <select id="spawn-playbook" class="input input-select"></select>
             </div>
             <div class="two-col">
                 <div class="form-row">
-                    <label>Instrument</label>
-                    <select id="spawn-instrument-type" class="input input-select">
-                        <option value="equity" selected>Equity</option>
-                        <option value="option">Options (index)</option>
-                    </select>
-                </div>
-                <div class="form-row">
-                    <label>Target type</label>
+                    <label for="spawn-target-type">Target type</label>
                     <select id="spawn-target-type" class="input input-select">
                         <option value="single">Single Symbol</option>
                         <option value="pool">Symbol Universe (Pool)</option>
                     </select>
                 </div>
-            </div>
-            <div class="two-col">
                 <div class="form-row">
-                    <label>Timeframe</label>
-                    <select id="spawn-timeframe" class="input input-select">
-                        <option>1min</option><option>5min</option><option>15min</option>
-                        <option selected>1hour</option><option>4hour</option>
-                        <option>1day</option><option>1week</option>
-                    </select>
-                </div>
-                <div class="form-row">
-                    <label>&nbsp;</label>
-                    <small id="spawn-instrument-hint" class="muted">
-                        Equity trades the symbol directly; Options converts the
-                        strategy's directional view into a multi-leg structure.
-                    </small>
-                </div>
-            </div>
-            <div id="spawn-option-box" hidden>
-                <div class="spawn-params-title">Option structure</div>
-                <div class="two-col">
-                    <div class="form-row">
-                        <label>Structure</label>
-                        <select id="spawn-opt-structure" class="input input-select"></select>
-                    </div>
-                    <div class="form-row">
-                        <label>Strike selection</label>
-                        <select id="spawn-opt-strike" class="input input-select">
-                            <option value="atm" selected>At the money</option>
-                            <option value="delta">By delta</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="two-col">
-                    <div class="form-row" id="spawn-opt-delta-row" hidden>
-                        <label>Delta target</label>
-                        <input id="spawn-opt-delta" class="input" type="number"
-                               step="0.05" min="0.05" max="1" value="0.35">
-                    </div>
-                    <div class="form-row">
-                        <label>Lots per leg</label>
-                        <input id="spawn-opt-qty" class="input" type="number"
-                               min="1" step="1" value="1">
-                    </div>
-                </div>
-
-                <div class="spawn-params-title">Exit rules</div>
-                <small class="muted">
-                    Risk rules are checked before the strategy's opinion: stop,
-                    target, days-to-expiry, then time, then a view flip.
-                </small>
-                <div class="two-col">
-                    <div class="form-row">
-                        <label>Stop loss (% of premium)</label>
-                        <input id="spawn-opt-stop" class="input" type="number"
-                               min="1" step="1" placeholder="blank = no stop">
-                    </div>
-                    <div class="form-row">
-                        <label>Take profit (% of premium)</label>
-                        <input id="spawn-opt-target" class="input" type="number"
-                               min="1" step="1" placeholder="blank = no target">
-                    </div>
-                </div>
-                <div class="two-col">
-                    <div class="form-row">
-                        <label>Close after N flat bars</label>
-                        <input id="spawn-opt-neutral" class="input" type="number"
-                               min="0" step="1" placeholder="0 = hold">
-                    </div>
-                    <div class="form-row">
-                        <label>Time stop (bars)</label>
-                        <input id="spawn-opt-maxbars" class="input" type="number"
-                               min="1" step="1" placeholder="blank = none">
-                    </div>
-                </div>
-                <div class="two-col">
-                    <div class="form-row">
-                        <label>Square off (days before expiry)</label>
-                        <input id="spawn-opt-dte" class="input" type="number"
-                               min="0" step="1" value="1">
-                    </div>
-                    <div class="form-row">
-                        <label>Behaviour</label>
-                        <label class="muted" style="display:block">
-                            <input id="spawn-opt-flip" type="checkbox" checked>
-                            Close when the view flips
-                        </label>
-                        <label class="muted" style="display:block">
-                            <input id="spawn-opt-settle" type="checkbox">
-                            Ride into settlement (ignore days-to-expiry)
-                        </label>
-                        <label class="muted" style="display:block">
-                            <input id="spawn-opt-reenter" type="checkbox">
-                            Reverse into the opposite structure on a flip
-                        </label>
-                    </div>
-                </div>
-                <small id="spawn-opt-summary" class="muted"></small>
-            </div>
-            <div class="form-row">
-                    <label>Timeframe</label>
+                    <label for="spawn-timeframe">Timeframe</label>
                     <select id="spawn-timeframe" class="input input-select">
                         <option>1min</option><option>5min</option><option>15min</option>
                         <option selected>1hour</option><option>4hour</option>
@@ -294,7 +531,7 @@
             </div>
             <div class="two-col">
                 <div class="form-row">
-                    <label>Bucket mode</label>
+                    <label for="spawn-mode">Bucket mode</label>
                     <select id="spawn-mode" class="input input-select">
                         {% for m in bucket_modes %}
                         <option value="{{ m }}"
@@ -306,34 +543,71 @@
                     </select>
                 </div>
                 <div class="form-row">
-                    <label>Data source</label>
+                    <label for="spawn-source">Data source</label>
                     <select id="spawn-source" class="input input-select">
                         {% for s in source_tags %}
                         <option value="{{ s }}"
-                            {% if s == 'synthetic' %}selected{% endif %}>{{ s | upper }}</option>
+                            {% if s == default_source_tag %}selected{% endif %}>{{ s | upper }}</option>
                         {% endfor %}
                     </select>
                 </div>
             </div>
+            <!-- Multi-broker: two independent routing choices.
+                 Segment — a capital partition mapped to a broker (Phase B),
+                 populated from GET /api/segments; hidden when no segments are
+                 configured. Broker — the direct execution-venue choice; it
+                 feeds the runner's execution_broker, which wins over the
+                 segment's broker in the routing rules (PRD-001 §4.3). -->
+            <div class="two-col">
+                <div class="form-row" id="spawn-segment-row" hidden>
+                    <label for="spawn-segment">Segment</label>
+                    <select id="spawn-segment" class="input input-select">
+                        <option value="">— none (legacy default) —</option>
+                    </select>
+                    <small id="spawn-segment-hint" class="muted"></small>
+                </div>
+                <div class="form-row" id="spawn-broker-row">
+                    <label for="spawn-broker">Broker <span class="muted">(orders route here when live)</span></label>
+                    <select id="spawn-broker" class="input input-select">
+                        <option value="">— default routing —</option>
+                    </select>
+                    <small id="spawn-broker-hint" class="muted"></small>
+                </div>
+            </div>
             <small id="spawn-risk-hint" class="muted">
-                Paper = free-play caps; live = tight caps (10% per name, 10k value, 5 positions)
-                and only mstock data is accepted for real fills. Source is data trust.
+                Paper = free-play caps, simulated fills. Live = tight caps (10% per name, 10k value,
+                5 positions) with orders routed to the chosen broker — the runner pauses entries if
+                that broker's session expires. Data source is the feed bars come from; Broker is the
+                venue orders go to.
             </small>
             <div class="two-col">
                 <div class="form-row" id="spawn-symbol-row">
-                    <label>Symbol</label>
-                    <input id="spawn-symbol" class="input" type="text" placeholder="BTC/USD or RELIANCE" value="BTC/USD">
+                    <label>Instrument</label>
+                    <!-- Restricted strategies (eligible_instruments) get a dropdown;
+                         open equity strategies get the shared SymbolPicker (Equity tab
+                         by default) with its tab strip + data hint below; free text
+                         remains the fallback. JS swaps the elements in place. -->
+                    <select id="spawn-symbol-select" class="input input-select" hidden></select>
+                    <input id="spawn-symbol" class="input" type="text" placeholder="RELIANCE" value="RELIANCE">
+                    <div id="spawn-symbol-picker-extras" hidden>
+                        <div id="spawn-symbol-tabs" class="sym-tabs"></div>
+                        <small id="spawn-symbol-hint" class="muted"></small>
+                    </div>
+                </div>
+                <div class="form-row" id="spawn-lots-row" hidden>
+                    <label for="spawn-lots">Lots per leg (options)</label>
+                    <input id="spawn-lots" class="input" type="number" value="1" min="1" max="100">
                 </div>
                 <div class="form-row" id="spawn-universe-row" hidden>
-                    <label>Universe / Pool</label>
+                    <label for="spawn-universe">Universe / Pool</label>
                     <select id="spawn-universe" class="input input-select"></select>
                 </div>
                 <div class="form-row" id="spawn-maxpos-row" hidden>
-                    <label>Max pool positions</label>
+                    <label for="spawn-maxpos">Max pool positions</label>
                     <input id="spawn-maxpos" class="input" type="number" value="5" min="1" max="20">
                 </div>
                 <div class="form-row">
-                    <label>Allocated capital ({{ currency_symbol }})</label>
+                    <label for="spawn-capital">Allocated capital ({{ currency_symbol }})</label>
                     <input id="spawn-capital" class="input" type="number" value="1000000" min="1000">
                 </div>
             </div>
@@ -346,13 +620,160 @@
     </div>
 </div>
 
+<!-- =====================================================================
+     Position action modals (Live Order Management).
+     Four verbs on one live position: modify stop, modify target, scale out,
+     close. Each modal names the exact position it will act on — an action
+     dialog that could hit the wrong row is worse than no dialog.
+     ===================================================================== -->
+
+<!-- Modify stop-loss -->
+<div id="pos-sl-modal" class="modal-overlay" hidden>
+    <div class="modal modal-sm">
+        <div class="modal-head">
+            <h3>🛑 Modify Stop-Loss</h3>
+            <button class="modal-close" data-close="pos-sl-modal" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+            <div id="pos-sl-context" class="pos-modal-context"></div>
+            <div class="form-row">
+                <label for="pos-sl-value">Stop level (price)</label>
+                <input id="pos-sl-value" class="input" type="number" step="0.05" min="0"
+                       placeholder="e.g. 24150">
+                <small class="muted" id="pos-sl-hint"></small>
+            </div>
+            <p class="muted pos-modal-note">
+                The stop fires on the next mark at or below this level and market-exits the position.
+                It is checked on every bar — the strategy does not have to trade for it to work.
+            </p>
+        </div>
+        <div class="modal-foot">
+            <button id="pos-sl-clear" class="btn btn-ghost" type="button">Clear level</button>
+            <button class="btn btn-ghost" data-close="pos-sl-modal" type="button">Cancel</button>
+            <button id="pos-sl-submit" class="btn btn-primary" type="button">Arm Stop</button>
+        </div>
+    </div>
+</div>
+
+<!-- Modify target -->
+<div id="pos-target-modal" class="modal-overlay" hidden>
+    <div class="modal modal-sm">
+        <div class="modal-head">
+            <h3>🎯 Modify Target</h3>
+            <button class="modal-close" data-close="pos-target-modal" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+            <div id="pos-target-context" class="pos-modal-context"></div>
+            <div class="form-row">
+                <label for="pos-target-value">Target level (price)</label>
+                <input id="pos-target-value" class="input" type="number" step="0.05" min="0"
+                       placeholder="e.g. 25500">
+                <small class="muted" id="pos-target-hint"></small>
+            </div>
+            <p class="muted pos-modal-note">
+                The target fires on the next mark at or above this level, booking the position out at
+                market. For an option structure the level is the <strong>net premium per unit</strong>
+                (the same number the Current column shows).
+            </p>
+        </div>
+        <div class="modal-foot">
+            <button id="pos-target-clear" class="btn btn-ghost" type="button">Clear level</button>
+            <button class="btn btn-ghost" data-close="pos-target-modal" type="button">Cancel</button>
+            <button id="pos-target-submit" class="btn btn-primary" type="button">Arm Target</button>
+        </div>
+    </div>
+</div>
+
+<!-- Partial close / scale out -->
+<div id="pos-partial-modal" class="modal-overlay" hidden>
+    <div class="modal modal-sm">
+        <div class="modal-head">
+            <h3>📉 Close Part of Position</h3>
+            <button class="modal-close" data-close="pos-partial-modal" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+            <div id="pos-partial-context" class="pos-modal-context"></div>
+            <div class="form-row">
+                <label>Fraction to close</label>
+                <div class="pos-fraction-row">
+                    <button class="btn btn-ghost btn-small pos-fraction" data-fraction="0.25" type="button">25%</button>
+                    <button class="btn btn-ghost btn-small pos-fraction" data-fraction="0.5" type="button">50%</button>
+                    <button class="btn btn-ghost btn-small pos-fraction" data-fraction="0.75" type="button">75%</button>
+                    <button class="btn btn-ghost btn-small pos-fraction" data-fraction="1" type="button">100%</button>
+                </div>
+                <input id="pos-partial-value" class="input" type="number" step="0.05" min="0.05" max="1" value="0.5">
+                <small class="muted" id="pos-partial-hint"></small>
+            </div>
+            <p class="muted pos-modal-note" id="pos-partial-note">
+                Scaling out books the realised P&amp;L on the closed part and leaves the rest working with
+                its stop and target intact.
+            </p>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-ghost" data-close="pos-partial-modal" type="button">Cancel</button>
+            <button id="pos-partial-submit" class="btn btn-primary" type="button">Close Fraction</button>
+        </div>
+    </div>
+</div>
+
+<!-- Amend a working order (Phase 3) -->
+<div id="order-modify-modal" class="modal-overlay" hidden>
+    <div class="modal modal-sm">
+        <div class="modal-head">
+            <h3>✎ Amend Working Order</h3>
+            <button class="modal-close" data-close="order-modify-modal" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+            <div id="order-modify-context" class="pos-modal-context"></div>
+            <div class="form-row">
+                <label for="order-modify-qty">New quantity <span class="muted">(blank = leave as is)</span></label>
+                <input id="order-modify-qty" class="input" type="number" step="1" min="1">
+            </div>
+            <div class="form-row">
+                <label for="order-modify-price">New limit price <span class="muted">(blank = leave as is)</span></label>
+                <input id="order-modify-price" class="input" type="number" step="0.05" min="0.05">
+            </div>
+            <p class="muted pos-modal-note">
+                The venue is asked <strong>first</strong> — if it refuses, nothing changes here. An amended
+                order keeps its client order id, so filled quantity, slippage and the audit trail continue
+                on the same order instead of starting a new one.
+            </p>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-ghost" data-close="order-modify-modal" type="button">Cancel</button>
+            <button id="order-modify-submit" class="btn btn-primary" type="button">Amend Order</button>
+        </div>
+    </div>
+</div>
+
+<!-- Close all -->
+<div id="pos-closeall-modal" class="modal-overlay" hidden>
+    <div class="modal modal-sm">
+        <div class="modal-head">
+            <h3>🚪 Close Position</h3>
+            <button class="modal-close" data-close="pos-closeall-modal" type="button">✕</button>
+        </div>
+        <div class="modal-body">
+            <div id="pos-closeall-context" class="pos-modal-context"></div>
+            <p>This market-exits the position <strong>now</strong> at the last price and books the
+                realised P&amp;L. Option structures close every leg together.</p>
+            <p class="muted">The strategy may re-enter on the next bar if it still wants the trade —
+                pause the runner if you want it to stand down.</p>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-ghost" data-close="pos-closeall-modal" type="button">Cancel</button>
+            <button id="pos-closeall-confirm" class="btn btn-danger" type="button">Close Now</button>
+        </div>
+    </div>
+</div>
+
 <!-- Emergency confirm modal -->
 <div id="emergency-modal" class="modal-overlay" hidden>
     <div class="modal modal-sm">
-        <div class="modal-head"><h3>🔴 Emergency Flatten All</h3>
-            <button class="modal-close" data-close="emergency-modal" type="button">✕</button></div>
+        <div class="modal-head"><h3>{{ icon('stop', 13) }} Emergency flatten confirmation</h3>
+            <button class="modal-close" data-close="emergency-modal" type="button" aria-label="Cancel emergency flatten">✕</button></div>
         <div class="modal-body">
-            <p>This will <strong>cancel new entries and market-exit every open position
+            <p id="emergency-scope-line">This will <strong>cancel new entries and market-exit every open position
             across all runners</strong>, then halt the portfolio.</p>
             <p class="muted">Use only for risk emergencies. This cannot be undone.</p>
         </div>

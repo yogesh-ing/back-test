@@ -1,8 +1,9 @@
 """Tests for option fee modelling (Phase 8 — T8.1–T8.4).
 
-The reference figures are the FY 2024-25 NFO rates a real contract note
-shows for a single NIFTY option order of 75 units (one lot) at a ₹120.50
-premium (₹9,037.50 turnover) on the mStock flat-fee plan:
+The buy-side reference figures are the NFO rates a real FY 2024-25 contract
+note shows for a single NIFTY option order of 75 units (one lot) at a
+₹120.50 premium (₹9,037.50 turnover) on the mStock flat-fee plan — none of
+those components have changed since:
 
     brokerage             20.00   (flat per order)
     exchange_transaction   3.17   (0.03503% of premium)
@@ -12,8 +13,10 @@ premium (₹9,037.50 turnover) on the mStock flat-fee plan:
     gst                    4.17   (18% on brokerage + exchange + SEBI + IPFT)
     TOTAL                 27.63
 
-The sell side additionally pays STT at 0.1% of the premium — buy side pays
-none. Every test below prices against these anchors.
+The sell side additionally pays STT on the premium — the buy side pays
+none. Budget 2026 raised it to 0.15% effective 2026-04-01 (was 0.1%, which
+is what the FY 2024-25 note showed). Every test below prices against these
+anchors.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.paper_trading import OptionPaperBroker
 from backtest.simulator import (
     BrokerProfile,
@@ -111,8 +115,8 @@ class TestOptionStatutoryStack:
         assert buy.get("stt") == D("0")
 
     def test_sell_side_pays_stt_on_premium(self, sell):
-        # 0.1% of the 9,037.50 premium.
-        assert sell.get("stt") == D("9.04")
+        # 0.15% of the 9,037.50 premium (Budget 2026, eff. 2026-04-01).
+        assert sell.get("stt") == D("13.56")
         assert sell.get("stamp_duty") == D("0")
 
     def test_options_exchange_charge_beats_equity_at_same_value(self):
@@ -208,10 +212,10 @@ class TestCalculateStructure:
                 {"side": "SELL", "quantity": 75, "price": "45.20"},
             ]
         )
-        # Leg 0 is the BUY: no STT. Leg 1 is the SELL: 0.1% of 75 x 45.20.
+        # Leg 0 is the BUY: no STT. Leg 1 is the SELL: 0.15% of 75 x 45.20.
         assert fees.get("leg_0_stt") == D("0")
-        assert fees.get("leg_1_stt") == D("3.39")  # 0.001 x 3390
-        assert fees.get("stt") == D("3.39")  # merged equals the sum
+        assert fees.get("leg_1_stt") == D("5.09")  # 0.0015 x 3390
+        assert fees.get("stt") == D("5.09")  # merged equals the sum
 
     def test_leg_fees_sum_to_merged_total(self, calc):
         fees = calc.calculate_structure(
@@ -404,6 +408,7 @@ class TestOptionPaperBrokerFeeIntegration:
             capital=500_000.0,
             commission_per_lot=0.0,  # isolate the fee-calculator path
             fee_calculator=fee_calculator,
+            allowed_structures=RESEARCH_STRUCTURES,
         )
 
     def _quote_provider(self, ltp: str = "120.50"):
@@ -412,7 +417,7 @@ class TestOptionPaperBrokerFeeIntegration:
         return provider
 
     def test_fee_calculator_is_optional_and_backward_compatible(self):
-        broker = OptionPaperBroker(capital=100_000.0, commission_per_lot=0.0)
+        broker = OptionPaperBroker(capital=100_000.0, commission_per_lot=0.0, allowed_structures=RESEARCH_STRUCTURES)
         assert broker.fee_calculator is None
         # A structure still executes exactly as before.
         from backtest.strategy.intent import Direction, MarketView, OptionLeg, TradeIntent

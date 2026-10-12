@@ -25,8 +25,9 @@ from backtest.web.app import create_app
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _JS_HARNESS = _REPO_ROOT / "tests" / "js" / "test_broker_status.mjs"
 _MODAL_HARNESS = _REPO_ROOT / "tests" / "js" / "test_broker_auth_modal.mjs"
+_ALERT_WIDGET_HARNESS = _REPO_ROOT / "tests" / "js" / "test_alert_widget_relogin.mjs"
 
-_PAGES = ["/", "/backtest", "/dashboard", "/compare", "/forward"]
+_PAGES = ["/", "/backtest", "/compare", "/forward"]
 
 
 @pytest.fixture()
@@ -112,6 +113,22 @@ def test_broker_auth_modal_js_behaviour():
         result.returncode == 0
     ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "14 tests passed" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_alert_widget_relogin_js_behaviour():
+    """Broker-session alerts render a working Re-login action (session alerts)."""
+    result = subprocess.run(
+        ["node", str(_ALERT_WIDGET_HARNESS)],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "6 alert-widget Re-login tests passed" in result.stdout
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")

@@ -369,13 +369,15 @@ class TestExpiryCalendar:
     def test_expiries_for_month(self):
         expiries = self.cal.expiries_for_month(2026, 9, "NIFTY")
         assert len(expiries) == 1
-        assert expiries[0].weekday() == 3  # Thursday
+        # NSE monthly expiry is the last Tuesday from September 2025 onward.
+        assert expiries[0].weekday() == 1  # Tuesday
+        assert expiries[0].day == 29       # last Tuesday of Sep 2026
 
     def test_expiries_for_year(self):
         expiries = self.cal.expiries_for_year(2026, "NIFTY")
         assert len(expiries) == 12
-        # All should be Thursdays
-        assert all(d.weekday() == 3 for d in expiries)
+        # All 2026 contracts are post-cutoff → last Tuesdays.
+        assert all(d.weekday() == 1 for d in expiries)
         # Should be in chronological order
         assert expiries == sorted(expiries)
 
@@ -384,16 +386,18 @@ class TestExpiryCalendar:
         assert exp is not None
         from datetime import date
         assert exp >= date.today()
-        assert exp.weekday() == 3
+        assert exp.weekday() == 1  # Tuesday
 
     def test_next_expiry_from_specific_date(self):
         from datetime import date
         exp = self.cal.next_expiry("NIFTY", from_date=date(2026, 10, 1))
         assert exp is not None
         assert exp >= date(2026, 10, 1)
-        # Should be Oct 29, 2026 (last Thursday of Oct)
+        # Should be Oct 27, 2026 (last Tuesday of Oct — NSE rule from Sep 2025)
         assert exp.month == 10
         assert exp.year == 2026
+        assert exp.day == 27
+        assert exp.weekday() == 1  # Tuesday
 
     def test_expiries_between(self):
         from datetime import date
@@ -401,7 +405,7 @@ class TestExpiryCalendar:
             date(2026, 1, 1), date(2026, 6, 30), "NIFTY"
         )
         assert len(expiries) == 6  # Jan through Jun
-        assert all(d.weekday() == 3 for d in expiries)
+        assert all(d.weekday() == 1 for d in expiries)  # Tuesdays
 
     def test_format_expiry(self):
         from datetime import date
@@ -416,4 +420,4 @@ class TestExpiryCalendar:
     def test_banknifty(self):
         exp = self.cal.next_expiry("BANKNIFTY")
         assert exp is not None
-        assert exp.weekday() == 3
+        assert exp.weekday() == 1  # Tuesday

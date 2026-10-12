@@ -16,6 +16,8 @@ PortfolioManager (control tower)
   ├── PaperBroker          V1 execution (fills at bar close via OrderExecutor)
   ├── RiskSupervisor       daily-loss + max-drawdown breakers, concentration warning
   ├── SyntheticFeed        per-second OHLCV bars (swappable for mStock)
+  ├── IntelligenceService  portfolio Greeks / concentration / correlation / regime
+  │     └── AlertBroker    alert pub/sub → alert widget, subscribed strategies, audit log
   └── StrategyRunner × N   isolated capital bucket, positions, trades, PnL
         ├── SINGLE_SYMBOL   one ticker (e.g. BTC/USD)
         └── SYMBOL_UNIVERSE  a curated pool (NIFTY_50, TOP_10_CRYPTO, …),
@@ -32,6 +34,7 @@ Key files (`src/backtest/`):
 | `forward/feed.py` | `SyntheticFeed` — deterministic random-walk bars, warmup |
 | `data/universe.py` | Symbol universe registry (`NIFTY_50`, `TOP_10_CRYPTO`, …) |
 | `api/portfolio.py` | REST + SSE blueprint (`/api/portfolio/*`, `/api/portfolio/stream`) |
+| `intelligence/*`, `alerts/*`, `api/intelligence.py` | Portfolio Intelligence & alerts — see [PORTFOLIO-INTELLIGENCE.md](PORTFOLIO-INTELLIGENCE.md) |
 | `web/templates/portfolio.html`, `portfolio_paper.html`, `portfolio_live.html`, `_portfolio_center.html` + `web/static/js/portfolio.js`, `deep_dive.js` | Command Center UI (landing + per-bucket pages) |
 
 ## Run it
@@ -53,9 +56,28 @@ curl -X POST localhost:5000/api/portfolio/runner/create -H 'Content-Type: applic
   "mode": "paper", "source": "synthetic"}'
 ```
 
-`mode` (`paper`|`live`, default `paper`) and `source` (`synthetic`|`replay`|`mstock`,
-default `synthetic`) tag the instance (ticket P4.1); `live` execution wiring is the
-remaining F-12 item, so `mode: "live"` today still uses simulated fills.
+`mode` (`paper`|`live`, default `paper`) and `source`
+(`synthetic`|`replay`|`mstock`|`dhan`, default `synthetic`) tag the instance
+(ticket P4.1; `dhan` admitted by migration 016, 2026-10-01). `mode: "live"`
+routes equity fills through `LiveEquityGateway` (F-12 closed).
+
+**Spawn-time broker choice (2026-10-01):** the Add Instance modal has a
+**Broker** dropdown (fed by `/api/broker/list` — mStock, Dhan) alongside
+**Data source**. It maps to the optional `execution_broker` payload field:
+
+- empty ("— default routing —") → `resolve_execution_broker()` rules decide
+  (segment mapping for live, `paper` bucket for paper);
+- an explicit broker **overrides the segment** for that runner's orders.
+  Paper runners keep simulated fills regardless; live runners are refused
+  (409) unless that broker's session is authenticated — fail-closed, never
+  rerouted. Picking a Segment in the modal pre-selects its broker.
+
+```bash
+curl -X POST localhost:5000/api/portfolio/runner/create -H 'Content-Type: application/json' -d '{
+  "name": "Equity via Dhan", "strategy": "sma_crossover",
+  "symbol": "RELIANCE", "allocated_capital": 100000,
+  "mode": "live", "execution_broker": "dhan", "source": "mstock"}'
+```
 
 Circuit-breaker demo (PRD acceptance step 5):
 
@@ -77,7 +99,40 @@ curl -X POST localhost:5000/api/portfolio/test/breach -H 'Content-Type: applicat
 | POST | `/api/portfolio/control/<action>` | `pause_all` / `resume_all` / `stop_all` / `emergency_flatten` / `reset_breaker` |
 | POST | `/api/portfolio/emergency_stop` | Global emergency flatten + halt |
 | POST | `/api/portfolio/test/breach` | Simulated crash (circuit-breaker test) |
-| GET | `/api/portfolio/stream` | SSE — JSON snapshot every second (bucket-scoped when on a bucket page) |
+| GET | `/api/portfolio/stream` | SSE — JSON snapshot every second (bucket-scoped when on a bucket page), carries `positions` + `orders_summary` + a compact `intelligence` block (net Greeks, scenarios, alert counts) |
+| GET | `/api/portfolio/positions?mode=` | Flat row per open position (equity + option structures) with its manual stop/target |
+| POST | `/api/portfolio/position/action` | `modify_stop_loss` / `clear_stop_loss` / `modify_target` / `clear_target` / `close_fraction` / `close_all` on one position |
+| GET | `/api/portfolio/orders?mode=&instance_id=&status=&limit=` | The order ledger, newest first + a summary strip (counts, slippage, oldest working age) |
+| POST | `/api/portfolio/orders/<coid>/cancel` | Cancel a still-PENDING order — **at the venue first** for a live order (404 unknown, 409 already terminal / venue refused) |
+| POST | `/api/portfolio/orders/<coid>/modify` | Amend a working order's quantity and/or limit price at the venue (409 for a paper/terminal/untracked order or a venue refusal) |
+
+Portfolio Intelligence adds `/api/portfolio/greeks`, `/api/portfolio/concentration`,
+`/api/portfolio/correlation`, `/api/portfolio/intelligence`, `/api/market/*` and
+`/api/alerts/*` — documented in [PORTFOLIO-INTELLIGENCE.md](PORTFOLIO-INTELLIGENCE.md#api).
+
+## Risk Board — Portfolio Intelligence
+
+The **Risk Board** tab now opens with five collapsible sections above the
+per-runner risk table (open/closed state kept in `localStorage`):
+
+| Section | Content | Refresh |
+|---|---|---|
+| Portfolio Greeks | net Δ / Γ / Vega / Θ with bias, scenario P&L (NIFTY ±2%, IV ±5, crash), per-strategy breakdown | 1 s |
+| Concentration | exposure % per underlying (flag above 60%), strike clusters (3+) | 1 s |
+| Correlation | runner-vs-runner P&L correlation heatmap (> 0.8 highlighted) | 5 min |
+| Market Regime | VIX band (or labelled realized-vol proxy), 24 h change, transition badge, history chart, strategy regime fit | 30 s view / 5 min samples |
+| Market Activity | OI anomalies and liquidity dry-ups from option chains (collapsed by default) | 30 s |
+
+Polling only runs while the Risk Board tab and the browser tab are visible.
+On `/portfolio/paper` and `/portfolio/live` the numbers are scoped to that
+bucket; *All buckets* aggregates both. Alert deep links
+(`/portfolio?tab=risk#pi-greeks`) open this tab, expand the section and
+highlight it.
+
+Alerts derived from these numbers appear in the global **alert widget**
+(bottom-right, every page) — see [ALERTS-GUIDE.md](ALERTS-GUIDE.md). They are
+information only: no alert closes or blocks a position; subscribed strategies
+decide for themselves ([STRATEGY-ALERTS.md](STRATEGY-ALERTS.md)).
 
 ## Behavior changes & known caveats
 
@@ -94,12 +149,23 @@ curl -X POST localhost:5000/api/portfolio/test/breach -H 'Content-Type: applicat
   per-buffer signal evaluation and are unaffected.
 - **Fill timing vs backtest (P1.5):** backtest ≈ forward only on **gapless** bars
   (`open[t] == close[t-1]`); on real gapped data the two anchors differ by design.
-- **In-memory only:** runners/manager state survives a page refresh, not a process
-  restart (documented V1; persistence is V2).
-- **Paper vs live:** `mode=paper` = simulated fills everywhere; `mode=live` buckets
-  are wired for tags/UI but **live broker fills are still open** (findings F-12 —
-  `BrokerFillProvider` + `MStockLiveFeed` exist but the forward-engine wiring and
-  `poll_fill` in the broker ABC remain).
+- **State persistence (V2, 2026-09-23):** runner configs, books, anchors and manual
+  stop/target levels round-trip through `PORTFOLIO_STATE_PATH`; a restored runner comes
+  back **PAUSED** (fail-closed). Two deliberate exceptions: breaker latches are written
+  but **not re-armed** on boot (a halt guards one session's P&L — a restored latch trapped
+  the dashboard in a permanent "🔴 HALTED"), and **ledger orders are not persisted**, so the
+  Orders tab starts empty after a restart and fills the moment new orders route through.
+- **Paper vs live:** `mode=paper` = simulated fills everywhere; `mode=live`
+  equity fills route through `LiveEquityGateway` (cumulative-delta `poll_fill`,
+  reconcile every 300 ticks — `tests/test_live_equity_gateway.py`), and
+  options/multi-broker fills through `ExecutionRouter.poll_fill(order_id,
+  broker)` incl. the Dhan order contract (Phase C, 2026-09-28). F-12 is
+  **CLOSED**.
+- **Live-position routing (2026-10):** the portfolio pages render positions
+  from each runner's in-memory book; for live runners that book is built from
+  mStock broker-API fills (polled by the gateways above), not from the
+  forward-test DB tables (`equity_curve` / `performance_metrics` / `trades`,
+  which key on `portfolio_id` and serve the paper ledger).
 
 ## Tests & benchmark
 
@@ -110,6 +176,100 @@ PYTHONPATH=src python benchmarks/benchmark_portfolio.py
 
 50-runner benchmark: ~311 ms/tick, 1,287 fills with **0** cross-contamination,
 ~130 MB RSS (2.6 MB/runner); breaker halt measured at ~15 ms (budget < 500 ms).
+
+---
+
+## Live Order Management (the two trading tabs)
+
+Live Order Management (LOM) is the operator's **manual steering wheel** on top
+of the automated strategy runners. Until LOM the Command Center could only
+*display* what strategies were doing — you watched positions and P&L but could
+not touch anything between strategy decisions. LOM adds the **Actions column on
+the Open Positions tab** (modify stop-loss, modify target, close 50%, close all)
+and the dedicated **Orders tab** (the engine's own order ledger with cancel,
+amend, aging alerts, slippage, and bounded auto-retry). It is the difference
+between a dashboard you can only look at and a trading console you can drive.
+
+The Command Center answers "what am I holding" and "did my order fill" with two
+separate tabs — the positions tab was **enhanced**, the Orders tab is new, and
+every other tab is untouched.
+
+**Open Positions** — one flat row per open position across runners (an option
+structure is one net row, with its legs listed underneath). Each row carries its
+side, size, entry, mark, P&L, the **Target** and **Stop** levels when armed, net
+Δ/Θ for option structures, and an **Actions** column:
+
+| Button | Sends | Notes |
+|---|---|---|
+| 🛑 SL | `modify_stop_loss` | Refused if it would fire immediately; Clear level disarms |
+| 🎯 TP | `modify_target` | Same validation on the other side of the mark |
+| ◐ 50% | `close_fraction` | Equity only — an option structure closes atomically, so it is pinned to 100% |
+| ✕ All | `close_all` | Full exit at market |
+
+Levels are **prices**, not percentages: the share price for an equity position,
+the **net premium per unit** for an option structure (for a credit structure the
+stop sits above the mark and the target below — the engine derives the side). They
+are evaluated on every bar **and** on every mark move, so a manual stop exits at
+market even if the strategy never trades again; the strategy's own exit policy
+still runs, and whichever fires first wins. On a live runner "close" can only be
+**placed** at the venue (`status: "placed"`, a client order id, no fill yet) — the
+UI says so instead of claiming the position is closed.
+
+**Orders** — the engine's own `OrderLedger`, not a second bookkeeping layer:
+PENDING (with age, and the only cancel button in the app), FILLED (requested vs
+filled price), REJECTED (with the venue/engine reason — a paper order that cannot
+fill is rejected, it never rests forever), CANCELLED. Slippage is
+**adverse-positive per unit** (+₹2 means the fill cost money, whichever side).
+The summary strip carries counts, average/worst slippage and the oldest working
+order's age; the tab badge (seeded from the SSE snapshot, so it works while the
+tab is closed) counts working + rejected orders. Rows are polled at 3 s only
+while the tab is visible.
+
+**Advanced order management (Phase 3).**
+
+| Feature | Behaviour |
+|---|---|
+| Amend a working order | `✎ Amend` (live orders only) → quantity and/or limit price. The **venue is asked first**; a refusal leaves local state untouched and is shown verbatim with the modal still open. The client order id, the original `requested_price` (slippage keeps measuring the *original* decision) and the fill history survive — an amend is not a cancel-and-replace. Only terms that actually differ are sent. |
+| Order aging alerts | A working order past **60 s** is `warn`, past **5 min** `alert`. The band ships with the row (`aging`, `age_s`), the row is tinted, the age cell is badged (⏰/🚨), the summary strip counts the bands, and the engine writes **one audit entry per band per order** — an alert that repeats every tick is noise an operator learns to ignore. Filter the tab with `⏰ Aging only`. |
+| Auto-retry on rejection | Opt-in per runner (`RunnerConfig.retry_policy`), **off by default**. A refused order that is *safe* to re-send (see below) is queued and retried on the next bars, up to `max_attempts`, no faster than `cooldown_s` and at most once per bar. Every attempt is its own audited ledger row carrying `retry_of` / `retry_attempt`, so the tab shows a lineage rather than duplicate mystery orders. |
+
+Auto-retry is deliberately narrow, because a retry loop is a way to discover a
+risk limit N times:
+
+* **Only retryable refusals are retried.** A paper failure leaves nothing at a
+  venue, so it is retryable. A *live* placement error is **not**: a timeout can
+  mean "accepted, acknowledgment lost", and re-sending there is how one intent
+  becomes two live orders. Those are blocked with `RETRY_REFUSED` and a
+  "reconcile before re-sending" note in the runner's signal log.
+* **The budget is finite.** `max_attempts=2` means at most three sends. A spent
+  budget is remembered (`order_retries.blocked`) so the next bar's identical
+  signal cannot quietly re-open it — a transition signal keeps firing while its
+  condition holds, which would otherwise make `max_attempts` meaningless.
+* **The block lifts two ways**: the strategy stops asking for that action (a
+  genuinely new decision), or `rearm_after_s` (default 300 s) expires, which
+  starts a *new* episode at a bounded rate instead of either giving up forever
+  on a long venue outage or hammering it.
+* Successful retries clear the block; `get_state()["order_retries"]` reports
+  `pending` / `blocked` / `raised` / `recovered` / `exhausted`.
+
+### How LOM helps trading
+
+| Without LOM | With LOM |
+|---|---|
+| Strategy hangs or a news event invalidates the thesis → you watch the position bleed until the strategy itself exits | Hit ✕ All and flatten at market, or arm a manual 🛑 SL the engine enforces on the very next tick |
+| Stop too wide / target too close → wait for the strategy config, restart the runner | 🛑 / 🎯 buttons re-arm levels in place, validated against the live mark |
+| One leg of an option structure goes bad → no way to act | Structures close atomically; net row + legs shown together |
+| Order stuck PENDING at the broker → invisible | Orders tab shows age with warn(60 s)/alert(5 min) bands; cancel or amend at the venue |
+| Rejected order (margin blip, circuit filter) → strategy may silently stop trading | Bounded auto-retry (opt-in) recovers safe refusals with a full audit lineage |
+| "Did I get a fair fill?" → guesswork | FILLED rows show requested vs fill → per-unit adverse slippage, measurable |
+
+Key files: `api/portfolio.py` (the four action/order endpoints),
+`forward/portfolio_manager.py` + `forward/paper_runner.py` (manual-level
+enforcement, `OrderLedger`, amend/aging/retry machinery),
+`forward/options_bridge.py` + `forward/live_gateway.py` (venue-first routing for
+live actions), `web/static/js/components/position_actions.js` + `orders_tab.js`
+(the two tabs; Orders rows poll at 3 s only while the tab is visible),
+`state_store.py` (manual levels round-trip across restarts).
 
 ---
 

@@ -23,6 +23,7 @@ from typing import Any
 import pandas as pd
 
 from backtest.data.csv_source import CsvSource
+from backtest.data.sources_policy import require_synthetic
 from backtest.data.synthetic import SyntheticSource
 from backtest.engine.backtester import BacktestConfig, Backtester
 from backtest.logging_config import get_logger
@@ -42,8 +43,18 @@ class RunSpec:
 
 
 def build_source(name: str, **kwargs):
+    """Build a candle source by name, subject to the data-source policy.
+
+    ``synthetic`` is the default in several call sites (and in
+    ``config``/``app.yaml``), which meant a deployment that disabled generated
+    data could still reach it through any path that forgot to say otherwise.
+    The check lives here so every caller inherits it: with synthetic disabled
+    this raises, and the only process that still builds a ``SyntheticSource``
+    is one whose policy enables it — the test suite's ``testing`` profile.
+    """
     source_name = (name or "").lower()
     if source_name == "synthetic":
+        require_synthetic("build_source")
         source: Any = SyntheticSource()
     elif source_name == "csv":
         source = CsvSource(root=kwargs.get("data_root", "data"))

@@ -13,10 +13,12 @@
 # so the presets work with no configuration at all.
 #
 # -----------------------------------------------------------------------------
-# RATES CHANGE. The Indian figures below are FY 2024-25 equity values. STT,
-# stamp duty and exchange transaction charges have all moved within the last
-# few years, sometimes mid-year. Check a recent contract note before trusting
-# any cost-sensitive result.
+# RATES CHANGE. Point-in-time figures, last re-verified 2026-09-28: equity
+# rates are FY 2024-25 values; F&O STT is the Budget 2026 schedule effective
+# 2026-04-01 (futures sell 0.05%, options sell 0.15% of premium). STT, stamp
+# duty and exchange transaction charges have all moved within the last few
+# years, sometimes mid-year. Check a recent contract note before trusting any
+# cost-sensitive result.
 # -----------------------------------------------------------------------------
 
 active_broker: zerodha
@@ -67,7 +69,7 @@ brokers:
       per_trade: 20
     delivery_commission_model:
       model: zero
-    # Options: flat per ORDER (not per lot), FY 2024-25 rates.
+    # Options: flat per ORDER (not per lot).
     # A spread pays brokerage once per leg. Reconcile against a real
     # contract note with CommissionCalculator.validate_against_contract_note()
     # before trusting cost-sensitive results — see docs/OPTIONS-PAPER-LIVE.md.
@@ -76,14 +78,39 @@ brokers:
       per_order: 20
     fee_schedule:
       schedule: india_equity
-      # Options statutory rates (NFO, FY 2024-25):
-      #   STT:            0.1% on the SELL premium only
+      # Options statutory rates (NFO, re-verified 2026-09-28):
+      #   STT:            0.15% of the SELL premium only
+      #                   (Budget 2026, effective 2026-04-01; was 0.1%)
       #   Exchange txn:   0.03503% of premium, both sides
       #   SEBI turnover:  ₹10 per crore of premium
       #   IPFT:           ₹10 per crore of premium
       #   Stamp duty:     0.003% of premium, BUY side only
       #   GST:            18% on brokerage + exchange + SEBI + IPFT (never on STT or stamp duty)
-      stt_options_sell: 0.001
+      stt_options_sell: 0.0015
+      exchange_txn_options: 0.0003503
+      stamp_duty_options: 0.00003
+
+  # Dhan — the second live broker in the multi-broker setup (segments.yaml
+  # routes `equity_intraday` here). Modelled on the same discount shape as
+  # Zerodha: delivery free, intraday capped at 0.03% or Rs 20, options flat
+  # per order. INDICATIVE — validate against a real contract note with the
+  # Settings → broker profile validator before trusting a cost-sensitive
+  # result; the statutory stack below is the same India schedule as mstock.
+  dhan:
+    currency: INR
+    default_segment: equity_intraday
+    commission_model:
+      model: percentage
+      rate: 0.0003
+      maximum: 20
+    delivery_commission_model:
+      model: zero
+    options_commission_model:
+      model: options_flat
+      per_order: 20
+    fee_schedule:
+      schedule: india_equity
+      stt_options_sell: 0.0015           # Budget 2026, effective 2026-04-01
       exchange_txn_options: 0.0003503
       stamp_duty_options: 0.00003
 

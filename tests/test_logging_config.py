@@ -99,14 +99,14 @@ def test_log_file_is_written_and_replaced_on_reconfigure(tmp_path):
     configure_logging("INFO", str(first))
     get_logger("file").info("alpha")
     logging.getLogger().handlers[0].flush()
-    assert "alpha" in first.read_text()
+    assert "alpha" in first.read_text(encoding="utf-8", errors="replace")
 
     configure_logging("INFO", str(second))
     get_logger("file").info("beta")
     for handler in logging.getLogger().handlers:
         handler.flush()
-    assert "beta" in second.read_text()
-    assert "beta" not in first.read_text()
+    assert "beta" in second.read_text(encoding="utf-8", errors="replace")
+    assert "beta" not in first.read_text(encoding="utf-8", errors="replace")
     files = [
         h
         for h in logging.getLogger().handlers
@@ -521,7 +521,7 @@ def test_no_swallowed_exceptions_in_the_debuggable_layers(module_dir):
     root = pathlib.Path(__file__).resolve().parents[1] / "src" / "backtest" / module_dir
     offenders = []
     for path in sorted(root.rglob("*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.ExceptHandler):
                 continue
@@ -530,7 +530,7 @@ def test_no_swallowed_exceptions_in_the_debuggable_layers(module_dir):
             if not ignores_only:
                 continue
             around = "".join(
-                path.read_text().splitlines()[max(0, node.lineno - 1) : node.lineno + 2]
+                path.read_text(encoding="utf-8", errors="replace").splitlines()[max(0, node.lineno - 1) : node.lineno + 2]
             )
             if "noqa" in around:
                 continue

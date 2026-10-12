@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator
 
 import pandas as pd
@@ -62,18 +62,27 @@ _INTERVAL_MAP = MSTOCK_INTERVAL_MAP
 
 def _market_open(now_utc: datetime | None = None) -> bool:
     """Whether the NSE market is currently open (IST business hours)."""
-    if now_utc is None:
-        now_utc = datetime.now(timezone.utc)
-    ist = now_utc + timedelta(hours=5, minutes=30)
-    if ist.weekday() >= 5:
-        return False
-    market_open = ist.replace(
-        hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0
-    )
-    market_close = ist.replace(
-        hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE, second=0, microsecond=0
-    )
-    return market_open <= ist <= market_close
+    try:
+        from backtest.live.market_status import IST, get_market_day_state
+
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+        ist = now_utc.astimezone(IST)
+        info = get_market_day_state(ist)
+        return bool(info.get("is_open", False))
+    except Exception:  # noqa: BLE001 — fail-open to standard hours check
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+        ist = now_utc + timedelta(hours=5, minutes=30)
+        if ist.weekday() >= 5:
+            return False
+        market_open = ist.replace(
+            hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0
+        )
+        market_close = ist.replace(
+            hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE, second=0, microsecond=0
+        )
+        return market_open <= ist <= market_close
 
 
 def _typea_headers(api_key: str, token: str) -> dict[str, str]:
@@ -132,19 +141,116 @@ def _fetch_bars(
     """Fetch bars for ``[start, end]`` from the TypeA historical endpoint.
 
     Returns ``[]`` (with a logged error) when the API is unreachable — a
-    feed hiccup must never take the poll loop down.
+    feed hiccup must never take the poll loop down. Transient failures
+    (408/429/timeouts — mStock rate-limits bursts) are retried once after a
+    short backoff (live-session lesson 2026-09-21: single-shot fetches
+    dropped bars on every rate-limit blip).
     """
     url = f"{base_url}/openapi/typea/instruments/historical/{segment}/{security_token}/{interval}"
     params = {"from": start, "to": end}
-    try:
-        resp = requests.get(url, headers=_typea_headers(api_key, token), params=params, timeout=15)
-        resp.raise_for_status()
-        rows = _extract_candles(resp.json())
-    except Exception as exc:  # noqa: BLE001 — feed hiccups are logged, not fatal
-        logger.error("Failed to fetch bars for %s: %s", security_token, exc)
-        return []
-    bars = [_candle_row_to_bar(row) for row in rows]
-    return [b for b in bars if b is not None]
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            resp = requests.get(
+                url, headers=_typea_headers(api_key, token), params=params, timeout=15
+            )
+            resp.raise_for_status()
+            rows = _extract_candles(resp.json())
+            bars = [_candle_row_to_bar(row) for row in rows]
+            return [b for b in bars if b is not None]
+        except Exception as exc:  # noqa: BLE001 — feed hiccups are logged, not fatal
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(1.0)  # brief backoff, then one retry
+    logger.error("Failed to fetch bars for %s: %s", security_token, last_exc)
+    return []
+
+
+#: Index security ids for the TypeA HISTORICAL endpoint. Indexes are NOT in
+#: scriptmaster (which lists only tradable instruments), so they resolve via
+#: this fixed map.
+#:
+#: Every id below was re-verified on 2026-10-02 by exact day-candle value
+#: match against the public index series (Yahoo ^CNX*/^NSEI/^BSESN, Sep-Oct
+#: 2026 closes) plus the mStock API annexure. The previous table was largely
+#: wrong: 26012 is Nifty 100 (not Auto), 26017 is India VIX (not Media),
+#: 26018/26019 were Realty/Infra swapped, 26021 is FMCG (not PSU Bank),
+#: 26015/26016 are rejected or empty, 26038 returns a flat stale 196.79, and
+#: SENSEX is 51 on BSE (1 raises InputException). NIFTY/BANKNIFTY were the
+#: only correct ones (verified live 2026-09-18). FINNIFTY (Next 50) and
+#: MIDCPNIFTY keep their historical ids — no external series to match.
+INDEX_SECURITY_TOKENS: dict[str, str] = {
+    "NIFTY": "26000",
+    "NIFTY50": "26000",
+    "NIFTY 50": "26000",
+    "BANKNIFTY": "26009",
+    "NIFTY BANK": "26009",
+    "NIFTYBANK": "26009",
+    # Sectoral/thematic indices (mStock security ids, value-verified)
+    "FINNIFTY": "26037",
+    "NIFTY NEXT 50": "26037",
+    "MIDCPNIFTY": "26051",
+    "NIFTY MIDCAP 150": "26051",
+    "NIFTYIT": "26008",
+    "NIFTY IT": "26008",
+    "NIFTYAUTO": "26029",
+    "NIFTY AUTO": "26029",
+    "NIFTYPHARMA": "26023",
+    "NIFTY PHARMA": "26023",
+    "NIFTYMETAL": "26030",
+    "NIFTY METAL": "26030",
+    "NIFTYREALTY": "26018",
+    "NIFTY REALTY": "26018",
+    "NIFTYFMCG": "26021",
+    "NIFTY FMCG": "26021",
+    "NIFTYENERGY": "26020",
+    "NIFTY ENERGY": "26020",
+    "NIFTYMEDIA": "26031",
+    "NIFTY MEDIA": "26031",
+    "NIFTYPSUBANK": "26025",
+    "NIFTY PSU BANK": "26025",
+    "NIFTYINFRA": "26019",
+    "NIFTY INFRA": "26019",
+    "SENSEX": "51",
+    "S&P BSE SENSEX": "51",
+    "INDIAVIX": "26017",
+    "INDIA VIX": "26017",
+}
+
+#: Index display names for the LIVE quote endpoint (``quote/ohlc``). That
+#: endpoint serves TODAY's session (open/high/low + last_price) while
+#: ``instruments/historical`` is T+1 (completed sessions only — verified
+#: live 2026-09-18), so the feed builds its live bars from here.
+QUOTE_SYMBOL_NAMES: dict[str, str] = {
+    "NIFTY": "NSE:NIFTY 50",
+    "BANKNIFTY": "NSE:NIFTY BANK",
+    "FINNIFTY": "NSE:NIFTY NEXT 50",
+    "MIDCPNIFTY": "NSE:NIFTY MIDCAP 150",
+    "NIFTYIT": "NSE:NIFTY IT",
+    "NIFTYAUTO": "NSE:NIFTY AUTO",
+    "NIFTYPHARMA": "NSE:NIFTY PHARMA",
+    "NIFTYMETAL": "NSE:NIFTY METAL",
+    "NIFTYREALTY": "NSE:NIFTY REALTY",
+    "NIFTYFMCG": "NSE:NIFTY FMCG",
+    "NIFTYENERGY": "NSE:NIFTY ENERGY",
+    "NIFTYMEDIA": "NSE:NIFTY MEDIA",
+    "NIFTYPSUBANK": "NSE:NIFTY PSU BANK",
+    "NIFTYINFRA": "NSE:NIFTY INFRA",
+    "SENSEX": "BSE:SENSEX",
+    "INDIAVIX": "NSE:INDIA VIX",
+}
+
+
+#: Path segment ids for the intraday-chart endpoint (verified live
+#: 2026-10-01: the API rejects anything else with "Valid exchange allowed
+#: are 1-NSE, 2-NFO, 3-CDS, 4-BSE and 5-BFO").
+INTRADAY_SEGMENT_IDS: dict[str, str] = {
+    "NSE": "1",
+    "NFO": "2",
+    "CDS": "3",
+    "BSE": "4",
+    "BFO": "5",
+}
 
 
 def _resolve_security_token(base_url: str, api_key: str, token: str, symbol: str) -> str:
@@ -173,6 +279,40 @@ def _resolve_security_token(base_url: str, api_key: str, token: str, symbol: str
     if matches.empty:
         raise ValueError(f"symbol {symbol} not in scriptmaster")
     return str(matches.iloc[0][token_key])
+
+
+def _resolve_scriptmaster_row(
+    base_url: str, api_key: str, token: str, symbol: str
+) -> dict:
+    """The scriptmaster row for ``symbol`` (lowercased columns), or ``{}``.
+
+    Used to recover the listing ``exchange`` (NSE/BSE) and ``tradingsymbol``
+    for the live ``quote/ohlc`` name of a non-index symbol. Unlike
+    :func:`_resolve_security_token` this never raises for a missing symbol —
+    the quote path degrades to an ``NSE:<SYMBOL>`` convention instead of
+    killing the poll thread.
+    """
+    resp = requests.get(
+        f"{base_url}/openapi/typea/instruments/scriptmaster",
+        headers=_typea_headers(api_key, token),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    import io
+
+    frame = pd.read_csv(io.StringIO(resp.text), low_memory=False)
+    if frame.empty:
+        return {}
+    lower = frame.rename(columns=lambda c: str(c).strip().lower())
+    symbol_key = next(
+        (c for c in ("tradingsymbol", "symbol", "name") if c in lower.columns), None
+    )
+    if not symbol_key:
+        return {}
+    matches = lower[lower[symbol_key].astype(str).str.lower() == str(symbol).lower()]
+    if matches.empty:
+        return {}
+    return matches.iloc[0].to_dict()
 
 
 class MStockLiveFeed:
@@ -211,6 +351,7 @@ class MStockLiveFeed:
         # extra kwargs here).
         self._config: dict[str, Any] = dict(kwargs)
         self._security_tokens: dict[str, str] = {}
+        self._intraday_keys: dict[str, tuple[str, str]] = {}
 
     # -- credentials (lazy) ------------------------------------------------
 
@@ -230,31 +371,203 @@ class MStockLiveFeed:
         url = self._base_url_override or os.getenv("MSTOCK_BASE_URL", "https://api.mstock.trade")
         return str(url).rstrip("/")
 
+    def _fetch_quote_bar(self, symbol: str) -> dict | None:
+        """Today's running bar from ``quote/ohlc`` — INDEX SYMBOLS ONLY.
+
+        Returns a bar ``{ts, open, high, low, close, volume}`` where OHLC
+        is the session's running aggregate and ``ts`` is the minute floor
+        of "now" (IST). ``None`` for anything outside
+        :data:`QUOTE_SYMBOL_NAMES` or when the API fails — non-index
+        symbols must use :meth:`_fetch_intraday_bar` (the quote catalog
+        rejects equities with "Invalid symbol" forever, 2026-10-01) and
+        then the historical fallback.
+        """
+        quote_name = QUOTE_SYMBOL_NAMES.get(str(symbol).strip().upper())
+        if quote_name is None:
+            return None
+        # One retry on transient failures (408/429/timeout) — mStock
+        # rate-limits bursts; the feed poll and option-quote calls can land
+        # in the same second (live-session lesson 2026-09-21).
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                token, api_key = self._credentials()
+                resp = requests.get(
+                    f"{self._base_url()}/openapi/typea/instruments/quote/ohlc",
+                    headers=_typea_headers(api_key, token),
+                    params=[("i", quote_name)],
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                payload = resp.json().get("data") or {}
+                entry = payload.get(quote_name)
+                if not isinstance(entry, dict):
+                    # A single-``i=`` request returns one keyed entry; if the
+                    # response key differs from our requested name (equity
+                    # tradingsymbol casing/exchange variants), take the sole
+                    # entry rather than dropping a valid live quote.
+                    vals = list(payload.values()) if isinstance(payload, dict) else []
+                    entry = vals[0] if len(vals) == 1 and isinstance(vals[0], dict) else {}
+                ohlc = entry.get("ohlc") or {}
+                last = entry.get("last_price")
+                if not ohlc or last is None:
+                    return None
+                ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+                ts = ist.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+                return {
+                    "ts": ts,
+                    "open": float(ohlc.get("open") or last),
+                    "high": float(ohlc.get("high") or last),
+                    "low": float(ohlc.get("low") or last),
+                    "close": float(last),
+                    "volume": 0,
+                }
+            except Exception as exc:  # noqa: BLE001 — transient: back off, retry once
+                last_exc = exc
+                if attempt == 0:
+                    time.sleep(1.0)
+        logger.warning(
+            "mstock feed: quote bar for %s failed after retry: %s", symbol, last_exc
+        )
+        return None
+
     def _security_token_for(self, symbol: str) -> str:
         key = str(symbol).strip().upper()
         if key not in self._security_tokens:
-            token, api_key = self._credentials()
-            self._security_tokens[key] = _resolve_security_token(
-                self._base_url(), api_key, token, key
-            )
+            if key in INDEX_SECURITY_TOKENS:
+                # Indexes never appear in scriptmaster — fixed token map.
+                self._security_tokens[key] = INDEX_SECURITY_TOKENS[key]
+            else:
+                token, api_key = self._credentials()
+                self._security_tokens[key] = _resolve_security_token(
+                    self._base_url(), api_key, token, key
+                )
         return self._security_tokens[key]
+
+    def _intraday_key_for(self, symbol: str) -> tuple[str, str] | None:
+        """``(segment_id, script_code)`` for the intraday-chart endpoint.
+
+        The endpoint keys equities/ETFs/derivatives by scriptmaster's
+        ``instrument_token`` (e.g. RELIANCE → ``intraday/1/2885/minute``),
+        NOT by tradingsymbol — ``intraday/1/RELIANCE/minute`` is rejected
+        as an invalid scriptCode (verified live 2026-10-01). Resolution
+        failure degrades to ``("1", <security token>)`` — the NSE default
+        the order path already assumes — so the poll thread never dies.
+        """
+        cached = self._intraday_keys.get(symbol)
+        if cached is not None:
+            return cached
+        exchange, script = "NSE", None
+        try:
+            token, api_key = self._credentials()
+            row = _resolve_scriptmaster_row(self._base_url(), api_key, token, symbol)
+            exchange = str(row.get("exchange") or "NSE").strip().upper() or "NSE"
+            raw_script = row.get("instrument_token") or row.get("securitytoken")
+            if raw_script is not None and str(raw_script).strip():
+                script = str(raw_script).strip()
+        except Exception as exc:  # noqa: BLE001 — resolution failure must not stop the poll
+            logger.debug(
+                "mstock feed: intraday key resolution for %s failed (%s); using NSE default",
+                symbol,
+                exc,
+            )
+        if script is None:
+            try:
+                script = self._security_token_for(symbol)
+            except Exception as exc:  # noqa: BLE001 — no token, no intraday path
+                logger.debug("mstock feed: no script code for %s: %s", symbol, exc)
+                return None
+        seg_id = INTRADAY_SEGMENT_IDS.get(exchange, "1")
+        key = (seg_id, script)
+        self._intraday_keys[symbol] = key
+        return key
+
+    def _fetch_intraday_bar(self, symbol: str) -> dict | None:
+        """The running minute bar for a NON-INDEX symbol (equities/ETFs/F&O).
+
+        ``instruments/intraday/{segment_id}/{scriptCode}/minute`` serves the
+        TODAY session for anything in scriptmaster — the only live path the
+        mStock TypeA API offers for equities (quote/ohlc is index-only and
+        instruments/historical is T+1). Candles come newest-first; the max
+        by timestamp is the still-forming bar. ``None`` when the symbol
+        cannot be keyed or the API fails — callers fall back to historical.
+        """
+        key = self._intraday_key_for(str(symbol).strip().upper())
+        if key is None:
+            return None
+        seg_id, script = key
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                token, api_key = self._credentials()
+                resp = requests.get(
+                    f"{self._base_url()}/openapi/typea/instruments/intraday"
+                    f"/{seg_id}/{script}/minute",
+                    headers=_typea_headers(api_key, token),
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                rows = _extract_candles(resp.json())
+                bars = [b for b in (_candle_row_to_bar(row) for row in rows) if b]
+                if not bars:
+                    return None
+                return max(bars, key=lambda b: str(b["ts"]))
+            except Exception as exc:  # noqa: BLE001 — transient: back off, retry once
+                last_exc = exc
+                if attempt == 0:
+                    time.sleep(1.0)
+        logger.warning(
+            "mstock feed: intraday bar for %s failed after retry: %s", symbol, last_exc
+        )
+        return None
 
     # -- bar access ----------------------------------------------------------
 
     def latest_bar(self, symbol: str) -> dict | None:
-        """The latest bar for ``symbol`` (``None`` when none is available)."""
+        """The latest bar for ``symbol`` (``None`` if none is available).
+
+        Live path: indexes come from the TODAY-session ``quote/ohlc``
+        endpoint (historical is T+1 and never returns the current session);
+        every other symbol (equities/ETFs/F&O) comes from the intraday-chart
+        endpoint, which serves the running minute bar keyed by scriptmaster
+        token. Only when both are unavailable does this fall back to the
+        historical window (catch-up). (2026-10-01: the equity leg started as
+        a quote/ohlc attempt — mStock rejects equity names there with
+        "Invalid symbol" — and lands on the intraday endpoint.)
+        """
         if self.client is not None:
             return self.client.get_latest_bar(symbol)
+
+        quote_bar = self._fetch_quote_bar(symbol)
+        if quote_bar is not None:
+            return quote_bar
+
+        # Non-index symbols (equities/ETFs/F&O) have no quote/ohlc entry and
+        # the historical endpoint is T+1 — the intraday-chart endpoint is the
+        # only source that carries the running session (2026-10-01 RELIANCE
+        # runners froze at the prior close until this path landed).
+        intraday_bar = self._fetch_intraday_bar(symbol)
+        if intraday_bar is not None:
+            return intraday_bar
+
         token, api_key = self._credentials()
-        today = date.today().strftime("%Y-%m-%d")
-        start = (date.today() - timedelta(days=3)).strftime("%Y-%m-%d")
+        # API window rules (all verified live 2026-09-18):
+        #   * ``to`` must be strictly in the past (clock skew ⇒ 400);
+        #   * full datetimes required — date-only strings ⇒ 400;
+        #   * max 1000 candles per request (docs §Historical Data Limit).
+        # So: trailing window ending at the last completed minute minus a
+        # 2-minute skew guard, sized to stay under the 1000-candle cap
+        # (375 × 6.25h trading minutes/375-min trading day < 1000).
+        now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        to_dt = (now - timedelta(minutes=2)).replace(second=0, microsecond=0)
+        start = (to_dt - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
         bars = _fetch_bars(
             self._base_url(),
             token,
             api_key,
             self._security_token_for(symbol),
             start,
-            today,
+            to_dt.strftime("%Y-%m-%d %H:%M:%S"),
             self.segment,
             "minute",
         )

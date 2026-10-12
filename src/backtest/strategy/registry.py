@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .base import Strategy
+else:
+    from .base import Strategy  # runtime: _BASE_MARKET_VIEW needs the class
 
 from backtest.logging_config import get_logger
 
@@ -22,6 +24,11 @@ def register(cls: type["Strategy"]) -> type["Strategy"]:
     _REGISTRY[cls.name] = cls
     logger.info("registered strategy %r (%s)", cls.name, cls.__name__)
     return cls
+
+
+def unregister(name: str) -> bool:
+    """Drop a strategy from the registry (hot-reload of plugins). True if dropped."""
+    return _REGISTRY.pop(name, None) is not None
 
 
 def _discover() -> None:
@@ -68,11 +75,29 @@ def get_strategy(name: str) -> type[Strategy]:
 # ---------------------------------------------------------------------------
 
 
+# The base class ships a default ``generate_market_view`` (derived from
+# ``generate_signals``), so ``hasattr`` is useless for detecting option-native
+# strategies — every strategy "has" it. Override detection compares the
+# function object against the base implementation (U6.1 spawn contract).
+_BASE_MARKET_VIEW = Strategy.generate_market_view
+
+
+def signal_kind(cls: type) -> str:
+    """``"option"`` when the strategy overrides ``generate_market_view``, else ``"equity"``.
+
+    This is the spawn-form contract (architecture §5.1): an option strategy
+    locks the spawn form to Single Symbol + index underlyings; an equity
+    strategy may target Single Symbol or Pool.
+    """
+    return "option" if cls.generate_market_view is not _BASE_MARKET_VIEW else "equity"
+
+
 def get_all() -> list[dict[str, Any]]:
     """Full strategy catalogue as plain dicts.
 
-    Each entry is ``{name, description, version, author, params}`` where
-    ``params`` is the normalised schema. Invalid strategies are skipped with a
+    Each entry is ``{name, description, version, author, params, signal_kind}``
+    where ``params`` is the normalised schema and ``signal_kind`` drives the
+    spawn form's target-type lock (U6.1). Invalid strategies are skipped with a
     logged warning rather than raising.
     """
     _discover()
@@ -93,6 +118,17 @@ def get_all() -> list[dict[str, Any]]:
                 "version": getattr(cls, "version", "") or "",
                 "author": getattr(cls, "author", "") or "",
                 "params": cls.param_schema(),
+                "signal_kind": signal_kind(cls),
+                # 2026-09-22: None = any instrument; a list = spawn form shows
+                # exactly these as a dropdown and the create API enforces them.
+                "eligible_instruments": getattr(cls, "eligible_instruments", None),
+                # issues.txt S2: the spawn form preselects the segment a
+                # strategy is designed for; None → derived from signal_kind.
+                "default_segment": getattr(cls, "default_segment", None),
+                # issues.txt S1 follow-up: plain-language entry/strike/TP/SL
+                # captured by the Strategy Builder (detected or user-typed);
+                # None for hand-written plugins that never went through it.
+                "readable_criteria": getattr(cls, "readable_criteria", None),
             }
         )
     logger.info(

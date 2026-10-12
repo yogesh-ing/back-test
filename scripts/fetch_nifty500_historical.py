@@ -29,6 +29,7 @@ import pandas as pd
 import requests
 from sqlalchemy import create_engine, text
 
+from backtest.data.base import bar_timestamp
 from backtest.live.auth import login, verify_totp, get_auth_code
 
 # ---------------------------------------------------------------------------
@@ -245,20 +246,14 @@ def persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timeframe
     skipped_bad = 0
     for bar in bars:
         if isinstance(bar, dict):
-            ts_raw = bar.get("t", bar.get("time", bar.get("timestamp")))
-            ts = pd.Timestamp(ts_raw)
-            if ts.tzinfo is not None:
-                ts = ts.tz_convert("UTC").tz_localize(None)
+            ts = bar_timestamp(bar.get("t", bar.get("time", bar.get("timestamp"))))
             o = float(bar.get("o", bar.get("open", 0)))
             h = float(bar.get("h", bar.get("high", 0)))
             l = float(bar.get("l", bar.get("low", 0)))
             c = float(bar.get("c", bar.get("close", 0)))
             v = int(bar.get("v", bar.get("volume", 0)))
         elif isinstance(bar, (list, tuple)) and len(bar) >= 6:
-            ts_raw = bar[0]
-            ts = pd.Timestamp(ts_raw)
-            if ts.tzinfo is not None:
-                ts = ts.tz_convert("UTC").tz_localize(None)
+            ts = bar_timestamp(bar[0])
             o = float(bar[1])
             h = float(bar[2])
             l = float(bar[3])
@@ -280,7 +275,7 @@ def persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timeframe
             "symbol": symbol,
             "exchange": exchange,
             "timeframe": timeframe,
-            "ts": ts.to_pydatetime(),
+            "ts": ts,
             "open": o, "high": h, "low": l, "close": c, "volume": v,
             "source": "mstock",
         })

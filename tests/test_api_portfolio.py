@@ -283,5 +283,5 @@ def test_sse_stream_emits_portfolio_frames(client):
 def test_portfolio_page_renders(client):
     r = client.get("/portfolio")
     assert r.status_code == 200
-    assert b"Portfolio Command Center" in r.data
+    assert b"command center" in r.data.lower()
     assert b"matrix-body" in r.data

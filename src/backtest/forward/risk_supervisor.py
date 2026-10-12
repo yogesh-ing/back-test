@@ -44,18 +44,50 @@ class GlobalRiskConfig:
     """
 
     daily_loss_limit: float = 250_000.0  # absolute account currency
-    max_drawdown_pct: float = 0.25  # fraction of peak equity
+    max_drawdown_pct: float = 0.80  # fraction of peak equity (80% for paper trading)
     max_leverage: float = 1.0  # V1 telemetry
     breach_mode: str = HALT_PAUSE  # daily-loss response mode
     correlation_warning_threshold: int = 3
 
     def __post_init__(self) -> None:
-        if self.daily_loss_limit <= 0:
-            raise ValueError("daily_loss_limit must be positive")
+        if self.daily_loss_limit < 0:
+            raise ValueError("daily_loss_limit must be non-negative (0 = breaker disabled)")
         if not 0 < self.max_drawdown_pct < 1:
             raise ValueError("max_drawdown_pct must be between 0 and 1")
         if self.breach_mode not in (HALT_PAUSE, HALT_FLATTEN):
             raise ValueError(f"breach_mode must be {HALT_PAUSE} or {HALT_FLATTEN}")
+
+    def update_limits(self, values: Dict[str, Any]) -> List[str]:
+        """Apply a validated partial update and return the changed fields.
+
+        The sanctioned path for mutating a live ``GlobalRiskConfig`` (the
+        risk-config API). Validate-first, commit-after: the current values
+        plus the update go through the ``GlobalRiskConfig`` constructor —
+        any invalid field raises ``ValueError`` and the live config is left
+        untouched. Unknown keys raise (typo-detection) instead of being
+        silently assigned as new attributes.
+        """
+        import dataclasses as _dc
+
+        if not isinstance(values, dict):
+            raise ValueError("values must be a dict")
+        known = {f.name for f in _dc.fields(GlobalRiskConfig)}
+        unknown = set(values) - known
+        if unknown:
+            raise ValueError(f"unknown global risk config field(s): {sorted(unknown)}")
+
+        current = {name: getattr(self, name) for name in known}
+        candidate = dict(current)
+        candidate.update(values)
+        GlobalRiskConfig(**candidate)  # raises on any invalid field
+
+        changed = []
+        for name, value in values.items():
+            new_value = getattr(GlobalRiskConfig(**{**current, name: value}), name)
+            if getattr(self, name) != new_value:
+                changed.append(name)
+            setattr(self, name, new_value)
+        return changed
 
 
 @dataclass
@@ -97,6 +129,11 @@ class RiskSupervisor:
     # -- rule checks ------------------------------------------------------
 
     def check_portfolio_daily_loss(self, daily_pnl: float) -> Optional[str]:
+        # ``daily_loss_limit == 0`` disables the breaker entirely (2026-09-24
+        # owner request: a clean watch session must never be halted — the
+        # limit cannot be "zero rupees" because that trips on the first ₹).
+        if self.config.daily_loss_limit <= 0:
+            return None
         if daily_pnl <= -abs(self.config.daily_loss_limit):
             return (
                 f"Global daily loss {daily_pnl:,.2f} breached limit "

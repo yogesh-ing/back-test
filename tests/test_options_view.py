@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -30,7 +31,39 @@ from pathlib import Path
 import pytest
 
 from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRunner
+from backtest.strategy.base import Strategy
 from backtest.strategy.intent import Direction, MarketView
+from backtest.strategy import registry as _registry
+from options_support import pin_session_clock, research_profile, stale_marks
+
+if "silent_option_fixture" not in _registry._REGISTRY:
+
+    class _SilentOptionStrategy(Strategy):
+        """Emits NO view ever — the fixture drives entries explicitly.
+
+        Needed since the warmup exemption (2026-09-18): option runners act on
+        bar 1, and the base ``generate_market_view`` returns a NEUTRAL view for
+        signal 0 — which plain-string expressions trade. A silent strategy is
+        the only way a fixture can own the entry timing.
+        """
+
+        name = "silent_option_fixture"
+        # Option-kind strategies must declare the instruments they may trade
+        # (2026-09-22 contract, enforced by tests/test_strategy_conformance).
+        # The fixture trades NIFTY only, and it is registered in the process-wide
+        # catalogue — an undeclared entry here broke the conformance gate for
+        # every later test in the same pytest session.
+        eligible_instruments = ["NIFTY", "BANKNIFTY"]
+
+        def generate_signals(self, candles):
+            import pandas as pd
+
+            return pd.Series(0, index=candles.index)
+
+        def generate_market_view(self, candles):
+            return None
+
+    _registry._REGISTRY[_SilentOptionStrategy.name] = _SilentOptionStrategy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _JS_DIR = REPO_ROOT / "tests" / "js"
@@ -72,9 +105,15 @@ def _option_runner_config(**overrides) -> RunnerConfig:
             "exit": {"max_bars": 2, "min_days_to_expiry": 1},
         },
     }
+    # NOTE (2026-09-21): option runners are exempt from the warmup gate, so
+    # the runner's OWN strategy views fire from bar 1. sma_crossover signals
+    # BULLISH immediately on a rising series — the fixture would auto-trade.
+    # The fixture's explicit on_market_view calls must be the only entries,
+    # so the params below pin a strategy whose view stays None (price_move
+    # with an unreachable threshold does exactly that).
     params = dict(
         name="NIFTY-BCS",
-        strategy_name="sma_crossover",  # no option views of its own: we drive them
+        strategy_name="silent_option_fixture",  # emits no view: fixture drives
         allocated_capital=500_000,
         symbols=["NIFTY"],
         timeframe="1day",
@@ -105,6 +144,7 @@ def option_runner():
     """A runner with one **closed** structure and one **open** one."""
     runner = StrategyRunner(_option_runner_config(), ledger=OrderLedger())
     runner.start()
+    research_profile(runner)
 
     for bar in _bars([25_000, 25_010, 25_020, 25_030, 25_040]):
         runner.process_candle_event("NIFTY", bar)
@@ -144,6 +184,7 @@ def snapshots(option_runner, tmp_path):
         ledger=OrderLedger(),
     )
     equity.start()
+    research_profile(equity)
     for bar in _bars([1_400, 1_410, 1_420]):
         bar = dict(bar, ts=bar["ts"].replace("2026-10-01", "2026-10-01"))
         equity.process_candle_event("RELIANCE", bar)
@@ -177,6 +218,7 @@ def _render(workdir: Path, detail_file: str) -> dict[str, str]:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",  # harness prints ₹/→; Windows cp1252 decode kills stdout=None
         timeout=120,
     )
     assert result.returncode == 0, (
@@ -212,7 +254,8 @@ def rendered_equity(snapshots):
 @requires_node
 def test_option_view_component_behaviour():
     result = subprocess.run(
-        ["node", str(_VIEW_HARNESS)], cwd=REPO_ROOT, capture_output=True, text=True, timeout=60
+        ["node", str(_VIEW_HARNESS)], cwd=REPO_ROOT, capture_output=True, text=True,
+        encoding="utf-8", timeout=60,
     )
     assert result.returncode == 0, (
         f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -281,12 +324,21 @@ class TestRunnerRowContract:
 
 
 class TestMatrixRendering:
-    def test_the_row_shows_the_structure_and_premium_at_risk(self, rendered):
+    def test_the_row_shows_the_structure_and_premium_at_risk(
+        self, rendered, snapshots
+    ):
         matrix = rendered["MATRIX"]
         assert "badge-option" in matrix
         assert "Bull call spread" in matrix
         assert "premium at risk" in matrix
-        assert "exp 29 Oct" in matrix.replace("Oct", "Oct")  # expiry of the open structure
+        # The label must match the expiry the fixture actually opened. Derived,
+        # not hard-coded: this assertion used to read "exp 29 Oct" because the
+        # generator assumed a Thursday monthly expiry, and it went stale the day
+        # the calendar switched to the last Tuesday (Oct 2026 → the 27th).
+        expiry = date.fromisoformat(
+            snapshots["row"]["options"]["open_structures_detail"][0]["expiry"]
+        )
+        assert f"exp {expiry.day} {expiry.strftime('%b')}" in matrix
         assert "24,950/25,000 CE" in matrix or "/" in matrix
 
     def test_the_positions_cell_counts_structures_with_legs_underneath(self, rendered):
@@ -419,6 +471,7 @@ def test_live_api_payload_renders_option_columns(api_client, tmp_path):
     iid = created.get_json()["instance_id"]
 
     runner = get_portfolio_manager().get_runner(iid)
+    research_profile(runner)  # bull call spread: widen before the first bar
     for bar in _bars([25_000, 25_010, 25_020, 25_030, 25_040]):
         runner.process_candle_event("NIFTY", bar)
     bridge = runner.options_bridge
@@ -465,24 +518,188 @@ def test_live_api_payload_renders_option_columns(api_client, tmp_path):
 
 
 def test_components_are_loaded_and_used():
-    base = (REPO_ROOT / "src/backtest/web/templates/base.html").read_text()
+    base = (REPO_ROOT / "src/backtest/web/templates/base.html").read_text(encoding="utf-8")
     assert "js/components/option_view.js" in base
     # Order matters: option_view.js declares its dependency on option_config.js.
     assert base.index("option_config.js") < base.index("option_view.js")
 
-    portfolio = (REPO_ROOT / "src/backtest/web/static/js/portfolio.js").read_text()
+    portfolio = (REPO_ROOT / "src/backtest/web/static/js/portfolio.js").read_text(encoding="utf-8")
     for call in ("OptionView.isOption", "OptionView.matrixNotes",
                  "OptionView.positionsCell", "OptionView.openStructures"):
         assert call in portfolio, f"matrix does not use {call}"
 
-    deep_dive = (REPO_ROOT / "src/backtest/web/static/js/deep_dive.js").read_text()
+    # Live Order Management (2026-09-23): the positions table's action modals
+    # and the Orders tab are two more globally-loaded components. Both format
+    # money through currency.js, so they must load after it — and the page
+    # renderer must actually call them, or the buttons render dead.
+    for component in ("js/components/position_actions.js", "js/components/orders_tab.js"):
+        assert component in base, f"{component} is not loaded"
+        assert base.index("currency.js") < base.index(component), f"{component} before currency.js"
+    for call in ("buttonCell", "PositionActions.rows", "PositionActions.init",
+                 "OrdersTab.init", "OrdersTab.refresh", "OrdersTab.noteTick"):
+        assert call in portfolio, f"positions/orders UI does not use {call}"
+
+    # Phase 3 client surface: the amend POST and the aging filter live in the
+    # Orders component, driven from the ids the template promises.
+    orders_tab = (REPO_ROOT / "src/backtest/web/static/js/components/orders_tab.js").read_text(
+        encoding="utf-8"
+    )
+    for token in ("/modify", "orders-aging-only", "data-amend", "aging_alert_count"):
+        assert token in orders_tab, f"the Orders tab is missing {token}"
+    # …and the action buttons are a real cell in the positions table.
+    assert "positionActionsCell(row)" in portfolio
+
+    deep_dive = (REPO_ROOT / "src/backtest/web/static/js/deep_dive.js").read_text(encoding="utf-8")
     for call in ("OptionView.bookStats", "OptionView.structureRows",
                  "OptionView.exitReasonLabel", "OptionView.isOptionTrade"):
         assert call in deep_dive, f"drawer does not use {call}"
 
 
 def test_option_columns_have_styles():
-    css = (REPO_ROOT / "src/backtest/web/static/css/app.css").read_text()
+    css = (REPO_ROOT / "src/backtest/web/static/css/app.css").read_text(encoding="utf-8")
     assert ".badge-option" in css
     assert ".dd-stats-4" in css
     assert ".opt-total" in css
+
+
+def test_the_action_surface_carries_its_handles():
+    """The DOM contract PositionActions / OrdersTab are wired against.
+
+    The components resolve rows and modals by id at click time (no per-row
+    listeners), so a renamed id fails silently in the browser — pin the handles
+    the templates promise: the positions table's tbody, the four action modals
+    with their submit buttons, and the Orders tab's filter/readout elements.
+    """
+    center = (REPO_ROOT / "src/backtest/web/templates/_portfolio_center.html").read_text(
+        encoding="utf-8"
+    )
+    for token in ('data-tab="orders"', 'id="orders-tab-badge"', 'id="tab-orders"',
+                  'id="orders-body"', 'id="orders-summary"', 'id="orders-status"',
+                  'id="orders-limit"', 'id="orders-search"', 'id="orders-refresh"',
+                  'id="orders-aging-only"',
+                  'id="aggregate-positions"', 'id="pos-search"', 'id="pos-rules-only"',
+                  'id="pos-summary"', 'id="pos-footnote"'):
+        assert token in center, f"command center is missing {token}"
+    for control in ("pos-sl-modal", "pos-sl-value", "pos-sl-submit", "pos-sl-clear",
+                    "pos-target-modal", "pos-target-value", "pos-target-submit",
+                    "pos-target-clear", "pos-partial-modal", "pos-partial-value",
+                    "pos-partial-submit", "pos-closeall-modal", "pos-closeall-confirm",
+                    # Phase 3: amending a working order.
+                    "order-modify-modal", "order-modify-context", "order-modify-qty",
+                    "order-modify-price", "order-modify-submit"):
+        assert 'id="' + control + '"' in center, f"missing control {control}"
+    # The Actions column is a header the operator can see, not just markup that
+    # only appears inside rows.
+    assert "Actions" in center
+
+
+def test_the_action_and_order_styles_exist():
+    css = (REPO_ROOT / "src/backtest/web/static/css/app.css").read_text(encoding="utf-8")
+    for cls in (".pos-actions", ".pos-modal-context", ".pos-modal-line",
+                ".pos-fraction-row", ".pos-row-stale", ".opt-leg-row",
+                ".orders-summary", ".orders-stat", ".order-status", ".tab-badge",
+                ".order-row-warn", ".order-row-alert", ".order-aging-warn",
+                ".order-aging-alert"):
+        assert cls in css, f"missing style {cls}"
+    # Adverse slippage must read as a loss, and a working order must be visible.
+    assert ".order-row.order-pending" in css
+    assert ".order-row.order-rejected" in css
+    for stale_cls in (
+        ".badge-stale-mark",
+        ".stale-mark-row",
+        ".row-btn-refresh-marks",
+        ".refresh-marks-result",
+        ".stale-mark-summary",
+    ):
+        assert stale_cls in css, f"missing staleness style {stale_cls}"
+
+
+@requires_node
+def test_stale_mark_live_drill_renders_badge_tooltip_and_refresh_button(
+    option_runner, tmp_path, monkeypatch
+):
+    """AC #2 & AC #10 (Live drill): Kill the quote session on a running option
+    runner, wait 3 bars, and verify the rendered dashboard visibly shows
+    '⚠ stale mark' badge, 'last good quote ... — ...' tooltip, 'stale-mark-row'
+    highlight, and '↻ Refresh marks' button in matrix, positions, and deep-dive.
+    """
+    pin_session_clock(monkeypatch)
+    bridge = option_runner.options_bridge
+    assert bridge is not None
+    assert bridge.open_structure_id is not None
+    # Hold the structure open through the 3-bar drill instead of time-stopping on bar 2
+    from backtest.options.exit_policy import ExitConfig, ExitPolicy
+
+    bridge.exit_policy = ExitPolicy(ExitConfig(max_bars=None, min_days_to_expiry=1))
+
+    class _KilledSessionQuoteProvider:
+        source_name = "live:mstock"
+        generator = bridge.quote_provider.generator
+
+        def register_contract(self, contract):
+            pass
+
+        def get_quote(self, token):
+            return {"error": f"unknown option contract {token!r} (session killed)"}
+
+    bridge.quote_provider = _KilledSessionQuoteProvider()
+
+    # Wait 3 bars after killing the broker session
+    for bar in _bars([25_700, 25_750, 25_800], day_offset=12):
+        option_runner.process_candle_event("NIFTY", bar)
+
+    # The kill leaves the marks frozen, so age them past the SLA in session time
+    # (§8.1) — the drill must not depend on the wall clock it runs at.
+    stale_marks(bridge, bridge.stale_after_seconds + 1)
+
+    row = option_runner.get_state()
+    detail = option_runner.get_detail()
+    assert row["mark_stale"] is True
+    assert bridge.mark_age_seconds() > bridge.stale_after_seconds
+    assert "session killed" in (row["quote_error"] or "")
+    assert row["mark_ts"] is not None
+
+    summary = {
+        "success": True,
+        "portfolio": {
+            "total_equity": row["equity"],
+            "open_positions": row["open_positions"],
+            "stale_marks_count": row["stale_positions"],
+            "runners": [row],
+            "positions": [
+                {
+                    "instance_id": row["instance_id"],
+                    "runner": row["name"],
+                    "status": row["status"],
+                    "stale": False,
+                    **s,
+                    "legs": s["legs_detail"],
+                }
+                for s in row["options"]["open_structures_detail"]
+            ],
+            "buckets": {},
+        },
+    }
+    (tmp_path / "summary.json").write_text(json.dumps(summary, default=str))
+    (tmp_path / "stale_detail.json").write_text(json.dumps(detail, default=str))
+
+    sections = _render(tmp_path, "stale_detail.json")
+
+    # Matrix row has stale-mark-row, ⚠ stale mark badge, tooltip, and ↻ Refresh marks button
+    assert "⚠ stale mark" in sections["MATRIX"]
+    assert "last good quote " in sections["MATRIX"]
+    assert "session killed" in sections["MATRIX"]
+    assert "stale-mark-row" in sections["MATRIX"]
+    assert "↻ Refresh marks" in sections["MATRIX"]
+    assert 'data-act="refresh_marks"' in sections["MATRIX"]
+
+    # Positions table has ⚠ stale mark badge and tooltip on structure and leg rows
+    assert "⚠ stale mark" in sections["POSITIONS"]
+    assert "last good quote " in sections["POSITIONS"]
+    assert "stale-mark-row" in sections["POSITIONS"]
+
+    # Deep-dive drawer has ⚠ stale mark badge and tooltip on structure and leg rows
+    assert "⚠ stale mark" in sections["DEEPDIVE"]
+    assert "last good quote " in sections["DEEPDIVE"]
+    assert "stale-mark-row" in sections["DEEPDIVE"]
+

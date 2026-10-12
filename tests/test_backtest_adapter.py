@@ -107,7 +107,17 @@ def test_to_compare_combines_payload():
 
 def test_to_all_is_json_serializable():
     out = _adapter().to_all()
-    assert set(out) == {"config", "metrics", "equity", "drawdown", "trades", "signals"}
+    # PRD §3: benchmark + monte_carlo ride on the same payload as the cards.
+    assert set(out) == {
+        "config",
+        "metrics",
+        "equity",
+        "drawdown",
+        "trades",
+        "signals",
+        "benchmark",
+        "monte_carlo",
+    }
     # must round-trip through json (no numpy scalars / Timestamps)
     json.dumps(out)
     assert out["config"]["strategy"] == "sma_crossover"

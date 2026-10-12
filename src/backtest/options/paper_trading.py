@@ -21,11 +21,13 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Any, Protocol
 
+from backtest.live.market_status import IST, MARKET_CLOSE_TIME, MARKET_OPEN_TIME
+from backtest.options.execution_gate import V1_ALLOWED_STRUCTURES, check_intent
 from backtest.strategy.intent import (
     OptionLeg,
     TradeIntent,
@@ -34,6 +36,96 @@ from backtest.strategy.intent import (
 logger = logging.getLogger("backtest.options.paper_trading")
 
 ZERO = Decimal("0")
+
+#: How old a held leg's last successful mark may get before the mark counts as
+#: stale (PRD §4.1/§8.1 freshness SLA). Measured in market-session seconds, not
+#: bar counts: a feed that stops delivering bars produces no *failed* marks at
+#: all, so counting failures never notices the freeze. Sized to clear the R6
+#: watchdog (60 s pass, 120 s repair age) so a healthy book never trips it;
+#: calibrate per underlying against the soak's measured latency distribution.
+STALE_AFTER_SECONDS = 180.0
+
+#: Marks may age only while the exchange is trading (§4.4: the exchange clock is
+#: authoritative), so the session window is part of the metric, not a filter.
+_SESSION_OPEN = MARKET_OPEN_TIME
+_SESSION_CLOSE = MARKET_CLOSE_TIME
+#: Days of session time an age may span before the arithmetic stops counting.
+#: A mark that old is past every SLA in use, and the loop stays bounded.
+_MAX_AGE_DAYS = 30
+
+
+def _now_utc() -> datetime:
+    """The freshness clock's single 'now' — patch this to test ageing deterministically."""
+    return datetime.now(timezone.utc)
+
+
+def _utc(dt: datetime | None) -> datetime | None:
+    """Normalise a possibly-naive timestamp to aware UTC (marks are naive UTC)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _session_seconds_between(mark: datetime, reference: datetime) -> float:
+    """Seconds of NSE session time in ``[mark, reference]`` (both aware UTC).
+
+    Time outside 09:15–15:30 IST is not counted: nobody can refresh a mark while
+    the exchange is shut, so a book carried overnight has not aged. Weekends are
+    skipped by the weekday rule; a market holiday is counted as a full session
+    because the holiday calendar is a DB read and this runs on every dashboard
+    row — over-reporting age errs toward halting, which is the safe side.
+    """
+    start = mark.astimezone(IST)
+    end = reference.astimezone(IST)
+    if end <= start:
+        return 0.0
+    total = 0.0
+    day = start.date()
+    sessions = 0
+    while day <= end.date() and sessions < _MAX_AGE_DAYS:
+        if day.weekday() < 5:
+            open_dt = datetime.combine(day, _SESSION_OPEN, tzinfo=IST)
+            close_dt = datetime.combine(day, _SESSION_CLOSE, tzinfo=IST)
+            total += max(
+                0.0,
+                (min(close_dt, end) - max(open_dt, start)).total_seconds(),
+            )
+            sessions += 1
+        day += timedelta(days=1)
+    return total
+
+
+def session_is_open(now: datetime | None = None) -> bool:
+    """Whether the NSE session is trading at ``now`` (naive timestamps are UTC).
+
+    Pure clock arithmetic: the freshness gate asks this on every mark, so it may
+    not reach for the holiday master, which is a database read. Weekends are shut
+    by the weekday rule and a market holiday counts as open — over-reporting
+    staleness halts entries, which is the safe direction.
+    """
+    reference = _utc(now) or _now_utc()
+    ist_time = reference.astimezone(IST).time()
+    return _SESSION_OPEN <= ist_time <= _SESSION_CLOSE
+
+
+def _age_seconds(last_updated: datetime | None, now: datetime | None) -> float | None:
+    """Market-session seconds since ``last_updated``, or ``None`` with no mark."""
+    stamp = _utc(last_updated)
+    if stamp is None:
+        return None
+    reference = _utc(now) or _now_utc()
+    return max(0.0, _session_seconds_between(stamp, reference))
+
+
+def _iso_utc(dt: datetime | None) -> str | None:
+    """Format ``dt`` as an unambiguous ISO-8601 UTC string."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc).isoformat()
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +188,41 @@ class OptionPosition:
     closed_at: datetime | None = None
     last_updated: datetime = field(default_factory=datetime.utcnow)
 
+    # Mark freshness observability (MTM Staleness PRD R1)
+    mtm_failures: int = 0
+    last_quote_error: str | None = None
+
     # Metadata
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def mark_ts(self) -> str | None:
+        """ISO-8601 UTC timestamp of the last successful quote mark (R1)."""
+        return _iso_utc(self.last_updated)
+
+    def mark_age_seconds(self, now: datetime | None = None) -> float | None:
+        """Market-session seconds since this leg's last mark (``None`` if never marked)."""
+        if self.status != PositionStatus.OPEN:
+            return None
+        return _age_seconds(self.last_updated, now)
+
+    def is_mark_stale(
+        self,
+        stale_after_seconds: float = STALE_AFTER_SECONDS,
+        now: datetime | None = None,
+    ) -> bool:
+        """True when the last successful mark is older than the freshness SLA.
+
+        Session time, not failed attempts: a stalled feed stops producing bars
+        (and so stops producing failures), which is exactly the case the SLA
+        must catch.
+        """
+        age = self.mark_age_seconds(now)
+        return (
+            self.status == PositionStatus.OPEN
+            and age is not None
+            and age > float(stale_after_seconds)
+        )
 
     @property
     def total_quantity(self) -> int:
@@ -157,10 +282,25 @@ class OptionPosition:
         self.last_updated = self.closed_at
         return self.realized_pnl
 
-    def update_mtm(self, price: Decimal, timestamp: datetime | None = None) -> Decimal:
-        """Update current price/P&L, using the supplied market clock if present."""
+    def update_mtm(self, price: Decimal) -> Decimal:
+        """Update current price and recalculate unrealized P&L."""
         self.current_price = price
-        self.last_updated = timestamp or datetime.utcnow()
+        self.last_updated = datetime.utcnow()
+        self.mtm_failures = 0
+        self.last_quote_error = None
+        return self.calculate_unrealized_pnl()
+
+    def record_mtm_failure(self, error: str | None = None) -> Decimal:
+        """Record a failed quote attempt while holding the last known mark (R1).
+
+        Increments ``mtm_failures`` and records ``last_quote_error`` without
+        advancing ``last_updated`` (so ``mark_ts`` remains the timestamp of
+        the last *successful* mark).
+        """
+        self.mtm_failures += 1
+        self.last_quote_error = str(error or "empty quote row")
+        if self.current_price <= 0 and self.entry_price > 0:
+            self.current_price = self.entry_price
         return self.calculate_unrealized_pnl()
 
 
@@ -213,6 +353,51 @@ class StructurePosition:
     def total_commission(self) -> Decimal:
         return sum(leg.commission for leg in self.legs)
 
+    @property
+    def mark_ts(self) -> str | None:
+        """Oldest successful mark timestamp across open legs (R1)."""
+        open_legs = [leg for leg in self.legs if leg.status == PositionStatus.OPEN]
+        if not open_legs:
+            open_legs = list(self.legs)
+        stamps = [_utc(leg.last_updated) for leg in open_legs if leg.last_updated is not None]
+        if not stamps:
+            return None
+        return min(stamps).isoformat()
+
+    @property
+    def mtm_failures(self) -> int:
+        open_legs = [leg for leg in self.legs if leg.status == PositionStatus.OPEN]
+        return max((leg.mtm_failures for leg in open_legs), default=0)
+
+    @property
+    def quote_error(self) -> str | None:
+        for leg in self.legs:
+            if leg.status == PositionStatus.OPEN and leg.last_quote_error:
+                return leg.last_quote_error
+        return None
+
+    def mark_age_seconds(self, now: datetime | None = None) -> float | None:
+        """Oldest mark across open legs — the structure is as fresh as its worst leg."""
+        ages = [
+            age
+            for leg in self.legs
+            if leg.status == PositionStatus.OPEN
+            for age in (leg.mark_age_seconds(now),)
+            if age is not None
+        ]
+        return max(ages) if ages else None
+
+    def is_mark_stale(
+        self,
+        stale_after_seconds: float = STALE_AFTER_SECONDS,
+        now: datetime | None = None,
+    ) -> bool:
+        return any(
+            leg.is_mark_stale(stale_after_seconds, now)
+            for leg in self.legs
+            if leg.status == PositionStatus.OPEN
+        )
+
 
 # ---------------------------------------------------------------------------
 # Quote provider protocol
@@ -225,6 +410,45 @@ class QuoteProvider(Protocol):
         """Return ``{"ltp": float, "bid": float, "ask": float, ...}``."""
         ...
 
+    def register_contract(self, contract: Any) -> None:
+        """Register an option contract so token → symbol resolution survives restarts (R3)."""
+        ...
+
+
+def _execution_quote(provider: Any, instrument_token: str, side: str) -> dict[str, Any]:
+    """Fill-price quote for one leg (PRD §4.1 cross-the-spread seam).
+
+    When the provider offers ``execution_quote`` (the
+    :class:`~backtest.options.quote_providers.BidAskQuoteProvider` wrapper the
+    runner path installs by default), fills cross the spread — buy at ask, sell
+    at bid — and a one-sided or zero book raises ``NoExecutableQuoteError``
+    rather than pricing the leg off LTP. Providers without the seam keep the
+    older behaviour: fill at LTP.
+    """
+    execution_quote = getattr(provider, "execution_quote", None)
+    if callable(execution_quote):
+        quote = execution_quote(instrument_token, side)
+        # Guard against duck-typing accidents (e.g. MagicMock providers in
+        # tests "have" every attribute): only trust a real quote dict.
+        if isinstance(quote, dict):
+            return quote
+    return provider.get_quote(instrument_token)
+
+
+def _mark_quote(provider: Any, instrument_token: str, side: str) -> dict[str, Any]:
+    """Mark price for a held leg — what closing it right now would fetch.
+
+    A provider with a ``mark_quote`` seam marks conservatively (PRD §4.2): bid
+    on a long leg, ask on a short one, never LTP. Providers without it mark off
+    LTP as before.
+    """
+    mark_quote = getattr(provider, "mark_quote", None)
+    if callable(mark_quote):
+        quote = mark_quote(instrument_token, side)
+        if isinstance(quote, dict):
+            return quote
+    return provider.get_quote(instrument_token)
+
 
 class FakeQuoteProvider:
     """Returns a fixed price for all instruments (for testing)."""
@@ -232,6 +456,12 @@ class FakeQuoteProvider:
     def __init__(self, default_price: float = 100.0) -> None:
         self.default_price = default_price
         self.prices: dict[str, float] = {}
+        self._contracts: dict[str, Any] = {}
+
+    def register_contract(self, contract: Any) -> None:
+        token = str(getattr(contract, "instrument_token", "") or "")
+        if token:
+            self._contracts[token] = contract
 
     def get_quote(self, instrument_token: str) -> dict[str, Any]:
         price = self.prices.get(instrument_token, self.default_price)
@@ -267,6 +497,13 @@ class OptionPaperBroker:
         ``calculate_structure()`` on every execution, alongside the legacy
         ``commission_per_lot`` charge. Costs never block execution: a fee
         calculation error is logged and the trade proceeds.
+    allowed_structures:
+        Execution-gate whitelist (see
+        :mod:`backtest.options.execution_gate`). Defaults to the V1 set —
+        one long call or one long put — so a structure the V1 contract forbids
+        cannot fill here even when it arrives as a hand-built intent. A
+        research profile that genuinely needs spreads passes
+        ``RESEARCH_STRUCTURES`` explicitly.
     """
 
     def __init__(
@@ -277,6 +514,7 @@ class OptionPaperBroker:
         fee_calculator: Any | None = None,
         on_structure_opened: Any | None = None,
         on_structure_closed: Any | None = None,
+        allowed_structures: Any | None = None,
     ) -> None:
         self.capital = Decimal(str(capital))
         self.available_cash = Decimal(str(capital))
@@ -284,6 +522,11 @@ class OptionPaperBroker:
         self.commission_per_lot = Decimal(str(commission_per_lot))
         self.fee_calculator = fee_calculator
         self._statutory_fees_paid = ZERO
+        self.allowed_structures = frozenset(
+            allowed_structures
+            if allowed_structures is not None
+            else V1_ALLOWED_STRUCTURES
+        )
 
         # Gap G4.2 observers — fired after every state transition so the
         # persistence layer (or tests) can mirror the book. Exceptions in an
@@ -333,11 +576,15 @@ class OptionPaperBroker:
 
         Raises
         ------
+        StructureNotAllowedError
+            If the intent fails the execution gate (see ``allowed_structures``).
         InsufficientMarginError
             If available cash is insufficient for the net debit.
         LotSizeValidationError
             If any leg has invalid lot size.
         """
+        check_intent(intent, self.allowed_structures)
+
         ts = timestamp or datetime.utcnow()
 
         # Validate lot sizes
@@ -348,10 +595,20 @@ class OptionPaperBroker:
         fills = []
         net_cost = ZERO
         for leg in intent.legs:
-            quote = quote_provider.get_quote(leg.instrument_token)
+            quote = _execution_quote(quote_provider, leg.instrument_token, leg.side)
             fill_price = self._apply_slippage(
                 Decimal(str(quote.get("ltp", 0))), leg.side
             )
+            # Unpriceable leg guard (live-session lesson 2026-09-21): a
+            # transient broker failure surfaces as ltp=0. Filling at 0
+            # books a phantom ₹0 entry and the exit then books the WHOLE
+            # premium as profit. A live market never sells an option for
+            # ₹0 — reject the structure instead of filling blind.
+            if fill_price <= 0:
+                raise InsufficientMarginError(
+                    f"no live quote for {leg.trading_symbol or leg.instrument_token} "
+                    "(ltp=0) — structure rejected rather than filled at a phantom price"
+                )
             leg_cost = fill_price * Decimal(str(leg.total_quantity))
             commission = self.commission_per_lot * Decimal(str(leg.quantity))
 
@@ -502,8 +759,27 @@ class OptionPaperBroker:
         closing_fills: list[dict[str, Any]] = []
 
         for position in open_legs:
-            quote = quote_provider.get_quote(position.instrument_token)
-            exit_price = Decimal(str(quote.get("ltp", 0)))
+            quote = _execution_quote(
+                quote_provider,
+                position.instrument_token,
+                "SELL" if position.is_long else "BUY",
+            )
+            is_failed_quote = (
+                not isinstance(quote, dict)
+                or not quote
+                or bool(quote.get("error"))
+            )
+            if is_failed_quote:
+                # Fail-closed exit: if the quote provider fails during a close,
+                # settle at the last known mark (or entry price) rather than
+                # booking a fake ₹0.00 fill.
+                exit_price = (
+                    position.current_price
+                    if position.current_price > 0
+                    else position.entry_price
+                )
+            else:
+                exit_price = Decimal(str(quote.get("ltp", 0) or 0))
             exit_price = self._apply_slippage(exit_price, "SELL" if position.is_long else "BUY")
 
             pnl = position.close(exit_price, ts)
@@ -567,20 +843,83 @@ class OptionPaperBroker:
     ) -> Decimal:
         """Update MTM for all open positions.
 
-        Returns total unrealized P&L across all open positions. Historical
-        replay supplies ``timestamp`` so position audit fields remain on the
-        same deterministic exchange clock as the fills.
+        Returns total unrealized P&L across all open positions.
+
+        ``timestamp`` is accepted for interface symmetry with
+        :meth:`execute_structure` / :meth:`close_structure`; MTM updates
+        always stamp positions with wall-clock time.
+
+        Atomic structure marking: for multi-leg structures, quotes are fetched
+        for all open legs first. If any leg of a structure fails its quote,
+        none of the legs in that structure overwrite ``current_price`` (avoiding
+        a partial-leg "Frankenstein spread" mark), while failing legs increment
+        ``mtm_failures`` and store ``last_quote_error``.
         """
         total_unrealized = ZERO
+        open_positions = [
+            p for p in self._positions.values() if p.status == PositionStatus.OPEN
+        ]
+        if not open_positions:
+            return total_unrealized
 
-        for position in self._positions.values():
-            if position.status != PositionStatus.OPEN:
-                continue
+        # Group open positions by structure_id so multi-leg structures mark atomically.
+        groups: dict[str, list[OptionPosition]] = {}
+        for pos in open_positions:
+            key = pos.structure_id or f"_pos:{pos.position_id}"
+            groups.setdefault(key, []).append(pos)
 
-            quote = quote_provider.get_quote(position.instrument_token)
-            price = Decimal(str(quote.get("ltp", 0)))
-            pnl = position.update_mtm(price, timestamp=timestamp)
-            total_unrealized += pnl
+        raised_exc: Exception | None = None
+
+        for group_positions in groups.values():
+            leg_outcomes: list[tuple[OptionPosition, bool, Decimal, str | None]] = []
+            for position in group_positions:
+                try:
+                    quote = _mark_quote(
+                        quote_provider, position.instrument_token, position.side
+                    )
+                except Exception as exc:  # noqa: BLE001 — record failure before re-raising
+                    raised_exc = exc
+                    leg_outcomes.append((position, True, ZERO, str(exc)))
+                    continue
+
+                if not isinstance(quote, dict) or not quote:
+                    leg_outcomes.append((position, True, ZERO, "empty quote row"))
+                    continue
+
+                price = Decimal(str(quote.get("ltp", 0) or 0))
+                # Fail-closed marking (2026-09-23 + R1/AC #3): a FAILED quote
+                # (empty row / error key from a dead session or unknown token)
+                # must not overwrite the last known price. A GENUINE zero
+                # (ltp=0 with NO "error" key) passes through and updates the
+                # mark to 0 with mark_stale=False.
+                if bool(quote.get("error")):
+                    leg_outcomes.append(
+                        (position, True, price, str(quote.get("error")))
+                    )
+                else:
+                    leg_outcomes.append((position, False, price, None))
+
+            any_failed = any(is_fail for _, is_fail, _, _ in leg_outcomes)
+            if any_failed:
+                for position, is_fail, _, err_msg in leg_outcomes:
+                    if is_fail:
+                        total_unrealized += position.record_mtm_failure(err_msg)
+                    else:
+                        # Sibling leg failed — keep this leg's last consistent
+                        # price so the structure net mark does not desync,
+                        # while clearing any stale error on this healthy leg.
+                        position.last_quote_error = None
+                        if position.current_price > 0:
+                            total_unrealized += position.calculate_unrealized_pnl()
+                        elif position.entry_price > 0:
+                            position.current_price = position.entry_price
+                            total_unrealized += position.calculate_unrealized_pnl()
+            else:
+                for position, _, price, _ in leg_outcomes:
+                    total_unrealized += position.update_mtm(price)
+
+        if raised_exc is not None:
+            raise raised_exc
 
         return total_unrealized
 

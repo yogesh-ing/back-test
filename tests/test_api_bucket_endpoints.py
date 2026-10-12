@@ -29,6 +29,14 @@ from backtest.web.app import create_app
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _arm_live_orders(monkeypatch):
+    """F-12: these suites exercise live-BUCKET accounting; arm the gateway
+    with the support module's fake venue (see live_test_support)."""
+    monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
+
+
 @pytest.fixture
 def app():
     """Create Flask test app with synthetic source."""
@@ -52,7 +60,10 @@ def manager(app):
     mgr = _manager()
     mgr.shutdown()
     # Recreate clean
+    from live_test_support import ARMED_KWARGS
+
     mgr = reset_portfolio_manager(
+        **ARMED_KWARGS,
         risk_config=GlobalRiskConfig(daily_loss_limit=100_000, max_drawdown_pct=0.50),
         auto_start_feed=False,
     )

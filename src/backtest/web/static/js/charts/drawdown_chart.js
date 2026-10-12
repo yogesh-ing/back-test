@@ -21,8 +21,8 @@ function renderDrawdownChart(canvasId, data) {
                 {
                     label: "Drawdown",
                     data: data.values.map((v) => v * 100),
-                    borderColor: "#ef4444",
-                    backgroundColor: "rgba(239,68,68,.15)",
+                    borderColor: "#e0938f",
+                    backgroundColor: "rgba(224,147,143,.15)",
                     tension: 0.15,
                     pointRadius: 0,
                     borderWidth: 2,

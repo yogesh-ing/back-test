@@ -136,6 +136,20 @@ class BrokerAuthBase(ABC):
     def logout(self) -> None:
         """Clear all in-memory session state (token, expiry, temp context)."""
 
+    def is_authenticated(self) -> bool:
+        """True while a valid session exists (``authenticated``/``expiring_soon``).
+
+        Concrete default so gateways/routers can gate order calls on any
+        broker implementation (fail-closed: any error reads as False).
+        """
+        try:
+            return self.get_session_status().get("status") in (
+                STATUS_AUTHENTICATED,
+                STATUS_EXPIRING_SOON,
+            )
+        except Exception:  # noqa: BLE001 — an order gate must never crash open
+            return False
+
 
 # ---------------------------------------------------------------------------
 # Order lifecycle values (ticket P3.1)

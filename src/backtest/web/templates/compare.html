@@ -1,19 +1,37 @@
 {% extends "base.html" %}
-{% block title %}Compare · Trading Bot{% endblock %}
+{% from "_macros.html" import icon, page_header %}
+{% block title %}Compare Backtests · Trading Bot{% endblock %}
 
 {% block content %}
-<h1 class="page-title">Compare</h1>
-<p class="muted small page-sub">Run 2–4 strategy / timeframe combinations side by side.</p>
+{% call page_header('Research / Side-by-side analysis', 'Compare strategies', 'Test 2–4 combinations under the same conditions. Find the differences that actually matter.') %}
+    <a href="/analytics" class="btn btn-ghost">{{ icon('chart', 15) }} Trading analytics {{ icon('arrow-up-right', 13) }}</a>
+{% endcall %}
+
+<!-- ================= WHAT ARE WE COMPARING? (PRD §4.2) ================= -->
+<div class="card mode-bar">
+    <div class="mode-toggle" role="radiogroup" aria-label="Comparison mode">
+        <button class="mode-btn active" data-mode="strategies" role="radio" aria-checked="true">
+            <strong>Compare Strategies</strong>
+            <span class="muted small">different strategies or parameters, one symbol</span>
+        </button>
+        <button class="mode-btn" data-mode="generalization" role="radio" aria-checked="false">
+            <strong>Test Generalization</strong>
+            <span class="muted small">one strategy &amp; parameter set, up to 4 symbols</span>
+        </button>
+    </div>
+    <p class="mode-note muted small"></p>
+</div>
 
 <!-- ================= SHARED CONFIG ================= -->
 <div class="card shared-config">
     <div class="shared-grid">
         <div class="form-row">
             <label for="symbol">Symbol</label>
+            <div id="symbol-tabs" class="sym-tabs"></div>
             <select id="symbol" class="input">
-                <option>DEMO</option><option>BTCUSD</option><option>ETHUSD</option>
-                <option>NIFTY</option><option>INFY</option>
+                <option>Loading…</option>
             </select>
+            <small id="symbol-status" class="text-muted"></small>
         </div>
         <div class="form-row">
             <label for="fromDate">From</label>
@@ -27,46 +45,90 @@
             <label for="capital">Capital ({{ currency_symbol }})</label>
             <input type="number" id="capital" class="input" value="10000" min="1">
         </div>
+        <div class="form-row" id="sharedTimeframeRow">
+            <label for="sharedTimeframe" title="Applies to EVERY slot. A 5-minute and a daily run are not comparable, so the timeframe is a shared condition rather than a per-slot choice.">
+                Timeframe
+            </label>
+            <select id="sharedTimeframe" class="input"></select>
+        </div>
+        <div class="form-row">
+            <label class="small" title="Applies to EVERY slot. Vectorized screen: previous-close fills and an approximate cost model — faster, but not what a paper or live run reproduces.">
+                <input type="checkbox" id="fastPreview"> Fast Preview <span class="muted">(approximate engine, all slots)</span>
+            </label>
+        </div>
+    </div>
+</div>
+
+<!-- ================= GENERALIZATION SETUP (§4.2) ================= -->
+<div class="card generalization-setup" id="generalizationSetup" hidden>
+    <h2 class="card-title inline">The one strategy under test</h2>
+    <p class="muted small">
+        Every symbol below runs this exact strategy with this exact parameter set, over the same dates
+        and capital. Change it once and all four change.
+    </p>
+    <div class="gen-grid">
+        <div class="form-row">
+            <label for="genStrategy">Strategy</label>
+            <select id="genStrategy" class="input"></select>
+        </div>
+        <div id="genParams" class="gen-params"></div>
     </div>
 </div>
 
 <!-- ================= SLOTS ================= -->
 <div class="slots-head">
-    <h2 class="card-title inline">Slots</h2>
+    <h2 class="card-title inline" id="slotsTitle">Slots</h2>
     <div class="actions">
-        <button id="addSlotBtn" class="btn">+ Add Slot</button>
-        <button id="runAllBtn" class="btn btn-primary">▶ Run All</button>
+        <button id="addSlotBtn" class="btn">{{ icon('plus', 13) }} Add slot</button>
+        <button id="runAllBtn" class="btn btn-primary">{{ icon('play', 13) }} Run comparison</button>
     </div>
 </div>
 <div id="slotsRow" class="slots-row"></div>
 
+<!-- Stored comparisons ledger (run-persistence PRD R4): tiles read
+     GET /api/backtest/compares; loading one never touches the process pool. -->
+<section id="compareHistory" class="recent-runs" hidden></section>
+
 <!-- ================= RESULTS ================= -->
 <section id="results" class="results-panel" hidden>
+    <div id="comparePersistBadge" class="prov-strip" hidden></div>
+    <div id="compareProvenance" class="prov-strip"></div>
     <div class="card">
         <div class="tabs">
             <button class="tab active" data-tab="metrics">Metrics Table</button>
             <button class="tab" data-tab="equity">Equity Curves</button>
             <button class="tab" data-tab="drawdown">Drawdown</button>
+            <button class="tab" data-tab="comparison">Comparison</button>
         </div>
         <div class="tab-body">
             <div class="tab-pane active" data-pane="metrics">
                 <div class="table-scroll"><table id="compareTable" class="data-table compare-table"></table></div>
             </div>
-            <div class="tab-pane" data-pane="equity"><div class="chart-wrap"><canvas id="equityCompareChart"></canvas></div></div>
+            <div class="tab-pane" data-pane="equity">
+                <p class="pane-note muted small">Every curve is indexed to 100 at the first shared date, so the chart compares how the slots performed — not what they happened to start with.</p>
+                <div class="chart-wrap"><canvas id="equityCompareChart"></canvas></div>
+            </div>
             <div class="tab-pane" data-pane="drawdown"><div class="chart-wrap"><canvas id="drawdownCompareChart"></canvas></div></div>
+            <div class="tab-pane" data-pane="comparison">
+                <div id="comparePanels" class="cmp-panels"></div>
+            </div>
         </div>
     </div>
 </section>
 
 <section id="emptyState" class="empty-state card">
-    <p class="muted">Configure slots and click <strong>Run All</strong> to compare.</p>
+    <div class="empty-icon">{{ icon('compare', 23) }}</div><h3>Put your ideas side by side.</h3><p class="muted">Configure your strategy slots, then run a comparison to see performance, drawdowns and trade-offs.</p>
 </section>
 {% endblock %}
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/components/params_form.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/provenance.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/symbol_picker.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/timeframes.js') }}"></script>
 <script src="{{ url_for('static', filename='js/compare/metrics_table.js') }}"></script>
 <script src="{{ url_for('static', filename='js/compare/equity_compare_chart.js') }}"></script>
 <script src="{{ url_for('static', filename='js/compare/drawdown_compare_chart.js') }}"></script>
+<script src="{{ url_for('static', filename='js/compare/comparison_panels.js') }}"></script>
 <script src="{{ url_for('static', filename='js/compare.js') }}"></script>
 {% endblock %}

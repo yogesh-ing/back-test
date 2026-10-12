@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Theme Proposal — Current vs Softened Dark</title>
+<style>
+/* ============================================================
+   DEMO ONLY — not wired into the app.
+   Left column: current palette (app.css today)
+   Right column: proposed palette (Radix-style 12-step thinking)
+   Pure CSS variables. No frameworks, no JS beyond a scroll nicety.
+   ============================================================ */
+
+:root {
+    font-size: 15px;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { padding: 24px; color: var(--text); }
+h1 { font-size: 1.3rem; margin-bottom: 4px; }
+.sub { color: #94a3b8; font-size: .85rem; margin-bottom: 20px; }
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+@media (max-width: 1100px) { .compare { grid-template-columns: 1fr; } }
+
+/* ------------------------------------------------------------
+   THEME A — CURRENT (app.css today)
+   ------------------------------------------------------------ */
+.theme-current {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface-2: #273449;
+    --border: #334155;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #8b5cf6;
+    --success: #22c55e;
+    --danger: #ef4444;
+    --warning: #f59e0b;
+
+    background: var(--bg);
+    color: var(--text);
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+/* ------------------------------------------------------------
+   THEME B — PROPOSED (softened dark, tinted severity)
+   Surfaces: three lightness steps, slightly blue-lifted.
+   Severity: tint (bg) / border / text / solid — a full ramp.
+   Solid saturated fills reserved for: HALT, destructive confirm, P&L.
+   ------------------------------------------------------------ */
+.theme-proposed {
+    /* surfaces — 3 elevation steps, barely blue, much softer than slate-900 */
+    --bg: #12161d;
+    --surface: #1a2029;
+    --surface-2: #212a36;
+    --border: #2a3442;
+
+    --text: #c9d2de;
+    --muted: #7f8b9e;
+
+    /* accent — muted steel-blue, present but quiet */
+    --accent: #5b8dbe;
+
+    /* SUCCESS ramp — desaturated, calm */
+    --success-tint: rgba(74, 140, 106, 0.10);
+    --success-border: rgba(74, 140, 106, 0.30);
+    --success-text: #7fc8a0;
+    --success: #4a8c6a;
+
+    /* DANGER ramp — muted brick, not fire-alarm */
+    --danger-tint: rgba(190, 92, 88, 0.09);
+    --danger-border: rgba(190, 92, 88, 0.30);
+    --danger-text: #e0938f;
+    --danger: #be5c58;
+
+    /* WARNING ramp — dim amber */
+    --warning-tint: rgba(198, 156, 84, 0.09);
+    --warning-border: rgba(198, 156, 84, 0.30);
+    --warning-text: #d4b26a;
+    --warning: #c69c54;
+
+    background: var(--bg);
+    color: var(--text);
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+.theme-label { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 14px; }
+.section-title { font-size: .8rem; color: var(--muted); margin: 18px 0 8px; }
+
+/* ---------------- shared component styles ---------------- */
+.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 12px;
+}
+.metric-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.metric {
+    background: var(--surface-2);
+    border-radius: 6px;
+    padding: 10px;
+}
+.metric .label { font-size: .68rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.metric .value { font-size: 1.15rem; font-weight: 700; margin-top: 2px; }
+
+/* state chips — the key difference:
+   A: solid fill;  B: tint + border + colored text */
+.chip {
+    display: inline-block; padding: 3px 10px; border-radius: 6px;
+    font-size: .75rem; font-weight: 600; margin-right: 6px;
+}
+.theme-current .chip-danger  { background: var(--danger);  color: #fff; }
+.theme-current .chip-warning { background: var(--warning); color: #1a1a1a; }
+.theme-current .chip-success { background: var(--success); color: #04120a; }
+.theme-proposed .chip-danger  { background: var(--danger-tint);  border: 1px solid var(--danger-border);  color: var(--danger-text); }
+.theme-proposed .chip-warning { background: var(--warning-tint); border: 1px solid var(--warning-border); color: var(--warning-text); }
+.theme-proposed .chip-success { background: var(--success-tint); border: 1px solid var(--success-border); color: var(--success-text); }
+
+/* alert banners */
+.banner { border-radius: 8px; padding: 12px 14px; font-size: .85rem; margin-bottom: 10px; border: 1px solid transparent; }
+.theme-current .banner-danger { background: var(--danger); color: #fff; }
+.theme-current .banner-warning { background: var(--warning); color: #1a1a1a; }
+.theme-proposed .banner-danger { background: var(--danger-tint); border-color: var(--danger-border); border-left: 3px solid var(--danger); color: var(--text); }
+.theme-proposed .banner-warning { background: var(--warning-tint); border-color: var(--warning-border); border-left: 3px solid var(--warning); color: var(--text); }
+.theme-proposed .banner-danger strong { color: var(--danger-text); }
+.theme-proposed .banner-warning strong { color: var(--warning-text); }
+
+/* table rows: severity in context */
+table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+th { text-align: left; color: var(--muted); font-weight: 600; font-size: .72rem; text-transform: uppercase; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+td { padding: 7px 8px; border-bottom: 1px solid var(--border); }
+.theme-current .row-dd-bad  td { background: var(--danger); color: #fff; }
+.theme-current .row-dd-warn td { background: var(--warning); color: #1a1a1a; }
+.theme-proposed .row-dd-bad  td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
+.theme-proposed .row-dd-bad  td:nth-child(3) { color: var(--danger-text); font-weight: 700; }
+.theme-proposed .row-dd-warn td:first-child { box-shadow: inset 3px 0 0 var(--warning); }
+.theme-proposed .row-dd-warn td:nth-child(3) { color: var(--warning-text); font-weight: 700; }
+.pos { color: var(--success); }
+.theme-proposed .pos { color: var(--success-text); }
+.neg { color: var(--danger); }
+.theme-proposed .neg { color: var(--danger-text); }
+
+/* buttons */
+.btn { display: inline-block; padding: 6px 14px; border-radius: 6px; font-size: .82rem; font-weight: 600; border: 1px solid transparent; margin-right: 8px; cursor: pointer; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-ghost { background: transparent; color: var(--text); border-color: var(--border); }
+.btn-danger { background: var(--danger); color: #fff; }
+
+/* gauge: bar severity via ramp, not solid flood */
+.gauge { margin-top: 6px; }
+.gauge .bar { height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+.gauge .fill { height: 100%; border-radius: 4px; }
+.theme-current .fill-warn { background: var(--warning); }
+.theme-current .fill-bad  { background: var(--danger); }
+.theme-proposed .fill-warn { background: linear-gradient(90deg, var(--warning-tint), var(--warning)); }
+.theme-proposed .fill-bad  { background: linear-gradient(90deg, var(--danger-tint), var(--danger)); }
+.gauge .meta { display: flex; justify-content: space-between; font-size: .72rem; color: var(--muted); margin-top: 3px; }
+
+.halt {
+    border-radius: 8px; padding: 12px 14px; font-weight: 700; font-size: .9rem;
+    display: flex; gap: 10px; align-items: center;
+}
+/* HALT keeps the strongest treatment in the app — but even it is calm:
+   solid muted-brick fill + text emphasis, no glow, no pulse. */
+.theme-current .halt { background: var(--danger); color: #fff; }
+.theme-proposed .halt { background: var(--danger); color: #f7ede9; font-weight: 700; }
+
+.note { font-size: .78rem; color: var(--muted); margin-top: 4px; }
+</style>
+</head>
+<body>
+<h1>Theme proposal — softer dark, tinted severity</h1>
+<p class="sub">Same components, two palettes. Left = today's app.css. Right = CALM revision: desaturated ~40%, whisper-quiet tints, no glow — but the severity hierarchy (tint → border → text → solid) and the solid-red-only-for-HALT rule stay, because money is on the line.</p>
+
+<div class="compare">
+    <!-- ================= A: CURRENT ================= -->
+    <div class="theme-current">
+        <div class="theme-label">A · Current (solid fills)</div>
+
+        <div class="card">
+            <div class="metric-row">
+                <div class="metric"><div class="label">Total Return</div><div class="value neg">-3.2%</div></div>
+                <div class="metric"><div class="label">Sharpe</div><div class="value">0.42</div></div>
+                <div class="metric"><div class="label">Max DD</div><div class="value neg">-14.5%</div></div>
+                <div class="metric"><div class="label">Win Rate</div><div class="value">48%</div></div>
+            </div>
+        </div>
+
+        <div class="section-title">Status chips</div>
+        <div style="margin-bottom: 14px;">
+            <span class="chip chip-success">🟢 Healthy</span>
+            <span class="chip chip-warning">🟡 Watch</span>
+            <span class="chip chip-danger">🔴 Degraded</span>
+        </div>
+
+        <div class="section-title">Alert banners</div>
+        <div class="banner banner-danger"><strong>HALTED:</strong> daily loss limit breached</div>
+        <div class="banner banner-warning"><strong>Watch:</strong> NIFTY concentration 73% (max 60%)</div>
+
+        <div class="section-title">Comparison table</div>
+        <table>
+            <thead><tr><th>Strategy</th><th>Return</th><th>Max DD</th><th>Health</th></tr></thead>
+            <tbody>
+                <tr class="row-dd-bad"><td>Iron Condor V2</td><td>-6.1%</td><td>-18.2%</td><td>🔴 Degraded</td></tr>
+                <tr class="row-dd-warn"><td>EMA Reversion</td><td>+2.4%</td><td>-11.0%</td><td>🟡 Watch</td></tr>
+                <tr><td>VWAP Momentum</td><td class="pos">+8.9%</td><td>-4.3%</td><td>🟢 Healthy</td></tr>
+            </tbody>
+        </table>
+
+        <div class="section-title">Risk gauge</div>
+        <div class="gauge">
+            <div class="bar"><div class="fill fill-bad" style="width: 86%;"></div></div>
+            <div class="meta"><span>Deployed capital</span><span>86% · danger</span></div>
+        </div>
+
+        <div class="section-title">HALT banner (emergency)</div>
+        <div class="halt">🚨 LIVE BUCKET HALTED — drawdown breaker tripped</div>
+
+        <div class="section-title">Buttons</div>
+        <div style="margin-bottom: 8px;">
+            <span class="btn btn-primary">Deploy</span>
+            <span class="btn btn-ghost">Details</span>
+            <span class="btn btn-danger">🔴 Flatten All</span>
+        </div>
+        <p class="note">Problem: danger green/amber/red are equally loud everywhere — banners, chips, table rows, buttons. Nothing ranks.</p>
+    </div>
+
+    <!-- ================= B: PROPOSED ================= -->
+    <div class="theme-proposed">
+        <div class="theme-label">B · Proposed (tinted severity, 3 elevations)</div>
+
+        <div class="card">
+            <div class="metric-row">
+                <div class="metric"><div class="label">Total Return</div><div class="value neg">-3.2%</div></div>
+                <div class="metric"><div class="label">Sharpe</div><div class="value">0.42</div></div>
+                <div class="metric"><div class="label">Max DD</div><div class="value neg">-14.5%</div></div>
+                <div class="metric"><div class="label">Win Rate</div><div class="value">48%</div></div>
+            </div>
+        </div>
+
+        <div class="section-title">Status chips (tint + border + text)</div>
+        <div style="margin-bottom: 14px;">
+            <span class="chip chip-success">🟢 Healthy</span>
+            <span class="chip chip-warning">🟡 Watch</span>
+            <span class="chip chip-danger">🔴 Degraded</span>
+        </div>
+
+        <div class="section-title">Alert banners (left-edge + tint)</div>
+        <div class="banner banner-danger"><strong>HALTED:</strong> daily loss limit breached</div>
+        <div class="banner banner-warning"><strong>Watch:</strong> NIFTY concentration 73% (max 60%)</div>
+
+        <div class="section-title">Comparison table (severity = left edge + text color)</div>
+        <table>
+            <thead><tr><th>Strategy</th><th>Return</th><th>Max DD</th><th>Health</th></tr></thead>
+            <tbody>
+                <tr class="row-dd-bad"><td>Iron Condor V2</td><td class="neg">-6.1%</td><td>-18.2%</td><td>🔴 Degraded</td></tr>
+                <tr class="row-dd-warn"><td>EMA Reversion</td><td class="pos">+2.4%</td><td>-11.0%</td><td>🟡 Watch</td></tr>
+                <tr><td>VWAP Momentum</td><td class="pos">+8.9%</td><td>-4.3%</td><td>🟢 Healthy</td></tr>
+            </tbody>
+        </table>
+
+        <div class="section-title">Risk gauge (ramp fill, not flood)</div>
+        <div class="gauge">
+            <div class="bar"><div class="fill fill-bad" style="width: 86%;"></div></div>
+            <div class="meta"><span>Deployed capital</span><span>86% · danger</span></div>
+        </div>
+
+        <div class="section-title">HALT banner (solid red — the only place it lives)</div>
+        <div class="halt">🚨 LIVE BUCKET HALTED — drawdown breaker tripped</div>
+
+        <div class="section-title">Buttons</div>
+        <div style="margin-bottom: 8px;">
+            <span class="btn btn-primary">Deploy</span>
+            <span class="btn btn-ghost">Details</span>
+            <span class="btn btn-danger">🔴 Flatten All</span>
+        </div>
+        <p class="note">Effect: page is 90% calm neutrals; color marks state without flooding; solid red now means exactly one thing — live emergency.</p>
+    </div>
+</div>
+</body>
+</html>

@@ -37,6 +37,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import math
 import threading
 import time
 import uuid
@@ -49,14 +50,20 @@ from typing import Any, Callable, Deque, Dict, List, Optional
 
 import pandas as pd
 
-from backtest.data.base import CANONICAL_TIMEFRAMES, DataSource
+from backtest.data.base import CANONICAL_TIMEFRAMES, TIMEFRAME_MINUTES, DataSource
 from backtest.data.frame_source import FrameSource
 from backtest.data.source_tags import SOURCE_TAG_VALUES, SOURCE_TAGS, source_tag_for
+from backtest.data.sources_policy import (
+    default_broker_source,
+    policy_key,
+    require_synthetic,
+)
 from backtest.data.universe import get_universe_symbols
 from backtest.forward.options_bridge import OptionsBridge
 from backtest.simulator.engine_loop import OrderQueue, run_engine_loop
 from backtest.simulator.enums import OrderSide, OrderType, TimeInForce
 from backtest.simulator.execution import OrderExecutor, free_executor
+from backtest.simulator.fees import CommissionCalculator
 from backtest.simulator.order import Order as SimOrder
 from backtest.simulator.portfolio import Portfolio, PortfolioLimits
 from backtest.simulator.position_sizing import all_in_size
@@ -130,9 +137,50 @@ ORDER_REJECTED = "REJECTED"
 SIDE_BUY = "BUY"
 SIDE_SELL = "SELL"
 
+#: Manual position-management fields (Live Order Management). Both are PRICE
+#: levels: the equity mark for a share position, the signed net premium per
+#: unit for an option structure.
+RULE_STOP_LOSS = "stop_loss"
+RULE_TARGET = "target"
+POSITION_RULE_FIELDS = (RULE_STOP_LOSS, RULE_TARGET)
+
 MAX_LEDGER_ORDERS = 100_000  # ring-fence memory in long runs
 
+#: Order-aging thresholds (Phase 3, "order aging alerts"). A working order is
+#: normal for a few seconds and a problem after a minute: on a 1-minute
+#: validator fleet an order that is still PENDING after a bar has been seen
+#: means the venue is not answering, not that it is about to fill. WARN is
+#: "look at it", ALERT is "this is stuck — cancel or reconcile".
+ORDER_AGING_WARN_S = 60.0
+ORDER_AGING_ALERT_S = 300.0
+
 _ORDER_SEQ = itertools.count(1)
+
+
+class OrderRefused(RuntimeError):
+    """A send that did not become a working order (Phase 3).
+
+    Carries the pieces the retry path and the Orders tab need to act on a
+    failure instead of just logging it: which ledger row died, why, and
+    whether re-sending is SAFE.
+
+    ``retryable`` is a statement about the venue's state, not about the
+    error's severity: paper failures are retryable (nothing left the process),
+    while a live placement failure is not — a venue error can mean the order
+    was accepted and the acknowledgment was lost, and re-sending into that
+    ambiguity is how one intent becomes two live orders.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        client_order_id: Optional[str] = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.client_order_id = client_order_id
+        self.retryable = bool(retryable)
+        self.reason = str(message)
 
 
 @dataclass
@@ -162,6 +210,44 @@ class Order:
     avg_fill_price: Optional[float] = None
     filled_ts: Optional[str] = None
     tag: Dict = field(default_factory=dict)
+    #: F-12: venue order id once placed at the live broker (None for paper).
+    #: Survives state-file round-trips so a restart re-arms POLLING for the
+    #: same venue order instead of double-placing.
+    broker_order_id: Optional[str] = None
+    # -- Live Order Management (Orders tab) --------------------------------
+    #: The price the order was *sent* at (the bar/last price the runner saw).
+    #: Fills are compared against it to report real slippage instead of a
+    #: guess; None for orders replayed from an earlier process.
+    requested_price: Optional[float] = None
+    #: Per-unit slippage actually paid, **adverse-positive**: a BUY filled
+    #: above the request is positive, a SELL filled below it is positive.
+    #: Negative means the fill beat the request (price improvement).
+    slippage: Optional[float] = None
+    #: ``slippage / requested_price`` — comparable across symbols.
+    slippage_pct: Optional[float] = None
+    #: Why the order was rejected (ledger-level or broker-level). Set only
+    #: alongside ``status == ORDER_REJECTED``.
+    reject_reason: Optional[str] = None
+    #: Last status transition timestamp (fill/cancel/reject) — lets the UI
+    #: show "pending for 42s" instead of a lone creation time.
+    updated_ts: Optional[str] = None
+    # -- Phase 3: amending a working order --------------------------------
+    #: How many times the order was amended while working. An amended order
+    #: is still the SAME order — cancel and replace would lose the venue id
+    #: and the audit trail of what was originally asked for.
+    amend_count: int = 0
+    #: The amended quantity/limit the venue now holds (None = as originally
+    #: sent). ``requested_price`` deliberately stays the price the runner
+    #: DECIDED on, so slippage keeps measuring the fill against the original
+    #: instruction and never shifts under the operator's feet.
+    amended_quantity: Optional[float] = None
+    amended_limit_price: Optional[float] = None
+    amended_ts: Optional[str] = None
+    #: Retry lineage (Phase 3 auto-retry): the coid of the attempt this order
+    #: re-placed, and which attempt it is. Kept in ``tag`` as well so it
+    #: survives the ledger's row → dict conversion without a schema change.
+    retry_of: Optional[str] = None
+    retry_attempt: int = 0
 
 
 @dataclass
@@ -251,7 +337,73 @@ class OrderLedger:
             if order is None or order.status != ORDER_PENDING:
                 return False
             order.status = ORDER_CANCELLED
+            order.updated_ts = datetime.now(timezone.utc).isoformat()
             return True
+
+    def reject(self, client_order_id: str, reason: str) -> bool:
+        """Mark a pending order rejected with the broker's reason.
+
+        A rejected order is a *terminal* state the Orders tab must be able to
+        show — an order that never filled used to stay PENDING forever, which
+        reads as "still working" and hides the failure.
+        """
+        with self._lock:
+            order = self._orders.get(client_order_id)
+            if order is None or order.status != ORDER_PENDING:
+                return False
+            order.status = ORDER_REJECTED
+            order.reject_reason = str(reason or "rejected")
+            order.updated_ts = datetime.now(timezone.utc).isoformat()
+            return True
+
+    def amend(
+        self,
+        client_order_id: str,
+        quantity: Optional[float] = None,
+        limit_price: Optional[float] = None,
+    ) -> Order:
+        """Amend a PENDING order in place; returns the updated order.
+
+        An amend is not a cancel-and-replace: the venue order id, the client
+        order id and the record of what was originally asked for all survive,
+        so "what did I send, and what did I change it to?" stays answerable.
+
+        ``requested_price`` is deliberately NOT rewritten — slippage keeps
+        measuring the fill against the price the runner decided on. If the
+        operator's amend is what should be measured, that is a different
+        question ("did my amendment help?"), not this one.
+
+        Raises ``KeyError`` for an unknown id and ``ValueError`` when the order
+        is already terminal (a filled order is history; amending it would be a
+        lie about what happened).
+        """
+        with self._lock:
+            order = self._orders.get(client_order_id)
+            if order is None:
+                raise KeyError(f"unknown order: {client_order_id}")
+            if order.status != ORDER_PENDING:
+                raise ValueError(
+                    f"order {client_order_id} is {order.status} — only a working "
+                    "order can be amended"
+                )
+            if quantity is None and limit_price is None:
+                raise ValueError("amend needs a new quantity and/or limit price")
+            if quantity is not None:
+                new_qty = float(quantity)
+                if new_qty <= 0:
+                    raise ValueError(f"amended quantity must be positive, got {new_qty!r}")
+                order.quantity = new_qty
+                order.amended_quantity = new_qty
+            if limit_price is not None:
+                new_price = float(limit_price)
+                if new_price <= 0:
+                    raise ValueError(f"amended limit price must be positive, got {new_price!r}")
+                order.limit_price = new_price
+                order.amended_limit_price = new_price
+            order.amend_count += 1
+            order.amended_ts = datetime.now(timezone.utc).isoformat()
+            order.updated_ts = order.amended_ts
+            return order
 
     def apply_fill(
         self,
@@ -286,6 +438,19 @@ class OrderLedger:
             order.filled_qty = qty
             order.avg_fill_price = fill.price
             order.filled_ts = fill.ts
+            order.updated_ts = fill.ts
+            # Slippage is measured against the price the order was SENT at.
+            # Recorded adverse-positive so "+₹2.50/unit" always means "cost me
+            # money" regardless of side (a SELL filled low is as bad as a BUY
+            # filled high).
+            if order.requested_price:
+                diff = fill.price - float(order.requested_price)
+                adverse = diff if order.side == SIDE_BUY else -diff
+                # Collapse -0.0 (and float dust) to a clean 0.0 — "-₹0.00
+                # slippage" is noise in a table, not information.
+                adverse = 0.0 if abs(adverse) < 1e-12 else adverse
+                order.slippage = round(adverse, 6)
+                order.slippage_pct = round(adverse / float(order.requested_price), 8)
 
             self._fill_count += 1
             self._pending_fills[instance_id].append(fill)
@@ -315,9 +480,190 @@ class OrderLedger:
         with self._lock:
             return self._routing.get(client_order_id)
 
+    def reattach_order(
+        self,
+        instance_id: str,
+        client_order_id: str,
+        spec: Dict[str, Any],
+        broker_order_id: Optional[str] = None,
+    ) -> Order:
+        """Re-tag an order from a previous process (live gateway restore).
+
+        The original PENDING order died with the old process; the venue
+        order it became did NOT. This recreates the ledger row so the
+        incoming fill has somewhere to route — the venue order is NEVER
+        re-placed.
+        """
+        order = Order(
+            client_order_id=client_order_id,
+            instance_id=instance_id,
+            symbol=str(spec.get("symbol", "")).upper(),
+            side=str(spec.get("side", "BUY")),
+            quantity=float(spec.get("quantity", 0.0)),
+            order_type="MARKET",
+            limit_price=None,
+            status=ORDER_PENDING,
+            created_ts=str(spec.get("created_ts") or datetime.now(timezone.utc).isoformat()),
+            tag=dict(spec.get("tag") or {}),
+            broker_order_id=broker_order_id,
+        )
+        with self._lock:
+            self._routing[client_order_id] = instance_id
+            self._orders[client_order_id] = order
+            self._order_history.append(client_order_id)
+            self._trim_locked()
+        return order
+
     def orders_for(self, instance_id: str) -> List[Order]:
         with self._lock:
             return [o for o in self._orders.values() if o.instance_id == instance_id]
+
+    # -- read surface (Orders tab) -----------------------------------------
+
+    @staticmethod
+    def order_to_dict(order: Order) -> Dict[str, Any]:
+        """One order as a JSON-safe row (the Orders tab's only shape)."""
+        return {
+            "client_order_id": order.client_order_id,
+            "instance_id": order.instance_id,
+            "symbol": order.symbol,
+            "side": order.side,
+            "quantity": order.quantity,
+            "order_type": order.order_type,
+            "limit_price": order.limit_price,
+            "status": order.status,
+            "created_ts": order.created_ts,
+            "updated_ts": order.updated_ts or order.filled_ts or order.created_ts,
+            "filled_qty": order.filled_qty,
+            "avg_fill_price": order.avg_fill_price,
+            "filled_ts": order.filled_ts,
+            "requested_price": order.requested_price,
+            "slippage": order.slippage,
+            "slippage_pct": order.slippage_pct,
+            "reject_reason": order.reject_reason,
+            "tag": dict(order.tag),
+            "broker_order_id": order.broker_order_id,
+            "cancellable": order.status == ORDER_PENDING,
+            # Phase 3: only a LIVE working order can be amended — a paper order
+            # fills or rejects synchronously, so there is nothing resting at a
+            # venue to amend. The server decides this, not the UI.
+            "modifiable": order.status == ORDER_PENDING and order.broker_order_id is not None,
+            "amend_count": order.amend_count,
+            "amended_quantity": order.amended_quantity,
+            "amended_limit_price": order.amended_limit_price,
+            "amended_ts": order.amended_ts,
+            "retry_of": order.retry_of,
+            "retry_attempt": order.retry_attempt,
+        }
+
+    @staticmethod
+    def aging_band(age_s: float, pending: bool = True) -> str:
+        """``"warn"`` / ``"alert"`` / ``""`` for a working order's age."""
+        if not pending:
+            return ""
+        if age_s >= ORDER_AGING_ALERT_S:
+            return "alert"
+        if age_s >= ORDER_AGING_WARN_S:
+            return "warn"
+        return ""
+
+    def row_with_age(self, order: Order) -> Dict[str, Any]:
+        """One ledger row plus its derived age band (the Orders tab's row).
+
+        Computed here rather than in the browser so the row the page renders
+        and the row the manager alerts on can never disagree about whether an
+        order is stuck.
+        """
+        row = self.order_to_dict(order)
+        age = self.age_seconds(order.created_ts) if order.status == ORDER_PENDING else 0.0
+        row["age_s"] = round(age, 1) if order.status == ORDER_PENDING else None
+        row["aging"] = self.aging_band(age, order.status == ORDER_PENDING)
+        return row
+
+    def snapshot(
+        self,
+        instance_id: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Newest-first order rows, optionally filtered.
+
+        ``statuses`` matches on exact status names (case-insensitive); an
+        empty list means "no filter" rather than "nothing", so a UI that
+        sends no status selection still gets the whole ledger.
+        """
+        wanted = {str(s).upper() for s in (statuses or []) if s}
+        with self._lock:
+            orders = [
+                o for o in self._orders.values()
+                if instance_id is None or o.instance_id == instance_id
+            ]
+            orders = [o for o in orders if not wanted or o.status.upper() in wanted]
+            orders.sort(key=lambda o: (o.created_ts, o.client_order_id), reverse=True)
+            rows = [self.row_with_age(o) for o in orders[: max(0, int(limit))]]
+        return rows
+
+    def summary(self, instance_id: Optional[str] = None) -> Dict[str, Any]:
+        """Counts + slippage statistics for the Orders header strip."""
+        with self._lock:
+            orders = [
+                o for o in self._orders.values()
+                if instance_id is None or o.instance_id == instance_id
+            ]
+            counts: Dict[str, int] = {
+                ORDER_PENDING: 0,
+                ORDER_FILLED: 0,
+                ORDER_CANCELLED: 0,
+                ORDER_REJECTED: 0,
+            }
+            for order in orders:
+                counts[order.status] = counts.get(order.status, 0) + 1
+            slips = [o.slippage for o in orders if o.slippage is not None]
+            slip_pcts = [o.slippage_pct for o in orders if o.slippage_pct is not None]
+            pending = [o for o in orders if o.status == ORDER_PENDING]
+            pending_age = [self.age_seconds(o.created_ts) for o in pending]
+            oldest = max(pending, key=lambda o: self.age_seconds(o.created_ts), default=None)
+            bands = {coid: 0 for coid in ("warn", "alert")}
+            for order in pending:
+                band = self.aging_band(self.age_seconds(order.created_ts))
+                if band:
+                    bands[band] += 1
+        return {
+            "total": len(orders),
+            "pending": counts.get(ORDER_PENDING, 0),
+            "filled": counts.get(ORDER_FILLED, 0),
+            "cancelled": counts.get(ORDER_CANCELLED, 0),
+            "rejected": counts.get(ORDER_REJECTED, 0),
+            "status_counts": counts,
+            "fills": counts.get(ORDER_FILLED, 0),
+            "avg_slippage": round(sum(slips) / len(slips), 6) if slips else 0.0,
+            "avg_slippage_pct": round(sum(slip_pcts) / len(slip_pcts), 8) if slip_pcts else 0.0,
+            "worst_slippage": round(max(slips), 6) if slips else 0.0,
+            "slippage_samples": len(slips),
+            "oldest_pending_age_s": round(max(pending_age), 1) if pending_age else 0.0,
+            # Order aging (Phase 3): the thresholds travel with the data so the
+            # strip, the rows and the manager's alerts share one definition of
+            # "stuck" instead of three approximations of it.
+            "aging_warn_s": ORDER_AGING_WARN_S,
+            "aging_alert_s": ORDER_AGING_ALERT_S,
+            "aging_warn_count": bands["warn"],
+            "aging_alert_count": bands["alert"],
+            "oldest_pending_coid": oldest.client_order_id if oldest is not None else None,
+            "oldest_pending_symbol": oldest.symbol if oldest is not None else None,
+        }
+
+    @staticmethod
+    def age_seconds(created_ts: Optional[str]) -> float:
+        """Seconds since ``created_ts``; 0.0 when it cannot be parsed."""
+        if not created_ts:
+            return 0.0
+        try:
+            created = datetime.fromisoformat(str(created_ts).replace("Z", "+00:00"))
+        except ValueError:
+            return 0.0
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
 
     @property
     def fill_count(self) -> int:
@@ -372,6 +718,9 @@ class PaperBroker:
             instance_id,
             OrderRequest(symbol=symbol, side=side, quantity=quantity, tag=tag or {}),
         )
+        # Live Order Management: remember the price the order was SENT at so
+        # the fill's slippage is a measurement, not a guess.
+        order.requested_price = float(fill_price)
         runner = self.ledger.runner_for(instance_id)
         if runner is None:
             # Ledger-level caller (no runner bound): record the fill at the
@@ -393,13 +742,38 @@ class PaperBroker:
             strategy_name=runner.config.strategy_name,
             client_order_id=order.client_order_id,
         )
-        sim_order.validate()
-        sim_order.submit()
+        # Everything from here on can refuse: a bad ticket, a frozen book, an
+        # executor that will not fill. The ledger row was already written, so
+        # each failure mode MUST terminate it — an order that never reached the
+        # venue and never got refused shows up as "still working" forever.
+        try:
+            sim_order.validate()
+            sim_order.submit()
+            result = runner.executor.execute(
+                sim_order, {"bid": price, "ask": price, "last": price}
+            )
+        except Exception as exc:  # noqa: BLE001 — every refusal is a refusal
+            reason = (
+                f"paper order refused before the venue: "
+                f"{exc.__class__.__name__}: {exc}"
+            )
+            self.ledger.reject(order.client_order_id, reason)
+            raise OrderRefused(
+                reason,
+                client_order_id=order.client_order_id,
+                # Nothing left this process, and the ticket is re-derivable
+                # from the runner's own state — a bounded retry is safe.
+                retryable=True,
+            ) from exc
 
-        result = runner.executor.execute(sim_order, {"bid": price, "ask": price, "last": price})
         fill = result.fill
         if fill is None:
-            raise RuntimeError(f"paper fill did not execute: {result.status} — {result.reason}")
+            # Terminal, not working: the venue (here, the executor) refused.
+            # Leaving it PENDING would show as a live order in the Orders tab
+            # forever, hiding the failure that the operator needs to retry.
+            reason = f"paper fill did not execute: {result.status} — {result.reason}"
+            self.ledger.reject(order.client_order_id, reason)
+            raise OrderRefused(reason, client_order_id=order.client_order_id, retryable=True)
         runner.portfolio.add_order(sim_order)
 
         return self.ledger.apply_fill(
@@ -435,6 +809,46 @@ OPTION_MTM_LOG_EVERY = 5
 
 
 @dataclass
+class OrderRetryPolicy:
+    """Auto-retry for an order the venue refused (Phase 3) — OFF by default.
+
+    Why this exists: a strategy's signal is *transition-based* (it fires on
+    ``0→1``, not on every bar). If that one order is refused, the position
+    never opens even though the reason for opening has not changed — the
+    runner just sits flat, and nothing in the P&L explains why. A bounded
+    retry is what turns "the strategy decided" into "the book followed".
+
+    Why it is bounded and off by default: a retry loop that never gives up is
+    a way to discover a risk limit N times. Every attempt is a fresh order
+    with a fresh client order id, all audited, and the lineage (``retry_of``,
+    ``retry_attempt``) rides on the order's tag so the Orders tab shows what
+    happened instead of N mysterious duplicates.
+
+    ``max_attempts`` counts retries AFTER the first failure: 2 means up to
+    three sends in total. ``cooldown_s`` is a floor between attempts (bars
+    arrive at whatever cadence the feed runs at, so a retry is only pumped
+    when the cooldown has genuinely elapsed).
+    """
+
+    max_attempts: int = 0
+    cooldown_s: float = 5.0
+    #: How long a SPENT budget stays spent before a new episode may start.
+    #: Without this, a venue outage that outlasts one episode strands the
+    #: runner flat forever whenever the strategy's signal never flips (a
+    #: buy-and-hold entry never "changes its mind"). With it, the runner keeps
+    #: trying at a slow, bounded, audited cadence instead of either giving up
+    #: permanently or hammering the venue.
+    rearm_after_s: float = 300.0
+    #: Which order kinds may be retried. An exit is a de-risking action, and a
+    #: refused exit is the one case where retrying matters most; entries are
+    #: included for the transition-signal reason above.
+    kinds: tuple = ("entry", "exit")
+
+    def allows(self, kind: str) -> bool:
+        return self.max_attempts > 0 and str(kind) in self.kinds
+
+
+@dataclass
 class RunnerConfig:
     """Spawn configuration for a runner (validated on construction)."""
 
@@ -450,18 +864,39 @@ class RunnerConfig:
     position_pct: Optional[float] = None  # fraction of bucket per entry
     instance_id: Optional[str] = None
     # Instance-level circuit breakers (fraction of allocation)
-    max_drawdown_pct: float = 0.25
+    max_drawdown_pct: float = 0.80  # 80% for paper trading
     daily_loss_limit_pct: float = 0.15
     allow_short: bool = False
     # Bucket classification for the portfolio UI (ticket P4.1):
     # 'paper' (simulated fills) or 'live' (broker execution — F-12 wiring).
     mode: str = "paper"
     # Canonical P1.1 source tag: synthetic / replay / mstock.
-    source: str = "synthetic"
+    # Resolved from config/data_sources.yaml at construction, never a literal:
+    # an omitted source means the deployment's **broker** feed (mStock), which
+    # is what paper and live runners are supposed to bar from. A process whose
+    # policy explicitly enables synthetic (the suite's ``testing`` profile)
+    # still gets synthetic by omission, so no test has to name a source.
+    source: str = field(default_factory=default_broker_source)
     # Instrument config (Gap G3.2): {"type": "equity"} keeps the classic
     # flow; {"type": "option", "expression": {...}} routes bars through the
     # options expression layer via an OptionsBridge.
     instrument: Dict[str, Any] = field(default_factory=lambda: {"type": "equity"})
+    # U3.4: playbook snapshot — running runners never mutate on playbook edit
+    playbook_id: Optional[str] = None
+    playbook_version: Optional[int] = None
+    playbook_snapshot: Optional[Dict[str, Any]] = None
+    # Phase 3: bounded auto-retry for a refused order (None/0 attempts = off).
+    retry_policy: Optional[OrderRetryPolicy] = None
+    # Multi-broker PRD Phase B: the segment this runner trades in (a capital
+    # partition mapped to a broker — config/segments.yaml), and/or an
+    # explicit execution-broker override. Derivation at construction:
+    #   mode=paper → execution_broker ignored (paper broker everywhere)
+    #   mode=live + segment → execution_broker = segments[segment].broker
+    #   mode=live + execution_broker → that broker directly
+    # Unknown segment/broker names are REFUSED (fail-closed, never silently
+    # rerouted).
+    segment: Optional[str] = None
+    execution_broker: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.name = str(self.name).strip()
@@ -506,6 +941,30 @@ class RunnerConfig:
         if self.max_pool_positions < 1:
             raise ValueError("max_pool_positions must be >= 1")
 
+        # Multi-broker PRD Phase B: validate segment/execution_broker and
+        # derive the execution broker for live runners. Fail-closed: an
+        # unknown segment or broker raises here — a runner must never spawn
+        # with an ambiguous order route.
+        self.segment = (str(self.segment).strip().lower() or None) if self.segment else None
+        self.execution_broker = (
+            (str(self.execution_broker).strip().lower() or None)
+            if self.execution_broker
+            else None
+        )
+        if self.segment or self.execution_broker:
+            from backtest.brokers.segments import SegmentError, resolve_execution_broker
+
+            try:
+                resolved = resolve_execution_broker(
+                    mode=self.mode,
+                    segment=self.segment,
+                    execution_broker=self.execution_broker,
+                )
+            except SegmentError as exc:
+                raise ValueError(str(exc)) from exc
+            if self.mode == "live":
+                self.execution_broker = resolved
+
         # Instrument config (Gap G3.2)
         if self.instrument is None:
             self.instrument = {"type": "equity"}
@@ -537,24 +996,46 @@ class StrategyRunner:
         ledger: OrderLedger,
         broker: Optional[PaperBroker] = None,
         strategy: Optional[Any] = None,
-        *,
-        options_bridge: Optional[OptionsBridge] = None,
-        clock: Optional[Callable[[], datetime]] = None,
-        preserve_candle_timestamps: Optional[bool] = None,
     ) -> None:
         self.config = config
-        self._clock = clock
-        if preserve_candle_timestamps is None:
-            # Option decisions and quote valuation share the same candle clock;
-            # equity strategies retain their historical RangeIndex behavior.
-            preserve_candle_timestamps = (
-                options_bridge is not None
-                or str(config.instrument.get("type", "equity")) == "option"
-            )
-        self._preserve_candle_timestamps = bool(preserve_candle_timestamps)
         self.instance_id: str = config.instance_id or uuid.uuid4().hex
         self.ledger = ledger
         self.broker = broker or PaperBroker(ledger)
+
+        # Data-source policy (2026-09-30). A config that names no source gets
+        # the policy's broker feed here, once, so the runner's own label, the
+        # gate below, the ledger rows and the persisted state all describe the
+        # same feed — and none of them can fall back to a literal.
+        if not str(config.source or "").strip():
+            config.source = default_broker_source()
+
+        # A runner is a long-lived thing that books P&L the operator reads as
+        # real, so the source it bars from is checked the moment it is
+        # constructed — not at the first fill. With synthetic disabled in
+        # config/data_sources.yaml a ``source=synthetic`` runner (including one
+        # restored from an old state file) cannot be built at all: it refuses,
+        # instead of quietly trading a random walk under a "paper/MSTOCK" label.
+        # Only the synthetic substitution is gated — an mstock/replay runner is
+        # legitimate even when its feed is momentarily unreachable.
+        if policy_key(config.source) == "synthetic":
+            require_synthetic(f"runner {config.name}")
+
+        # 2026-09-24: for option runners, the strategy's free-text
+        # ``underlying`` param is FORCED to the runner symbol BEFORE the
+        # strategy instance is built — the options bridge prices the chain
+        # off the view's underlying, so a spawn-form mismatch (Instrument=
+        # BANKNIFTY, Underlying param=NIFTY) would book BANKNIFTY positions
+        # priced off the NIFTY chain. The runner symbol is the single source
+        # of truth; the param is just a label.
+        if (
+            str(config.instrument.get("type", "equity")) == "option"
+            and config.symbols
+            and "underlying" in getattr(get_strategy(config.strategy_name), "params", {})
+        ):
+            try:
+                config.strategy_params["underlying"] = str(config.symbols[0]).upper()
+            except (AttributeError, TypeError):
+                pass
 
         # Strategy instance (isolated per runner so indicator state never leaks)
         if strategy is not None:
@@ -568,7 +1049,12 @@ class StrategyRunner:
             initial_capital=config.allocated_capital,
             limits=PortfolioLimits(allow_short=config.allow_short),
             mode="paper",
-            source=config.source,
+            # The ledger row's data-source tag used to be the literal
+            # "synthetic" for every runner, so a real mStock runner was
+            # recorded as generated data (and the reverse: nothing tied the
+            # label to the feed actually driving it). It now names the feed the
+            # runner bars from — normalised above, so it is never empty.
+            source=str(config.source),
         )
         self.executor = free_executor(self.portfolio)
         self.closed_trades_cache: List[Dict[str, Any]] = []
@@ -576,12 +1062,51 @@ class StrategyRunner:
         # -- options bridge (Gap G3.2) --------------------------------------
         # Runners with instrument.type == "option" route bars through the
         # expression layer instead of the equity signal flow.
-        self.options_bridge: Optional["OptionsBridge"] = options_bridge
-        if self.options_bridge is None and str(config.instrument.get("type", "equity")) == "option":
+        # U6.2: the chain generator is the SHARED one (one per underlying via
+        # the ChainBus) so two NIFTY runners price identical chains off the
+        # same spot. The quote provider stays per-runner (cheap, per-book
+        # contract registry + pricing clock).
+        self.options_bridge: Optional["OptionsBridge"] = None
+        self._chain_released = True  # U6.2 guard; flipped when a bridge takes its subscription
+        # P1.1: release must match the acquire source. The bridge branch below
+        # overwrites this with the store the acquire actually landed in; the
+        # starting value is the runner's own (already policy-resolved) source.
+        self._chain_source = str(config.source)
+        if str(config.instrument.get("type", "equity")) == "option":
+            from backtest.forward.feed_registry import option_quote_provider_for
+
+            self._chain_underlying = config.symbols[0] if config.symbols else "NIFTY"
+            # P1.1: source routes the chain — mstock/dhan + authenticated
+            # session → the shared LiveChainProvider (real chains + LTP, one
+            # API budget per underlying); anything else → the synthetic pair.
+            # The fallback is deliberate and labelled ("synthetic:bs") so a
+            # synthetic-priced runner can never pass as live.
+            provider, quote_label = option_quote_provider_for(
+                config.source, self._chain_underlying
+            )
+            # The bus STORE the acquire landed in (synthetic|mstock|dhan) —
+            # derived from the resolved provider, not from config.source: a
+            # requested "mstock"/"dhan" that fell back to synthetic must
+            # release the synthetic entry, or stop() leaks the refcount.
+            # Live labels are ``live:<source>`` (+ ``+bidask`` when the bus
+            # handed out the spread-crossing wrapper).
+            self._chain_source = (
+                str(config.source).lower() if quote_label.startswith("live:") else "synthetic"
+            )
+            self._chain_released = False  # one release per acquire (stop is idempotent)
             self.options_bridge = OptionsBridge(
                 capital=config.allocated_capital,
                 expression=config.instrument.get("expression"),
+                quote_provider=provider,
+                # Marks land on bar close (plus the portfolio watchdog), so the
+                # freshness SLA is sized off the bar cadence — see OptionsBridge.
+                bar_cadence_seconds=60.0
+                * TIMEFRAME_MINUTES.get(config.timeframe, 0),
+                fee_calculator=CommissionCalculator.for_broker("zerodha"),
             )
+            self.options_bridge.runner_id = self.instance_id
+            self.options_bridge.runner_name = self.config.name
+            self.options_bridge.runner_running = False
 
         # -- rolling candle buffers ----------------------------------------
         self._bars: Dict[str, Deque[Dict[str, Any]]] = {
@@ -599,23 +1124,47 @@ class StrategyRunner:
         #: Most recent option-book MTM (0.0 for equity runners) — task A1.
         self.last_option_pnl: float = 0.0
         self.signal_log: Deque[Dict[str, Any]] = deque(maxlen=MAX_SIGNAL_LOG)
+        #: PnL-vs-spot watch series (2026-09-24): one row per closed bar while
+        #: an option structure is open — feeds the end-of-day chart export
+        #: (watch_export.py). Live (mstock) runners only; synthetic books are
+        #: excluded per the owner's "synthetic stuff must vanish" rule.
+        self.watch_series: List[Dict[str, Any]] = []
+        self.last_option_label: Optional[str] = None
 
         # -- state -----------------------------------------------------------
         self.status: str = STATUS_STOPPED
         self.error: Optional[str] = None
         self.bars_processed: int = 0
-        self.created_ts: str = self._now().isoformat()
+        self.created_ts: str = datetime.now(timezone.utc).isoformat()
+
+        # -- operator-set levels (Live Order Management) --------------------
+        # ``{position_key: {"stop_loss": float|None, "target": float|None}}``
+        # for EQUITY positions (key = symbol). Option structures keep their
+        # equivalent levels on the bridge (key = structure_id) because the
+        # bridge owns the per-bar mark that arms them; ``position_rules_view``
+        # merges both so the dashboard sees one shape.
+        self.position_rules: Dict[str, Dict[str, Optional[float]]] = {}
+
+        # -- order auto-retry (Phase 3) --------------------------------------
+        # ``{symbol: {side, qty, kind, attempts, last_ts, retry_of, reason}}``
+        # — the most recent refused intent per symbol. One pending retry per
+        # symbol on purpose: the strategy's LATEST intent is the one worth
+        # re-sending, and a queue of stale ones would trade a view the
+        # strategy has already left.
+        self._retries: Dict[str, Dict[str, Any]] = {}
+        #: ``{symbol: {"side", "kind"}}`` — intents whose retry budget was spent.
+        #: A transition signal keeps firing while its condition holds, so
+        #: without this the very next bar would open a fresh budget and the
+        #: "bounded" policy would retry forever. Cleared as soon as the
+        #: strategy stops asking for that action (a genuinely new decision).
+        self._retry_blocked: Dict[str, Dict[str, Any]] = {}
+        self.retries_raised: int = 0
+        self.retries_recovered: int = 0
+        self.retries_exhausted: int = 0
 
         self._lock = threading.RLock()
         self.ledger.register_handler(self.instance_id, self.on_fill)
         self.ledger.register_runner(self.instance_id, self)
-
-    def _now(self) -> datetime:
-        """Read the injected run clock, falling back to UTC wall time."""
-        value = self._clock() if self._clock is not None else datetime.now(timezone.utc)
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
 
     # -- accounting views (over the simulator portfolio) --------------------
 
@@ -759,6 +1308,134 @@ class StrategyRunner:
     # Lifecycle
     # ------------------------------------------------------------------ #
 
+    def _maybe_upgrade_to_live_chain(self) -> None:
+        """Upgrade a synthetic-priced option runner to its live chain (bug #2).
+
+        A restored mstock/dhan option runner resolves its quote provider ONCE,
+        in ``__init__``. If the broker session was not yet authenticated at
+        that moment it silently fell back to the labelled synthetic chain
+        (``"synthetic:bs"``) — and never re-checked. So a runner that was
+        restored before the operator logged into mStock stays synthetic for
+        its whole life even though ``mode/source`` reads ``paper/mstock``: real
+        bars in, MOCK-token prices out. This is the "random expiry / random
+        tick / random PnL" the owner reported.
+
+        Called from :meth:`resume` (restored runners come back PAUSED) and from
+        :meth:`start`. It is a no-op unless every guard passes:
+
+        * it is an option runner currently on a SYNTHETIC chain whose
+          ``config.source`` is a live broker (mstock/dhan);
+        * that broker is authenticated RIGHT NOW (pre-checked via
+          ``_default_quote_broker`` so a still-missing session never triggers a
+          second synthetic acquire inside ``option_quote_provider_for``);
+        * the bridge has NO open structure — a live swap would orphan the
+          MOCK-token legs (they don't resolve on the real chain), so we refuse
+          and log, advising flatten-then-resume.
+
+        On success: release the synthetic ChainBus entry, acquire the live one
+        (``option_quote_provider_for`` does the acquire), swap the bridge's
+        quote provider, and re-point ``_chain_source`` so ``stop()`` releases
+        the entry we now hold. State is only mutated after the live acquire
+        succeeds, so a failure leaves the runner exactly as it was.
+        """
+        bridge = self.options_bridge
+        if bridge is None:
+            return
+        src = str(self.config.source or "").lower()
+        if src not in ("mstock", "dhan"):
+            return
+        if self._chain_source != "synthetic":
+            return  # already live (or never fell back) — nothing to upgrade
+
+        try:
+            from backtest.forward.feed_registry import (
+                _default_quote_broker,
+                get_chain_bus,
+                option_quote_provider_for,
+            )
+        except Exception:  # noqa: BLE001 — registry import must never break resume
+            logger.debug("chain registry unavailable for %s", self.instance_id[:8], exc_info=True)
+            return
+
+        # Pre-check auth BEFORE option_quote_provider_for: with no session that
+        # helper falls through to a SECOND synthetic acquire (refcount leak).
+        if _default_quote_broker(src) is None:
+            logger.info(
+                "Runner %s (%s) still has no authenticated %s session — "
+                "keeping synthetic chain",
+                self.instance_id[:8],
+                self.config.name,
+                src,
+            )
+            return
+
+        # Never swap the pricing source under an open structure: its legs carry
+        # MOCK tokens that don't exist on the live chain.
+        try:
+            if bridge._has_open_structure():
+                logger.warning(
+                    "Runner %s (%s) has an OPEN structure — refusing synthetic→"
+                    "live chain upgrade (MOCK-token legs won't price on the "
+                    "live chain). Flatten the position, then pause/resume to "
+                    "re-price live.",
+                    self.instance_id[:8],
+                    self.config.name,
+                )
+                return
+        except Exception:  # noqa: BLE001 — structure probe must never block resume
+            logger.debug("open-structure probe failed for %s", self.instance_id[:8], exc_info=True)
+            return
+
+        try:
+            provider, label = option_quote_provider_for(src, self._chain_underlying)
+        except Exception:  # noqa: BLE001 — a failed upgrade keeps the runner synthetic
+            logger.exception(
+                "live chain acquire failed for %s — staying synthetic",
+                self.instance_id[:8],
+            )
+            return
+
+        if not label.startswith("live:"):
+            # Session vanished between the pre-check and the acquire; the helper
+            # already re-acquired synthetic, so release that extra ref and bail.
+            try:
+                get_chain_bus().release(self._chain_underlying, source="synthetic")
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "synthetic re-release failed for %s", self.instance_id[:8], exc_info=True
+                )
+            logger.info(
+                "Runner %s (%s) live chain not available (%s) — staying synthetic",
+                self.instance_id[:8],
+                self.config.name,
+                label,
+            )
+            return
+
+        # Live acquire succeeded — now drop the synthetic entry we were holding.
+        try:
+            get_chain_bus().release(self._chain_underlying, source="synthetic")
+        except Exception:  # noqa: BLE001 — release must never block the upgrade
+            logger.exception("synthetic chain release failed for %s", self.instance_id[:8])
+
+        bridge.quote_provider = provider
+        self._chain_source = src
+        self._chain_released = False  # we now hold the live entry; stop() releases it
+        logger.info(
+            "Runner %s (%s) upgraded synthetic→live chain (%s) on %s",
+            self.instance_id[:8],
+            self.config.name,
+            label,
+            self._chain_underlying,
+        )
+
+    def _sync_bridge_runner_state(self) -> None:
+        bridge = self.options_bridge
+        if bridge is not None:
+            bridge.runner_id = self.instance_id
+            bridge.runner_name = self.config.name
+            bridge.runner_running = self.status == STATUS_RUNNING
+
     def start(self) -> None:
         with self._lock:
             if self.status == STATUS_RUNNING:
@@ -769,6 +1446,21 @@ class StrategyRunner:
                 return
             self.status = STATUS_RUNNING
             self.error = None
+            self._sync_bridge_runner_state()
+            # U6.2: re-acquire the chain subscription if this runner was
+            # previously stopped (stop released it); start is idempotent.
+            if self.options_bridge is not None and self._chain_released:
+                try:
+                    from backtest.forward.feed_registry import get_chain_bus
+                    get_chain_bus().acquire(
+                        self._chain_underlying, source=self._chain_source
+                    )
+                    self._chain_released = False
+                except Exception:  # noqa: BLE001 — acquire must never block start
+                    logger.exception("chain bus acquire failed for %s", self.instance_id[:8])
+            # Bug #2: a runner built while the broker was logged out is stuck on
+            # the synthetic chain — try to upgrade it now that we're (re)starting.
+            self._maybe_upgrade_to_live_chain()
             logger.info(
                 "Runner %s (%s) started: %s on %s",
                 self.instance_id[:8],
@@ -781,18 +1473,38 @@ class StrategyRunner:
         with self._lock:
             if self.status == STATUS_RUNNING:
                 self.status = STATUS_PAUSED
+                self._sync_bridge_runner_state()
                 logger.info("Runner %s paused", self.instance_id[:8])
 
     def resume(self) -> None:
         with self._lock:
             if self.status == STATUS_PAUSED:
+                # Bug #2: restored runners come back PAUSED on whatever chain
+                # they resolved at construction. If the broker is authenticated
+                # now, upgrade synthetic→live before we start pricing again.
+                self._maybe_upgrade_to_live_chain()
                 self.status = STATUS_RUNNING
                 self.error = None
+                self._sync_bridge_runner_state()
                 logger.info("Runner %s resumed", self.instance_id[:8])
 
     def stop(self) -> None:
         with self._lock:
+            if not self._chain_released:
+                # U6.2: give back the shared chain-generator subscription.
+                # (Status is no good as a guard — runners are BORN stopped,
+                # so stop() must release exactly once per acquire.)
+                if self.options_bridge is not None:
+                    try:
+                        from backtest.forward.feed_registry import get_chain_bus
+                        get_chain_bus().release(
+                            self._chain_underlying, source=self._chain_source
+                        )
+                    except Exception:  # noqa: BLE001 — release must never block stop
+                        logger.exception("chain bus release failed for %s", self.instance_id[:8])
+                self._chain_released = True
             self.status = STATUS_STOPPED
+            self._sync_bridge_runner_state()
             logger.info("Runner %s stopped", self.instance_id[:8])
 
     def flatten_all(self, reason: str = "emergency_flatten") -> int:
@@ -805,25 +1517,405 @@ class StrategyRunner:
                     continue
                 self._emit_close(symbol, price, reason=reason)
                 count += 1
+        # Also close any open option structure (single-structure V1 model).
+        if self.options_bridge is not None:
+            count += self.options_bridge.flatten_all(reason=reason)
         return count
+
+    # ------------------------------------------------------------------ #
+    # Manual position management (Live Order Management)
+    # ------------------------------------------------------------------ #
+    #
+    # What an operator can do to a LIVE position from the positions table:
+    # set/replace/clear its stop, set/replace/clear its target, close part of
+    # it, or close all of it. Nothing here is strategy logic — the levels live
+    # beside the book (runner for equity, bridge for option structures) so a
+    # strategy reload, a config edit or a restart can never silently drop them
+    # (state_store persists them), and enforcement happens on every mark, not
+    # only on bars that produce a signal.
+
+    def position_rules_view(self) -> Dict[str, Dict[str, Optional[float]]]:
+        """Operator levels for every open position (equity **and** options)."""
+        with self._lock:
+            rules = {k: dict(v) for k, v in self.position_rules.items()}
+            bridge = self.options_bridge
+            if bridge is not None and bridge.open_structure_id:
+                levels = bridge.manual_rules()
+                if any(v is not None for v in levels.values()):
+                    rules[bridge.open_structure_id] = dict(levels)
+            return rules
+
+    def _resolve_position_key(self, key: str) -> tuple[str, str]:
+        """Map a dashboard key → ``("equity", SYMBOL)`` or ``("option", ID)``.
+
+        Accepts what the tables actually render: the symbol (equity), the
+        structure id (options, the preferred key) or the structure's display
+        label (``"NIFTY bull_call_spread"``), because a human copying a row out
+        of a log should not have to translate.
+        """
+        candidate = str(key or "").strip()
+        if not candidate:
+            raise KeyError("a position key (symbol or structure id) is required")
+        upper = candidate.upper()
+        with self._lock:
+            if upper in self.positions:
+                return "equity", upper
+            bridge = self.options_bridge
+            if bridge is not None:
+                for structure in bridge.option_broker.get_open_structures():
+                    label = f"{structure.underlying} {structure.structure_type}"
+                    if candidate in (structure.structure_id, label):
+                        return "option", structure.structure_id
+        raise KeyError(f"no open position matching {candidate!r} on this runner")
+
+    def _position_mark(self, kind: str, resolved: str) -> Optional[float]:
+        """The price a level must sit on the correct side of (None if unknown)."""
+        if kind == "equity":
+            pos = self.positions.get(resolved)
+            if pos is None:
+                return None
+            return self.last_price.get(resolved, pos["entry_price"])
+        bridge = self.options_bridge
+        if bridge is None or bridge.open_structure_id != resolved:
+            return None
+        return bridge._open_mark()
+
+    @staticmethod
+    def _validated_rule_value(
+        value: Any, field: str, mark: Optional[float]
+    ) -> Optional[float]:
+        """Coerce an operator level, or raise a message the UI can show.
+
+        ``None``/blank clears the level. A level on the wrong side of the
+        current mark is REFUSED rather than armed: it would liquidate the
+        position on the very next tick, which is what Close is for, and a
+        transposed digit must not be able to flatten a book.
+        """
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        try:
+            level = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{field} must be a number, got {value!r}") from None
+        if not math.isfinite(level) or level <= 0:
+            raise ValueError(f"{field} must be a finite price above 0, got {value!r}")
+        if mark:
+            if field == RULE_STOP_LOSS and level >= mark:
+                raise ValueError(
+                    f"stop-loss {level:.2f} is at or above the current price "
+                    f"{mark:.2f} — it would exit immediately; use Close instead"
+                )
+            if field == RULE_TARGET and level <= mark:
+                raise ValueError(
+                    f"target {level:.2f} is at or below the current price "
+                    f"{mark:.2f} — it would exit immediately; use Close instead"
+                )
+        return round(level, 4)
+
+    def set_position_rule(
+        self, key: str, field: str, value: Any
+    ) -> Dict[str, Any]:
+        """Arm / re-price / clear a manual stop-loss or target on one position.
+
+        Returns ``{"key", "kind", "field", "value", "rules", "mark"}`` — the
+        post-change level set, so the caller can echo exactly what is armed.
+        """
+        field = str(field or "").strip().lower()
+        if field not in POSITION_RULE_FIELDS:
+            raise ValueError(
+                f"unknown position rule {field!r}; expected one of {POSITION_RULE_FIELDS}"
+            )
+        kind, resolved = self._resolve_position_key(key)
+        mark = self._position_mark(kind, resolved)
+        level = self._validated_rule_value(value, field, mark)
+
+        with self._lock:
+            if kind == "option":
+                bridge = self.options_bridge
+                if bridge is None:  # pragma: no cover — guarded by resolution
+                    raise KeyError(f"no open position matching {key!r}")
+                if field == RULE_STOP_LOSS:
+                    levels = bridge.set_manual_rule(stop_loss=level)
+                else:
+                    levels = bridge.set_manual_rule(target=level)
+            else:
+                rules = self.position_rules.setdefault(resolved, {})
+                rules[field] = level
+                if not any(v is not None for v in rules.values()):
+                    self.position_rules.pop(resolved, None)
+                levels = {
+                    f: self.position_rules.get(resolved, {}).get(f)
+                    for f in POSITION_RULE_FIELDS
+                }
+
+        action = "SET" if level is not None else "CLEARED"
+        self._log_signal(
+            resolved if kind == "equity" else resolved[:8],
+            f"MANUAL_{field.upper()}",
+            None,
+            mark,
+            f"{field} {action} at {level if level is not None else '—'}"
+            + (f" (mark {mark:.2f})" if mark else ""),
+        )
+        logger.info(
+            "Runner %s manual %s on %s (%s): %s",
+            self.instance_id[:8], field, resolved, kind, level,
+        )
+        return {
+            "instance_id": self.instance_id,
+            "key": resolved,
+            "kind": kind,
+            "field": field,
+            "value": level,
+            "rules": {f: levels.get(f) for f in POSITION_RULE_FIELDS},
+            "mark": round(mark, 4) if mark else None,
+        }
+
+    def clear_position_rule(self, key: str, field: str) -> Dict[str, Any]:
+        """Drop one operator level (``set_position_rule(key, field, None)``)."""
+        return self.set_position_rule(key, field, None)
+
+    def _check_position_rules(self, symbol: str, price: float) -> bool:
+        """Fire an operator stop/target for one symbol at ``price``.
+
+        Returns True when a position was closed. Runs on EVERY mark (each bar
+        for single runners, each tick for pool books, and on a stress
+        markdown) — a manual stop that only worked on bars the strategy traded
+        would be worse than no stop at all.
+        """
+        rules = self.position_rules.get(symbol)
+        if not rules:
+            return False
+        pos = self.positions.get(symbol)
+        if pos is None:
+            self.position_rules.pop(symbol, None)
+            return False
+        side = pos["side"]
+        long_side = side == "LONG"
+        for rule_field, reason in (
+            (RULE_STOP_LOSS, "manual_stop_loss"),
+            (RULE_TARGET, "manual_target"),
+        ):
+            level = rules.get(rule_field)
+            if level is None:
+                continue
+            # A stop sits on the losing side of the mark, a target on the
+            # winning side — and "losing" flips with the position's direction.
+            # (Using the stop test for both would make every target dead code.)
+            if rule_field == RULE_STOP_LOSS:
+                hit = price <= float(level) if long_side else price >= float(level)
+            else:
+                hit = price >= float(level) if long_side else price <= float(level)
+            if not hit:
+                continue
+            self._log_signal(
+                symbol,
+                "MANUAL_EXIT",
+                0,
+                price,
+                f"{reason} {float(level):.2f} hit at {price:.2f}",
+            )
+            self._emit_close(symbol, price, reason=reason)
+            return True
+        return False
+
+    def positions_detail(self) -> List[Dict[str, Any]]:
+        """Equity positions as flat rows — the positions table's row shape.
+
+        Same keys as an option structure row (``open_structures_snapshot``),
+        so one renderer can draw both: ``position_key``, ``kind``, ``symbol``,
+        ``side``, ``qty``, ``entry_price``, ``current_price``,
+        ``unrealized_pnl``, ``stop_loss``, ``target``, ``can_partial_close``.
+        """
+        rows: List[Dict[str, Any]] = []
+        with self._lock:
+            for sym, pos in self.positions.items():
+                qty = float(pos["qty"])
+                entry = float(pos["entry_price"])
+                current = float(self.last_price.get(sym, entry))
+                sign = 1.0 if pos["side"] == "LONG" else -1.0
+                pnl = (current - entry) * qty * sign
+                rules = self.position_rules.get(sym, {})
+                rows.append(
+                    {
+                        "position_key": sym,
+                        "kind": "equity",
+                        "symbol": sym,
+                        "label": sym,
+                        "side": pos["side"],
+                        "qty": qty,
+                        "units": qty,
+                        "entry_price": round(entry, 4),
+                        "current_price": round(current, 4),
+                        "unrealized_pnl": round(pnl, 2),
+                        "pnl_pct": round(pnl / (entry * qty), 4) if entry and qty else 0.0,
+                        "entry_ts": pos.get("entry_ts"),
+                        "stop_loss": rules.get(RULE_STOP_LOSS),
+                        "target": rules.get(RULE_TARGET),
+                        # Scaling out needs more than one unit to scale.
+                        "can_partial_close": qty > 1,
+                    }
+                )
+        return rows
+
+    def close_position(
+        self,
+        key: str,
+        fraction: float = 1.0,
+        reason: str = "manual_close",
+    ) -> Dict[str, Any]:
+        """Close one open position — all of it, or ``fraction`` of it.
+
+        Equity positions scale out: ``fraction=0.5`` books half the ticket's
+        realised P&L and leaves the rest working (with its stop/target intact).
+        Option structures close **atomically** — every leg together — so a
+        partial request is refused with a message rather than silently rounded
+        up to a full exit.
+
+        Works while the runner is PAUSED: closing a position de-risks the book,
+        which is exactly when a human reaches for this button.
+        """
+        kind, resolved = self._resolve_position_key(key)
+        try:
+            frac = float(fraction)
+        except (TypeError, ValueError):
+            raise ValueError(f"fraction must be a number, got {fraction!r}") from None
+        if not 0 < frac <= 1:
+            raise ValueError(f"fraction must be in (0, 1], got {frac}")
+
+        with self._lock:
+            if kind == "option":
+                if frac < 1.0:
+                    raise ValueError(
+                        "option structures close atomically (all legs together) — "
+                        "use Close All, or 100%"
+                    )
+                bridge = self.options_bridge
+                event = (
+                    bridge.manual_exit(reason=reason, strategy_name=self.config.strategy_name)
+                    if bridge is not None
+                    else None
+                )
+                if event is None:
+                    raise KeyError(f"no open position matching {key!r} on this runner")
+                self.position_rules.pop(resolved, None)
+                self._record_equity_point(self.equity())
+                self._log_signal(
+                    resolved[:8],
+                    "MANUAL_CLOSE",
+                    0,
+                    self.last_price.get(self._chain_underlying),
+                    f"{reason} — closed {event.get('structure_type')} "
+                    f"for {float(event.get('pnl', 0.0)):+,.2f}",
+                )
+                return {
+                    "instance_id": self.instance_id,
+                    "key": resolved,
+                    "kind": "option",
+                    "symbol": event.get("structure_type"),
+                    "fraction": 1.0,
+                    "qty_closed": None,
+                    "price": None,
+                    "coid": None,
+                    "status": "filled",
+                    "reason": reason,
+                    "realized_pnl": round(float(event.get("pnl", 0.0)), 2),
+                    "exit_reason": event.get("reason"),
+                    "remaining_qty": 0.0,
+                }
+
+            pos = self.positions.get(resolved)
+            if pos is None:
+                raise KeyError(f"no open position matching {key!r} on this runner")
+            qty = float(pos["qty"])
+            if frac >= 1.0:
+                close_qty = qty
+            elif "/" in resolved:  # crypto pairs trade fractionally
+                close_qty = round(qty * frac, 8)
+            else:
+                close_qty = float(int(qty * frac))
+            if close_qty <= 0:
+                raise ValueError(
+                    f"closing {frac:.0%} of {qty:g} {resolved} would close 0 units — "
+                    "close it all instead"
+                )
+            price = self.last_price.get(resolved)
+            if price is None:
+                raise ValueError(f"no price for {resolved} yet — cannot close safely")
+            side = SIDE_SELL if pos["side"] == "LONG" else SIDE_BUY
+            try:
+                fill = self.broker.submit_market(
+                    self.instance_id,
+                    resolved,
+                    side,
+                    close_qty,
+                    float(price),
+                    tag={
+                        "runner": self.config.name,
+                        "kind": "exit",
+                        "reason": reason,
+                        "fraction": round(frac, 4),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 — surface it, don't crash the API
+                self.error = str(exc)
+                logger.exception("Manual close failed for %s: %s", resolved, exc)
+                raise
+
+            remaining = float(self.positions.get(resolved, {}).get("qty", 0.0))
+            if remaining <= 0:
+                # Flat: the levels belonged to THAT ticket. Keep them and the
+                # next entry inherits a stop nobody set on it.
+                self.position_rules.pop(resolved, None)
+            if not isinstance(fill, FillEvent):
+                # Live gateway: placed, not filled — say so instead of
+                # reporting a fill that has not happened.
+                self._log_signal(
+                    resolved, "LIVE_ORDER", 0, price,
+                    f"{reason} → {side} {close_qty:g} @ ~{price:.2f} PLACED coid={fill}",
+                )
+                return {
+                    "instance_id": self.instance_id,
+                    "key": resolved,
+                    "kind": "equity",
+                    "symbol": resolved,
+                    "fraction": frac,
+                    "qty_closed": close_qty,
+                    "price": round(float(price), 4),
+                    "coid": str(fill),
+                    "status": "placed",
+                    "reason": reason,
+                    "realized_pnl": round(self.realized_pnl, 2),
+                    "remaining_qty": remaining,
+                }
+
+            self._record_equity_point(self.equity())
+            self._log_signal(
+                resolved, "MANUAL_CLOSE", 0, fill.price,
+                f"{reason} → {side} {close_qty:g} @ {fill.price:.2f} "
+                f"({frac:.0%} of position)" + ("" if remaining else " — flat"),
+            )
+            return {
+                "instance_id": self.instance_id,
+                "key": resolved,
+                "kind": "equity",
+                "symbol": resolved,
+                "fraction": frac,
+                "qty_closed": close_qty,
+                "price": round(float(fill.price), 4),
+                "coid": fill.client_order_id,
+                "status": "filled",
+                "reason": reason,
+                "realized_pnl": round(self.realized_pnl, 2),
+                "remaining_qty": remaining,
+            }
 
     # ------------------------------------------------------------------ #
     # Candle event processing
     # ------------------------------------------------------------------ #
 
-    def process_candle_event(
-        self,
-        symbol: str,
-        candle: Dict[str, Any],
-        *,
-        allow_trading: bool = True,
-    ) -> None:
-        """Feed one closed bar. Main entry point from the portfolio feed.
-
-        A replay feed-health halt can keep bars in the strategy's prefix while
-        suppressing decisions and preserving the last good option mark. Normal
-        forward callers use the default and retain existing behavior.
-        """
+    def process_candle_event(self, symbol: str, candle: Dict[str, Any]) -> None:
+        """Feed one closed bar. Main entry point from the portfolio feed."""
         symbol = str(symbol).upper()
         if symbol not in self._bars:
             # Unknown symbol for this runner — ignore defensively.
@@ -858,26 +1950,43 @@ class StrategyRunner:
                 self._roll_trading_day(ts)
                 self.portfolio.update_prices({symbol: price})
                 if self.options_bridge is not None:
-                    # A1: re-price the option book before equity is marked.
-                    # During a replay feed halt this advances the bridge's
-                    # simulated bar clock but deliberately preserves its last
-                    # good quote/mark.
-                    self._mark_option_book(
-                        symbol, price, ts, feed_valid=allow_trading
-                    )
+                    # A1: re-price the option book before equity is marked,
+                    # so the curve and the breakers see fresh premiums.
+                    self._mark_option_book(symbol, price, ts)
                 # B3: record the curve every bar — the deep-dive chart had no
                 # data because nothing called this with record=True.
                 self._mark_to_market(record=True)
 
-                if allow_trading and self.config.target_type == TARGET_SINGLE:
+                if self.config.target_type == TARGET_SINGLE:
                     # Single-symbol runners act immediately on their own bar.
-                    if len(self._bars[symbol]) >= MIN_WARMUP_BARS:
+                    # Option runners are exempt from the warmup gate (2026-09-18):
+                    # the bridge owns history needs (ATM strike = closest chain
+                    # strike, no lookback math), and an "immediate entry" spec
+                    # cannot wait 12 bars for a warmup designed for lookback
+                    # indicators. The strategy contract is unaffected.
+                    warmup_ok = (
+                        len(self._bars[symbol]) >= MIN_WARMUP_BARS
+                        or self.options_bridge is not None
+                    )
+                    if warmup_ok:
                         if self.options_bridge is not None:
                             # Gap G3.2: option instrument → expression layer.
                             self._process_option_bar(symbol, bar)
                         else:
                             self._process_single(symbol, bar)
                         self._check_instance_risk()
+                # Manual stop/target (Live Order Management): checked AFTER the
+                # strategy has had its say on this bar, so an exit the operator
+                # asked for can never be immediately undone by a same-bar
+                # re-entry the strategy was about to make anyway.
+                self._check_position_rules(symbol, price)
+                # Portfolio Intelligence: exits the strategy *requested* from
+                # on_alert run here, through the normal close path.
+                self._apply_strategy_requests()
+                # Phase 3: a refused order gets its next attempt here, on the
+                # bar clock — after the strategy and the levels, so a retry can
+                # never jump ahead of a decision made on the same bar.
+                self._pump_retries(symbol, price, ts)
                 # Pool mode defers the basket scan to :meth:`on_tick_end`
                 # (once per tick instead of once per symbol event — O(n) vs O(n^2)).
 
@@ -916,6 +2025,10 @@ class StrategyRunner:
                 # option book so a breaker halt reflects it.
                 self._mark_option_book(symbol, float(price), ts or new_bar["ts"])
             self._mark_to_market(record=True)
+            # A manual stop is a risk control, not a strategy decision: it
+            # must fire on a pure market move too (the crash simulation is the
+            # one place where "did my stop actually work?" gets answered).
+            self._check_position_rules(symbol, float(price))
 
     def on_tick_end(self, tick_ts: str) -> None:
         """Hook fired by the feed after every symbol's bar for this tick.
@@ -930,9 +2043,68 @@ class StrategyRunner:
             try:
                 self._process_pool(tick_ts)
                 self._check_instance_risk()
+                self._apply_strategy_requests()
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Runner %s pool scan failed: %s", self.instance_id[:8], exc)
                 self.error = str(exc)
+
+    # -- strategy alert responses (Portfolio Intelligence) -----------------
+
+    def _entries_paused_by_strategy(self) -> bool:
+        try:
+            return bool(getattr(self.strategy, "pause_new_entries", False))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _apply_strategy_requests(self) -> List[Dict[str, Any]]:
+        """Execute exits the strategy queued via ``request_exit``.
+
+        The platform never decides to close; it only carries out a request
+        the strategy made, through :meth:`close_position` (same audit trail
+        as a manual close, reason ``strategy_alert:<reason>``). Option
+        structures close atomically, so a partial request on one is refused
+        and logged instead of splitting a spread's legs.
+        """
+        drain = getattr(self.strategy, "drain_exit_requests", None)
+        if not callable(drain):
+            return []
+        try:
+            requests = drain()
+        except Exception:  # noqa: BLE001
+            return []
+        results: List[Dict[str, Any]] = []
+        for req in requests or []:
+            fraction = float(req.get("fraction", 1.0) or 1.0)
+            reason = f"strategy_alert:{req.get('reason') or 'alert'}"
+            key = req.get("position_key")
+            if key:
+                keys = [str(key)]
+            else:
+                keys = list(self.positions)
+                if self.options_bridge is not None:
+                    keys += [
+                        s.structure_id
+                        for s in self.options_bridge.option_broker.get_open_structures()
+                    ]
+            for k in keys:
+                try:
+                    kind, _ = self._resolve_position_key(k)
+                    if kind == "option" and fraction < 1.0:
+                        self._log_signal(
+                            k[:8],
+                            "ALERT_EXIT_REFUSED",
+                            None,
+                            None,
+                            f"{reason}: option structures close atomically — "
+                            f"partial {fraction:.0%} refused",
+                        )
+                        continue
+                    results.append(self.close_position(k, fraction=fraction, reason=reason))
+                except (KeyError, ValueError) as exc:
+                    self._log_signal(k[:8], "ALERT_EXIT_REFUSED", None, None, f"{reason}: {exc}")
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Runner %s alert exit failed: %s", self.instance_id[:8], exc)
+        return results
 
     # -- single symbol ----------------------------------------------------
 
@@ -954,10 +2126,7 @@ class StrategyRunner:
         """
         if self.options_bridge is None:
             return
-        df = self._bars_to_frame(
-            self._bars[symbol],
-            preserve_timestamps=self._preserve_candle_timestamps,
-        )
+        df = self._bars_to_frame(self._bars[symbol])
         try:
             view = self.strategy.generate_market_view(df)
         except Exception as exc:  # noqa: BLE001 — one bad bar must not kill the runner
@@ -969,6 +2138,41 @@ class StrategyRunner:
                 symbol, "ERROR", None, self.last_price.get(symbol), f"view error: {exc}"
             )
             return
+        if (
+            view is not None
+            and self.options_bridge.mark_stale
+            and not self.options_bridge._has_open_structure()
+        ):
+            # Freshness SLA (PRD §4.1): a mark older than stale_after_seconds is
+            # not a price, so the entry is refused rather than simulated.
+            age = self.options_bridge.mark_age_seconds()
+            self._log_signal(
+                symbol,
+                "OPTION_BLOCKED",
+                None,
+                bar["close"],
+                "entry paused: option mark "
+                f"{int(age) if age is not None else '?'}s old, "
+                f"SLA {int(self.options_bridge.stale_after_seconds)}s",
+            )
+            view = None
+        if (
+            view is not None
+            and self._entries_paused_by_strategy()
+            and not self.options_bridge._has_open_structure()
+        ):
+            # Strategy paused new entries (alert response): with nothing open
+            # a view could only open a structure, so drop it. With a structure
+            # open the view still flows — it drives the exit rules, and the
+            # bridge never re-enters on the bar it exits.
+            self._log_signal(
+                symbol,
+                "OPTION_BLOCKED",
+                None,
+                bar["close"],
+                "entry paused by strategy (alert response)",
+            )
+            view = None
         # A viewless bar is meaningful (B1): the bridge counts it towards the
         # neutral exit rule and can close a position the strategy walked away
         # from. So the call happens even when the strategy has no opinion.
@@ -977,20 +2181,6 @@ class StrategyRunner:
             return
         if result.get("exited"):
             self._log_option_exit(symbol, result, bar["close"])
-            return
-        if result.get("pending"):
-            self._log_signal(
-                symbol,
-                "OPTION_INTENT",
-                1 if result.get("direction") == "bullish" else -1,
-                bar["close"],
-                "{} {} expiry={} legs={} — awaiting next-bar replay open".format(
-                    result.get("structure_type"),
-                    "/".join(result.get("strikes", [])),
-                    result.get("expiry"),
-                    result.get("positions"),
-                ),
-            )
             return
         if result.get("rejected"):
             self._log_signal(
@@ -1009,6 +2199,14 @@ class StrategyRunner:
                 result.get("positions"),
             ),
         )
+        # Watch-export chart title (2026-09-24): e.g. "long_call 23250".
+        try:
+            self.last_option_label = "{} {}".format(
+                result.get("structure_type", ""),
+                "/".join(result.get("strikes", [])),
+            ).strip()
+        except Exception:  # noqa: BLE001 — a label must never kill the entry
+            pass
 
     def options_summary(self) -> Optional[Dict[str, Any]]:
         """Option-book state for runners with ``instrument.type == 'option'``.
@@ -1018,44 +2216,88 @@ class StrategyRunner:
         if self.options_bridge is None:
             return None
         with self._lock:
+            self._sync_bridge_runner_state()
             return self.options_bridge.summary()
 
-    def _mark_option_book(
+    def refresh_option_marks(
         self,
-        symbol: str,
-        price: float,
-        ts: Optional[str],
         *,
-        feed_valid: bool = True,
-    ) -> None:
-        """Advance/mark the option book on one closed bar (task A1).
+        force: bool = True,
+        now_utc: Optional[datetime] = None,
+        max_age_s: float = 120.0,
+    ) -> Dict[str, Any]:
+        """Run the R6 mark-repair routine on this runner's option book."""
+        with self._lock:
+            self._sync_bridge_runner_state()
+            bridge = self.options_bridge
+            if bridge is None:
+                return {
+                    "checked": 0,
+                    "repaired": 0,
+                    "still_failing": 0,
+                    "mark_stale": False,
+                    "mark_ts": None,
+                    "quote_error": None,
+                    "refreshed_at": (now_utc or datetime.now(timezone.utc)).isoformat(),
+                    "message": "runner has no option book",
+                }
+            res = bridge.repair_marks(
+                force=force, now_utc=now_utc, max_age_s=max_age_s
+            )
+            self.last_option_pnl = float(bridge.unrealized_pnl)
+            return res
 
-        An invalid replay quote advances the bridge's clock but preserves its
-        last valid mark. The caller records the feed halt and suppresses the
-        strategy decision; no quote is synthesized or carried forward.
+    def _mark_option_book(self, symbol: str, price: float, ts: Optional[str]) -> None:
+        """Mark the option book to market for one bar (task A1).
+
+        Called for every closed bar before equity is marked, so an option
+        runner's curve, daily P&L and instance breakers are built from fresh
+        premiums instead of the entry price. While a structure is open the
+        book also emits a throttled ``OPTION_MTM`` heartbeat the deep-dive can
+        chart.
         """
         bridge = self.options_bridge
         if bridge is None:
             return
-        if feed_valid:
-            # Keep the long-standing three-argument call surface (tests and
-            # embedders commonly wrap this hook); only replay halts need the
-            # explicit validity flag.
-            pnl = bridge.on_bar(symbol, price, ts)
-        else:
-            pnl = bridge.on_bar(symbol, price, ts, feed_valid=False)
-        if pnl is not None:
-            self.last_option_pnl = float(pnl)
+        self._sync_bridge_runner_state()
+        pnl = bridge.on_bar(symbol, price, ts)
+        if pnl is None:
+            return
+        self.last_option_pnl = float(pnl)
+        self._record_watch_point(ts, price, float(pnl))
         # A stop/target/time exit fires inside the pricing hook — drain and log it.
         while True:
             event = bridge.pop_exit_event()
             if event is None:
                 break
             self._log_option_exit(symbol, event, price)
-        if pnl is not None and feed_valid and self.bars_processed % OPTION_MTM_LOG_EVERY == 0:
+        if self.bars_processed % OPTION_MTM_LOG_EVERY == 0:
             self._log_signal(
                 symbol, "OPTION_MTM", None, price, f"option MTM {float(pnl):+,.0f}"
             )
+
+    def _record_watch_point(self, ts: Optional[str], spot: float, option_pnl: float) -> None:
+        """Append one watch-series row (2026-09-24, watch_export.py).
+
+        Live option runners only — synthetic books are never recorded, so an
+        export can never resurrect vanished synthetic P&L. Capped at one
+        trading day of 1-min bars (~400) × 4 to bound memory.
+        """
+        if str(self.config.source).lower() != "mstock":
+            return
+        if len(self.watch_series) >= 1600:
+            self.watch_series.pop(0)
+        try:
+            self.watch_series.append(
+                {
+                    "ts": str(ts or ""),
+                    "spot": round(float(spot), 2),
+                    "option_pnl": round(float(option_pnl), 2),
+                    "equity": round(self.equity(), 2),
+                }
+            )
+        except Exception:  # noqa: BLE001 — a bad row must never kill the bar
+            pass
 
     def _log_option_exit(self, symbol: str, event: Dict[str, Any], price: float) -> None:
         """Record a structure close in the signal log (task B1/B3).
@@ -1117,11 +2359,7 @@ class StrategyRunner:
     # -- signal / action --------------------------------------------------
 
     @staticmethod
-    def _bars_to_frame(
-        buf: Deque[Dict[str, Any]],
-        *,
-        preserve_timestamps: bool = False,
-    ) -> pd.DataFrame:
+    def _bars_to_frame(buf: Deque[Dict[str, Any]]) -> pd.DataFrame:
         """Build the canonical OHLCV frame from a rolling buffer."""
         n = len(buf)
         data = {
@@ -1137,21 +2375,29 @@ class StrategyRunner:
             data["low"][i] = bar["low"]
             data["close"][i] = bar["close"]
             data["volume"][i] = bar["volume"]
-        index = pd.RangeIndex(n)
-        if preserve_timestamps:
-            timestamps = [bar.get("ts") for bar in buf]
+        # 2026-09-25: give the frame a REAL time index when every bar carries
+        # a parseable timestamp. Time-aware strategies (daily EMA, session
+        # windows, 30-min resamples) need ``candles.index`` to be a clock,
+        # not a row counter. Unparseable/partial timestamps fall back to the
+        # legacy positional index, so nothing that shipped before changes.
+        ts_values = [str(bar.get("ts") or "").strip() for bar in buf]
+        index = None
+        if buf and all(ts_values):
             try:
-                index = pd.DatetimeIndex(pd.to_datetime(timestamps, utc=True, errors="raise"))
-                index.name = "timestamp"
+                parsed = pd.to_datetime(ts_values, errors="coerce")
+                if not parsed.isna().any():
+                    index = pd.DatetimeIndex(parsed)
             except (TypeError, ValueError):
-                # Replay bars are expected to carry UTC timestamps; retain a
-                # usable frame if an ad-hoc caller supplies an invalid one.
-                index = pd.RangeIndex(n)
+                index = None
+        if index is not None:
+            return pd.DataFrame(
+                data,
+                index=index,
+                columns=["open", "high", "low", "close", "volume"],
+                dtype="float64",
+            )
         return pd.DataFrame(
-            data,
-            index=index,
-            columns=["open", "high", "low", "close", "volume"],
-            dtype="float64",
+            data, columns=["open", "high", "low", "close", "volume"], dtype="float64"
         )
 
     def _signal_for(self, symbol: str) -> Optional[int]:
@@ -1187,9 +2433,24 @@ class StrategyRunner:
     ) -> None:
         held = symbol in self.positions
 
+        # A spent retry budget lifts as soon as the strategy stops asking for
+        # that action: the signal becoming a NEW decision (flat again, or the
+        # other way) is what makes another attempt legitimate.
+        if signal != 1:
+            self.clear_retry_block(symbol, "entry")
+        if signal == 1:
+            self.clear_retry_block(symbol, "exit")
+
         if signal == 1 and not held:
             if self.status != STATUS_RUNNING:
                 self._log_signal(symbol, "BLOCKED", 1, price, f"entry blocked while {self.status}")
+                return
+            if self._entries_paused_by_strategy():
+                # Portfolio Intelligence: the *strategy* chose to pause entries
+                # (typically in on_alert). Exits below are unaffected.
+                self._log_signal(
+                    symbol, "BLOCKED", 1, price, "entry paused by strategy (alert response)"
+                )
                 return
             if len(self.positions) >= self.config.max_pool_positions:
                 self._log_signal(
@@ -1226,6 +2487,209 @@ class StrategyRunner:
             qty = float(int(qty))
         return round(qty, 6)
 
+    # -- auto-retry (Phase 3) ----------------------------------------------
+
+    def _retry_policy(self) -> Optional[OrderRetryPolicy]:
+        policy = self.config.retry_policy
+        return policy if policy is not None and policy.max_attempts > 0 else None
+
+    def clear_retry_block(self, symbol: str, kind: Optional[str] = None) -> bool:
+        """Lift a spent-budget block (the strategy changed its mind).
+
+        Called automatically when the signal stops asking for the blocked
+        action; exposed so an operator can also clear it deliberately.
+        """
+        blocked = self._retry_blocked.get(symbol)
+        if blocked is None or (kind is not None and blocked["kind"] != kind):
+            return False
+        self._retry_blocked.pop(symbol, None)
+        self._log_signal(
+            symbol, "RETRY_REARMED", 0, self.last_price.get(symbol),
+            f"{blocked['kind']} retry budget re-armed (the signal changed)",
+        )
+        return True
+
+    def _retry_owns(self, symbol: str, kind: str) -> bool:
+        """True when an intent is already spoken for — queued OR spent.
+
+        Queued: the strategy's own re-signal would race the pump and send the
+        order twice. Spent: the budget is gone, so a fresh send on the next bar
+        is the unbounded loop ``max_attempts`` exists to prevent.
+        """
+        pending = self._retries.get(symbol)
+        if pending is not None and pending["kind"] == kind:
+            return True
+        blocked = self._retry_blocked.get(symbol)
+        if blocked is not None and blocked["kind"] == kind:
+            policy = self._retry_policy()
+            rearm = float(policy.rearm_after_s) if policy is not None else float("inf")
+            if time.time() - float(blocked.get("blocked_ts", 0.0)) < rearm:
+                return True
+            # The episode has expired: a new one may start (fresh budget),
+            # which is a retry at a bounded RATE rather than no retry at all.
+            self._retry_blocked.pop(symbol, None)
+            self._log_signal(
+                symbol, "RETRY_REARMED", 0, self.last_price.get(symbol),
+                f"{blocked['kind']} retry budget re-armed after "
+                f"{rearm:g}s — starting a new {policy.max_attempts}-attempt episode",
+            )
+        return False
+
+    def _queue_retry(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        kind: str,
+        exc: Exception,
+        now_ts: Optional[float] = None,
+        bar_ts: Optional[str] = None,
+    ) -> bool:
+        """Remember a refused order so a later bar can re-send it.
+
+        Only refusals that are SAFE to re-send are queued (see
+        :class:`OrderRefused`): a paper failure leaves nothing at a venue,
+        while a live placement error may have been accepted with the
+        acknowledgment lost — re-sending there is how one intent becomes two
+        live orders, so it is refused with an explicit reason instead.
+        """
+        policy = self._retry_policy()
+        if policy is None or not policy.allows(kind):
+            return False
+        retryable = getattr(exc, "retryable", False)
+        coid = getattr(exc, "client_order_id", None)
+        blocked = self._retry_blocked.get(symbol)
+        if blocked is not None and blocked["side"] == side and blocked["kind"] == kind:
+            # This intent already spent its budget. Re-arming on the next bar
+            # would make max_attempts meaningless — the signal stays on until
+            # the position exists, which is exactly what is not happening.
+            return False
+        existing = self._retries.get(symbol)
+        if existing is not None and existing["side"] == side and existing["kind"] == kind:
+            # The strategy re-signalled the same intent while its retry is
+            # still in flight (a transition signal keeps firing while flat).
+            # That is NOT a new failure: refreshing the entry must keep the
+            # attempt count and the cooldown anchor, or the budget resets every
+            # bar and an infinite retry loop hides inside a bounded policy.
+            existing["qty"] = float(qty)
+            existing["reason"] = str(exc)
+            return False
+        if not retryable:
+            # Not just "don't retry" — don't let the next bar's identical
+            # signal quietly do the re-send this refused. The block lifts when
+            # the strategy's ask changes, so a human can also reconcile and
+            # let the signal fire again.
+            self._retry_blocked[symbol] = {
+                "side": side, "kind": kind, "reason": str(exc),
+                "needs_reconcile": True, "blocked_ts": time.time(),
+            }
+            self._log_signal(
+                symbol, "RETRY_REFUSED", 0, self.last_price.get(symbol),
+                f"{kind} refused and NOT retried ({exc}) — the venue may still "
+                "hold the order; reconcile before re-sending",
+            )
+            return False
+        self._retries[symbol] = {
+            "side": side,
+            "qty": float(qty),
+            "kind": kind,
+            "attempts": 0,
+            "cooldown_s": float(policy.cooldown_s),
+            "last_ts": float(now_ts if now_ts is not None else time.time()),
+            "retry_of": coid,
+            "reason": str(exc),
+            # The bar this intent was refused ON. One attempt per bar even at
+            # cooldown 0, so a retry can never fire inside the same bar that
+            # produced the signal it is retrying.
+            "bar_ts": bar_ts,
+        }
+        self.retries_raised += 1
+        self._log_signal(
+            symbol, "RETRY_QUEUED", 1 if side == SIDE_BUY else 0,
+            self.last_price.get(symbol),
+            f"{kind} refused ({exc}) — will retry up to "
+            f"{policy.max_attempts}x, first after {policy.cooldown_s:g}s",
+        )
+        return True
+
+    def _pump_retries(self, symbol: str, price: float, ts: str) -> None:
+        """Re-send a queued retry once its cooldown has elapsed.
+
+        Called per bar (from the same place the strategy gets its say), so a
+        retry rides the market clock rather than a wall-clock timer — the two
+        only agree when the feed runs in real time.
+        """
+        policy = self._retry_policy()
+        pending = self._retries.get(symbol)
+        if policy is None or pending is None:
+            return
+        if pending.get("bar_ts") == ts:
+            return  # this bar already had its attempt
+        now = time.time()
+        if now - float(pending["last_ts"]) < float(pending["cooldown_s"]):
+            return
+        pending["bar_ts"] = ts
+
+        attempt = int(pending["attempts"]) + 1
+        if attempt > policy.max_attempts:
+            self._retries.pop(symbol, None)
+            self._retry_blocked[symbol] = {
+                "side": pending["side"], "kind": pending["kind"],
+                "reason": pending["reason"], "blocked_ts": time.time(),
+            }
+            self.retries_exhausted += 1
+            self._log_signal(
+                symbol, "RETRY_EXHAUSTED", 1 if pending["side"] == SIDE_BUY else 0, price,
+                f"{pending['kind']} still refused after {policy.max_attempts} "
+                f"retries (last: {pending['reason']}) — giving up; the book "
+                "stays as it is until something changes",
+            )
+            return
+
+        pending["attempts"] = attempt
+        pending["last_ts"] = now
+        tag = {
+            "runner": self.config.name,
+            "kind": pending["kind"],
+            "retry_attempt": attempt,
+            "retry_of": pending["retry_of"],
+            "retry_reason": pending["reason"],
+        }
+        try:
+            fill = self.broker.submit_market(
+                self.instance_id, symbol, pending["side"], pending["qty"], price, ts=ts, tag=tag
+            )
+        except Exception as exc:  # noqa: BLE001 — the next bar tries again
+            pending["reason"] = str(exc)
+            if not getattr(exc, "retryable", False):
+                # The situation stopped being retryable (e.g. cash ran out,
+                # or the venue started refusing live). Stop, and say why —
+                # a retry that cannot succeed must not burn the budget.
+                self._retries.pop(symbol, None)
+                self._retry_blocked[symbol] = {
+                    "side": pending["side"], "kind": pending["kind"],
+                    "reason": str(exc), "blocked_ts": time.time(),
+                }
+                self.retries_exhausted += 1
+                self._log_signal(
+                    symbol, "RETRY_EXHAUSTED", 1 if pending["side"] == SIDE_BUY else 0, price,
+                    f"retry refused as non-retryable ({exc}) — stopping",
+                )
+            return
+
+        self._retries.pop(symbol, None)
+        self._retry_blocked.pop(symbol, None)
+        self.retries_recovered += 1
+        placed = isinstance(fill, FillEvent)
+        self._log_signal(
+            symbol,
+            "ENTRY" if pending["kind"] == "entry" else "EXIT",
+            1 if pending["side"] == SIDE_BUY else 0,
+            price if not placed else fill.price,
+            f"RETRY {attempt}/{policy.max_attempts} of {pending['kind']} accepted"
+            + (f" @ {fill.price:.2f}" if placed else " (placed at the venue)"),
+        )
+
     def _emit_entry(
         self,
         symbol: str,
@@ -1234,6 +2698,10 @@ class StrategyRunner:
         side: str = SIDE_BUY,
         score: Optional[float] = None,
     ) -> None:
+        if self._retry_owns(symbol, "entry"):
+            # A retry for this exact intent is already queued; sending again
+            # here would duplicate the order the pump is about to re-send.
+            return
         qty = self._position_size(price)
         if qty <= 0:
             self._log_signal(
@@ -1253,9 +2721,19 @@ class StrategyRunner:
         except Exception as exc:  # noqa: BLE001
             self.error = str(exc)
             logger.exception("Entry order failed for %s: %s", symbol, exc)
+            self._queue_retry(symbol, side, qty, "entry", exc, bar_ts=ts)
             return
         score_part = f" | pool rank score {score:+.4f}" if score is not None else ""
         reason = f"BUY signal{score_part}"
+        if not isinstance(fill, FillEvent):
+            # F-12: the live gateway returns the coid — the order is PLACED,
+            # not filled. Logging a fake instant fill here is exactly the
+            # silent-paper-trading this seam exists to prevent.
+            self._log_signal(
+                symbol, "LIVE_ORDER", 1, price,
+                f"{reason} → {side} {qty:g} @ ~{price:.2f} PLACED coid={fill}",
+            )
+            return
         self._log_signal(
             symbol, "ENTRY", 1, fill.price, f"{reason} → {side} {qty:g} @ {fill.price:.2f}"
         )
@@ -1263,6 +2741,12 @@ class StrategyRunner:
     def _emit_close(self, symbol: str, price: float, reason: str, ts: Optional[str] = None) -> None:
         pos = self.positions.get(symbol)
         if pos is None:
+            return
+        if self._retry_owns(symbol, "exit") and reason not in (
+            "manual_close", "manual_stop_loss", "manual_target",
+        ):
+            # The queued retry owns the exit. A manual close is an explicit
+            # operator instruction and always gets its own attempt.
             return
         try:
             fill = self.broker.submit_market(
@@ -1277,10 +2761,22 @@ class StrategyRunner:
         except Exception as exc:  # noqa: BLE001
             self.error = str(exc)
             logger.exception("Exit order failed for %s: %s", symbol, exc)
+            self._queue_retry(symbol, SIDE_SELL, pos["qty"], "exit", exc, bar_ts=ts)
+            return
+        if not isinstance(fill, FillEvent):
+            self._log_signal(
+                symbol, "LIVE_ORDER", 0, price,
+                f"{reason} → SELL {pos['qty']:g} @ ~{price:.2f} PLACED coid={fill}",
+            )
             return
         self._log_signal(
             symbol, "EXIT", 0, fill.price, f"{reason} → SELL {pos['qty']:g} @ {fill.price:.2f}"
         )
+        # A level belongs to the position it was set on: once the book is flat
+        # there is nothing left to protect, and carrying the level into the
+        # NEXT trade would arm a stop nobody asked for.
+        if symbol not in self.positions:
+            self.position_rules.pop(symbol, None)
 
     # ------------------------------------------------------------------ #
     # Fill routing — ledger calls back here (zero cross-contamination).
@@ -1367,16 +2863,20 @@ class StrategyRunner:
 
     def _mark_to_market(self, record: bool = False) -> None:
         equity = self.equity()
-        if equity > self.peak_equity:
-            self.peak_equity = equity
-        if self.peak_equity > 0:
-            dd = (self.peak_equity - equity) / self.peak_equity
-            if dd > self.max_drawdown_pct:
-                self.max_drawdown_pct = dd
+        is_stale = bool(self.options_bridge is not None and self.options_bridge.mark_stale)
+        # §8 Q4: freeze peak_equity / max_drawdown_pct updates while option
+        # marks are stale so a frozen mark cannot corrupt drawdown breakers.
+        if not is_stale:
+            if equity > self.peak_equity:
+                self.peak_equity = equity
+            if self.peak_equity > 0:
+                dd = (self.peak_equity - equity) / self.peak_equity
+                if dd > self.max_drawdown_pct:
+                    self.max_drawdown_pct = dd
         if record:
-            self._record_equity_point(equity)
+            self._record_equity_point(equity, stale=is_stale)
 
-    def _record_equity_point(self, equity: float) -> None:
+    def _record_equity_point(self, equity: float, stale: bool = False) -> None:
         """Append one equity-curve point, downsampling when the buffer is full.
 
         ``MAX_EQUITY_POINTS`` used to be a hard stop: once the buffer filled,
@@ -1388,18 +2888,19 @@ class StrategyRunner:
         """
         if len(self.equity_curve) >= MAX_EQUITY_POINTS:
             self.equity_curve = self.equity_curve[::2]
-        self.equity_curve.append(
-            {
-                "ts": self._now().isoformat(),
-                "equity": round(equity, 2),
-            }
-        )
+        point: Dict[str, Any] = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "equity": round(equity, 2),
+        }
+        if stale or (self.options_bridge is not None and self.options_bridge.mark_stale):
+            point["stale"] = True
+        self.equity_curve.append(point)
 
     def _roll_trading_day(self, ts: str) -> None:
         # Daily PnL is session-anchored: the baseline is fixed at the first
         # bar the runner sees (warmup and replay do not roll days). Call
         # :meth:`reset_daily_anchor` to re-baseline at the real session start.
-        day = ts[:10] if ts else self._now().date().isoformat()
+        day = ts[:10] if ts else datetime.now(timezone.utc).date().isoformat()
         if self._current_day is None:
             self._current_day = day
             self._day_start_equity = self.equity()
@@ -1408,7 +2909,7 @@ class StrategyRunner:
         """Re-baseline daily PnL at current equity (session open / tests)."""
         with self._lock:
             self._day_start_equity = self.equity()
-            self._current_day = self._now().date().isoformat()
+            self._current_day = datetime.now(timezone.utc).date().isoformat()
 
     # -- instance-level circuit breakers ----------------------------------
 
@@ -1416,12 +2917,23 @@ class StrategyRunner:
         equity = self.equity()
         alloc = self.config.allocated_capital
         breach = None
-        if self.max_drawdown_pct >= self.config.max_drawdown_pct:
+        # 0 disables a breaker (2026-09-24, mirrors the global daily-loss
+        # convention): a clean watch session spawns with 0/0 and never
+        # auto-pauses. A 0 limit can't mean "zero tolerance" — it would trip
+        # on the first ₹1 (or instantly, 0 >= 0).
+        if (
+            self.config.max_drawdown_pct > 0
+            and self.max_drawdown_pct >= self.config.max_drawdown_pct
+        ):
             breach = (
                 f"instance max drawdown {self.max_drawdown_pct:.1%} >= "
                 f"{self.config.max_drawdown_pct:.1%}"
             )
-        elif (alloc - equity) >= alloc * self.config.daily_loss_limit_pct and self.daily_pnl() < 0:
+        elif (
+            self.config.daily_loss_limit_pct > 0
+            and (alloc - equity) >= alloc * self.config.daily_loss_limit_pct
+            and self.daily_pnl() < 0
+        ):
             loss_pct = (self._day_start_equity - equity) / alloc
             if loss_pct >= self.config.daily_loss_limit_pct:
                 breach = (
@@ -1432,6 +2944,7 @@ class StrategyRunner:
             self._log_signal("-", "RISK_HALT", None, None, breach)
             if self.status == STATUS_RUNNING:
                 self.status = STATUS_PAUSED
+                self._sync_bridge_runner_state()
                 self.error = breach
 
     # ------------------------------------------------------------------ #
@@ -1442,7 +2955,7 @@ class StrategyRunner:
         self, symbol: str, kind: str, signal: Optional[int], price: Optional[float], reason: str
     ) -> None:
         entry = {
-            "ts": self._now().isoformat(),
+            "ts": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol,
             "kind": kind,
             "signal": signal,
@@ -1480,6 +2993,7 @@ class StrategyRunner:
         structure-level detail the matrix and deep-dive render.
         """
         with self._lock:
+            self._sync_bridge_runner_state()
             equity = self.equity()
             options_summary = (
                 self.options_bridge.summary() if self.options_bridge is not None else None
@@ -1507,15 +3021,67 @@ class StrategyRunner:
                 "status": self.status,
                 "mode": self.config.mode,
                 "source": self.config.source,
+                # Multi-broker PRD Phase B: which capital segment this runner
+                # trades in and which broker its orders route to. ``broker``
+                # is the display label: the execution broker for live
+                # runners, 'paper' otherwise.
+                "segment": self.config.segment,
+                "execution_broker": self.config.execution_broker,
+                "broker": (
+                    (self.config.execution_broker or "live")
+                    if self.config.mode == "live"
+                    else "paper"
+                ),
                 "error": self.error,
                 "bars_processed": self.bars_processed,
                 "last_bar_ts": max(self._last_bar_ts.values()) if self._last_bar_ts else None,
                 "created_ts": self.created_ts,
                 "instrument": dict(self.config.instrument or {"type": "equity"}),
                 "options": options_summary,
+                # R1: runner-level mark freshness fields (mirrored from options_summary)
+                "mark_ts": (options_summary or {}).get("mark_ts"),
+                "mark_stale": bool((options_summary or {}).get("mark_stale")),
+                "quote_error": (options_summary or {}).get("quote_error"),
+                "stale_positions": int((options_summary or {}).get("stale_positions") or 0),
                 # A1: the book's most recent MTM, mirrored onto the row so a
                 # card can show option P&L before it is folded into equity (A2).
                 "option_pnl": round(self.last_option_pnl, 2),
+                # U3.4: playbook snapshot version for display
+                "playbook_id": self.config.playbook_id,
+                "playbook_version": self.config.playbook_version,
+                "playbook_snapshot": self.config.playbook_snapshot,
+                # -- Live Order Management ---------------------------------
+                # Per-position rows (equity) + the operator's levels. Option
+                # structures already ship their own rows inside ``options``
+                # (``open_structures_detail``), enriched with the same
+                # ``stop_loss``/``target``/``position_key`` keys so one
+                # positions table can render both kinds.
+                "positions_detail": self.positions_detail(),
+                "position_rules": self.position_rules_view(),
+                # Phase 3: refused orders waiting for their next attempt. The
+                # dashboard shows this so "the strategy went quiet" and "the
+                # venue keeps saying no" are distinguishable at a glance.
+                "order_retries": {
+                    "pending": [
+                        {
+                            "symbol": sym,
+                            "side": entry["side"],
+                            "quantity": entry["qty"],
+                            "kind": entry["kind"],
+                            "attempts": entry["attempts"],
+                            "retry_of": entry["retry_of"],
+                            "reason": entry["reason"],
+                        }
+                        for sym, entry in sorted(self._retries.items())
+                    ],
+                    "blocked": [
+                        {"symbol": sym, **entry}
+                        for sym, entry in sorted(self._retry_blocked.items())
+                    ],
+                    "raised": self.retries_raised,
+                    "recovered": self.retries_recovered,
+                    "exhausted": self.retries_exhausted,
+                },
             }
 
     def get_detail(self) -> Dict[str, Any]:
@@ -1534,6 +3100,12 @@ class StrategyRunner:
                         2,
                     ),
                     "entry_ts": p["entry_ts"],
+                    # Live Order Management: the levels armed on this row (the
+                    # key the dashboard sends back for any manual action).
+                    "position_key": sym,
+                    "kind": "equity",
+                    "stop_loss": self.position_rules.get(sym, {}).get(RULE_STOP_LOSS),
+                    "target": self.position_rules.get(sym, {}).get(RULE_TARGET),
                 }
                 for sym, p in self.positions.items()
             ]

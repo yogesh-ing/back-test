@@ -1260,8 +1260,11 @@ def _resolve_price(current_price: Any, signal: Any, portfolio: Any) -> Decimal:
                             continue
 
     # from portfolio? no price there
-    # fallback
-    return to_price(100, "price")
+    # No resolvable price: fall back to the smoke-test quantity of 1
+    # (priced at 1) so sizing still degrades to a single unit instead of a
+    # fantasy ₹100 price — callers that need a real price must fail closed
+    # themselves (the forward adapter now rejects no-price signals).
+    return ONE
 
 
 def _resolve_equity(portfolio: Any) -> Decimal:

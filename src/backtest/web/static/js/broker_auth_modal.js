@@ -54,6 +54,29 @@ const BrokerAuthUI = (() => {
     // close
     const closeBtn         = () => document.getElementById("broker-auth-close");
 
+    // remember-session-today toggles (credentials view + authenticated view)
+    const rememberToggleCred = () => document.getElementById("broker-auth-remember-toggle");
+    const rememberToggleAuth = () => document.getElementById("broker-auth-remember-toggle-auth");
+    const rememberHint       = () => document.getElementById("broker-auth-remember-hint");
+
+    // broker selector (2026-09-25): which broker's login flow to run.
+    const brokerSelect       = () => document.getElementById("broker-auth-broker-select");
+    const usernameLabel      = () => document.getElementById("broker-auth-username-label");
+
+    // Per-broker step-1 wording (field labels + placeholders). A new broker
+    // only needs an entry here once it's registered server-side.
+    const BROKER_FIELDS = {
+        mstock: { display: "mStock", userLabel: "Username", userPlaceholder: "Enter username", passLabel: "Password" },
+        dhan:   { display: "Dhan", userLabel: "Client ID", userPlaceholder: "Enter Dhan client ID", passLabel: "PIN" },
+    };
+
+    // The broker whose credentials flow is currently in progress (kept across
+    // steps so /api/broker/verify-totp lands on the right session).
+    let selectedBroker = null;
+    // The broker shown on the authenticated view — its [Logout] must hit
+    // exactly this broker and leave every other session alive (Phase A).
+    let authBroker = null;
+
     // ---- helpers -----------------------------------------------------------
 
     function showView(name) {
@@ -71,6 +94,51 @@ const BrokerAuthUI = (() => {
     function setTitle(text) {
         const el = titleEl();
         if (el) el.textContent = text;
+    }
+
+    // ---- broker selector ---------------------------------------------------
+
+    let brokerListRequested = false; // one fetch per page — the registry is static
+
+    async function loadBrokerList() {
+        const sel = brokerSelect();
+        if (!sel || sel.options.length > 0 || brokerListRequested) return; // already populated
+        brokerListRequested = true;
+        let brokers = [];
+        try {
+            const resp = await fetch("/api/broker/list");
+            const data = await resp.json();
+            brokers = (data && data.brokers) || [];
+        } catch (err) { /* fall through — selector just stays empty */ }
+        for (const b of brokers) {
+            const opt = document.createElement("option");
+            opt.value = b.name;
+            opt.textContent = b.display_name || b.name;
+            sel.appendChild(opt);
+        }
+    }
+
+    function applyBrokerFields() {
+        const sel = brokerSelect();
+        const name = (sel && sel.value) || "mstock";
+        const f = BROKER_FIELDS[name] || BROKER_FIELDS.mstock;
+        if (usernameLabel()) usernameLabel().textContent = f.userLabel;
+        if (usernameInput()) usernameInput().placeholder = f.userPlaceholder;
+        // Defensive: the node test harness's fake elements have no
+        // .closest(); real browsers always do.
+        const passEl = passwordInput();
+        const passField = passEl && typeof passEl.closest === "function"
+            ? passEl.closest(".broker-auth-field")
+            : null;
+        if (passField && typeof passField.querySelector === "function") {
+            const lbl = passField.querySelector("label");
+            if (lbl) lbl.textContent = f.passLabel;
+        }
+    }
+
+    function currentBroker() {
+        const sel = brokerSelect();
+        return selectedBroker || (sel && sel.value) || null;
     }
 
     function setSpinner(btnEl, spinning) {
@@ -100,11 +168,23 @@ const BrokerAuthUI = (() => {
 
     // ---- view: credentials (Step 1) ----------------------------------------
 
+    // Broker-aware step-1 title: "mStock Login" / "Dhan Login" (generic
+    // fallback for a broker without a fields entry).
+    function loginTitle() {
+        const sel = brokerSelect();
+        const name = selectedBroker || (sel && sel.value) || "mstock";
+        const f = BROKER_FIELDS[name];
+        return "🔐 " + (f && f.display ? f.display + " Login" : "Broker Login");
+    }
+
     function showCredentials() {
-        setTitle("🔐 mStock Login");
+        setTitle(loginTitle());
         showView("credentials");
         if (credError()) credError().textContent = "";
+        applyBrokerFields();
+        selectedBroker = null; // next login uses the selector's current value
         if (usernameInput()) usernameInput().focus();
+        syncRememberToggle();
     }
 
     async function handleLogin() {
@@ -128,8 +208,10 @@ const BrokerAuthUI = (() => {
         if (credError()) credError().textContent = "";
 
         try {
-            const result = await postJSON("/api/broker/login", { username, password });
+            const broker = brokerSelect() && brokerSelect().value;
+            const result = await postJSON("/api/broker/login", { broker, username, password });
             if (result.success && result.requires_totp) {
+                selectedBroker = broker;
                 showTotp();
             } else if (result.success) {
                 // login succeeded but no TOTP required — go straight to authenticated
@@ -137,7 +219,7 @@ const BrokerAuthUI = (() => {
             } else {
                 // show error but don't call showCredentials() which clears it
                 if (credError()) credError().textContent = result.message || "Login failed";
-                setTitle("🔐 mStock Login");
+                setTitle(loginTitle());
                 showView("credentials");
             }
         } catch (err) {
@@ -150,7 +232,9 @@ const BrokerAuthUI = (() => {
     // ---- view: TOTP (Step 2) -----------------------------------------------
 
     function showTotp() {
-        setTitle("🔐 mStock Login");
+        const name = currentBroker();
+        const display = (name && BROKER_FIELDS[name] && name.charAt(0).toUpperCase() + name.slice(1)) || "Broker";
+        setTitle(`🔐 ${display} Login — TOTP`);
         showView("totp");
         if (totpError()) totpError().textContent = "";
         const t = totpInput();
@@ -173,7 +257,11 @@ const BrokerAuthUI = (() => {
         if (totpError()) totpError().textContent = "";
 
         try {
-            const result = await postJSON("/api/broker/verify-totp", { totp_code: code });
+            // Multi-broker Phase A: target the broker whose flow is pending.
+            const result = await postJSON("/api/broker/verify-totp", {
+                totp_code: code,
+                broker: currentBroker(),
+            });
             if (result.success) {
                 await refreshAndShowAuth();
             } else {
@@ -187,19 +275,82 @@ const BrokerAuthUI = (() => {
         }
     }
 
+    // ---- remember-session toggle (2026-09-24) ------------------------------
+
+    async function syncRememberToggle() {
+        // Reflect the server's toggle state on both checkboxes. The status
+        // payload carries remember_session {enabled, has_saved}.
+        // No toggle/hint in the DOM → nothing to reflect, skip the fetch
+        // (also keeps the node harness's "no fetch" invariants honest).
+        if (!rememberToggleCred() && !rememberToggleAuth() && !rememberHint()) return;
+        let enabled = false, saved = false;
+        try {
+            const resp = await fetch("/api/broker/status");
+            const data = await resp.json();
+            const rs = data.remember_session || {};
+            enabled = !!rs.enabled;
+            saved = !!rs.has_saved;
+        } catch (err) { /* keep defaults */ }
+        for (const el of [rememberToggleCred(), rememberToggleAuth()]) {
+            if (el) el.checked = enabled;
+        }
+        const hint = rememberHint();
+        if (hint) {
+            hint.textContent = enabled
+                ? (saved ? "saved ✓" : "saves on login")
+                : "";
+        }
+    }
+
+    async function handleRememberChange(evt) {
+        const enabled = !!evt.target.checked;
+        // Optimistic sync of the sibling checkbox, then the server call.
+        for (const el of [rememberToggleCred(), rememberToggleAuth()]) {
+            if (el && el !== evt.target) el.checked = enabled;
+        }
+        try {
+            const result = await postJSON("/api/broker/remember-session", { enabled });
+            if (!result.success) throw new Error(result.error || "failed");
+            const hint = rememberHint();
+            if (hint) {
+                hint.textContent = enabled
+                    ? (result.deleted ? "saved ✓" : "saves on login")
+                    : "won't be remembered";
+            }
+        } catch (err) {
+            // Revert on failure so the checkbox never lies.
+            evt.target.checked = !enabled;
+            for (const el of [rememberToggleCred(), rememberToggleAuth()]) {
+                if (el && el !== evt.target) el.checked = !enabled;
+            }
+        }
+        if (BrokerStatus && typeof BrokerStatus.refresh === "function") {
+            BrokerStatus.refresh();
+        }
+    }
+
     // ---- view: authenticated (Step 3) --------------------------------------
 
-    function showAuthenticated() {
+    function showAuthenticated(brokerName) {
         const status = BrokerStatus && BrokerStatus.get();
-        const name = (status && status.broker_display_name) || "mStock";
+        // Multi-broker Phase A: prefer the targeted broker's session row from
+        // the sessions map; fall back to the legacy top-level (UI-active) keys.
+        const sessions = (status && status.sessions) || {};
+        const target = brokerName || currentBroker();
+        const row = (target && sessions[target]) || null;
+        const name = (row && row.broker_display_name)
+            || (status && status.broker_display_name) || "mStock";
+        const expiresAt = row ? row.expires_at : (status && status.expires_at);
 
+        authBroker = target || (status && status.broker) || null;
         setTitle(`🟢 ${name} Connected`);
         showView("auth");
 
         if (brokerNameEl()) brokerNameEl().textContent = name;
         if (expiresEl()) {
-            expiresEl().textContent = formatExpiry(status && status.expires_at);
+            expiresEl().textContent = formatExpiry(expiresAt);
         }
+        syncRememberToggle();
     }
 
     async function refreshAndShowAuth() {
@@ -219,11 +370,52 @@ const BrokerAuthUI = (() => {
     // ---- logout ------------------------------------------------------------
 
     async function handleLogout() {
+        // Check if data fetch is running and warn user
+        try {
+            const statusResp = await fetch('/api/data/status');
+            const statusData = await statusResp.json();
+            
+            if (statusData.status === 'running') {
+                const shouldProceed = confirm(
+                    `A data fetch is currently running (${statusData.fetched || 0}/${statusData.total || 0} symbols).\n\n` +
+                    `It will continue in the background after logout.\n\n` +
+                    `Do you want to stop it first?`
+                );
+                
+                if (!shouldProceed) {
+                    // User cancelled logout
+                    return;
+                }
+                
+                // User wants to stop the fetch first
+                try {
+                    const stopResp = await fetch('/api/data/stop', { method: 'POST' });
+                    const stopData = await stopResp.json();
+                    
+                    if (stopResp.ok) {
+                        alert('Data fetch stopped. You can now logout safely.');
+                    } else {
+                        alert('Could not stop fetch: ' + (stopData.error || 'Unknown error'));
+                    }
+                } catch (err) {
+                    alert('Error stopping fetch: ' + err.message);
+                }
+                
+                // Don't proceed with logout yet - let user click again
+                return;
+            }
+        } catch (err) {
+            // If status check fails, proceed with logout anyway
+            console.warn('Could not check data fetch status:', err);
+        }
+        
         if (BrokerStatus && typeof BrokerStatus.expectLogout === "function") {
             BrokerStatus.expectLogout();
         }
         try {
-            await postJSON("/api/broker/logout", {});
+            // Multi-broker Phase A: log out ONLY the broker shown on the
+            // authenticated view; other broker sessions stay live.
+            await postJSON("/api/broker/logout", authBroker ? { broker: authBroker } : {});
         } catch (err) {
             // ignore — we're clearing UI state regardless
         }
@@ -235,12 +427,36 @@ const BrokerAuthUI = (() => {
 
     // ---- open / close ------------------------------------------------------
 
-    function open() {
+    function open(opts) {
         const ov = overlay();
         if (!ov) return;
         ov.classList.add("open");
 
-        // Seed the correct view based on current auth state.
+        // Multi-broker Phase A: open({broker: "dhan"}) targets one broker's
+        // flow (Broker Board [Login] path) — the selector is pre-set and the
+        // view seeds from THAT broker's session state.
+        const targetBroker = (opts && opts.broker) || null;
+
+        loadBrokerList().then(() => {
+            const sel = brokerSelect();
+            if (targetBroker && sel) sel.value = targetBroker;
+            applyBrokerFields();
+        });
+
+        const status = BrokerStatus && BrokerStatus.get();
+        const sessions = (status && status.sessions) || {};
+        if (targetBroker) {
+            const row = sessions[targetBroker];
+            if (row && row.authenticated) {
+                showAuthenticated(targetBroker);
+            } else {
+                showCredentials();
+                selectedBroker = targetBroker;
+            }
+            return;
+        }
+
+        // Legacy (no target): seed from the UI-active broker's auth state.
         const state = BrokerStatus && BrokerStatus.state();
         if (state === "authenticated" || state === "expiring_soon") {
             showAuthenticated();
@@ -296,15 +512,23 @@ const BrokerAuthUI = (() => {
             if (e.key === "Enter") handleTotp();
         });
 
-        // Credentials enter-key
-        const pi = passwordInput();
-        if (pi) pi.addEventListener("keydown", (e) => {
+        const passField = passwordInput();
+        if (passField) passField.addEventListener("keydown", (e) => {
             if (e.key === "Enter") handleLogin();
         });
+
+        // Broker selector: re-apply the field wording when it changes.
+        const bs = brokerSelect();
+        if (bs) bs.addEventListener("change", applyBrokerFields);
 
         // logout
         const lo = logoutBtn();
         if (lo) lo.addEventListener("click", handleLogout);
+
+        // remember-session toggles (either checkbox drives the same setting)
+        for (const el of [rememberToggleCred(), rememberToggleAuth()]) {
+            if (el) el.addEventListener("change", handleRememberChange);
+        }
 
         // Register globally so broker_status.js and toasts can call it.
         window.BrokerAuthUI = { open, close };

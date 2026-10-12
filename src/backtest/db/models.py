@@ -135,6 +135,8 @@ class PortfolioSource(StrEnum):
     SYNTHETIC = "synthetic"
     REPLAY = "replay"
     MSTOCK = "mstock"
+    #: Second broker venue (migration 016 widened the DB CHECK to admit it).
+    DHAN = "dhan"
 
 
 class PositionStatus(StrEnum):
@@ -255,10 +257,17 @@ class Portfolio(Base):
     mode: Mapped[str] = mapped_column(
         String(16), nullable=False, default="paper", server_default=text("'paper'")
     )
-    #: Where this run's bars come from (migration 002): synthetic = generated,
-    #: replay = historical DB, mstock = live broker feed.
+    #: Where this run's bars come from (migration 002, widened by 016):
+    #: synthetic = generated, replay = historical DB, mstock | dhan = live
+    #: broker feed.
     source: Mapped[str] = mapped_column(
         String(16), nullable=False, default="synthetic", server_default=text("'synthetic'")
+    )
+    #: Capital partition this run belongs to (migration 008): '' = none, legacy.
+    segment: Mapped[str] = mapped_column(String(64), nullable=False, server_default=text("''"))
+    #: Broker the runner routes orders to (migration 008): '' = default routing.
+    execution_broker: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("''")
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -333,6 +342,9 @@ class Position(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
     status: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'open'"))
+    #: Venue classification (migration 008): 'paper' = simulated fills, else
+    #: the broker the position's orders were routed to.
+    broker: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'paper'"))
 
     portfolio: Mapped["Portfolio"] = relationship(back_populates="positions")
     fills: Mapped[list["Fill"]] = relationship(back_populates="position")
@@ -365,6 +377,7 @@ class Position(Base):
         Index("ix_positions_portfolio_status", "portfolio_id", "status"),
         Index("ix_positions_symbol", "symbol"),
         Index("ix_positions_opened_at", text("opened_at DESC")),
+        Index("ix_positions_broker", "broker"),
     )
 
     def __repr__(self) -> str:  # pragma: no cover
@@ -417,6 +430,9 @@ class Order(Base):
     client_order_id: Mapped[Optional[str]] = mapped_column(String(64))
     #: Broker-assigned identifier; NULL in pure simulation.
     broker_order_id: Mapped[Optional[str]] = mapped_column(String(64))
+    #: Venue classification (migration 008): 'paper' = simulated fills, else
+    #: the broker the order was routed to.
+    broker: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'paper'"))
 
     submitted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -472,6 +488,7 @@ class Order(Base):
         Index("ix_orders_portfolio_status", "portfolio_id", "status"),
         Index("ix_orders_symbol_submitted", "symbol", text("submitted_at DESC")),
         Index("ix_orders_position", "position_id"),
+        Index("ix_orders_broker", "broker"),
         # Hot path: the execution loop scans working orders every tick.
         Index(
             "ix_orders_working",
@@ -734,10 +751,79 @@ class MarketDataCache(Base):
         UniqueConstraint("symbol", "exchange", "timeframe", "ts", name="uq_mdc_bar"),
         Index("ix_mdc_symbol_tf_ts", "symbol", "timeframe", text("ts DESC")),
         Index("ix_mdc_ts", text("ts DESC")),
+        # Timeframe-leading so the freshness chip's per-timeframe
+        # ``ORDER BY ts DESC LIMIT 1`` is an O(log n) seek for EMPTY
+        # timeframes too (13.7s full scan without it, 2026-10-04).
+        Index("ix_mdc_tf_ts", "timeframe", text("ts DESC")),
     )
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<Bar {self.symbol} {self.timeframe} {self.ts} c={self.close}>"
+
+
+# ---------------------------------------------------------------------------
+# 7b. Corporate actions (review §3.3 / gap 12c — adjusted-price policy store)
+# ---------------------------------------------------------------------------
+
+
+class CorporateActionRecord(Base):
+    """Split / bonus / dividend events per symbol.
+
+    The adjustment POLICY applies these at read time (``AdjustedSource``);
+    raw bars in ``market_data_cache`` are never rewritten. ``factor`` is the
+    pre-ex-date price multiplier: split ₹10 → ₹1 ⇒ 0.10; bonus 1:1 ⇒ 0.50;
+    dividends default to 1.0 (recorded, price-neutral).
+    """
+
+    __tablename__ = "corporate_actions"
+
+    action_id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: First day the post-action price trades. Bars strictly before this are
+    #: back-adjusted by ``factor``.
+    ex_date: Mapped[date] = mapped_column(Date, nullable=False)
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    factor: Mapped[Decimal] = mapped_column(Price, nullable=False, server_default=text("1"))
+    #: Dividend rupees per share (informational; policy does not auto-adjust).
+    amount: Mapped[Optional[Decimal]] = mapped_column(Money)
+    note: Mapped[Optional[str]] = mapped_column(String(255))
+    source: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'manual'"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('split', 'bonus', 'dividend')", name="ck_ca_kind"),
+        CheckConstraint("factor > 0", name="ck_ca_factor_pos"),
+        # One event per symbol/day/kind — re-announcements are updates, not rows.
+        UniqueConstraint("symbol", "ex_date", "kind", name="uq_ca_event"),
+        Index("ix_ca_symbol_exdate", "symbol", "ex_date"),
+    )
+
+    def to_action(self):
+        """→ ``backtest.data.corporate_actions.CorporateAction`` (lazy import)."""
+        from backtest.data.corporate_actions import CorporateAction
+
+        return CorporateAction(
+            symbol=self.symbol,
+            ex_date=self.ex_date,
+            kind=self.kind,
+            adjustment_factor=float(self.factor),
+            amount=float(self.amount) if self.amount is not None else None,
+            note=self.note or "",
+        )
+
+    @classmethod
+    def ensure_schema(cls, manager: Any) -> None:
+        """Create just this table (same convention as the snapshot asset)."""
+        engine = manager.engine if hasattr(manager, "engine") else manager
+        Base.metadata.create_all(engine, tables=[cls.__table__])
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"<CorporateAction {self.symbol} {self.kind} x{float(self.factor):g} "
+            f"ex={self.ex_date}>"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -994,3 +1080,1237 @@ class TradeStructure(Base):
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<TradeStructure {self.structure_type} {self.underlying} {self.status}>"
+
+
+class OptionChainSnapshot(Base):
+    """One contract's state in one option-chain snapshot batch (P1.1).
+
+    The data asset behind options *research*: every snapshot run appends the
+    full contract terms of the chain (from the instrument master — one API
+    call) plus L1 quotes where available, so backtests can eventually price
+    off recorded premiums/IV instead of Black-Scholes
+    (see ``docs/OPTIONS-FORWARD-TEST-EXPERIMENT.md`` E-6).
+
+    Append-only: each run writes a new batch sharing one ``snapshot_ts``;
+    there is no update path. Research reads go through
+    :func:`backtest.options.chain_snapshots.load_snapshots`.
+    """
+
+    __tablename__ = "option_chain_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: Batch timestamp — one value shared by every row of one snapshot run.
+    snapshot_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: Data source tag ("mstock" today; vendors plug in here).
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    underlying: Mapped[str] = mapped_column(String(32), nullable=False)
+    expiry: Mapped[date] = mapped_column(Date, nullable=False)
+    strike: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    option_type: Mapped[str] = mapped_column(String(2), nullable=False)
+    instrument_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    trading_symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    lot_size: Mapped[Optional[int]] = mapped_column(Integer)
+
+    #: L1 quotes — nullable because contract terms are captured even when a
+    #: quote call fails or is skipped (rate-limit budget).
+    ltp: Mapped[Optional[Decimal]] = mapped_column(Money)
+    bid: Mapped[Optional[Decimal]] = mapped_column(Money)
+    ask: Mapped[Optional[Decimal]] = mapped_column(Money)
+    volume: Mapped[Optional[int]] = mapped_column(Integer)
+    oi: Mapped[Optional[int]] = mapped_column(Integer)
+    #: Underlying spot at snapshot time (when the caller has one).
+    spot: Mapped[Optional[Decimal]] = mapped_column(Money)
+
+    __table_args__ = (
+        CheckConstraint(
+            option_type.in_(["CE", "PE"]), name="ck_option_chain_snapshots_type"
+        ),
+        Index("ix_chain_snapshots_ts", "snapshot_ts"),
+        Index("ix_chain_snapshots_underlying", "underlying"),
+        Index(
+            "ix_chain_snapshots_lookup",
+            "underlying",
+            "expiry",
+            "option_type",
+            "strike",
+        ),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"<OptionChainSnapshot {self.underlying} {self.expiry} "
+            f"{self.strike}{self.option_type}>"
+        )
+
+
+class OptionIntentKind(StrEnum):
+    """Event classes in the append-only option intent journal."""
+
+    #: The decision layer (bridge, live trader) chose to act.
+    DECIDED = "decided"
+    #: ``place_order`` returned an order id — the broker holds the ticket.
+    SUBMITTED = "submitted"
+    #: A submitted order was seen executed in the order book.
+    FILLED = "filled"
+    #: The broker definitely rejected the order (nothing at the exchange).
+    REJECTED = "rejected"
+    #: Placement timed out / failed at the gateway — the order may exist.
+    UNCERTAIN = "uncertain"
+    #: An uncertain submit was matched against the broker order book.
+    RECONCILED = "reconciled"
+    #: Execution stopped before all legs were placed.
+    HALTED = "halted"
+    #: A paper (simulated) fill was booked. Never used for live orders.
+    EXECUTED = "executed"
+
+
+class OptionIntentEvent(Base):
+    """One event in the append-only option intent journal (PRD decision 8).
+
+    ``intent_id`` is derived from the *decision*, not from a random uuid, so
+    the same decision replayed after a restart hashes to the same id and the
+    ``dedupe_key`` unique index makes a second submit of one leg impossible to
+    record — that is the idempotency key the execution seam reads before
+    calling ``place_order``.
+
+    Append-only: the journal has no update or delete path (see
+    :mod:`backtest.options.intent_journal`), so portfolio state stays derivable
+    by replay and an uncertain submit can be reconciled against the broker
+    rather than blindly retried.
+    """
+
+    __tablename__ = "option_intent_events"
+
+    @classmethod
+    def ensure_schema(cls, manager: Any) -> None:
+        """Create just this table (same convention as the segment audit)."""
+        engine = manager.engine if hasattr(manager, "engine") else manager
+        Base.metadata.create_all(engine, tables=[cls.__table__])
+
+    event_id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    intent_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    #: ``intent_id`` + ``kind`` (+ leg) — the idempotency key. ``None`` for
+    #: events that may legitimately repeat (e.g. ``reconciled`` polls).
+    dedupe_key: Mapped[Optional[str]] = mapped_column(String(160))
+
+    leg_index: Mapped[Optional[int]] = mapped_column(Integer)
+    structure_id: Mapped[Optional[str]] = mapped_column(String(36))
+    strategy_name: Mapped[Optional[str]] = mapped_column(String(64))
+    structure_type: Mapped[Optional[str]] = mapped_column(String(32))
+    underlying: Mapped[Optional[str]] = mapped_column(String(32))
+
+    broker_order_id: Mapped[Optional[str]] = mapped_column(String(64))
+    client_order_id: Mapped[Optional[str]] = mapped_column(String(64))
+
+    #: Anything else the reconciliation needs: quote ts/source, requested vs
+    #: filled lots, exit reason, error text. Never credentials.
+    detail: Mapped[dict[str, Any]] = mapped_column(
+        JSONVariant, nullable=False, server_default=text("'{}'")
+    )
+
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(_in_check("kind", OptionIntentKind), name="ck_opt_intent_kind"),
+        Index("ix_opt_intent_events_dedupe", "dedupe_key", unique=True),
+        Index("ix_opt_intent_events_intent", "intent_id", "event_id"),
+        Index("ix_opt_intent_events_recorded", text("recorded_at DESC")),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<OptionIntentEvent {self.intent_id[:8]} {self.kind}>"
+
+
+# ====================================================================
+# Parameter Optimization Engine (PRD "Parameter Optimization Engine" v1.0)
+# ===========================================================================
+#
+# Mirrors Alembic revisions 009-013 / db/migrations/009-013_*.sql. PostgreSQL
+# is the production target (native UUID + JSONB, GIN index on result params,
+# updated_at triggers, analytics views); the same models run on SQLite for
+# local development and the test suite via ``create_all``.
+
+
+class OptimizationStatus(StrEnum):
+    DRAFT = "draft"
+    PENDING = "pending"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class OptimizationObjective(StrEnum):
+    SHARPE = "sharpe"
+    SORTINO = "sortino"
+    CALMAR = "calmar"
+    TOTAL_RETURN = "total_return"
+    PROFIT_FACTOR = "profit_factor"
+    EXPECTANCY = "expectancy"
+
+
+class OptimizationMethod(StrEnum):
+    GRID = "grid"
+    RANDOM = "random"
+    BAYESIAN = "bayesian"
+    GENETIC = "genetic"
+
+
+class PresetSource(StrEnum):
+    OPTIMIZATION = "optimization"
+    MANUAL = "manual"
+    DEFAULT = "default"
+    IMPORT = "import"
+    #: Automatic "params before apply" snapshot kept for one-click rollback.
+    SNAPSHOT = "snapshot"
+
+
+#: Ratio / score columns (Sharpe, returns as decimals, drawdown...).
+Score = Numeric(10, 4)
+#: Per-trade currency amounts on result rows (PRD precision).
+TradeMoney = Numeric(10, 2)
+
+
+class OptimizationRun(Base):
+    """One optimization job: config, lifecycle, best result, WF verdict.
+
+    Columns beyond the PRD schema (``baseline_*``, ``analysis``,
+    ``robustness_score``) hold the original-vs-optimized comparison and the
+    sensitivity/robustness output the results dashboard renders, so a
+    completed run is fully reproducible from this row plus its results.
+    """
+
+    __tablename__ = "optimization_runs"
+
+    run_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    strategy_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    bucket_id: Mapped[Optional[str]] = mapped_column(String(100))
+
+    # -- configuration ------------------------------------------------------
+    objective_function: Mapped[str] = mapped_column(String(50), nullable=False)
+    method: Mapped[str] = mapped_column(String(50), nullable=False)
+    param_space: Mapped[Any] = mapped_column(JSONVariant, nullable=False)
+    constraints: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    backtest_config: Mapped[Any] = mapped_column(JSONVariant, nullable=False)
+
+    # -- lifecycle ----------------------------------------------------------
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'pending'")
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    # -- progress -----------------------------------------------------------
+    total_combinations: Mapped[Optional[int]] = mapped_column(Integer)
+    tested_combinations: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    valid_combinations: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+
+    # -- results summary ----------------------------------------------------
+    best_params: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    best_score: Mapped[Optional[Decimal]] = mapped_column(Score)
+    best_metrics: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    # -- original-vs-optimized comparison (extension) ------------------------
+    baseline_params: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    baseline_metrics: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    baseline_score: Mapped[Optional[Decimal]] = mapped_column(Score)
+
+    # -- walk-forward -------------------------------------------------------
+    walk_forward_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    walk_forward_config: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    walk_forward_results: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    overfitted: Mapped[Optional[bool]] = mapped_column(Boolean)
+    avg_train_score: Mapped[Optional[Decimal]] = mapped_column(Score)
+    avg_test_score: Mapped[Optional[Decimal]] = mapped_column(Score)
+
+    # -- analytics (extension): sensitivity, equity curves, warnings --------
+    analysis: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    robustness_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 2))
+    # PRD Part 2 §3. The Sharpe the best-of-N had to beat, on the same scale
+    # as `best_metrics.sharpe`. The full statistic (including the probability)
+    # is in `analysis["deflated_sharpe"]`; this column is the one number you
+    # would want to sort or filter on.
+    deflated_sharpe: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 3))
+
+    # -- data attestation (PRD Part 2 §2, migration 015) --------------------
+    # What this run actually ran on, measured on the candles the search loaded
+    # rather than on the range that was requested. All nullable and all
+    # unbackfilled on purpose: a row written before this migration has no
+    # attestation, and that is the truth of it. A guessed value here would be a
+    # claim nobody checked.
+    #
+    # The flat columns exist so runs can be listed and filtered by source
+    # without unpacking JSON in every query; `data_attestation` holds the whole
+    # record, including staleness and the synthetic acknowledgement. They are
+    # written together by `attestation.attestation_columns()` and nowhere else,
+    # so the two cannot drift.
+    data_source: Mapped[Optional[str]] = mapped_column(String(30))
+    data_fetch_date: Mapped[Optional[date]] = mapped_column(Date)
+    bars_count: Mapped[Optional[int]] = mapped_column(Integer)
+    symbol: Mapped[Optional[str]] = mapped_column(String(30))
+    timeframe: Mapped[Optional[str]] = mapped_column(String(10))
+    date_from: Mapped[Optional[date]] = mapped_column(Date)
+    date_to: Mapped[Optional[date]] = mapped_column(Date)
+    data_attestation: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    # -- metadata -----------------------------------------------------------
+    created_by: Mapped[Optional[str]] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        onupdate=func.now(),
+    )
+    task_id: Mapped[Optional[str]] = mapped_column(String(100))
+
+    results: Mapped[list["OptimizationResult"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(_in_check("status", OptimizationStatus), name="ck_opt_runs_status"),
+        CheckConstraint(
+            _in_check("objective_function", OptimizationObjective),
+            name="ck_opt_runs_objective",
+        ),
+        CheckConstraint(_in_check("method", OptimizationMethod), name="ck_opt_runs_method"),
+        CheckConstraint("tested_combinations >= 0", name="ck_opt_runs_tested_nonneg"),
+        CheckConstraint("valid_combinations >= 0", name="ck_opt_runs_valid_nonneg"),
+        Index("idx_opt_runs_strategy", "strategy_id"),
+        Index("idx_opt_runs_status", "status"),
+        Index("idx_opt_runs_created", "created_at"),
+        Index("idx_opt_runs_strategy_status", "strategy_id", "status"),
+        Index("idx_opt_runs_bucket", "bucket_id"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<OptimizationRun {self.strategy_id} {self.method} {self.status}>"
+
+
+class OptimizationResult(Base):
+    """One tested parameter combination and its standardized metrics."""
+
+    __tablename__ = "optimization_results"
+
+    result_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    run_id: Mapped[str] = mapped_column(
+        UUIDStr,
+        ForeignKey("optimization_runs.run_id", ondelete="CASCADE", name="fk_opt_results_run"),
+        nullable=False,
+    )
+    params: Mapped[Any] = mapped_column(JSONVariant, nullable=False)
+
+    # -- core metrics -------------------------------------------------------
+    sharpe: Mapped[Optional[Decimal]] = mapped_column(Score)
+    sortino: Mapped[Optional[Decimal]] = mapped_column(Score)
+    calmar: Mapped[Optional[Decimal]] = mapped_column(Score)
+    #: Decimal fraction: 0.124 = 12.4 %.
+    total_return: Mapped[Optional[Decimal]] = mapped_column(Score)
+    cagr: Mapped[Optional[Decimal]] = mapped_column(Score)
+    #: Negative decimal fraction: -0.083 = -8.3 %.
+    max_drawdown: Mapped[Optional[Decimal]] = mapped_column(Score)
+    drawdown_duration_days: Mapped[Optional[int]] = mapped_column(Integer)
+
+    # -- trade statistics ---------------------------------------------------
+    profit_factor: Mapped[Optional[Decimal]] = mapped_column(Score)
+    #: Percentage: 54.20 = 54.2 % of closed trades were winners.
+    win_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2))
+    total_trades: Mapped[Optional[int]] = mapped_column(Integer)
+    winning_trades: Mapped[Optional[int]] = mapped_column(Integer)
+    losing_trades: Mapped[Optional[int]] = mapped_column(Integer)
+    expectancy: Mapped[Optional[Decimal]] = mapped_column(TradeMoney)
+    avg_win: Mapped[Optional[Decimal]] = mapped_column(TradeMoney)
+    avg_loss: Mapped[Optional[Decimal]] = mapped_column(TradeMoney)
+    largest_win: Mapped[Optional[Decimal]] = mapped_column(TradeMoney)
+    largest_loss: Mapped[Optional[Decimal]] = mapped_column(TradeMoney)
+
+    # -- risk ---------------------------------------------------------------
+    volatility: Mapped[Optional[Decimal]] = mapped_column(Score)
+    downside_deviation: Mapped[Optional[Decimal]] = mapped_column(Score)
+
+    # -- execution ----------------------------------------------------------
+    avg_holding_time_minutes: Mapped[Optional[int]] = mapped_column(Integer)
+    avg_slippage: Mapped[Optional[Decimal]] = mapped_column(Score)
+
+    # -- constraints & ranking ----------------------------------------------
+    constraints_met: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    constraint_violations: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    objective_score: Mapped[Decimal] = mapped_column(Score, nullable=False)
+    rank: Mapped[Optional[int]] = mapped_column(Integer)
+
+    full_result: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    run: Mapped[OptimizationRun] = relationship(back_populates="results")
+
+    __table_args__ = (
+        CheckConstraint("rank IS NULL OR rank >= 1", name="ck_opt_results_rank_pos"),
+        CheckConstraint(
+            "win_rate IS NULL OR (win_rate >= 0 AND win_rate <= 100)",
+            name="ck_opt_results_win_rate",
+        ),
+        Index("idx_opt_results_run", "run_id"),
+        Index(
+            "idx_opt_results_rank",
+            "run_id",
+            "rank",
+            postgresql_where=text("rank IS NOT NULL"),
+            sqlite_where=text("rank IS NOT NULL"),
+        ),
+        Index("idx_opt_results_score", "run_id", "objective_score"),
+        Index("idx_opt_results_constraints", "run_id", "constraints_met"),
+        # JSONB containment search (params @> '{"fast": 10}') — PostgreSQL only.
+        Index("idx_opt_results_params_gin", "params", postgresql_using="gin").ddl_if(
+            dialect="postgresql"
+        ),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<OptimizationResult rank={self.rank} score={self.objective_score}>"
+
+
+class ParameterPreset(Base):
+    """A named, reusable parameter set for a strategy."""
+
+    __tablename__ = "parameter_presets"
+
+    preset_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    strategy_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    params: Mapped[Any] = mapped_column(JSONVariant, nullable=False)
+
+    source: Mapped[str] = mapped_column(String(50), nullable=False)
+    optimization_run_id: Mapped[Optional[str]] = mapped_column(
+        UUIDStr,
+        ForeignKey(
+            "optimization_runs.run_id", ondelete="SET NULL", name="fk_presets_opt_run"
+        ),
+    )
+    #: Backtest-run ledger lineage (migration 018, PRD R3): set when the
+    #: preset is saved from a plain backtest run ("Promote to Forward" anchor).
+    backtest_run_id: Mapped[Optional[str]] = mapped_column(
+        UUIDStr,
+        ForeignKey(
+            "backtest_runs.run_id", ondelete="SET NULL", name="fk_presets_backtest_run"
+        ),
+    )
+    backtest_metrics: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    applied_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    last_applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    created_by: Mapped[Optional[str]] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("strategy_id", "name", name="uq_strategy_preset_name"),
+        CheckConstraint(_in_check("source", PresetSource), name="ck_presets_source"),
+        CheckConstraint("applied_count >= 0", name="ck_presets_applied_nonneg"),
+        Index("idx_presets_strategy", "strategy_id"),
+        Index(
+            "idx_presets_active",
+            "strategy_id",
+            "is_active",
+            postgresql_where=text("is_active = true"),
+            sqlite_where=text("is_active = 1"),
+        ),
+        Index("idx_presets_source", "source"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<ParameterPreset {self.strategy_id}:{self.name}>"
+
+
+class OptimizationAudit(Base):
+    """Append-only audit trail: who changed which parameters, when, where."""
+
+    __tablename__ = "optimization_audit"
+
+    audit_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    run_id: Mapped[Optional[str]] = mapped_column(
+        UUIDStr,
+        ForeignKey("optimization_runs.run_id", ondelete="SET NULL", name="fk_audit_opt_run"),
+    )
+    strategy_id: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    action: Mapped[str] = mapped_column(String(50), nullable=False)
+    action_details: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    old_params: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    new_params: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    params_diff: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    applied_to_bucket: Mapped[Optional[str]] = mapped_column(String(100))
+    applied_to_mode: Mapped[Optional[str]] = mapped_column(String(20))
+    runner_restarted: Mapped[Optional[bool]] = mapped_column(Boolean)
+
+    expected_impact: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    actual_impact: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    requires_approval: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    approved_by: Mapped[Optional[str]] = mapped_column(String(100))
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    user_id: Mapped[Optional[str]] = mapped_column(String(100))
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45))
+    user_agent: Mapped[Optional[str]] = mapped_column(String(255))
+
+    __table_args__ = (
+        CheckConstraint(
+            "applied_to_mode IS NULL OR applied_to_mode IN ('paper', 'live')",
+            name="ck_audit_mode",
+        ),
+        Index("idx_audit_strategy", "strategy_id"),
+        Index("idx_audit_timestamp", "timestamp"),
+        Index("idx_audit_action", "action"),
+        Index("idx_audit_user", "user_id"),
+        Index("idx_audit_bucket", "applied_to_bucket"),
+        Index("idx_audit_run", "run_id"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<OptimizationAudit {self.action} {self.strategy_id}>"
+
+
+#: Tables owned by the optimization engine (used for scoped ``create_all``).
+OPTIMIZATION_TABLES = (
+    OptimizationRun.__table__,
+    OptimizationResult.__table__,
+    ParameterPreset.__table__,
+    OptimizationAudit.__table__,
+)
+# ---------------------------------------------------------------------------
+# Portfolio Intelligence & Alerts (migration 005)
+# ---------------------------------------------------------------------------
+
+
+class AlertSeverity(StrEnum):
+    CRITICAL = "critical"
+    WARNING = "warning"
+    INFO = "info"
+
+
+class PortfolioAlert(Base):
+    """Alert audit trail — one row per alert, updated through its lifecycle.
+
+    Written by :class:`backtest.intelligence.persistence.IntelligencePersister`
+    (fail-soft, off the tick thread). ``alert_key`` is the dedupe identity
+    (``type:subject``); ``notified_strategies`` records which strategy
+    subscribers were called and whether their callback succeeded.
+    """
+
+    __tablename__ = "alerts"
+
+    alert_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    alert_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    alert_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    data: Mapped[dict[str, Any]] = mapped_column(
+        JSONVariant, nullable=False, server_default=text("'{}'")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    dismissed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    dismissed_by: Mapped[Optional[str]] = mapped_column(String(100))
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    notified_strategies: Mapped[Optional[list[Any]]] = mapped_column(JSONVariant)
+
+    __table_args__ = (
+        CheckConstraint(_in_check("severity", AlertSeverity), name="ck_alerts_severity"),
+        Index("idx_alerts_type", "alert_type"),
+        Index("idx_alerts_created", text("created_at DESC")),
+        Index("idx_alerts_active", "alert_type", "resolved_at"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<PortfolioAlert {self.alert_type} {self.severity}>"
+
+
+class PortfolioGreeksSnapshot(Base):
+    """Periodic portfolio Greeks snapshot (historical analysis, not per tick).
+
+    Units: ``net_delta`` share-equivalents, ``net_gamma`` Δ per 1% move,
+    ``net_vega`` ₹ per IV point, ``net_theta`` ₹ per day.
+    """
+
+    __tablename__ = "portfolio_greeks_history"
+
+    snapshot_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    net_delta: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2))
+    net_gamma: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2))
+    net_vega: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2))
+    net_theta: Mapped[Optional[Decimal]] = mapped_column(Numeric(16, 2))
+    greeks_by_strategy: Mapped[Optional[list[Any]]] = mapped_column(JSONVariant)
+    concentration_by_underlying: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONVariant)
+    concentration_by_strike: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONVariant)
+
+    __table_args__ = (Index("idx_greeks_time", text("timestamp DESC")),)
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<PortfolioGreeksSnapshot {self.timestamp}>"
+
+
+class MarketRegimeSnapshot(Base):
+    """Market regime samples (5-minute cadence + every transition)."""
+
+    __tablename__ = "market_regime_history"
+
+    regime_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    regime: Mapped[str] = mapped_column(String(20), nullable=False)
+    vix: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2))
+    realized_vol: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2))
+    source: Mapped[Optional[str]] = mapped_column(String(64))
+    previous_regime: Mapped[Optional[str]] = mapped_column(String(20))
+    regime_changed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
+    __table_args__ = (Index("idx_regime_time", text("timestamp DESC")),)
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<MarketRegimeSnapshot {self.regime} {self.vix}>"
+
+
+# ---------------------------------------------------------------------------
+# 9. Cost & Risk Settings — broker cost-model profiles (certified panel, v2 §0)
+# ---------------------------------------------------------------------------
+
+
+class BrokerProfileRow(Base):
+    """An editable broker cost model (Phase 1 of the certified settings panel).
+
+    One row per broker profile. Built-in presets are seeded from
+    ``config/brokers.yaml`` / ``BROKER_PRESETS`` with ``is_preset=True`` and
+    are shown read-only in the UI; user overrides/edits are separate rows
+    (or the preset row updated by an admin — the audit table records which).
+
+    ``commission_model`` / ``statutory_rates`` are JSON dicts in the exact
+    shape :class:`~backtest.simulator.fees.BrokerProfile` accepts (see
+    ``to_profile()``), so the fee engine needs no adapter code.
+    """
+
+    __tablename__ = "broker_profiles"
+
+    @classmethod
+    def ensure_schema(cls, manager: Any) -> None:
+        """Create just this table (same convention as the snapshot asset)."""
+        engine = manager.engine if hasattr(manager, "engine") else manager
+        Base.metadata.create_all(engine, tables=[cls.__table__])
+
+    profile_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    profile_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    is_preset: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="INR")
+    default_segment: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="equity_delivery"
+    )
+    commission_model: Mapped[dict[str, Any]] = mapped_column(
+        JSONVariant, nullable=False, server_default=text("'{}'")
+    )
+    statutory_rates: Mapped[dict[str, Any]] = mapped_column(
+        JSONVariant, nullable=False, server_default=text("'{}'")
+    )
+    minimum_commission: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    validated_on: Mapped[Optional[date]] = mapped_column(Date)
+    contract_note_ref: Mapped[Optional[str]] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), onupdate=func.now()
+    )
+
+    def to_profile_kwargs(self) -> dict[str, Any]:
+        """Keyword arguments for ``BrokerProfile(**kwargs)`` (validated there).
+
+        The stored ``commission_model`` is the composite the panel edits
+        (``default`` / ``delivery`` / ``options`` sub-models); it unpacks to
+        the three separate BrokerProfile fields here.
+        """
+        composite = dict(self.commission_model or {})
+        default = composite.get("default")
+        if not isinstance(default, dict):
+            default = composite if composite else {"model": "zero"}
+        return {
+            "name": self.profile_id,
+            "commission_model": default,
+            "delivery_commission_model": composite.get("delivery"),
+            "options_commission_model": composite.get("options"),
+            "fee_schedule": {"schedule": "india_equity", **(self.statutory_rates or {})},
+            "minimum_commission": self.minimum_commission,
+            "currency": self.currency,
+            "default_segment": self.default_segment,
+        }
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<BrokerProfileRow {self.profile_id} preset={self.is_preset}>"
+
+
+class BrokerProfileAudit(Base):
+    """Append-only audit trail for every broker-profile change (v2 §0 #5).
+
+    One row per field change: who, when, old → new. Never updated, never
+    deleted — the tax-audit trail the contract-note validator stamps into.
+    """
+
+    __tablename__ = "broker_profile_audit"
+
+    @classmethod
+    def ensure_schema(cls, manager: Any) -> None:
+        """Create just this table (same convention as the snapshot asset)."""
+        engine = manager.engine if hasattr(manager, "engine") else manager
+        Base.metadata.create_all(engine, tables=[cls.__table__])
+
+    audit_id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    profile_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    field_changed: Mapped[str] = mapped_column(String(100), nullable=False)
+    old_value: Mapped[Optional[str]] = mapped_column(Text)
+    new_value: Mapped[Optional[str]] = mapped_column(Text)
+    changed_by: Mapped[Optional[str]] = mapped_column(String(50), server_default="admin")
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("idx_broker_audit_profile", "profile_id", "changed_at"),)
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<BrokerProfileAudit {self.profile_id}.{self.field_changed}>"
+
+
+# ---------------------------------------------------------------------------
+# 10. Cost & Risk Settings — segments + global live kill-switch (Phase 2, v2 §0)
+# ---------------------------------------------------------------------------
+
+
+class SegmentRow(Base):
+    """A trading segment — capital + mandate + broker + mode + risk limits.
+
+    Certified v2 §0 #2: risk limits belong to SEGMENTS, not brokers. One row
+    per named segment (``equity_intraday``, ``options_selling``, …) with:
+
+    * ``allocated_capital`` — the segment's ring-fenced capital;
+    * ``broker_profile_id`` — the execution venue (FK-shaped, not enforced);
+    * ``mode`` — ``paper`` | ``live`` (per-segment half of the two-tier gate);
+    * ``risk_limits`` — JSON: ``daily_loss_limit`` (abs ₹, MANDATORY before a
+      segment can arm live — fail closed), ``max_drawdown_pct``,
+      ``max_positions``, ``max_gross_exposure_pct``, ``max_leverage``.
+
+    A missing/empty segment table means "panel not configured" — the live
+    arming gates treat that as the legacy behavior (env-gated), not as a
+    block, so a deployment without the panel keeps working.
+    """
+
+    __tablename__ = "segments"
+
+    @classmethod
+    def ensure_schema(cls, manager: Any) -> None:
+        """Create just this table (same convention as the snapshot asset)."""
+        engine = manager.engine if hasattr(manager, "engine") else manager
+        Base.metadata.create_all(engine, tables=[cls.__table__])
+
+    segment_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    segment_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    mode: Mapped[str] = mapped_column(String(10), nullable=False, server_default="paper")
+    allocated_capital: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2))
+    broker_profile_id: Mapped[Optional[str]] = mapped_column(String(50))
+    risk_limits: Mapped[dict[str, Any]] = mapped_column(
+        JSONVariant, nullable=False, server_default=text("'{}'")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), onupdate=func.now()
+    )
+
+    #: The risk-limit vocabulary the panel edits (v2 §0 #2).
+    RISK_LIMIT_FIELDS: tuple = (
+        "daily_loss_limit",
+        "weekly_loss_limit",
+        "max_drawdown_pct",
+        "max_positions",
+        "max_gross_exposure_pct",
+        "max_leverage",
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "segment_id": self.segment_id,
+            "segment_name": self.segment_name,
+            "mode": self.mode,
+            "allocated_capital": (
+                float(self.allocated_capital) if self.allocated_capital is not None else None
+            ),
+            "broker_profile_id": self.broker_profile_id,
+            "risk_limits": dict(self.risk_limits or {}),
+        }
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<SegmentRow {self.segment_id} mode={self.mode}>"
+
+
+class SegmentAudit(Base):
+    """Append-only audit trail for segment + kill-switch changes (v2 §0 #5)."""
+
+    __tablename__ = "segment_audit"
+
+    @classmethod
+    def ensure_schema(cls, manager: Any) -> None:
+        """Create just this table (same convention as the snapshot asset)."""
+        engine = manager.engine if hasattr(manager, "engine") else manager
+        Base.metadata.create_all(engine, tables=[cls.__table__])
+
+    audit_id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    segment_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    field_changed: Mapped[str] = mapped_column(String(100), nullable=False)
+    old_value: Mapped[Optional[str]] = mapped_column(Text)
+    new_value: Mapped[Optional[str]] = mapped_column(Text)
+    changed_by: Mapped[Optional[str]] = mapped_column(String(50), server_default="admin")
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("idx_segment_audit_segment", "segment_id", "changed_at"),)
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<SegmentAudit {self.segment_id}.{self.field_changed}>"
+
+
+# ---------------------------------------------------------------------------
+# 12. Strategy Metadata — descriptions, regime info, documentation (v2 strategy template)
+# ---------------------------------------------------------------------------
+
+
+class StrategyMetadata(Base):
+    """Extended metadata for strategies — descriptions, docs, regime fit.
+
+    This table stores rich strategy information beyond the class attributes.
+    The ``strategy_name`` is the canonical name from ``Strategy.name`` and is
+    unique per row. Descriptions are mandatory for new strategies; older
+    strategies without descriptions will have backfilled data.
+
+    The ``regime_vix_range`` column drives the Risk Board "strategy regime fit"
+    display (low-volatility mean-reversion vs high-volatility momentum, etc.).
+    ``eligible_instruments`` restricts which underlyings a strategy can trade.
+    """
+
+    __tablename__ = "strategy_metadata"
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    #: Canonical strategy name (matches ``Strategy.name``, unique).
+    strategy_name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    #: Rich description of what the strategy does, its logic, and when to use it.
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Longer-form documentation / README content (Markdown allowed).
+    documentation: Mapped[Optional[str]] = mapped_column(Text)
+    #: Author / source of the strategy.
+    author: Mapped[Optional[str]] = mapped_column(String(100))
+    #: Version string (semver-like: "1.0", "2.1.3").
+    version: Mapped[Optional[str]] = mapped_column(String(20))
+    #: Signal kind: "equity" or "option" (derived from generate_market_view override).
+    signal_kind: Mapped[str] = mapped_column(String(20), nullable=False, server_default="equity")
+    #: VIX range this strategy is designed for (e.g. (10, 20)).
+    regime_vix_low: Mapped[Optional[float]] = mapped_column(Numeric(8, 2))
+    regime_vix_high: Mapped[Optional[float]] = mapped_column(Numeric(8, 2))
+    #: Comma-separated list of eligible instruments (NIFTY,BANKNIFTY).
+    eligible_instruments: Mapped[Optional[str]] = mapped_column(String(255))
+    #: Tags for filtering/searching (momentum, mean-reversion, breakout, etc.).
+    tags: Mapped[Optional[str]] = mapped_column(String(255))
+    #: When this metadata was created/updated.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("strategy_name", name="uq_strategy_metadata_name"),
+        CheckConstraint(
+            "signal_kind IN ('equity', 'option')", name="ck_strategy_metadata_signal_kind"
+        ),
+        CheckConstraint(
+            "regime_vix_low IS NULL OR regime_vix_high IS NULL "
+            "OR regime_vix_low <= regime_vix_high",
+            name="ck_strategy_metadata_vix_range",
+        ),
+        Index("idx_strategy_metadata_name", "strategy_name"),
+        Index("idx_strategy_metadata_signal_kind", "signal_kind"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<StrategyMetadata {self.strategy_name} v{self.version}>"
+
+
+# ---------------------------------------------------------------------------
+# 13. Market Holidays — NSE holiday calendar for market status awareness
+# ---------------------------------------------------------------------------
+
+
+class MarketHoliday(Base):
+    """Trading holiday for a market segment (non-weekend day when exchange is closed)."""
+
+    __tablename__ = "market_holidays"
+
+    @classmethod
+    def ensure_schema(cls, manager: Any, seed: bool = True) -> None:
+        """Create just this table and seed 2026 holidays if empty."""
+        if hasattr(manager, "engine"):
+            bind = manager.engine
+        elif hasattr(manager, "get_bind"):
+            bind = manager.get_bind()
+        else:
+            bind = manager
+        Base.metadata.create_all(bind, tables=[cls.__table__])
+        if seed:
+            cls.seed_2026(manager)
+
+    @classmethod
+    def seed_2026(cls, manager: Any) -> int:
+        """Seed 2026 NSE equity trading holidays if not already present."""
+        from backtest.live.market_status import NSE_HOLIDAYS_2026
+
+        def _do_seed(session: Any) -> int:
+            cnt = 0
+            for h_date, segment, desc in NSE_HOLIDAYS_2026:
+                parsed_date = date.fromisoformat(h_date) if isinstance(h_date, str) else h_date
+                existing = session.get(cls, parsed_date)
+                if existing is None:
+                    session.add(
+                        cls(
+                            holiday_date=parsed_date,
+                            segment=segment,
+                            description=desc,
+                            is_trading_holiday=True,
+                            source="nse",
+                        )
+                    )
+                    cnt += 1
+            if cnt:
+                session.commit()
+            return cnt
+
+        try:
+            if hasattr(manager, "session"):
+                with manager.session() as session:
+                    return _do_seed(session)
+            elif hasattr(manager, "add") and hasattr(manager, "commit"):
+                return _do_seed(manager)
+            elif hasattr(manager, "connect"):
+                from sqlalchemy.orm import Session
+                with Session(manager) as session:
+                    return _do_seed(session)
+            return 0
+        except Exception:
+            return 0
+
+    holiday_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    segment: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="equity", server_default="equity"
+    )
+    description: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_trading_holiday: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    source: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="nse", server_default="nse"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_market_holidays_date", "holiday_date"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<MarketHoliday {self.holiday_date} {self.description}>"
+
+
+# ---------------------------------------------------------------------------
+# Backtest Run Ledger (docs/BACKTEST-RUN-PERSISTENCE-PRD.md, migration 018)
+# ---------------------------------------------------------------------------
+
+
+class BacktestRunKind(StrEnum):
+    SINGLE = "single"
+    COMPARE_SLOT = "compare_slot"
+    OPTIMIZER_BASELINE = "optimizer_baseline"
+
+
+class LedgerSeriesStatus(StrEnum):
+    PRESENT = "present"
+    EVICTED = "evicted"
+    WRITE_FAILED = "write_failed"
+
+
+class BacktestRun(Base):
+    """One completed, successful backtest — immutable ledger row (PRD R1).
+
+    Append-only: the same config re-run on re-fetched data is a new fact, not
+    an update. Flat metric columns are a *projection* of ``metrics`` written
+    through the optimizer's sanitizer; ``metrics`` stays the source of truth
+    for full re-render.
+    """
+
+    __tablename__ = "backtest_runs"
+
+    run_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    #: sha256 of the canonical (sort_keys, allow_nan=False) config JSON.
+    #: Display dedupe only — never a uniqueness constraint.
+    config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'single'")
+    )
+    #: Set for compare slots. SET NULL: deleting a comparison must never
+    #: delete the ledger facts about its individual runs.
+    parent_compare_id: Mapped[Optional[str]] = mapped_column(
+        UUIDStr,
+        ForeignKey(
+            "backtest_compare_runs.compare_id",
+            ondelete="SET NULL",
+            name="fk_bt_runs_compare",
+        ),
+    )
+    #: Set for optimizer baseline rows (PRD R6) only.
+    optimization_run_id: Mapped[Optional[str]] = mapped_column(
+        UUIDStr,
+        ForeignKey(
+            "optimization_runs.run_id", ondelete="SET NULL", name="fk_bt_runs_opt_run"
+        ),
+    )
+
+    # -- economic determinants (also inside config_hash, flat for filtering) --
+    strategy_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
+    date_from: Mapped[date] = mapped_column(Date, nullable=False)
+    date_to: Mapped[date] = mapped_column(Date, nullable=False)
+    capital: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    #: backtest_driver | quick_screen — cross-engine aggregation is invalid.
+    engine: Mapped[str] = mapped_column(String(30), nullable=False)
+
+    #: Schema version of the stored payload. Bumped in BacktestAdapter (single
+    #: canonical source); read endpoint refuses mismatched majors with 422.
+    payload_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    params: Mapped[Any] = mapped_column(JSONVariant, nullable=False)
+    #: payload["config"] verbatim (strategy/symbol/capital/stop_loss/
+    #: take_profit/bars/strategy_params + timeframe/from/to/engine). The flat
+    #: columns are its projection for filtering; read-back uses this so the
+    #: reconstructed payload is shape-identical to the live response.
+    config: Mapped[Any] = mapped_column(JSONVariant, nullable=False)
+    readiness: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    cost_shock: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    metrics: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    # -- flat metric projection (same sanitizer as optimization results) ------
+    sharpe: Mapped[Optional[Decimal]] = mapped_column(Score)
+    sortino: Mapped[Optional[Decimal]] = mapped_column(Score)
+    calmar: Mapped[Optional[Decimal]] = mapped_column(Score)
+    total_return: Mapped[Optional[Decimal]] = mapped_column(Score)
+    cagr: Mapped[Optional[Decimal]] = mapped_column(Score)
+    max_drawdown: Mapped[Optional[Decimal]] = mapped_column(Score)
+    profit_factor: Mapped[Optional[Decimal]] = mapped_column(Score)
+    #: Percentage: 54.20 = 54.2 % of closed trades were winners.
+    win_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2))
+    total_trades: Mapped[Optional[int]] = mapped_column(Integer)
+
+    #: Lifecycle of the heavy series row (R2). write_failed until the series
+    #: transaction commits; retention sets evicted. UI never shows a missing
+    #: series as ``present`` because the status flips in the same txn as the
+    #: DELETE (PRD R7 two-step sweep).
+    series_status: Mapped[str] = mapped_column(
+        String(12), nullable=False, server_default=text("'write_failed'")
+    )
+
+    # -- data attestation (flat columns + JSON written by one helper) --------
+    data_source: Mapped[Optional[str]] = mapped_column(String(30))
+    bars_count: Mapped[Optional[int]] = mapped_column(Integer)
+    fetched_first_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    fetched_last_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    data_fetch_date: Mapped[Optional[date]] = mapped_column(Date)
+    provenance: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    #: Code-side attestation: {app_git_sha, strategy_sha256}. Non-null
+    #: asserted at write — the ledger must tell apart same-name, different-code.
+    code_fingerprint: Mapped[Any] = mapped_column(JSONVariant, nullable=False)
+
+    created_by: Mapped[Optional[str]] = mapped_column(
+        String(100), comment="Becomes NOT NULL when web auth ships."
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(_in_check("kind", BacktestRunKind), name="ck_bt_runs_kind"),
+        CheckConstraint(
+            _in_check("series_status", LedgerSeriesStatus), name="ck_bt_runs_series_status"
+        ),
+        CheckConstraint(
+            "win_rate IS NULL OR (win_rate >= 0 AND win_rate <= 100)",
+            name="ck_bt_runs_win_rate",
+        ),
+        Index(
+            "ix_backtest_runs_list",
+            "strategy_id",
+            "symbol",
+            "timeframe",
+            text("created_at DESC"),
+        ),
+        Index("ix_backtest_runs_config", "config_hash", text("created_at DESC")),
+        Index("ix_backtest_runs_kind", "kind", text("created_at DESC")),
+        Index(
+            "ix_backtest_runs_opt",
+            "optimization_run_id",
+            postgresql_where=text("optimization_run_id IS NOT NULL"),
+            sqlite_where=text("optimization_run_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_backtest_runs_compare",
+            "parent_compare_id",
+            postgresql_where=text("parent_compare_id IS NOT NULL"),
+            sqlite_where=text("parent_compare_id IS NOT NULL"),
+        ),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<BacktestRun {self.run_id[:8]} {self.strategy_id}:{self.symbol} {self.kind}>"
+
+
+class BacktestCompareRun(Base):
+    """One run-many comparison: shared attestation + stored comparison block (R1b)."""
+
+    __tablename__ = "backtest_compare_runs"
+
+    compare_id: Mapped[str] = mapped_column(UUIDStr, primary_key=True, default=_uuid4_str)
+    #: The literal values run_many stamps today (L732-734).
+    comparison_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'strategies'")
+    )
+    #: Schema version of comparison_block; mismatched major → 422 on read-back.
+    comparison_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    config_snapshot: Mapped[Any] = mapped_column(JSONVariant, nullable=False)
+
+    data_source: Mapped[Optional[str]] = mapped_column(String(30))
+    date_from: Mapped[Optional[date]] = mapped_column(Date)
+    date_to: Mapped[Optional[date]] = mapped_column(Date)
+    symbols_used: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    engines_used: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    provenance: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    #: correlation matrix + Sharpe significance, stored verbatim so review
+    #: reads the same numbers the page showed at the time.
+    comparison_block: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    slot_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: {slot_id: {"error": msg}} — honest about partial comparisons.
+    slot_errors: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+
+    created_by: Mapped[Optional[str]] = mapped_column(
+        String(100), comment="Becomes NOT NULL when web auth ships."
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "comparison_mode IN ('strategies','generalization')",
+            name="ck_bt_compares_mode",
+        ),
+        CheckConstraint("slot_count >= 0", name="ck_bt_compares_slots_nonneg"),
+        Index("ix_backtest_compares_created", text("created_at DESC")),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"<BacktestCompareRun {self.compare_id[:8]} "
+            f"{self.comparison_mode} x{self.slot_count}>"
+        )
+
+
+class BacktestRunSeries(Base):
+    """Heavy per-run payloads (trades/equity/drawdown/signals), retention-capped (R2).
+
+    Written in a transaction SEPARATE from the parent ledger row; the parent's
+    ``series_status`` flips to ``present`` only when this row commits, so the
+    ledger never claims a series it does not have.
+    """
+
+    __tablename__ = "backtest_run_series"
+
+    run_id: Mapped[str] = mapped_column(
+        UUIDStr,
+        ForeignKey(
+            "backtest_runs.run_id", ondelete="CASCADE", name="fk_bt_series_run"
+        ),
+        primary_key=True,
+    )
+    trades: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    equity: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    drawdown: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    signals: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    #: Non-curve payload parts needed for byte-identical read-back:
+    #: {"benchmark": …, "monte_carlo": …}. Small; ride with the series.
+    extras: Mapped[Optional[Any]] = mapped_column(JSONVariant)
+    #: Serialized size in bytes — feeds retention sizing (R7/R8).
+    bytes_written: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), nullable=False, server_default=text("0")
+    )
+    stored_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<BacktestRunSeries {self.run_id[:8]} {self.bytes_written}B>"
+
+
+#: Tables owned by the backtest run ledger (scoped ``create_all`` helper).
+BACKTEST_LEDGER_TABLES = (
+    BacktestCompareRun.__table__,
+    BacktestRun.__table__,
+    BacktestRunSeries.__table__,
+)

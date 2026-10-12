@@ -9,6 +9,7 @@ from .market_data_handler import (
     MockBrokerFeed,
     MStockBrokerFeed,
 )
+from .market_status import NSE_HOLIDAYS_2026, get_market_day_state
 from .mstock import MStockClient, MStockSource
 from .preflight import print_preflight, run_preflight
 from .time_manager import MarketHours, TimeManager
@@ -28,6 +29,8 @@ __all__ = [
     "BrokerFeed",
     "MockBrokerFeed",
     "MStockBrokerFeed",
+    "get_market_day_state",
+    "NSE_HOLIDAYS_2026",
     # Step 11
     "DataValidator",
     "ValidationResult",

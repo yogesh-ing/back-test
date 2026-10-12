@@ -15,11 +15,26 @@ env/
 .env
 .env.local
 *.session.json
+/.broker_sessions.json
 
 # Local databases (SQLite dev files)
 *.db
 *.sqlite
 *.sqlite3
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+
+# Local runtime state / vendored reference code (never commit)
+/data/
+/reference-code/
+/.tmp_chain_probe.json
 
 # Build / run artefacts
 /charts/
@@ -33,6 +48,32 @@ coverage.xml
 # Tooling output
 graphify-out/
 
+# Local runtime state (report output, dry-run mail outbox)
+/var/
+
 # OS noise
 .DS_Store
 Thumbs.db
+/reusable-prompts/
+/.freebuff/
+.idea/
+/scripts/start-server.bat
+/scripts/start-server.ps1
+/scripts/write_blueprint.py
+/.vscode/
+/.mstock_session_token
+/.mstock_remember_session
+/broker_remember_session.json
+/pyproject.toml
+/strategy-plan/
+/reference-code/mstock-pytradingapi-typeA-OG/
+
+# Local UI review tools, browser binaries and screenshots
+/.cache/
+
+# Local runtime dumps and server logs (never commit)
+/pf*.json
+/server_5000.log
+/server_5000.out
+/server_5000.err.log
+src/data/feed_quality.log

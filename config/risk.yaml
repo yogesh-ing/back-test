@@ -8,6 +8,13 @@
 #   risk = RiskManager(portfolio, config=load_risk_config(profile="conservative"))
 #
 # Risk hierarchy: order -> position -> portfolio
+#
+# NOTE (2026-09-22): the FORWARD TESTING ENGINE does not read this file.
+# Its pre-trade RiskConfig is built from the bucket limits
+# (simulator/bucket_risk.py BUCKET_RISK_LIMITS, overridable per run via
+# risk.buckets.<bucket> in forward_testing.yaml) plus config-level
+# drawdown/daily-loss values. This file + profiles serve the standalone
+# RiskManager / backtest-runner path (load_risk_config).
 # =============================================================================
 
 active_profile: default

@@ -1,0 +1,91 @@
+# =============================================================================
+# Market data sources — which ones this deployment is allowed to run on
+# =============================================================================
+# Loaded by backtest.data.sources_policy
+#
+#   from backtest.data.sources_policy import source_policy
+#   source_policy().is_enabled("synthetic")   # -> False
+#   source_policy().describe()                # -> [{name, enabled, label, ...}]
+#
+# Precedence (highest wins):
+#   1. BACKTEST_DATA_PROFILE env var
+#   2. active_profile in this file
+#   3. the `default` block
+#
+# The vocabulary is the app's own (backtest.data.source_tags.APP_SOURCE_TAGS):
+# synthetic | csv | mstock | db. `mock_broker` is a venue, not a source — it
+# runs the DATA pipeline as synthetic.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# The app could optimize a strategy on synthetic candles, return a robustness
+# score of 8/10, and read as certified — on prices that were never traded.
+# Nothing said so anywhere. That is the failure this file closes.
+#
+# DISABLING IS NOT DELETING
+# -------------------------
+# `enabled: false` means "the app will refuse to serve runs on this source".
+# The generator, the CLI flag and the test fixtures are untouched: 89 test
+# files generate synthetic candles on purpose, and they must keep working.
+# That is why this is a policy layer and not a change to SyntheticSource.
+#
+# To run on synthetic anyway (a demo box, a class, a CI job), set
+# `enabled: true` below, or start with BACKTEST_DATA_PROFILE=testing.
+# =============================================================================
+
+default:
+  sources:
+    # --- Generated data ---------------------------------------------------
+    # Random-walk candles. Useful for smoke tests and for seeing the UI move.
+    # Never certifiable: there is no price here to be right or wrong about.
+    synthetic:
+      enabled: false
+      label: "Synthetic (random walk)"
+      certifiable: false
+      note: >-
+        Generated candles. Results are not certification-grade and cannot be
+        applied to a real runner.
+
+    # --- Real data --------------------------------------------------------
+    db:
+      enabled: true
+      label: "Real Data (PostgreSQL)"
+      certifiable: true
+      note: "Historical bars from market_data_cache."
+
+    mstock:
+      enabled: true
+      label: "Broker (mstock)"
+      certifiable: true
+      note: "Live broker feed."
+
+    dhan:
+      enabled: true
+      label: "Broker (dhan)"
+      certifiable: true
+      note: "Live broker feed (second venue, Phase A multi-broker)."
+
+    csv:
+      enabled: true
+      label: "CSV files"
+      certifiable: false
+      note: >-
+        User-supplied bars of unknown provenance. Trust depends entirely on
+        where the files came from, so this is treated as unverified rather
+        than real.
+
+profiles:
+  # For CI, demos and local development. Select with
+  # BACKTEST_DATA_PROFILE=testing.
+  testing:
+    sources:
+      synthetic:
+        enabled: true
+      csv:
+        enabled: true
+      db:
+        enabled: false
+      mstock:
+        enabled: false
+      dhan:
+        enabled: false

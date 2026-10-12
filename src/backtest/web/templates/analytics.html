@@ -1,0 +1,556 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, page_header %}
+{% block title %}Strategy Performance Analytics · Trading Bot{% endblock %}
+
+{% block content %}
+<div class="analytics-page">
+    {% call page_header('Workspace / Performance & execution', 'Strategy analytics', 'Understand your edge, execution quality and risk across paper and live trading.') %}
+        <a href="/compare" class="btn btn-ghost">{{ icon('compare', 14) }} Compare backtests</a>
+        <button id="refreshAnalyticsBtn" class="btn" type="button" title="Refresh data">{{ icon('refresh', 14) }} Refresh</button>
+    {% endcall %}
+
+    <!-- Analytics Navigation Bar -->
+    <div class="card" style="padding: 10px 16px; margin-bottom: 20px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+            <div class="tabs" style="margin-bottom: 0;">
+                <button class="tab active" id="tabOverviewBtn" data-tab="overview">Overview</button>
+                <button class="tab" id="tabDetailBtn" data-tab="detail" style="display: none;">Strategy Detail</button>
+            </div>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <label for="periodSelect" class="small muted" style="font-weight: 600;">Period:</label>
+                <select id="periodSelect" class="input" style="padding: 4px 10px; width: auto; font-size: 0.85rem;">
+                    <option value="7d">Last 7 Days</option>
+                    <option value="30d" selected>Last 30 Days</option>
+                    <option value="90d">Last 90 Days</option>
+                    <option value="1y">Last 1 Year</option>
+                    <option value="all_time">All Time</option>
+                </select>
+                <label for="modeFilterSelect" class="small muted" style="font-weight: 600;">Mode:</label>
+                <select id="modeFilterSelect" class="input" style="padding: 4px 10px; width: auto; font-size: 0.85rem;">
+                    <option value="all" selected>All Modes</option>
+                    <option value="paper">Paper Only</option>
+                    <option value="live">Live Only</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <!-- TAB 1: OVERVIEW -->
+    <div id="analyticsOverviewPane" class="analytics-tab-pane">
+        <!-- Portfolio Overview Card -->
+        <div class="card" style="margin-bottom: 24px;">
+            <div class="card-head" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                <h2 class="card-title inline" style="margin: 0;">Portfolio Overview</h2>
+                <span id="activeRunnersPill" class="badge" style="background: var(--surface-2); padding: 4px 10px; border-radius: 12px; font-size: 0.8rem;">0 Active Strategies</span>
+            </div>
+            
+            <div class="metric-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px;">
+                <div class="metric-card">
+                    <div class="label">Total Return</div>
+                    <div id="overviewTotalReturn" class="value">—</div>
+                    <div id="overviewTotalPnl" class="small muted">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Portfolio Sharpe</div>
+                    <div id="overviewSharpe" class="value">—</div>
+                    <div id="overviewSharpeRating" class="small muted">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Win Rate</div>
+                    <div id="overviewWinRate" class="value">—</div>
+                    <div id="overviewTradeCount" class="small muted">0 trades</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Max Drawdown</div>
+                    <div id="overviewMaxDd" class="value">—</div>
+                    <div id="overviewMaxDdAmt" class="small muted">—</div>
+                </div>
+            </div>
+
+            <div class="chart-section" style="margin-top: 16px;">
+                <div class="small muted" style="font-weight: 600; margin-bottom: 8px;">Portfolio Equity Curve</div>
+                <div style="height: 220px; position: relative;">
+                    <canvas id="portfolioEquityChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Cross-broker: portfolio totals across every venue (PRD-003) -->
+        <div class="card" style="margin-bottom: 24px;">
+            <div class="card-head" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                <h2 class="card-title inline" style="margin: 0;">🌐 Cross-Broker Portfolio</h2>
+                <span id="crossBrokerScopePill" class="badge" style="background: var(--surface-2); padding: 4px 10px; border-radius: 12px; font-size: 0.8rem;">0 brokers</span>
+            </div>
+            <div class="metric-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px;">
+                <div class="metric-card">
+                    <div class="label">Total P&amp;L (all brokers)</div>
+                    <div id="crossBrokerTotalPnl" class="value">—</div>
+                    <div id="crossBrokerTotalPnlSub" class="small muted">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Portfolio Sharpe</div>
+                    <div id="crossBrokerSharpe" class="value">—</div>
+                    <div id="crossBrokerSharpeSub" class="small muted">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Max Drawdown</div>
+                    <div id="crossBrokerMaxDd" class="value">—</div>
+                    <div id="crossBrokerMaxDdSub" class="small muted">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Trades / Orders</div>
+                    <div id="crossBrokerTrades" class="value">—</div>
+                    <div id="crossBrokerTradesSub" class="small muted">—</div>
+                </div>
+            </div>
+            <div id="crossBrokerDataQuality" class="small muted" style="margin-top: 12px;"></div>
+        </div>
+
+        <!-- By Broker (collapsible) -->
+        <details class="card xb-section" id="brokerSection" style="margin-bottom: 24px;">
+            <summary class="xb-section-head">
+                <span>🏦 By Broker</span>
+                <span class="xb-chevron" aria-hidden="true">▾</span>
+            </summary>
+            <div class="xb-section-body">
+                <div id="brokerHeadline" class="xb-headline"></div>
+                <div class="table-scroll">
+                    <table class="data-table" id="brokerTable">
+                        <thead>
+                            <tr>
+                                <th>Broker</th>
+                                <th class="text-right">Net P&amp;L</th>
+                                <th class="text-right">Share</th>
+                                <th class="text-right">Sharpe</th>
+                                <th class="text-right">Max DD</th>
+                                <th class="text-right">Trades</th>
+                                <th class="text-right">Win %</th>
+                                <th class="text-right">Slip</th>
+                                <th class="text-right">Fill</th>
+                                <th class="text-right">Fill time</th>
+                                <th class="text-right">Rejects</th>
+                                <th>Segments</th>
+                            </tr>
+                        </thead>
+                        <tbody id="brokerTableBody">
+                            <tr><td colspan="12" class="text-center muted">Expand to load broker performance…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div id="brokerAlerts" class="xb-alerts"></div>
+                <div id="brokerInsights" class="xb-insights"></div>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px;">
+                    <button id="openCompareBtn" class="btn btn-primary btn-small" type="button">🔄 Compare Brokers</button>
+                    <button id="openMigrationBtn" class="btn btn-ghost btn-small" type="button">🧭 Strategy Migration Analyzer</button>
+                    <button id="openRecommendBtn" class="btn btn-ghost btn-small" type="button">🎯 Recommend a Broker</button>
+                </div>
+            </div>
+        </details>
+
+        <!-- Execution Quality (collapsible) -->
+        <details class="card xb-section" id="executionSection" style="margin-bottom: 24px;">
+            <summary class="xb-section-head">
+                <span>⚡ Execution Quality</span>
+                <span class="xb-chevron" aria-hidden="true">▾</span>
+            </summary>
+            <div class="xb-section-body">
+                <div class="xb-filters">
+                    <label for="execBrokerFilter" class="small muted">Broker</label>
+                    <select id="execBrokerFilter" class="input" style="padding: 4px 10px; width: auto; font-size: 0.85rem;">
+                        <option value="">All brokers</option>
+                    </select>
+                    <label for="execStrategyFilter" class="small muted">Strategy</label>
+                    <select id="execStrategyFilter" class="input" style="padding: 4px 10px; width: auto; font-size: 0.85rem;">
+                        <option value="">All strategies</option>
+                    </select>
+                </div>
+
+                <div id="execDegradation" class="xb-headline"></div>
+
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 20px; align-items: start;">
+                    <div class="xb-panel">
+                        <h4 class="xb-panel-title">Slippage trend (bps, adverse-positive)</h4>
+                        <div style="height: 200px; position: relative;">
+                            <canvas id="execSlippageChart"></canvas>
+                        </div>
+                        <div id="execSlippageMedian" class="small muted" style="margin-top: 6px;"></div>
+                    </div>
+                    <div class="xb-panel">
+                        <h4 class="xb-panel-title">Slippage distribution</h4>
+                        <div style="height: 200px; position: relative;">
+                            <canvas id="execDistributionChart"></canvas>
+                        </div>
+                        <div id="execDistributionNote" class="small muted" style="margin-top: 6px;"></div>
+                    </div>
+                </div>
+
+                <div class="xb-panel" style="margin-top: 20px;">
+                    <h4 class="xb-panel-title">Fill performance by broker</h4>
+                    <div class="table-scroll">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Broker</th>
+                                    <th class="text-right">Fill rate</th>
+                                    <th class="text-right">Avg time</th>
+                                    <th class="text-right">Rejections</th>
+                                    <th class="text-right">Stale (&gt;60s)</th>
+                                    <th class="text-right">Orders</th>
+                                </tr>
+                            </thead>
+                            <tbody id="execPeerBody">
+                                <tr><td colspan="6" class="text-center muted">No execution data in this period.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="xb-panel" style="margin-top: 20px;">
+                    <h4 class="xb-panel-title">By strategy</h4>
+                    <div class="table-scroll">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Strategy</th>
+                                    <th>Broker</th>
+                                    <th class="text-right">Avg slippage</th>
+                                    <th class="text-right">Fill rate</th>
+                                    <th class="text-right">Rejections</th>
+                                    <th class="text-right">Orders</th>
+                                </tr>
+                            </thead>
+                            <tbody id="execStrategyBody">
+                                <tr><td colspan="6" class="text-center muted">No execution data in this period.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="execNotes" class="xb-notes"></div>
+            </div>
+        </details>
+
+        <!-- Strategy Comparison Table -->
+        <div style="margin-bottom: 24px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <h2 class="card-title" style="margin: 0;">Running Strategies</h2>
+                <a href="/portfolio" class="small" style="color: var(--accent); text-decoration: none;">+ Deploy / Manage in Portfolio →</a>
+            </div>
+            <div class="card" style="padding: 0; overflow-x: auto;">
+                <table class="matrix-table" style="width: 100%;">
+                    <thead>
+                        <tr id="strategyTableHead">
+                            <th>Strategy</th>
+                            <th class="num" data-sort="return" title="Total return % — click to sort">Return ↕</th>
+                            <th class="num" data-sort="sharpe" title="Sharpe ratio — click to sort">Sharpe ↕</th>
+                            <th class="num" data-sort="drawdown" title="Max drawdown % — click to sort">Max DD ↕</th>
+                            <th class="num" data-sort="winrate" title="Win rate % — click to sort">Win Rate ↕</th>
+                            <th class="num" data-sort="trades" title="Closed trades in period — click to sort">Trades ↕</th>
+                            <th class="num" data-sort="pnl" title="Total P&L in ₹ — click to sort">P&L ↕</th>
+                            <th>Health</th>
+                            <th>Trend</th>
+                        </tr>
+                    </thead>
+                    <tbody id="strategyTableBody">
+                        <tr><td colspan="9" class="muted" style="padding: 16px;">Loading strategies…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="small muted" style="margin-top: 6px;">Click a row for the full analytics · click a column header to sort · the health badge grades sample-size-adjusted Sharpe / drawdown / win rate.</div>
+            <div id="noStrategiesEmpty" class="card empty-state" style="display: none; text-align: center; padding: 40px 20px;">
+                <p class="muted">No running strategy instances found.</p>
+                <p class="small muted" style="margin-top: 8px;">Deploy a strategy in <a href="/portfolio">Portfolio</a> or test in <a href="/forward">Forward Test</a> to view live performance analytics.</p>
+            </div>
+        </div>
+
+        <!-- Recent Alerts Section -->
+        <div class="card">
+            <h3 class="card-title" style="margin-bottom: 12px;">🚨 Performance Alerts & Edge Degradation</h3>
+            <div id="overviewAlertsList" style="display: flex; flex-direction: column; gap: 8px;">
+                <div class="muted small">No active risk or performance degradation alerts detected.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- TAB 2: STRATEGY DETAIL -->
+    <div id="analyticsDetailPane" class="analytics-tab-pane" style="display: none;">
+        <!-- Header with Back Button and Quick Stats -->
+        <div style="margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+            <div>
+                <button id="backToOverviewBtn" class="btn btn-ghost btn-small" type="button" style="margin-bottom: 4px;">← Back to All Strategies</button>
+                <h2 id="detailStrategyTitle" style="margin: 0; font-size: 1.4rem;">Strategy Name</h2>
+                <div id="detailStrategySubtitle" class="small muted">Mode: paper · Symbols: NIFTY</div>
+            </div>
+            <div style="display: flex; gap: 8px;">
+                <a id="detailBacktestLink" href="/compare" class="btn btn-ghost btn-small" style="text-decoration: none;">🔍 View Backtest Config</a>
+                <a id="detailPortfolioLink" href="/portfolio" class="btn btn-primary btn-small" style="text-decoration: none;">⚙️ Manage Runner</a>
+            </div>
+        </div>
+
+        <!-- Edge Degradation Banner if Alert Triggered -->
+        <div id="degradationAlertBanner" class="card" style="display: none; background: rgba(245, 158, 11, 0.1); border-left: 4px solid var(--warning); margin-bottom: 16px; padding: 12px 16px;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <span style="font-size: 1.3rem;">⚠️</span>
+                <div>
+                    <strong id="degradationTitle">Edge Degradation Warning</strong>
+                    <div id="degradationDesc" class="small muted">Rolling Sharpe has degraded significantly compared to historical performance.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section 0: Strategy Description (how it works / takes profit / stop loss) -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h3 class="card-title" style="margin-bottom: 10px;">📜 Strategy Description</h3>
+            <div id="strategyDescriptionBody" class="small" style="line-height: 1.6;">
+                <!-- Populated by renderStrategyDescription -->
+            </div>
+            <div id="strategyDescriptionMeta" class="small muted" style="margin-top: 8px;"></div>
+        </div>
+
+        <!-- Section 1: Key Metrics Header Grid -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h3 class="card-title" style="margin-bottom: 14px;">Key Performance Ratios</h3>
+            <div class="metric-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px;">
+                <div class="metric-card">
+                    <div class="label">Total Return</div>
+                    <div id="detailReturn" class="value">—</div>
+                    <div id="detailPnl" class="small muted">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Sharpe Ratio</div>
+                    <div id="detailSharpe" class="value">—</div>
+                    <div id="detailSharpeBadge" class="small muted">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Sortino Ratio</div>
+                    <div id="detailSortino" class="value">—</div>
+                    <div class="small muted">Downside risk-adjusted</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Calmar Ratio</div>
+                    <div id="detailCalmar" class="value">—</div>
+                    <div class="small muted">Return / Max DD</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Win Rate</div>
+                    <div id="detailWinRate" class="value">—</div>
+                    <div id="detailWinsLosses" class="small muted">0W / 0L</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Profit Factor</div>
+                    <div id="detailProfitFactor" class="value">—</div>
+                    <div id="detailExpectancy" class="small muted">Exp: ₹0/trade</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Max Drawdown</div>
+                    <div id="detailMaxDd" class="value">—</div>
+                    <div id="detailMaxDdAmt" class="small muted">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">Win Streak</div>
+                    <div id="detailStreak" class="value">—</div>
+                    <div id="detailMaxStreak" class="small muted">Max: 0W / 0L</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section 2: Interactive Equity Curve & Drawdown -->
+        <div class="card" style="margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <h3 class="card-title inline" style="margin: 0;">Equity Curve & Drawdown (%)</h3>
+                <div class="small muted">Live / Paper execution mark-to-market</div>
+            </div>
+            <div style="height: 320px; position: relative;">
+                <canvas id="detailEquityChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Section 3: Rolling Metrics & Degradation Chart -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h3 class="card-title" style="margin-bottom: 6px;">Rolling Performance Trend (Edge Stability)</h3>
+            <p class="small muted" style="margin-bottom: 12px;">Tracks 10-trade rolling Sharpe and Win Rate to proactively flag edge degradation.</p>
+            <div style="height: 220px; position: relative;">
+                <canvas id="detailRollingChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Section 4: Monthly Performance Breakdown -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h3 class="card-title" style="margin-bottom: 12px;">Monthly Performance Breakdown</h3>
+            <div class="table-scroll">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Month</th>
+                            <th class="text-right">Trades</th>
+                            <th class="text-right">Win Rate</th>
+                            <th class="text-right">Net P&L (₹)</th>
+                            <th class="text-right">Return %</th>
+                            <th class="text-right">Max DD %</th>
+                            <th class="text-right">Sharpe</th>
+                        </tr>
+                    </thead>
+                    <tbody id="detailMonthlyTbody">
+                        <tr><td colspan="7" class="text-center muted">No monthly trade data yet</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Section 5: Trade P&L Distribution -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h3 class="card-title" style="margin-bottom: 10px;">Trade P&L Distribution & Insights</h3>
+            <div class="analytics-detail-grid">
+                <div style="height: 220px; position: relative;">
+                    <canvas id="detailDistributionChart"></canvas>
+                </div>
+                <div style="background: var(--surface-2); padding: 16px; border-radius: 8px;">
+                    <h4 style="margin: 0 0 10px 0; font-size: 0.95rem;">💡 Statistical Insights</h4>
+                    <div id="distributionInsightsList" style="display: flex; flex-direction: column; gap: 8px;" class="small muted">
+                        <div>Evaluating trade distribution...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section 6: Closed Trades Log -->
+        <div class="card">
+            <h3 class="card-title" style="margin-bottom: 12px;">Recent Executed Trades</h3>
+            <div class="table-scroll">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Exit Time</th>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th class="text-right">Qty</th>
+                            <th class="text-right">Entry (₹)</th>
+                            <th class="text-right">Exit (₹)</th>
+                            <th class="text-right">P&L (₹)</th>
+                            <th>Result</th>
+                        </tr>
+                    </thead>
+                    <tbody id="detailTradesTbody">
+                        <tr><td colspan="8" class="text-center muted">No trades recorded</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# ------------------------------------------------------------------ #}
+{# Cross-broker modals (PRD-003 §5.4 / §5.5)                            #}
+{# ------------------------------------------------------------------ #}
+<div id="crossBrokerCompareOverlay" class="broker-auth-overlay" role="dialog" aria-modal="true" aria-labelledby="crossBrokerCompareTitle">
+  <div class="broker-auth-modal xb-modal">
+    <div class="broker-auth-header">
+      <span id="crossBrokerCompareTitle" class="broker-auth-title">🔄 Compare Brokers</span>
+      <button id="crossBrokerCompareClose" class="broker-auth-close" type="button" aria-label="Close">&times;</button>
+    </div>
+    <div class="broker-auth-form">
+      <div class="xb-field">
+        <label for="compareBrokerChecks">Brokers to compare</label>
+        <div id="compareBrokerChecks" class="xb-checks"></div>
+      </div>
+      <div class="xb-field">
+        <label for="compareMetricSelect">Metrics</label>
+        <select id="compareMetricSelect" class="input">
+          <option value="all" selected>All metrics</option>
+          <option value="sharpe">Sharpe ratio</option>
+          <option value="net_pnl">Net P&amp;L</option>
+          <option value="win_rate">Win rate</option>
+          <option value="max_drawdown_pct">Max drawdown</option>
+          <option value="avg_slippage_bps">Avg slippage</option>
+          <option value="fill_rate_pct">Fill rate</option>
+          <option value="fill_time_sec">Avg fill time</option>
+          <option value="rejection_rate_pct">Rejection rate</option>
+          <option value="total_trades">Trades</option>
+        </select>
+      </div>
+      <div class="xb-field">
+        <label><input type="checkbox" id="compareStatTest" checked /> Run significance tests</label>
+      </div>
+      <div id="compareError" class="broker-auth-error" role="alert"></div>
+      <button id="compareRunBtn" class="btn btn-primary btn-block" type="button">Run comparison</button>
+      <div id="compareResult" class="xb-result"></div>
+    </div>
+  </div>
+</div>
+
+<div id="crossBrokerMigrationOverlay" class="broker-auth-overlay" role="dialog" aria-modal="true" aria-labelledby="crossBrokerMigrationTitle">
+  <div class="broker-auth-modal xb-modal">
+    <div class="broker-auth-header">
+      <span id="crossBrokerMigrationTitle" class="broker-auth-title">🧭 Strategy Migration Analyzer</span>
+      <button id="crossBrokerMigrationClose" class="broker-auth-close" type="button" aria-label="Close">&times;</button>
+    </div>
+    <div class="broker-auth-form">
+      <p class="small muted">What would happen if this strategy moved to another broker?</p>
+      <div class="xb-field">
+        <label for="migrationStrategy">Strategy</label>
+        <select id="migrationStrategy" class="input"></select>
+      </div>
+      <div class="xb-field xb-field-row">
+        <div>
+          <label for="migrationFrom">From broker (current)</label>
+          <select id="migrationFrom" class="input"></select>
+        </div>
+        <div>
+          <label for="migrationTo">To broker</label>
+          <select id="migrationTo" class="input"></select>
+        </div>
+      </div>
+      <div id="migrationError" class="broker-auth-error" role="alert"></div>
+      <button id="migrationRunBtn" class="btn btn-primary btn-block" type="button">Calculate impact</button>
+      <div id="migrationResult" class="xb-result"></div>
+    </div>
+  </div>
+</div>
+
+<div id="crossBrokerRecommendOverlay" class="broker-auth-overlay" role="dialog" aria-modal="true" aria-labelledby="crossBrokerRecommendTitle">
+  <div class="broker-auth-modal xb-modal">
+    <div class="broker-auth-header">
+      <span id="crossBrokerRecommendTitle" class="broker-auth-title">🎯 Recommend a Broker</span>
+      <button id="crossBrokerRecommendClose" class="broker-auth-close" type="button" aria-label="Close">&times;</button>
+    </div>
+    <div class="broker-auth-form">
+      <p class="small muted">For a strategy that has not been deployed yet.</p>
+      <div class="xb-field xb-field-row">
+        <div>
+          <label for="recommendType">Strategy type</label>
+          <select id="recommendType" class="input">
+            <option value="scalper" selected>Scalper</option>
+            <option value="intraday">Intraday</option>
+            <option value="swing">Swing</option>
+            <option value="options">Options</option>
+          </select>
+        </div>
+        <div>
+          <label for="recommendFrequency">Frequency</label>
+          <select id="recommendFrequency" class="input">
+            <option value="high" selected>High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+        </div>
+      </div>
+      <div class="xb-field">
+        <label for="recommendSize">Avg trade size (₹, optional)</label>
+        <input id="recommendSize" class="input" type="number" min="0" step="1000" placeholder="Uses observed notional if blank" />
+      </div>
+      <div class="xb-field">
+        <label for="recommendSegment">Segment (optional)</label>
+        <select id="recommendSegment" class="input"><option value="">All segments</option></select>
+      </div>
+      <div id="recommendError" class="broker-auth-error" role="alert"></div>
+      <button id="recommendRunBtn" class="btn btn-primary btn-block" type="button">Recommend</button>
+      <div id="recommendResult" class="xb-result"></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/analytics.js') }}"></script>
+<script src="{{ url_for('static', filename='js/cross_broker.js') }}"></script>
+{% endblock %}

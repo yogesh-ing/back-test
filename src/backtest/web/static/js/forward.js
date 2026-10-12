@@ -40,7 +40,9 @@ let currentBuckets = null;   // {mode, source} of the running session
 function runSelection() {
     return {
         mode: $("runMode")?.value || "paper",
-        source: $("dataSource")?.value || "synthetic",
+        // Empty means "the server decides from config/data_sources.yaml" —
+        // never a client-side guess at a source the deployment may have off.
+        source: $("dataSource")?.value || "",
     };
 }
 
@@ -417,6 +419,34 @@ async function init() {
 
     // Load strategies
     let strategies = [];
+    function escapeHtml(text) {
+        return String(text ?? "").replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
+    }
+
+    function updateStrategySegmentInfo(stratName) {
+        const infoEl = $("strategy-segment-info");
+        if (!infoEl) return;
+        const strat = strategies.find((s) => s.name === stratName);
+        if (!strat) {
+            infoEl.innerHTML = "";
+            return;
+        }
+        const isOpt = !!(strat.signal_kind === "option" || String(strat.name).includes("option"));
+        const seg = strat.default_segment || (isOpt ? "options_index" : "equity_intraday");
+        let html = `<span>Linked segment:</span> <span class="badge badge-subtle" style="font-family:monospace;">${escapeHtml(seg)}</span> <span class="text-muted" style="font-size:11px;">(execution fees & margins follow Settings)</span>`;
+        if (strat.readable_criteria && (strat.readable_criteria.entry || strat.readable_criteria.entry_strike)) {
+            const rc = strat.readable_criteria;
+            html += `<div style="width:100%; font-size:11px; color:var(--muted); margin-top:2px;">`
+                + `<strong>Criteria:</strong> `
+                + (rc.entry ? `Entry: <em>${escapeHtml(rc.entry)}</em>` : "")
+                + (rc.entry_strike ? ` · Strike: <em>${escapeHtml(rc.entry_strike)}</em>` : "")
+                + (rc.take_profit ? ` · TP: <em>${escapeHtml(rc.take_profit)}</em>` : "")
+                + (rc.stop_loss ? ` · SL: <em>${escapeHtml(rc.stop_loss)}</em>` : "")
+                + `</div>`;
+        }
+        infoEl.innerHTML = html;
+    }
+
     try {
         strategies = await fetchJSON("/api/strategies");
         $("strategy").innerHTML = strategies.map((s) => `<option value="${s.name}">${s.name}</option>`).join("");
@@ -424,33 +454,61 @@ async function init() {
         $("strategy").innerHTML = '<option value="">failed to load</option>';
     }
 
+    let forwardPicker = null;
+    function updateStrategySymbolHint(stratName) {
+        const name = String(stratName || "").toLowerCase();
+        const isOption = name.includes("option") || name.includes("instant_buy") || name.includes("condor") || name.includes("strangle") || name.includes("atm");
+        const searchInput = $("symbol-search");
+        if (searchInput) {
+            searchInput.placeholder = isOption ? "Search indices / options (e.g. NIFTY, BANKNIFTY)…" : "Search instruments (e.g. RELIANCE, INFY)…";
+        }
+        if (forwardPicker && isOption && typeof forwardPicker.setTab === "function") {
+            forwardPicker.setTab("index");
+        }
+    }
+
     $("strategy").addEventListener("change", async () => {
+        updateStrategySymbolHint($("strategy").value);
+        updateStrategySegmentInfo($("strategy").value);
         try {
             renderParamsInto($("params-container"),
                 await fetchJSON(`/api/strategies/${encodeURIComponent($("strategy").value)}/params`));
         } catch (err) { showToast(err.message, "error"); }
     });
 
-    // Load symbol autocomplete + add input filtering
-    await loadSymbols();
-    const symbolInput = $("symbol");
-    symbolInput.addEventListener("input", () => {
-        const val = symbolInput.value.toUpperCase();
-        const list = $("symbolList");
-        if (!list) return;
-        const options = list.querySelectorAll("option");
-        let shown = 0;
-        options.forEach(opt => {
-            const match = opt.value.toUpperCase().includes(val);
-            opt.style.display = match ? "" : "none";
-            if (match && shown < 20) shown++;
+    if (typeof SymbolPicker !== "undefined" && $("symbol-search") && $("symbol-tabs")) {
+        forwardPicker = SymbolPicker.mount({
+            select: $("symbol"),
+            search: $("symbol-search"),
+            tabs: $("symbol-tabs"),
+            summary: $("symbol-status"),
         });
-    });
+    } else {
+        await loadSymbols();
+        const symbolInput = $("symbol");
+        if (symbolInput && typeof symbolInput.addEventListener === "function") {
+            symbolInput.addEventListener("input", () => {
+                const val = (symbolInput.value || "").toUpperCase();
+                const list = $("symbolList");
+                if (!list) return;
+                const options = list.querySelectorAll ? list.querySelectorAll("option") : [];
+                let shown = 0;
+                options.forEach(opt => {
+                    const match = opt.value.toUpperCase().includes(val);
+                    opt.style.display = match ? "" : "none";
+                    if (match && shown < 20) shown++;
+                });
+            });
+        }
+    }
+    updateStrategySymbolHint($("strategy").value);
+    updateStrategySegmentInfo($("strategy").value);
 
     // Pre-fill from backtest
     const pre = SessionState.forwardPrefill;
     if (pre && pre.config && pre.config.strategy) {
         $("strategy").value = pre.config.strategy;
+        updateStrategySegmentInfo(pre.config.strategy);
         if (pre.config.symbol) $("symbol").value = pre.config.symbol;
         if (pre.config.timeframe) $("timeframe").value = pre.config.timeframe;
         if (pre.config.capital) $("capital").value = pre.config.capital;
@@ -463,6 +521,7 @@ async function init() {
         const banner = $("prefillBanner");
         if (banner) banner.hidden = false;
     } else if ($("strategy").value) {
+        updateStrategySegmentInfo($("strategy").value);
         try {
             renderParamsInto($("params-container"),
                 await fetchJSON(`/api/strategies/${encodeURIComponent($("strategy").value)}/params`));

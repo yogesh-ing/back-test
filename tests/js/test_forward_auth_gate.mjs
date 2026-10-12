@@ -337,11 +337,22 @@ await test("clicking enabled Start button does NOT open auth modal (calls startB
     assert.equal(body.from_date, "2024-01-01");
     assert.equal(body.to_date, "2024-12-31");
     assert.equal(body.capital, 10000);
-    // Taxonomy (ticket #10): the payload carries BOTH dimensions; when the
-    // controls are absent the safe default is paper/synthetic — never the old
-    // implicit "live" label that the replay could not honour.
+    // Taxonomy (ticket #10): the payload carries BOTH dimensions. The mode
+    // still defaults to paper — never the old implicit "live" label a replay
+    // could not honour — but the source is whatever the control holds, passed
+    // through verbatim. An empty control means "the server resolves it from
+    // config/data_sources.yaml"; the client must not name a feed the deployment
+    // may have switched off (it used to hard-code "synthetic" here).
     assert.equal(body.mode, "paper");
-    assert.equal(body.source, "synthetic");
+    assert.equal(body.source, $("dataSource").value);
+    assert.equal(body.source, "");
+    $("dataSource").value = "mstock";
+    sandbox._forwardStarted = 0;
+    $("startBtn").click();
+    await flush();
+    await flush();
+    assert.equal(sandbox._startBody.source, "mstock", "a chosen feed must reach the server");
+    $("dataSource").value = "";
 });
 
 await test("missing symbol blocks the start and warns instead of posting", async () => {

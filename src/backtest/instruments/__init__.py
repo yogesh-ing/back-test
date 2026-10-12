@@ -19,7 +19,13 @@ from __future__ import annotations
 
 from backtest.instruments.base import InstrumentType, SettlementType
 from backtest.instruments.equity import EquityInstrument
-from backtest.instruments.expiry_calendar import ExpiryCalendar, last_thursday
+from backtest.instruments.expiry_calendar import (
+    TUESDAY_EXPIRY_EFFECTIVE,
+    ExpiryCalendar,
+    last_thursday,
+    last_tuesday,
+    monthly_expiry,
+)
 from backtest.instruments.option import OptionContract, OptionQuote
 from backtest.instruments.registry import InstrumentRegistry
 
@@ -31,5 +37,8 @@ __all__ = [
     "OptionQuote",
     "EquityInstrument",
     "SettlementType",
+    "TUESDAY_EXPIRY_EFFECTIVE",
     "last_thursday",
+    "last_tuesday",
+    "monthly_expiry",
 ]

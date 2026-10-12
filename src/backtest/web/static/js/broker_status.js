@@ -68,11 +68,44 @@ const BrokerStatus = (() => {
         const dot = byId("broker-status-dot");
         const nameEl = byId("broker-status-name");
         const btn = byId("broker-status");
+        const strip = byId("broker-strip");
+        const sessions = current && current.sessions;
+
+        // Multi-broker PRD Phase A: when the payload carries the per-broker
+        // sessions map, the header renders one dot per broker (the status
+        // strip); the legacy single dot+name is hidden.
+        if (strip && sessions && Object.keys(sessions).length) {
+            strip.innerHTML = "";
+            for (const name of Object.keys(sessions)) {
+                const row = sessions[name];
+                const item = document.createElement("span");
+                item.className = "broker-strip-item";
+                item.dataset.broker = name;
+                item.dataset.state = row.status || "unknown";
+                // CSS renders the status dot separately; keep the original
+                // text for assistive technology and the stable status contract.
+                item.dataset.label = row.broker_display_name || name;
+                const d = row.authenticated ? DOTS[row.status] || "🟢"
+                    : (row.status === "expired" ? DOTS.expired : "⚪");
+                item.textContent = `${d} ${row.broker_display_name || name}`;
+                item.title = `${row.broker_display_name || name}: ${row.status || "unknown"}`;
+                strip.appendChild(item);
+            }
+            if (dot) dot.hidden = true;
+            if (nameEl) nameEl.hidden = true;
+            if (btn) {
+                btn.title = "Broker connections — click to open the Broker Board";
+                btn.setAttribute("aria-label", btn.title);
+            }
+            return;
+        }
+
         if (dot) {
+            dot.hidden = false;
             dot.textContent = DOTS[state] || DOTS.unknown;
             dot.dataset.state = state;
         }
-        if (nameEl) nameEl.textContent = displayName();
+        if (nameEl) { nameEl.hidden = false; nameEl.textContent = displayName(); }
         if (btn) {
             btn.title = tooltip(state);
             btn.setAttribute("aria-label", tooltip(state));
@@ -82,6 +115,13 @@ const BrokerStatus = (() => {
     // ---- Task 3.3: expiry toasts ---------------------------------------
 
     function openAuthPopup() {
+        // Multi-broker Phase A: the Broker Board is the landing surface when
+        // available (grid of per-broker cards); the single auth modal stays
+        // the fallback for pages that don't render the board.
+        if (window.BrokerBoard && typeof window.BrokerBoard.open === "function") {
+            window.BrokerBoard.open();
+            return;
+        }
         if (window.BrokerAuthUI && typeof window.BrokerAuthUI.open === "function") {
             window.BrokerAuthUI.open();
         }
@@ -108,6 +148,34 @@ const BrokerStatus = (() => {
         const ms = new Date(current.expires_at).getTime() - Date.now();
         if (Number.isNaN(ms)) return 30;
         return Math.max(1, Math.round(ms / 60000));
+    }
+
+    // Multi-broker PRD Phase A: per-broker expiry toasts. The status payload
+    // carries `expiry_events` — one (broker, kind) per session transition,
+    // consumed server-side exactly once. Events for the UI-active broker are
+    // skipped here (the legacy transition toast below already covers it).
+    function handleExpiryEvents(payload) {
+        const events = (payload && payload.expiry_events) || [];
+        const sessions = (payload && payload.sessions) || {};
+        const activeBroker = payload && payload.broker;
+        for (const evt of events) {
+            if (!evt || evt.broker === activeBroker) continue;
+            const row = sessions[evt.broker] || {};
+            const name = row.broker_display_name || evt.broker;
+            if (evt.kind === "expiring_soon") {
+                makeToast(
+                    "toast warning clickable",
+                    `⚠️ ${name} session expiring soon. Click here to re-authenticate.`,
+                    openAuthPopup,
+                );
+            } else if (evt.kind === "expired") {
+                makeToast(
+                    "toast error clickable",
+                    `${name} session expired — runners routed to ${name} pause entries. Click to re-authenticate.`,
+                    openAuthPopup,
+                );
+            }
+        }
     }
 
     function handleTransition(prev, next) {
@@ -143,6 +211,7 @@ const BrokerStatus = (() => {
         const next = payload && payload.status;
         render(next);
         handleTransition(prevState, next);
+        handleExpiryEvents(payload);
         prevState = next;
         document.dispatchEvent(new CustomEvent("broker:status", { detail: payload }));
     }

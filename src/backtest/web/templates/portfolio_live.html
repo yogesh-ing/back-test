@@ -1,21 +1,15 @@
 {% extends "base.html" %}
-{% from "_macros.html" import badge %}
+{% from "_macros.html" import badge, icon, page_header %}
 {% block title %}Live Portfolio{% endblock %}
 
 {% block content %}
-<style>
-    .pcc-scope-banner { margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; background: rgba(255,64,64,.08); border: 1px solid rgba(255,64,64,.35); }
-</style>
-<div class="card pcc-header">
-    <div class="pcc-title-row">
-        <div>
-            <a href="/portfolio" style="color:#64748b;text-decoration:none;font-size:.85rem;">← Overview</a>
-            <h1 class="pcc-title">🔴 Live Portfolio</h1>
-            <div class="muted">Instances in the <code>live</code> bucket only — paper instances never appear on this page.</div>
-        </div>
-    </div>
-    {# C6: Capability-driven banner — shows REAL MONEY when broker connected, Simulated fills otherwise #}
-    <div id="capability-banner" class="capability-banner capability-sim" style="display:none;"></div>
+{% call page_header('Trading / Broker execution', 'Live portfolio', 'Your real-money book. Review strategies, positions and risk before making execution decisions.') %}
+    <a href="/portfolio" class="btn btn-ghost">{{ icon('arrow-left', 14) }} Portfolio overview</a>
+    <a href="/risk" class="btn">{{ icon('shield', 14) }} Review risk</a>
+{% endcall %}
+<div class="capability-banner capability-live">{{ icon('alert', 15) }} Real capital at risk. Live execution requires a connected broker and explicit arming.</div>
+<details class="card initial-instances">
+    <summary>Deployment snapshot · {{ instances | length }} live instance{{ '' if instances | length == 1 else 's' }}</summary>
     <div class="table-scroll">
         <table class="matrix-table">
             <thead>
@@ -45,11 +39,15 @@
             </tbody>
         </table>
     </div>
-</div>
+</details>
 {% include "_portfolio_center.html" %}
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/components/risk_board.js') }}"></script>
 <script src="{{ url_for('static', filename='js/deep_dive.js') }}"></script>
+<!-- SymbolPicker: required by portfolio.js spawn-form equity picker (see portfolio_paper.html note). -->
+<script src="{{ url_for('static', filename='js/components/symbol_picker.js') }}"></script>
 <script src="{{ url_for('static', filename='js/portfolio.js') }}"></script>
+<script src="{{ url_for('static', filename='js/components/portfolio_intelligence.js') }}"></script>
 {% endblock %}

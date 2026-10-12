@@ -49,6 +49,27 @@ Anything importing these old `StrategyAdapter` names must switch:
 
 ---
 
+## Current runtime status (2026-10)
+
+- **Broker session is per-process.** The session lives in the server
+  process's `BrokerSessionManager`; restarting the server (or the app in a
+  fresh process) requires a fresh broker login (password + TOTP). Logging
+  into the mStock app itself can invalidate the API session.
+- **Session expiry is loud now (PR #41).** The expiry monitor raises
+  `broker_session_expiring` (warning) and `broker_session_expired`
+  (critical) platform alerts — surfaced in the in-app alert widget (with a
+  Re-login button that opens the broker auth popup) and fanned out through
+  the outbound notifier (Telegram/email).
+- **Runners are currently PAUSED**; the live server runs on **:5000**.
+- **Data routing (2026-09-30 policy, enforced at every source decision).**
+  Forward/paper/portfolio runners bar from the broker feed (mStock/dhan);
+  historical runs (backtest/optimize) read from the DB. Synthetic data is
+  config-gated (`config/data_sources.yaml`) and off by default, with **no
+  fallback**: a source-less run refuses instead of silently trading
+  generated candles (`backtest.data.sources_policy`).
+
+---
+
 ## What It Is
 
 Forward testing is **paper trading** — simulating a strategy bar-by-bar without
@@ -126,8 +147,10 @@ POST /api/forward/start
     "to_date": "2024-12-31",            # optional
     "capital": 100000,
     "params": {"fast": 20, "slow": 50},
-    "mode": "synthetic",                # "live" requires broker auth (403 otherwise)
-    "bars_per_second": 5                # optional clock override (0 = manual stepping)
+    "mode": "paper",                      # "live" is refused on this replay (see below)
+    "source": "mstock",                   # synthetic|replay|mstock|dhan — "synthetic" is refused
+                                          # unless config/data_sources.yaml enables it
+    "bars_per_second": 5                  # optional clock override (0 = manual stepping)
 }
 ```
 
@@ -150,7 +173,16 @@ POST /api/forward/start
   params}` — but anything the server fills in is listed in `defaults_applied`
   and echoed in `config`, and the page warns when it is non-empty. Malformed
   (`01-01-2024`) or inverted ranges are a `400` before any data is fetched.
-- `403` when `mode` is `live` and no broker session is authenticated.
+- `mode` defaults to `paper`; the `(mode, source)` pair is validated through
+  the canonical bucket-risk gate (`_resolve_classification`) before anything
+  runs — unknown buckets/sources and `live`/`synthetic` or `live`/`replay`
+  are a `400`.
+- `mode: "live"` is refused on the web replay — it only simulates fills
+  (`400 live_execution_not_wired`, ticket #8's live-never-simulated rule);
+  without an authenticated broker session the request 403s first.
+- `source: "synthetic"` is refused (`400`) unless `config/data_sources.yaml`
+  enables the synthetic source — the shipped default disables it, so the
+  replay is not runnable without credentials (`require_synthetic`).
 
 > ⚠️ **Replay, not execution.** This endpoint reveals a precomputed backtest; it
 > does **not** run the strategy per bar and does not write orders/fills. For real
@@ -238,8 +270,8 @@ filter used to be a no-op).
   - **Format v3 (F-04 + ticket #7, 2026-09):** the payload carries
     `state_version: 3`, `engine_id` (the `portfolios.portfolio_id`), the run
     classification `mode` (`paper`|`live`) + `source`
-    (`synthetic`|`replay`|`mstock`) — the same vocabulary as the `portfolios`
-    columns (migration 002), derived from the engine's **actual** `config.data`
+    (`synthetic`|`replay`|`mstock`|`dhan`) — the same vocabulary as the `portfolios`
+    columns (migration 002, widened to admit `dhan` by 016), derived from the engine's **actual** `config.data`
     (a `backtest` data mode is stored as the `paper` bucket — simulated
     fills). Source strings come from the canonical
     `backtest.data.source_tags.SOURCE_TAGS`.
@@ -327,6 +359,12 @@ PYTHONPATH=src python -m backtest papertrade \
 Both modes run through `forward/paper_runner.py` on the shared
 `simulator/engine_loop.py` loop (fills at the next bar's open).
 
+> **Source policy (2026-09-30).** `--source synthetic` is refused unless
+> `config/data_sources.yaml` enables the synthetic source — the shipped
+> default disables it and there is no fallback (the test suite opts back in
+> via `BACKTEST_DATA_PROFILE=testing`). Paper/live runs name a broker source
+> (`mstock`/`dhan`) instead.
+
 ## Forward-engine traffic rules (after F-01)
 
 1. **Signal on bar `t`** → adapter produces `Signal` + `Order` (`create_orders`),
@@ -347,10 +385,13 @@ Both modes run through `forward/paper_runner.py` on the shared
    `place_order` + `poll_fill`), never from the simulated pricing engine.
    Paper runs keep the simulated provider. An order still working after an
    unfilled poll is POLLED again — the venue is never double-placed.
-2. **Auth guard** — `mode: "live"` on the web replay requires an authenticated
-   broker session (403 otherwise); `mode: "synthetic"` is explicitly exempt so
-   the loop is testable without credentials. Direct fills fail cleanly without
-   a session (mStock `_require_session`).
+2. **Auth guard + source policy** — `mode: "live"` on the web replay
+   requires an authenticated broker session (403 otherwise), and the replay
+   then refuses live outright (`400 live_execution_not_wired`) because it
+   only simulates fills. Synthetic is no longer exempt: it is refused (400)
+   unless `config/data_sources.yaml` enables the synthetic source, and the
+   shipped default disables it (`backtest.data.sources_policy.require_synthetic`).
+   Direct fills fail cleanly without a session (mStock `_require_session`).
 3. **No silent downgrade, with risk teeth** — a live run restores/classifies
    as live (a stale paper-tagged portfolio is upgraded with a warning); a
    paper run never claims live. And per-bucket risk limits (see `Risk limits

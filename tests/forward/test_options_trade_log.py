@@ -31,6 +31,7 @@ from backtest.forward.paper_runner import (
     StrategyRunner,
 )
 from backtest.options.quote_providers import SyntheticChainGenerator
+from options_support import research_profile
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +76,9 @@ def _runner(exit_cfg=None, **overrides):
     kwargs.update(overrides)
     runner = StrategyRunner(RunnerConfig(**kwargs), ledger=OrderLedger())
     runner.start()
+    # The trade log is exercised on two-leg structures, which the V1 execution
+    # gate refuses for a real runner — widen this book to the research profile.
+    research_profile(runner)
     return runner
 
 

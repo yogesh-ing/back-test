@@ -34,9 +34,10 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, request
 
-from backtest.options.paper_trading import OptionPaperBroker
+from backtest.data.sources_policy import require_synthetic
+from backtest.options.paper_trading import InsufficientMarginError, OptionPaperBroker
 from backtest.options.persistence import StructurePersistence
 from backtest.options.portfolio_greeks import PortfolioGreeksCalculator
 from backtest.options.expiry import ExpiryManager
@@ -139,18 +140,24 @@ def get_option_broker() -> OptionPaperBroker:
 
 
 def _register_restored_contracts(quotes: Any, structures: list[Any]) -> None:
-    """Re-register rehydrated legs with a synthetic quote feed.
+    """Re-register rehydrated legs with a quote feed (R3).
 
     The in-process contract registry dies with the server; without this the
     first MTM refresh after a restart would mark every restored leg at 0.
-    Live feeds need no registration, so this is a no-op for them.
+    Logs ERROR if the provider lacks ``register_contract``.
     """
     from backtest.instruments.base import OptionType
     from backtest.instruments.option import OptionContract
 
-    target = getattr(quotes, "inner", quotes)
-    register = getattr(target, "register_contract", None)
-    if register is None:
+    register = getattr(quotes, "register_contract", None)
+    if not callable(register):
+        target = getattr(quotes, "inner", quotes)
+        register = getattr(target, "register_contract", None)
+    if not callable(register):
+        logger.error(
+            "[options] restored legs cannot rebind — %s lacks register_contract",
+            type(quotes).__name__,
+        )
         return
     for structure in structures:
         for leg in structure.legs:
@@ -181,9 +188,16 @@ def get_expiry_manager() -> ExpiryManager:
 def get_quote_provider() -> Any:
     """Pick the quote feed once (G2.2): live mStock when authenticated.
 
-    Falls back to the synthetic Black-Scholes provider with no credentials
-    and no network. A per-token TTL cache (``CachedQuoteProvider``) guards
-    the live feed from dashboard-polling spam.
+    With no session the Black-Scholes provider is used **only if the
+    deployment's data policy still allows synthetic**
+    (``config/data_sources.yaml``); when the kill-switch is off this raises
+    :class:`~backtest.data.sources_policy.SourceDisabledError` instead of
+    handing the dashboard generated quotes. Every caller already treats a
+    failure here as "no quotes" (MTM skips, flatten logs), so the honest
+    degradation is stale/absent prices, never invented ones.
+
+    A per-token TTL cache (``CachedQuoteProvider``) guards the live feed from
+    dashboard-polling spam.
     """
     global _quote_provider
     if _quote_provider is not None:
@@ -203,6 +217,7 @@ def get_quote_provider() -> Any:
     if live is not None:
         _quote_provider = live
     else:
+        require_synthetic("options dashboard quotes")
         synthetic = SyntheticQuoteProvider()
         # Register a default NIFTY chain so MTM works even before the first
         # trade-driven chain registration.
@@ -210,6 +225,33 @@ def get_quote_provider() -> Any:
         _quote_provider = CachedQuoteProvider(synthetic, ttl=2)
         logger.info("[options] using synthetic Black-Scholes quotes (no live session)")
     return _quote_provider
+
+
+def _live_chain_generator(underlying: str) -> Any | None:
+    """Real option-chain surface for the dashboard, or ``None``.
+
+    The quote feed and the chain feed are different objects: an authenticated
+    mStock session gives ``LiveQuoteProvider`` (LTP only, no ``.generator``),
+    while strike selection needs a generator. This resolves the broker's own
+    :class:`~backtest.options.quote_providers.LiveChainProvider` through the
+    shared ChainBus, so the dashboard picks expiries the market actually has.
+    """
+    try:
+        from backtest.forward.feed_registry import _default_quote_broker, get_chain_bus
+
+        name = None
+        for candidate in ("mstock", "dhan"):
+            if _default_quote_broker(candidate) is not None:
+                name = candidate
+                break
+        if name is None:
+            return None
+        broker = _default_quote_broker(name)
+        feed = get_chain_bus().acquire(underlying, source=name, broker=broker)
+        return getattr(feed, "generator", feed)
+    except Exception:  # noqa: BLE001 — resolution must never break a trade
+        logger.debug("[options] live chain unavailable", exc_info=True)
+        return None
 
 
 def reset_option_state() -> None:
@@ -348,12 +390,20 @@ def _execute_trade(payload: dict[str, Any]) -> dict[str, Any]:
         spot_price=spot,
     )
 
-    # 2. Option chain for the near monthly expiry (synthetic generator, or
-    #    a live chain when one exists — V1 ships the generator).
+    # 2. Option chain for the near monthly expiry. The chain defines the
+    #    expiry and the strikes, so it must be the broker's whenever a session
+    #    exists: falling through to the Black-Scholes generator here is how a
+    #    live-labelled trade ended up on an expiry the market never listed.
     generator = getattr(quotes, "generator", None) or getattr(
         getattr(quotes, "inner", None), "generator", None
     )
     if generator is None:
+        generator = _live_chain_generator(underlying)
+    if generator is None:
+        # No chain feed at all. A generated one is available only to a
+        # deployment whose data policy still enables synthetic; otherwise this
+        # raises (→ 400 at the route) and no order is placed.
+        require_synthetic("options dashboard chain")
         from backtest.options.quote_providers import SyntheticChainGenerator
 
         generator = SyntheticChainGenerator()
@@ -460,14 +510,14 @@ def quote_source_name(quotes: Any) -> str:
 # ---------------------------------------------------------------------------
 
 def register_options_routes(app: Flask) -> None:
-    """Attach the options page + JSON API to the Flask app."""
+    """Attach the options JSON API to the Flask app.
 
-    # ------------------------------------------------------------------
-    # Page
-    # ------------------------------------------------------------------
-    @app.get("/options")
-    def options_page() -> Any:
-        return render_template("options.html", active="options")
+    2026-09-22 — GAP-3 resolved: the manual `/options` page was REMOVED
+    (owner decision). This module keeps only what other systems still use:
+    the book singleton (portfolio merge + emergency flatten) and the JSON
+    endpoints exercised by tests. The manual trade UI lives in Portfolio →
+    Playbooks via runner instances.
+    """
 
     # ------------------------------------------------------------------
     # API — summary
@@ -529,6 +579,10 @@ def register_options_routes(app: Flask) -> None:
             result = _execute_trade(payload)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
+        except InsufficientMarginError as exc:
+            # Gap-PRD P3: the broker's hard cash guard is a clean client
+            # rejection (same family as PreTradeRiskCheck), not a server error.
+            return jsonify({"error": str(exc), "rejected": True}), 400
         except Exception as exc:  # noqa: BLE001 — report, don't 500 the UI
             logger.exception("[options] trade execution failed")
             return jsonify({"error": f"execution failed: {exc}"}), 500
@@ -655,6 +709,10 @@ def _position_to_dict(p: Any) -> dict[str, Any]:
         "realized_pnl": float(p.realized_pnl),
         "status": p.status.value,
         "opened_at": p.opened_at.isoformat(),
+        "mark_ts": getattr(p, "mark_ts", None),
+        "mark_stale": bool(p.is_mark_stale()) if hasattr(p, "is_mark_stale") else False,
+        "quote_error": getattr(p, "last_quote_error", None),
+        "mtm_failures": int(getattr(p, "mtm_failures", 0) or 0),
     }
 
 
@@ -671,4 +729,8 @@ def _structure_to_dict(s: Any) -> dict[str, Any]:
         "total_unrealized_pnl": float(s.total_unrealized_pnl),
         "legs": [_position_to_dict(leg) for leg in s.legs],
         "opened_at": s.opened_at.isoformat(),
+        "mark_ts": getattr(s, "mark_ts", None),
+        "mark_stale": bool(s.is_mark_stale()) if hasattr(s, "is_mark_stale") else False,
+        "quote_error": getattr(s, "quote_error", None),
+        "mtm_failures": int(getattr(s, "mtm_failures", 0) or 0),
     }

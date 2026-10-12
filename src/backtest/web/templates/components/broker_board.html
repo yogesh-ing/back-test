@@ -1,0 +1,23 @@
+{# broker_board.html — Multi-broker PRD Phase A (UI-SPEC-001).
+
+   The Broker Board: a grid of per-broker status cards replacing the single
+   session view. Multiple cards can show Authenticated simultaneously; each
+   card has its own Login/Logout (and, once live order routing is armed, a
+   Reconcile action). Opened via window.BrokerBoard.open() — the header
+   status strip click lands here; per-card [Login] opens the existing
+   BrokerAuthUI modal pre-targeted at that broker.
+#}
+<div id="broker-board-overlay" class="broker-auth-overlay" role="dialog" aria-modal="true" aria-labelledby="broker-board-title">
+  <div class="broker-board-modal">
+    <div class="broker-auth-header">
+      <span id="broker-board-title" class="broker-auth-title">🔗 Broker Connections</span>
+      <div class="broker-board-header-actions">
+        <button id="broker-board-refresh" class="btn btn-ghost btn-small" type="button">Refresh</button>
+        <button id="broker-board-close" class="broker-auth-close" type="button" aria-label="Close">&times;</button>
+      </div>
+    </div>
+    <div id="broker-board-grid" class="broker-board-grid">
+      <div class="muted">Loading broker status…</div>
+    </div>
+  </div>
+</div>

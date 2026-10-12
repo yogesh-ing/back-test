@@ -1,0 +1,76 @@
+# =============================================================================
+# Consolidated P&L & Tax Reporting (PRD-002)
+# =============================================================================
+#
+# Everything the report does that depends on a number the platform cannot
+# discover for itself lives here: the tax rates, the reconciliation tolerance
+# and the monthly email. Read by backtest.reporting.tax / .reconciliation /
+# .email_report; set REPORTING_CONFIG_PATH to point at a different file.
+#
+# -----------------------------------------------------------------------------
+# RATES CHANGE. These defaults are FY 2026-27 (tax period 2026-27) values,
+# last reviewed 2026-09-28:
+#
+#   STCG (listed equity, STT paid)   20%        s.111A rate, Finance (No.2) Act 2024
+#   LTCG (listed equity, STT paid)   12.5%      s.112A rate, above the exemption
+#   LTCG exemption                   Rs 125,000 per year (raised from Rs 1,00,000)
+#   F&O                              slab       NON-speculative business income
+#   Equity intraday                  slab       SPECULATIVE business income
+#
+# business_slab_rate is an estimate of YOUR marginal rate, not a rule: the
+# report cannot know it. The 30% default is the top slab — deliberately
+# conservative (it will overstate, never understate, the bill).
+# -----------------------------------------------------------------------------
+
+tax:
+  stcg_rate: 0.20
+  ltcg_rate: 0.125
+  ltcg_exemption: 125000
+  ltcg_holding_months: 12
+  # Marginal slab rate applied to business income (F&O + intraday equity).
+  business_slab_rate: 0.30
+  # Health & education cess, charged on the tax itself.
+  cess_rate: 0.04
+  # Surcharge depends on total income; 0 keeps the estimate honest by omission.
+  surcharge_rate: 0.0
+  # Informational compliance thresholds (s.44AB / s.44AD).
+  audit_turnover_limit: 10000000          # Rs 10 crore, all-digital receipts/payments
+  audit_turnover_limit_cash: 1000000      # Rs 1 crore otherwise
+  presumptive_turnover_limit: 3000000     # s.44AD ceiling for digital receipts
+  presumptive_profit_rate: 0.06           # deemed profit under s.44AD
+  disclaimer: >-
+    Estimate only, built from platform-recorded trades and the rates in this
+    file. Verify every figure against broker contract notes and a chartered
+    accountant before filing. This is not tax advice.
+
+# Platform P&L vs the broker's contract note.
+reconciliation:
+  pass_tolerance: 10        # <= Rs 10 apart is rounding, not signal
+  warn_tolerance: 100       # < Rs 100 apart is a warning
+  warn_pct: 1.0             # ... or under 1% of the note's P&L
+
+# Monthly auto-report (1st of the month, previous month's book).
+monthly_email:
+  enabled: false            # nothing is sent until this is true AND smtp.host is set
+  send_on_day: 1            # day of month
+  send_at_hour: 9           # 24h clock, IST
+  report_previous_month: true
+  to_email: ""              # recipient; falls back to REPORTING_EMAIL_TO
+  subject_prefix: "Monthly P&L"
+
+smtp:
+  host: ""                  # e.g. smtp.gmail.com; empty disables real sending
+  port: 587
+  user: ""
+  # The password is NEVER stored in this file — set REPORTING_SMTP_PASSWORD.
+  password_env: REPORTING_SMTP_PASSWORD
+  from_email: ""            # defaults to smtp.user
+  use_tls: true
+  # Dry-run writes an .eml into this directory instead of sending. That is the
+  # default whenever no host is configured, so the pipeline is testable
+  # without an account.
+  outbox_dir: "var/reporting/outbox"
+
+exports:
+  include_trades: true
+  max_trades: 1000          # PDF ledger cap; the Excel/CSV export is uncapped

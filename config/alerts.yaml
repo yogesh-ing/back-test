@@ -1,11 +1,15 @@
 # =============================================================================
 # Forward Testing Simulator — Alert & Notification Configuration (Step 21)
 # =============================================================================
-# Loaded by backtest.alerts.manager.AlertManager
+# Loaded by backtest.alerts.notifier (load_notifier_config / start_alert_notifier)
 #
-#   from backtest.alerts.manager import AlertManager
-#   manager = AlertManager()  # loads this file + env overrides
-#   manager.send_alert("info", "Trade executed: INFY BUY 100 @ 1500", channels=["telegram"])
+#   from backtest.alerts.notifier import start_alert_notifier
+#   start_alert_notifier()  # platform alerts → routing below → channels
+#
+# Only the `log`, `telegram` and `email` channels are implemented today;
+# slack/discord/sms/desktop entries are accepted and skipped (the log
+# channel is the floor — an alert that passes min_level is never dropped).
+# Profiles are merged over `default`; env vars override this file.
 #
 # Secrets (tokens, passwords) should be in .env, not here:
 #   TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
@@ -80,6 +84,8 @@ default:
     position_opened: [telegram, log]
     position_closed: [telegram, log]
     daily_summary: [telegram, email, log]
+    broker_session_expiring: [telegram, log]
+    broker_session_expired: [telegram, log]
 
   # Quiet hours – suppress non-critical alerts during night (IST)
   quiet_hours_enabled: false
@@ -107,6 +113,8 @@ default:
     position_opened: "📈 Position opened: {symbol} {side} {quantity} @ {price}"
     position_closed: "📉 Position closed: {symbol} {side} {quantity} @ {price} | PnL: {pnl}"
     daily_summary: "📊 Daily Summary: Equity {equity} | P&L {pnl} | Trades {trades} | Win Rate {win_rate}%"
+    broker_session_expiring: "🟡 {broker_display_name} login expires {expires_at} — Re-login (password + TOTP) in the web UI to keep feeds running."
+    broker_session_expired: "🔴 {broker_display_name} session EXPIRED — live feeds and runner entries PAUSED. Re-login (password + TOTP) now."
 
   keep_history: true
   max_history: 1000
@@ -159,6 +167,8 @@ profiles:
       risk_limit_breach: [telegram, log]
       system_error: [telegram, log]
       daily_summary: [telegram, log]
+      broker_session_expiring: [telegram, log]
+      broker_session_expired: [telegram, log]
 
   # All channels – for testing all integrations
   all_channels:

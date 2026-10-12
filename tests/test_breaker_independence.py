@@ -38,6 +38,14 @@ from backtest.forward.risk_supervisor import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _arm_live_orders(monkeypatch):
+    """F-12: these suites exercise live-BUCKET accounting; arm the gateway
+    with the support module's fake venue (see live_test_support)."""
+    monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
+
+
 def _paper_config(name="P1", capital=100_000, symbols=None):
     return RunnerConfig(
         name=name,
@@ -71,7 +79,10 @@ def _first_bar(symbol="AAA", ts="2026-09-02 10:00:00"):
 
 @pytest.fixture
 def manager():
+    from live_test_support import ARMED_KWARGS
+
     mgr = PortfolioManager(
+        **ARMED_KWARGS,
         risk_config=GlobalRiskConfig(
             daily_loss_limit=10_000,
             max_drawdown_pct=0.10,
@@ -86,7 +97,10 @@ def manager():
 @pytest.fixture
 def flatten_manager():
     """Manager with HALT_FLATTEN mode for drawdown tests."""
+    from live_test_support import ARMED_KWARGS
+
     mgr = PortfolioManager(
+        **ARMED_KWARGS,
         risk_config=GlobalRiskConfig(
             daily_loss_limit=10_000,
             max_drawdown_pct=0.10,
@@ -217,6 +231,18 @@ class TestMasterKill:
         assert manager._bucket_halted["live"] is True
         # All positions flattened
         assert len(manager.get_runner(pid).positions) == 0
+        # F-12: the live bucket's exit went to the VENUE, not the paper
+        # book — flat only once the venue fill polls back.
+        from live_test_support import ARMED_KWARGS
+
+        live_gw = manager._live_gateway
+        assert live_gw is not None and live_gw.working_count() == 1
+        fake = ARMED_KWARGS["live_broker"]
+        state = live_gw._working[live_gw.working_coids()[0]]
+        fake.fills[state["broker_order_id"]] = {
+            "symbol": "BBB", "transaction_type": "SELL", "quantity": 100, "price": 100.0,
+        }
+        live_gw.poll_pending()
         assert len(manager.get_runner(lid).positions) == 0
 
     def test_scoped_emergency_only_halts_target(self, manager):
@@ -526,7 +552,9 @@ class TestScopedBulkControl:
 class TestRestartBehavior:
     def test_new_manager_has_clean_breaker_state(self):
         """Fresh PortfolioManager has no stale breaker state."""
-        mgr = PortfolioManager(auto_start_feed=False)
+        from live_test_support import ARMED_KWARGS
+
+        mgr = PortfolioManager(**ARMED_KWARGS, auto_start_feed=False)
         try:
             assert mgr.halted is False
             assert mgr._bucket_halted["paper"] is False
@@ -559,7 +587,9 @@ class TestRestartBehavior:
         """Halt state is in-memory only — restart clears it (AC-18)."""
         from backtest.forward.portfolio_manager import reset_portfolio_manager
 
-        mgr = reset_portfolio_manager()
+        from live_test_support import ARMED_KWARGS
+
+        mgr = reset_portfolio_manager(**ARMED_KWARGS)
         try:
             mgr.add_runner(_paper_config(capital=100_000, symbols=["AAA"]), start=False)
             mgr.add_runner(_live_config(capital=200_000, symbols=["BBB"]), start=False)
@@ -572,7 +602,7 @@ class TestRestartBehavior:
             mgr.shutdown()
 
         # Simulate restart
-        mgr2 = reset_portfolio_manager()
+        mgr2 = reset_portfolio_manager(**ARMED_KWARGS)
         try:
             # All state should be clean
             assert mgr2.halted is False
