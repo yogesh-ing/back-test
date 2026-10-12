@@ -9,7 +9,9 @@
 > Companion docs: [OPTIONS-PAPER-LIVE.md](OPTIONS-PAPER-LIVE.md) (options
 > pipeline) · [FORWARD-TESTING.md](FORWARD-TESTING.md) (forward engine) ·
 > [Gap-Analysis-Remediation-PRD.md](Gap-Analysis-Remediation-PRD.md) (§P2 is
-> the same finding as A2 below).
+> the same finding as A2 below). For offline mechanism/regression evidence, see
+> [OPTIONS-DETERMINISTIC-REPLAY.md](OPTIONS-DETERMINISTIC-REPLAY.md); it does
+> not test restart recovery or replace the mandatory live soak.
 
 ## Why this tracker exists
 

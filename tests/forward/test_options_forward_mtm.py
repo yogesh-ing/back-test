@@ -57,7 +57,7 @@ def _bars(closes, start_day=1):
     base = _CYCLE_START + timedelta(days=start_day - 1)
     return [
         {
-            "ts": f"{(base + timedelta(days=i)).isoformat()}T09:15:00",
+            "ts": f"{(base + timedelta(days=i)).isoformat()}T09:15:00+05:30",
             "open": close - 10,
             "high": close + 30,
             "low": close - 30,
@@ -89,7 +89,11 @@ def _option_config(**overrides):
 
 
 def _running_option_runner(**overrides):
-    runner = StrategyRunner(_option_config(**overrides), ledger=OrderLedger())
+    runner = StrategyRunner(
+        _option_config(**overrides),
+        ledger=OrderLedger(),
+        preserve_candle_timestamps=True,
+    )
     runner.start()
     return runner
 

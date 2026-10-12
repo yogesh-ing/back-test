@@ -70,6 +70,10 @@ MarketView (bullish/bearish) → strike + expiry selection → TradeIntent
 - **Paper:** `/options` dashboard — positions, structures, Greeks grid, expiry alerts
 - **Live:** `LiveOptionTrader(dry_run=True)` first — logs payloads, places nothing
 - **Docs:** [docs/OPTIONS-PAPER-LIVE.md](docs/OPTIONS-PAPER-LIVE.md)
+- **Internal replay evidence:** [docs/OPTIONS-DETERMINISTIC-REPLAY.md](docs/OPTIONS-DETERMINISTIC-REPLAY.md) — deterministic point-in-time CSV
+  replay through the forward `StrategyRunner`; not a performance backtester
+  and not a substitute for live soak. For hands-on checks, see the
+  [manual test plan](docs/OPTIONS-DETERMINISTIC-REPLAY-MANUAL-TEST.md).
 
 **Status:** the options PRD is complete (9/9 phases) — instrument model,
 expression layer, paper trading, live trading, Greeks & margin, the full
@@ -110,6 +114,7 @@ src/backtest/
 ├── strategies/     # Built-in strategies (SMA, RSI, Donchian, Buy&Hold)
 ├── engine/         # Backtest engine (trade simulation, metrics)
 ├── forward/        # Forward testing (paper trading)
+├── replay/         # Internal deterministic options replay (forward engine path)
 ├── simulator/      # Costs, slippage, fills, risk — incl. option fee stack
 ├── options/        # Options trading: selectors, structures, paper/live
 │                   #   execution, Greeks, margin, fees, expiry

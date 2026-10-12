@@ -82,6 +82,27 @@ from backtest.strategy.intent import Direction, MarketView
 
 logger = logging.getLogger("backtest.forward.options_bridge")
 
+
+def _audit_value(value: Any) -> Any:
+    """Convert bridge audit values to stable JSON-compatible primitives."""
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, (datetime,)) or hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except (TypeError, ValueError):
+            pass
+    if hasattr(value, "value"):
+        return _audit_value(value.value)
+    if isinstance(value, dict):
+        return {str(key): _audit_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_audit_value(item) for item in value]
+    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        return None
+    return value
+
+
 #: structure_type → (structure instance, option side of the chain)
 STRUCTURES: dict[str, tuple[Any, str]] = {
     "long_call": (LongCall(), "CE"),
@@ -122,12 +143,26 @@ class OptionsBridge:
         expression: Optional[dict[str, Any]] = None,
         option_broker: Optional[OptionPaperBroker] = None,
         quote_provider: Optional[Any] = None,
+        *,
+        chain_generator: Optional[Any] = None,
+        defer_entry_fills: bool = False,
+        intrabar_exit_resolver: Optional[Any] = None,
+        audit: bool = False,
     ) -> None:
         self.expression: dict[str, Any] = {**DEFAULT_EXPRESSION, **(expression or {})}
         self.option_broker = option_broker or OptionPaperBroker(capital=float(capital))
         self.quote_provider: Any = quote_provider or SyntheticQuoteProvider()
-        if getattr(self.quote_provider, "generator", None) is None:
+        self.chain_generator = chain_generator
+        if self.chain_generator is None and getattr(self.quote_provider, "generator", None) is None:
             self.quote_provider.generator = SyntheticChainGenerator()
+        # These seams let a replay provide historical contracts/quotes and a
+        # one-bar-later fill schedule without forking the strategy/expression
+        # path. Live/synthetic callers retain the immediate default.
+        self.defer_entry_fills = bool(defer_entry_fills)
+        self.intrabar_exit_resolver = intrabar_exit_resolver
+        self.audit_enabled = bool(audit)
+        self.audit_events: list[dict[str, Any]] = []
+        self._pending_entry: Optional[dict[str, Any]] = None
         # -- exit policy (task B1) ------------------------------------------
         self.exit_policy = ExitPolicy(ExitConfig.from_expression(self.expression.get("exit")))
         #: Minutes before the close at which the canonical expiry pipeline
@@ -185,6 +220,27 @@ class OptionsBridge:
         * ``{"rejected": True, ...}`` on a soft rejection (e.g. margin),
         * ``None`` when nothing happened.
         """
+        view_ts = (
+            self._bar_datetime(getattr(view, "bar_timestamp", None))
+            if view is not None
+            else None
+        )
+        decision_ts = view_ts or self._bar_dt
+        if self.audit_enabled:
+            self._audit(
+                "decision",
+                ts=decision_ts,
+                bar_index=self._bar_index,
+                direction=_label(view.direction) if view is not None else None,
+                confidence=getattr(view, "confidence", None) if view is not None else None,
+                spot=float(getattr(view, "spot_price", 0) or 0) if view is not None else None,
+                view_ts=view_ts,
+            )
+        if self._pending_entry is not None:
+            # At most one outstanding option structure. The original decision
+            # remains queued for its next-bar fill; this bar cannot pyramid.
+            return {"pending": True, "intent_ts": self._pending_entry["intent_ts"]}
+
         if self._has_open_structure():
             closed = self._manage_open_structure(view, strategy_name)
             if closed is None:
@@ -200,7 +256,15 @@ class OptionsBridge:
 
         structure_type = self._structure_type_for(view)
         if structure_type not in STRUCTURES:
-            logger.warning("[options-bridge] unknown structure type %r", structure_type)
+            reason = f"unknown structure type {structure_type!r}"
+            logger.warning("[options-bridge] %s", reason)
+            self._audit(
+                "rejected",
+                ts=decision_ts,
+                bar_index=self._bar_index,
+                structure_type=structure_type,
+                reason=reason,
+            )
             return None
 
         if self._blocked_reentry(view):
@@ -208,13 +272,70 @@ class OptionsBridge:
             return None
         dte_block = self._entry_dte_block()
         if dte_block is not None:
+            self._audit(
+                "rejected",
+                ts=decision_ts,
+                bar_index=self._bar_index,
+                structure_type=structure_type,
+                reason=dte_block.get("reason"),
+            )
             return dte_block
 
         try:
-            return self._execute(view, structure_type, strategy_name)
+            if self.defer_entry_fills:
+                intent, strikes, expiry = self._build_trade_intent(
+                    view, structure_type, strategy_name
+                )
+                intent_ts = self._bar_datetime(view.bar_timestamp) or self._bar_dt
+                self._pending_entry = {
+                    "intent": intent,
+                    "intent_ts": intent_ts,
+                    "intent_bar_index": self._bar_index,
+                    "strategy_name": strategy_name,
+                    "strikes": strikes,
+                    "expiry": expiry,
+                }
+                self._audit(
+                    "intent",
+                    ts=intent_ts,
+                    bar_index=self._bar_index,
+                    structure_type=structure_type,
+                    underlying=view.underlying,
+                    direction=view.direction,
+                    strikes=strikes,
+                    expiry=expiry,
+                    contracts=[leg.instrument_token for leg in intent.legs],
+                )
+                return {
+                    "pending": True,
+                    "structure_type": structure_type,
+                    "underlying": view.underlying,
+                    "strikes": [str(strike) for strike in strikes],
+                    "expiry": str(expiry),
+                    "positions": len(intent.legs),
+                    "direction": view.direction.value,
+                    "intent_ts": intent_ts.isoformat() if intent_ts else None,
+                }
+            result = self._execute(view, structure_type, strategy_name)
+            if result.get("rejected"):
+                self._audit(
+                    "rejected",
+                    ts=decision_ts,
+                    bar_index=self._bar_index,
+                    structure_type=structure_type,
+                    reason=result.get("reason"),
+                )
+            return result
         except Exception as exc:  # noqa: BLE001 — a bad bar must not kill the runner
             logger.warning(
                 "[options-bridge] %s execution failed: %s", structure_type, exc
+            )
+            self._audit(
+                "rejected",
+                ts=decision_ts,
+                bar_index=self._bar_index,
+                structure_type=structure_type,
+                reason=str(exc),
             )
             return {"rejected": True, "reason": str(exc)}
 
@@ -225,6 +346,18 @@ class OptionsBridge:
         happens inside the pricing hook and still needs a signal-log entry.
         """
         return self._exit_events.popleft() if self._exit_events else None
+
+    def _audit(self, kind: str, **fields: Any) -> None:
+        if not self.audit_enabled:
+            return
+        event = {"kind": str(kind)}
+        event.update({key: _audit_value(value) for key, value in fields.items()})
+        self.audit_events.append(event)
+
+    @property
+    def pending_intent(self) -> Optional[dict[str, Any]]:
+        """A copy of the deferred entry record, for replay fill gating."""
+        return dict(self._pending_entry) if self._pending_entry is not None else None
 
     @property
     def bars_in_trade(self) -> int:
@@ -418,40 +551,42 @@ class OptionsBridge:
     # ------------------------------------------------------------------ #
 
     def on_bar(
-        self, symbol: str, price: float, ts: Any = None
+        self,
+        symbol: str,
+        price: float,
+        ts: Any = None,
+        *,
+        feed_valid: bool = True,
     ) -> Optional[Decimal]:
-        """Mark the option book to market at one bar close.
+        """Advance the bridge on one completed forward-engine bar.
 
-        Called by :class:`~backtest.forward.paper_runner.StrategyRunner` for
-        every closed bar (single **and** pool runners). Three things happen:
-
-        1. the synthetic spot moves to ``price`` so premiums track the
-           underlying the strategy just saw;
-        2. the quote provider's pricing reference is pinned to ``ts`` — the
-           bar's timestamp, not ``datetime.now()`` — so time decay advances at
-           replay speed;
-        3. every open leg is re-priced and its unrealized P&L recomputed;
-        4. the **mechanical** exit rules (stop, target, days-to-expiry, time
-           stop) are evaluated against the fresh mark. Signal rules — flip and
-           neutral — need the strategy's view and are evaluated by
-           :meth:`on_market_view` instead, so a viewless bar cannot close a
-           position on a view it never saw. A close here is queued for
-           :meth:`pop_exit_event`.
-
-        Returns the book's total unrealized P&L (post-action), or ``None`` when
-        there is nothing open (or the book is empty). Pricing failures are
-        logged and swallowed: a bad bar must never kill the runner.
+        A replay adapter may defer an entry created on bar T until bar T+1's
+        first available price. It supplies the current bar's open/close phases
+        through the same quote-provider seam used for normal paper execution.
+        ``feed_valid=False`` advances the simulated bar clock but preserves the
+        last known mark and suppresses trading; it never fabricates a quote.
         """
         self._bar_index += 1
         bar_dt = self._bar_datetime(ts)
         if bar_dt is not None or self._bar_dt is None:
             self._bar_dt = bar_dt
+
+        if not feed_valid:
+            if self._pending_entry is not None:
+                self._reject_pending_entry(
+                    "STRIKE_NO_FRESH_QUOTE: the next-bar fill window had no valid feed"
+                )
+            return None
+
+        if self._pending_entry is not None:
+            self._fill_pending_entry()
         if not self._has_open_structure():
             return None
 
         try:
             underlying = str(symbol or self.underlying or "NIFTY").upper()
             self.underlying = underlying
+            self._set_quote_phase("close")
             self._sync_market(underlying, price, ts)
             unrealized = self.option_broker.update_mtm(
                 self.quote_provider, self._bar_datetime(ts)
@@ -463,11 +598,136 @@ class OptionsBridge:
             logger.warning(
                 "[options-bridge] MTM failed for %s @ %s: %s", symbol, price, exc
             )
+            self._audit(
+                "quote_error",
+                ts=self._bar_dt,
+                bar_index=self._bar_index,
+                reason=str(exc),
+            )
             return None
 
         self._maybe_risk_exit(strategy_name="")
         self._maybe_expiry_settlement()
         return self.last_unrealized_pnl
+
+    def _set_quote_phase(self, phase: str) -> None:
+        setter = getattr(self.quote_provider, "set_phase", None)
+        if callable(setter):
+            setter(phase)
+
+    def _fill_pending_entry(self) -> None:
+        pending = self._pending_entry
+        if pending is None:
+            return
+        intent = pending["intent"]
+        fill_ts = getattr(self.quote_provider, "current_fill_timestamp", None) or self._bar_dt
+        if callable(fill_ts):
+            fill_ts = fill_ts()
+        fill_ts = self._bar_datetime(fill_ts) or fill_ts
+        if self._bar_index != pending["intent_bar_index"] + 1:
+            self._reject_pending_entry(
+                "replay invariant: deferred entry did not fill on the immediately following bar"
+            )
+            return
+        if pending["intent_ts"] is not None and fill_ts is not None:
+            if fill_ts < pending["intent_ts"]:
+                self._reject_pending_entry("replay invariant: fill precedes intent timestamp")
+                return
+
+        reads: list[dict[str, Any]] = []
+        self._set_quote_phase("open")
+        try:
+            validate_quotes = getattr(self.quote_provider, "validate_entry_quotes", None)
+            if callable(validate_quotes):
+                validate_quotes(intent)
+            reject = getattr(self.quote_provider, "should_reject_entry", None)
+            if callable(reject) and reject():
+                raise RuntimeError("INJECTED_BROKER_REJECT: authored replay rejection")
+            positions = self.option_broker.execute_structure(
+                intent,
+                self.quote_provider,
+                timestamp=fill_ts,
+            )
+            self.open_structure_id = positions[0].structure_id if positions else None
+            if self.open_structure_id is None:
+                self._reject_pending_entry("paper broker returned no positions")
+                return
+            self.executed_count += 1
+            self._entry_bar_index = self._bar_index
+            self._exit_bar_index = None
+            self._bars_without_view = 0
+            self._structure_direction = intent.view.direction
+            self._structure_expiry = intent.expiry
+            opened = self.option_broker.get_structure(self.open_structure_id)
+            self._entry_premium = opened.total_entry_cost if opened is not None else Decimal("0")
+            consume = getattr(self.quote_provider, "consume_read_audit", None)
+            if callable(consume):
+                reads = consume()
+            self._audit(
+                "fill",
+                ts=fill_ts,
+                intent_ts=pending["intent_ts"],
+                intent_bar_index=pending["intent_bar_index"],
+                fill_bar_index=self._bar_index,
+                structure_id=self.open_structure_id,
+                structure_type=intent.structure_type,
+                underlying=intent.view.underlying,
+                expiry=intent.expiry,
+                strikes=pending["strikes"],
+                legs=[
+                    {
+                        "instrument_token": leg.instrument_token,
+                        "trading_symbol": leg.trading_symbol,
+                        "side": leg.side,
+                        "lot_size": leg.lot_size,
+                        "entry_price": float(leg.entry_price),
+                    }
+                    for leg in positions
+                ],
+                quote_reads=reads,
+            )
+            logger.info(
+                "[options-bridge] replay-filled %s at %s (%s intent bar %s)",
+                intent.structure_type,
+                fill_ts,
+                self.open_structure_id,
+                pending["intent_bar_index"],
+            )
+        except Exception as exc:  # noqa: BLE001 — injected/market rejection is a journal event
+            consume = getattr(self.quote_provider, "consume_read_audit", None)
+            if callable(consume):
+                reads = consume()
+            self._audit(
+                "rejected",
+                ts=fill_ts,
+                intent_ts=pending["intent_ts"],
+                intent_bar_index=pending["intent_bar_index"],
+                fill_bar_index=self._bar_index,
+                structure_type=intent.structure_type,
+                reason=str(exc),
+                quote_reads=reads,
+            )
+            logger.warning("[options-bridge] deferred %s rejected: %s", intent.structure_type, exc)
+        finally:
+            self._pending_entry = None
+            self._set_quote_phase("close")
+
+    def _reject_pending_entry(self, reason: str) -> None:
+        pending = self._pending_entry
+        if pending is None:
+            return
+        intent = pending["intent"]
+        self._audit(
+            "rejected",
+            ts=self._bar_dt,
+            intent_ts=pending["intent_ts"],
+            intent_bar_index=pending["intent_bar_index"],
+            fill_bar_index=self._bar_index,
+            structure_type=intent.structure_type,
+            reason=reason,
+        )
+        logger.warning("[options-bridge] deferred %s rejected: %s", intent.structure_type, reason)
+        self._pending_entry = None
 
     # ------------------------------------------------------------------ #
     # Expiry settlement (task B2)
@@ -555,6 +815,17 @@ class OptionsBridge:
         self._entry_premium = Decimal("0")
         self.last_unrealized_pnl = self.option_broker.total_unrealized_pnl
         self._exit_events.append(event)
+        self._audit(
+            "exit",
+            ts=self._bar_dt,
+            structure_id=structure.structure_id,
+            structure_type=structure.structure_type,
+            reason=event["reason"],
+            detail=event["detail"],
+            pnl=float(realized),
+            bars_held=event["bars_held"],
+            settled=settled,
+        )
 
         logger.info(
             "[options-bridge] %s %s — pnl ₹%.2f (%d settled, %d squared off)",
@@ -567,7 +838,41 @@ class OptionsBridge:
         return event
 
     def _maybe_risk_exit(self, strategy_name: str) -> Optional[dict[str, Any]]:
-        """Apply the view-independent exit rules to the freshly marked book."""
+        """Apply view-independent exits to the freshly marked book.
+
+        An optional OHLC resolver is used by the CSV replay adapter. It checks
+        the closed candle range and supplies conservative candle-derived exit
+        marks; standard forward paper retains the established close-mark rule.
+        """
+        structure = self.option_broker.get_structure(self.open_structure_id or "")
+        resolver = self.intrabar_exit_resolver
+        if structure is not None and resolver is not None:
+            try:
+                resolution = resolver.resolve(
+                    structure=structure,
+                    quote_provider=self.quote_provider,
+                    basis=self._entry_premium,
+                    exit_config=self.exit_policy.config,
+                )
+            except Exception as exc:  # noqa: BLE001 — fail closed to the normal policy
+                logger.warning("[options-bridge] OHLC exit resolver failed: %s", exc)
+                resolution = None
+            if resolution is not None:
+                setter = getattr(self.quote_provider, "set_exit_prices", None)
+                clearer = getattr(self.quote_provider, "clear_exit_prices", None)
+                if callable(setter):
+                    setter(resolution.prices)
+                try:
+                    return self._exit_structure(
+                        resolution.decision,
+                        self._bar_ts(self._bar_dt),
+                        strategy_name,
+                        queue=True,
+                    )
+                finally:
+                    if callable(clearer):
+                        clearer()
+
         decision = self._evaluate_exit(view=None)
         if decision is None or decision.reason not in RISK_REASONS:
             return None
@@ -738,6 +1043,19 @@ class OptionsBridge:
         # The legs are closed, so the open-leg mark is gone. Keep the summary
         # honest for the rest of this bar.
         self.last_unrealized_pnl = self.option_broker.total_unrealized_pnl
+        consume = getattr(self.quote_provider, "consume_read_audit", None)
+        reads = consume() if callable(consume) else []
+        self._audit(
+            "exit",
+            ts=self._bar_datetime(ts),
+            structure_id=structure_id,
+            structure_type=structure.structure_type,
+            reason=decision.reason,
+            detail=decision.detail,
+            pnl=float(realized),
+            bars_held=bars_held,
+            quote_reads=reads,
+        )
 
         logger.info(
             "[options-bridge] closed %s (%s) after %d bars — pnl ₹%.2f — %s",
@@ -819,31 +1137,40 @@ class OptionsBridge:
             return str(type_cfg.get("BULLISH", "bull_call_spread"))
         return str(type_cfg)
 
-    def _generator(self) -> SyntheticChainGenerator:
-        generator = getattr(self.quote_provider, "generator", None) or getattr(
-            getattr(self.quote_provider, "inner", None), "generator", None
+    def _generator(self) -> Any:
+        generator = (
+            self.chain_generator
+            or getattr(self.quote_provider, "generator", None)
+            or getattr(
+                getattr(self.quote_provider, "inner", None),
+                "generator",
+                None,
+            )
         )
         if generator is None:
             generator = SyntheticChainGenerator()
             self.quote_provider.generator = generator
         return generator
 
-    def _execute(
+    def _build_trade_intent(
         self, view: MarketView, structure_type: str, strategy_name: str
-    ) -> dict[str, Any]:
-        from backtest.options.paper_trading import InsufficientMarginError
-
+    ) -> tuple[Any, list[Decimal], Any]:
+        """Use the normal selector/structure path and return its executable intent."""
         structure, option_type = STRUCTURES[structure_type]
         underlying = str(view.underlying or "NIFTY")
         generator = self._generator()
         self.underlying = underlying
 
-        # Sync the synthetic market to the view's spot so premiums and
-        # strikes line up with what the strategy saw. The entry is priced on
-        # the view's own bar clock (when it carries one) so the premium is
-        # consistent with the MTM that follows on the next bar (A1).
+        # The replay chain generator accepts the same spot seam but supplies
+        # only contracts whose CSV rows are fresh at the current bar close.
         if view.spot_price is not None:
-            self._sync_market(underlying, float(view.spot_price), view.bar_timestamp)
+            # A deferred replay view may omit its timestamp; use the injected
+            # bar clock rather than falling back to wall time. The normal
+            # forward path retains its existing provider-reference behavior.
+            reference_ts = view.bar_timestamp
+            if reference_ts is None and self.defer_entry_fills:
+                reference_ts = self._bar_dt
+            self._sync_market(underlying, float(view.spot_price), reference_ts)
         spot = Decimal(str(generator.get_spot(underlying)))
 
         expiry = self._select_expiry(generator, underlying)
@@ -855,15 +1182,29 @@ class OptionsBridge:
 
         strikes = self._pick_strikes(structure_type, spot, chain, view.direction)
         if not strikes:
-            raise ValueError("no suitable strike found in the chain")
+            raise ValueError("no suitable strike found in the fresh chain")
 
         intent = structure.build(view, strikes, chain, expiry, strategy_name=strategy_name)
         quantity = int(self.expression.get("quantity", 1) or 1)
         if quantity > 1:
             intent = self._scale_intent(intent, quantity)
+        return intent, strikes, expiry
 
+    def _execute(
+        self, view: MarketView, structure_type: str, strategy_name: str
+    ) -> dict[str, Any]:
+        from backtest.options.paper_trading import InsufficientMarginError
+
+        intent, strikes, expiry = self._build_trade_intent(view, structure_type, strategy_name)
+        timestamp = self._bar_datetime(view.bar_timestamp)
+        if timestamp is None and self.defer_entry_fills:
+            timestamp = self._bar_dt
         try:
-            positions = self.option_broker.execute_structure(intent, self.quote_provider)
+            positions = self.option_broker.execute_structure(
+                intent,
+                self.quote_provider,
+                timestamp=timestamp,
+            )
         except InsufficientMarginError as exc:
             return {"rejected": True, "reason": str(exc)}
 
@@ -881,7 +1222,7 @@ class OptionsBridge:
         logger.info(
             "[options-bridge] opened %s on %s strikes=%s expiry=%s (view %s conf=%.2f)",
             structure_type,
-            underlying,
+            view.underlying,
             [str(s) for s in strikes],
             expiry,
             view.direction.value,
@@ -890,7 +1231,7 @@ class OptionsBridge:
         return {
             "structure_id": self.open_structure_id,
             "structure_type": structure_type,
-            "underlying": underlying,
+            "underlying": view.underlying,
             "strikes": [str(s) for s in strikes],
             "expiry": str(expiry),
             "positions": len(positions),

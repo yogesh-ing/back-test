@@ -537,8 +537,21 @@ class StrategyRunner:
         ledger: OrderLedger,
         broker: Optional[PaperBroker] = None,
         strategy: Optional[Any] = None,
+        *,
+        options_bridge: Optional[OptionsBridge] = None,
+        clock: Optional[Callable[[], datetime]] = None,
+        preserve_candle_timestamps: Optional[bool] = None,
     ) -> None:
         self.config = config
+        self._clock = clock
+        if preserve_candle_timestamps is None:
+            # Option decisions and quote valuation share the same candle clock;
+            # equity strategies retain their historical RangeIndex behavior.
+            preserve_candle_timestamps = (
+                options_bridge is not None
+                or str(config.instrument.get("type", "equity")) == "option"
+            )
+        self._preserve_candle_timestamps = bool(preserve_candle_timestamps)
         self.instance_id: str = config.instance_id or uuid.uuid4().hex
         self.ledger = ledger
         self.broker = broker or PaperBroker(ledger)
@@ -555,7 +568,7 @@ class StrategyRunner:
             initial_capital=config.allocated_capital,
             limits=PortfolioLimits(allow_short=config.allow_short),
             mode="paper",
-            source="synthetic",
+            source=config.source,
         )
         self.executor = free_executor(self.portfolio)
         self.closed_trades_cache: List[Dict[str, Any]] = []
@@ -563,8 +576,8 @@ class StrategyRunner:
         # -- options bridge (Gap G3.2) --------------------------------------
         # Runners with instrument.type == "option" route bars through the
         # expression layer instead of the equity signal flow.
-        self.options_bridge: Optional["OptionsBridge"] = None
-        if str(config.instrument.get("type", "equity")) == "option":
+        self.options_bridge: Optional["OptionsBridge"] = options_bridge
+        if self.options_bridge is None and str(config.instrument.get("type", "equity")) == "option":
             self.options_bridge = OptionsBridge(
                 capital=config.allocated_capital,
                 expression=config.instrument.get("expression"),
@@ -591,11 +604,18 @@ class StrategyRunner:
         self.status: str = STATUS_STOPPED
         self.error: Optional[str] = None
         self.bars_processed: int = 0
-        self.created_ts: str = datetime.now(timezone.utc).isoformat()
+        self.created_ts: str = self._now().isoformat()
 
         self._lock = threading.RLock()
         self.ledger.register_handler(self.instance_id, self.on_fill)
         self.ledger.register_runner(self.instance_id, self)
+
+    def _now(self) -> datetime:
+        """Read the injected run clock, falling back to UTC wall time."""
+        value = self._clock() if self._clock is not None else datetime.now(timezone.utc)
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     # -- accounting views (over the simulator portfolio) --------------------
 
@@ -791,8 +811,19 @@ class StrategyRunner:
     # Candle event processing
     # ------------------------------------------------------------------ #
 
-    def process_candle_event(self, symbol: str, candle: Dict[str, Any]) -> None:
-        """Feed one closed bar. Main entry point from the portfolio feed."""
+    def process_candle_event(
+        self,
+        symbol: str,
+        candle: Dict[str, Any],
+        *,
+        allow_trading: bool = True,
+    ) -> None:
+        """Feed one closed bar. Main entry point from the portfolio feed.
+
+        A replay feed-health halt can keep bars in the strategy's prefix while
+        suppressing decisions and preserving the last good option mark. Normal
+        forward callers use the default and retain existing behavior.
+        """
         symbol = str(symbol).upper()
         if symbol not in self._bars:
             # Unknown symbol for this runner — ignore defensively.
@@ -827,14 +858,18 @@ class StrategyRunner:
                 self._roll_trading_day(ts)
                 self.portfolio.update_prices({symbol: price})
                 if self.options_bridge is not None:
-                    # A1: re-price the option book before equity is marked,
-                    # so the curve and the breakers see fresh premiums.
-                    self._mark_option_book(symbol, price, ts)
+                    # A1: re-price the option book before equity is marked.
+                    # During a replay feed halt this advances the bridge's
+                    # simulated bar clock but deliberately preserves its last
+                    # good quote/mark.
+                    self._mark_option_book(
+                        symbol, price, ts, feed_valid=allow_trading
+                    )
                 # B3: record the curve every bar — the deep-dive chart had no
                 # data because nothing called this with record=True.
                 self._mark_to_market(record=True)
 
-                if self.config.target_type == TARGET_SINGLE:
+                if allow_trading and self.config.target_type == TARGET_SINGLE:
                     # Single-symbol runners act immediately on their own bar.
                     if len(self._bars[symbol]) >= MIN_WARMUP_BARS:
                         if self.options_bridge is not None:
@@ -919,7 +954,10 @@ class StrategyRunner:
         """
         if self.options_bridge is None:
             return
-        df = self._bars_to_frame(self._bars[symbol])
+        df = self._bars_to_frame(
+            self._bars[symbol],
+            preserve_timestamps=self._preserve_candle_timestamps,
+        )
         try:
             view = self.strategy.generate_market_view(df)
         except Exception as exc:  # noqa: BLE001 — one bad bar must not kill the runner
@@ -939,6 +977,20 @@ class StrategyRunner:
             return
         if result.get("exited"):
             self._log_option_exit(symbol, result, bar["close"])
+            return
+        if result.get("pending"):
+            self._log_signal(
+                symbol,
+                "OPTION_INTENT",
+                1 if result.get("direction") == "bullish" else -1,
+                bar["close"],
+                "{} {} expiry={} legs={} — awaiting next-bar replay open".format(
+                    result.get("structure_type"),
+                    "/".join(result.get("strikes", [])),
+                    result.get("expiry"),
+                    result.get("positions"),
+                ),
+            )
             return
         if result.get("rejected"):
             self._log_signal(
@@ -968,29 +1020,39 @@ class StrategyRunner:
         with self._lock:
             return self.options_bridge.summary()
 
-    def _mark_option_book(self, symbol: str, price: float, ts: Optional[str]) -> None:
-        """Mark the option book to market for one bar (task A1).
+    def _mark_option_book(
+        self,
+        symbol: str,
+        price: float,
+        ts: Optional[str],
+        *,
+        feed_valid: bool = True,
+    ) -> None:
+        """Advance/mark the option book on one closed bar (task A1).
 
-        Called for every closed bar before equity is marked, so an option
-        runner's curve, daily P&L and instance breakers are built from fresh
-        premiums instead of the entry price. While a structure is open the
-        book also emits a throttled ``OPTION_MTM`` heartbeat the deep-dive can
-        chart.
+        An invalid replay quote advances the bridge's clock but preserves its
+        last valid mark. The caller records the feed halt and suppresses the
+        strategy decision; no quote is synthesized or carried forward.
         """
         bridge = self.options_bridge
         if bridge is None:
             return
-        pnl = bridge.on_bar(symbol, price, ts)
-        if pnl is None:
-            return
-        self.last_option_pnl = float(pnl)
+        if feed_valid:
+            # Keep the long-standing three-argument call surface (tests and
+            # embedders commonly wrap this hook); only replay halts need the
+            # explicit validity flag.
+            pnl = bridge.on_bar(symbol, price, ts)
+        else:
+            pnl = bridge.on_bar(symbol, price, ts, feed_valid=False)
+        if pnl is not None:
+            self.last_option_pnl = float(pnl)
         # A stop/target/time exit fires inside the pricing hook — drain and log it.
         while True:
             event = bridge.pop_exit_event()
             if event is None:
                 break
             self._log_option_exit(symbol, event, price)
-        if self.bars_processed % OPTION_MTM_LOG_EVERY == 0:
+        if pnl is not None and feed_valid and self.bars_processed % OPTION_MTM_LOG_EVERY == 0:
             self._log_signal(
                 symbol, "OPTION_MTM", None, price, f"option MTM {float(pnl):+,.0f}"
             )
@@ -1055,7 +1117,11 @@ class StrategyRunner:
     # -- signal / action --------------------------------------------------
 
     @staticmethod
-    def _bars_to_frame(buf: Deque[Dict[str, Any]]) -> pd.DataFrame:
+    def _bars_to_frame(
+        buf: Deque[Dict[str, Any]],
+        *,
+        preserve_timestamps: bool = False,
+    ) -> pd.DataFrame:
         """Build the canonical OHLCV frame from a rolling buffer."""
         n = len(buf)
         data = {
@@ -1071,8 +1137,21 @@ class StrategyRunner:
             data["low"][i] = bar["low"]
             data["close"][i] = bar["close"]
             data["volume"][i] = bar["volume"]
+        index = pd.RangeIndex(n)
+        if preserve_timestamps:
+            timestamps = [bar.get("ts") for bar in buf]
+            try:
+                index = pd.DatetimeIndex(pd.to_datetime(timestamps, utc=True, errors="raise"))
+                index.name = "timestamp"
+            except (TypeError, ValueError):
+                # Replay bars are expected to carry UTC timestamps; retain a
+                # usable frame if an ad-hoc caller supplies an invalid one.
+                index = pd.RangeIndex(n)
         return pd.DataFrame(
-            data, columns=["open", "high", "low", "close", "volume"], dtype="float64"
+            data,
+            index=index,
+            columns=["open", "high", "low", "close", "volume"],
+            dtype="float64",
         )
 
     def _signal_for(self, symbol: str) -> Optional[int]:
@@ -1311,7 +1390,7 @@ class StrategyRunner:
             self.equity_curve = self.equity_curve[::2]
         self.equity_curve.append(
             {
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "ts": self._now().isoformat(),
                 "equity": round(equity, 2),
             }
         )
@@ -1320,7 +1399,7 @@ class StrategyRunner:
         # Daily PnL is session-anchored: the baseline is fixed at the first
         # bar the runner sees (warmup and replay do not roll days). Call
         # :meth:`reset_daily_anchor` to re-baseline at the real session start.
-        day = ts[:10] if ts else datetime.now(timezone.utc).date().isoformat()
+        day = ts[:10] if ts else self._now().date().isoformat()
         if self._current_day is None:
             self._current_day = day
             self._day_start_equity = self.equity()
@@ -1329,7 +1408,7 @@ class StrategyRunner:
         """Re-baseline daily PnL at current equity (session open / tests)."""
         with self._lock:
             self._day_start_equity = self.equity()
-            self._current_day = datetime.now(timezone.utc).date().isoformat()
+            self._current_day = self._now().date().isoformat()
 
     # -- instance-level circuit breakers ----------------------------------
 
@@ -1363,7 +1442,7 @@ class StrategyRunner:
         self, symbol: str, kind: str, signal: Optional[int], price: Optional[float], reason: str
     ) -> None:
         entry = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": self._now().isoformat(),
             "symbol": symbol,
             "kind": kind,
             "signal": signal,

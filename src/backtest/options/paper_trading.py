@@ -157,10 +157,10 @@ class OptionPosition:
         self.last_updated = self.closed_at
         return self.realized_pnl
 
-    def update_mtm(self, price: Decimal) -> Decimal:
-        """Update current price and recalculate unrealized P&L."""
+    def update_mtm(self, price: Decimal, timestamp: datetime | None = None) -> Decimal:
+        """Update current price/P&L, using the supplied market clock if present."""
         self.current_price = price
-        self.last_updated = datetime.utcnow()
+        self.last_updated = timestamp or datetime.utcnow()
         return self.calculate_unrealized_pnl()
 
 
@@ -567,11 +567,9 @@ class OptionPaperBroker:
     ) -> Decimal:
         """Update MTM for all open positions.
 
-        Returns total unrealized P&L across all open positions.
-
-        ``timestamp`` is accepted for interface symmetry with
-        :meth:`execute_structure` / :meth:`close_structure`; MTM updates
-        always stamp positions with wall-clock time.
+        Returns total unrealized P&L across all open positions. Historical
+        replay supplies ``timestamp`` so position audit fields remain on the
+        same deterministic exchange clock as the fills.
         """
         total_unrealized = ZERO
 
@@ -581,7 +579,7 @@ class OptionPaperBroker:
 
             quote = quote_provider.get_quote(position.instrument_token)
             price = Decimal(str(quote.get("ltp", 0)))
-            pnl = position.update_mtm(price)
+            pnl = position.update_mtm(price, timestamp=timestamp)
             total_unrealized += pnl
 
         return total_unrealized
