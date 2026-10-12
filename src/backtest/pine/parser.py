@@ -60,29 +60,6 @@ class PineScriptParser:
                 i += 1
                 continue
 
-            # Skip user-defined function blocks (`dirmov(len) =>` + its
-            # indented body). Their internals are per-call bookkeeping; the
-            # codegen inlines known families (ADX/DM) instead of transpiling
-            # arbitrary Pine functions.
-            func_def = re.match(r'([A-Za-z_]\w*)\(([^)]*)\)\s*=>\s*$', stripped)
-            if func_def:
-                i += 1
-                while i < len(original_lines):
-                    next_line = original_lines[i]
-                    if next_line and (next_line[0] == ' ' or next_line[0] == '\t'):
-                        i += 1
-                    else:
-                        break
-                continue
-
-            # Skip declaration/plot lines: `strategy("...")`, `indicator(...)`,
-            # `plot(...)`, `bgcolor(...)` — none of them compute a signal
-            # variable, and the bare-assignment regex would otherwise swallow
-            # them as broken `name = "..."` statements.
-            if re.match(r'(strategy|indicator|library|plot|bgcolor|barcolor|fill)\s*\(', stripped):
-                i += 1
-                continue
-
             # Parse input(): atrPeriod = input(10, "ATR Length")
             #                factor = input.float(3.0, "Factor", step = 0.01)
             input_match = re.match(
@@ -253,7 +230,7 @@ class PineScriptParser:
                 continue
 
             # Parse strategy call (standalone, not in if body)
-            strategy_match = re.match(r'strategy\.(entry|close|exit|order)\((.*)\)', stripped)
+            strategy_match = re.match(r'strategy\.(entry|close|exit)\((.*)\)', stripped)
             if strategy_match:
                 stmt = self._parse_strategy_call(
                     strategy_match.group(1), strategy_match.group(2)
@@ -291,11 +268,6 @@ class PineScriptParser:
             or stripped.count("[") != stripped.count("]")
         )
 
-    @staticmethod
-    def _is_function_header(stripped: str) -> bool:
-        """True for a user-defined function header like ``dirmov(len) =>``."""
-        return bool(re.search(r"=>\s*$", stripped))
-
     def _join_continuations(self, lines: List[str]) -> List[str]:
         """Merge continuation lines into single logical statements.
 
@@ -316,13 +288,6 @@ class PineScriptParser:
                 buf = content
             else:
                 buf = f"{buf} {content}"
-            # A function header (`dirmov(len) =>`) closes the previous
-            # statement and stands alone — its body lines follow indented.
-            if buf is not None and PineScriptParser._is_function_header(buf):
-                merged.append(indent + buf)
-                buf = None
-                indent = ""
-                continue
             if self._continues(buf):
                 continue
             merged.append(indent + buf)
@@ -376,30 +341,6 @@ class PineScriptParser:
                 "name": positional[0] if positional else "",
                 "from_order": positional[1] if len(positional) > 1 else "",
                 "exit_params": named,
-            }
-        if func == 'order':
-            # strategy.order("open_long", true, when=entry_long) — the entry
-            # form real Pine v5 scripts use (Rob Booker ADX breakout etc.),
-            # with a when= clause instead of an `if` block.
-            positional: List[str] = []
-            named: Dict[str, str] = {}
-            for part in args_str.split(','):
-                part = part.strip()
-                if not part:
-                    continue
-                kv = re.match(r'(\w+)\s*=\s*(.+)$', part)
-                if kv:
-                    named[kv.group(1).lower()] = kv.group(2).strip()
-                else:
-                    positional.append(part.strip('"\''))
-            side = positional[1].strip() if len(positional) > 1 else "true"
-            when = named.get("when", "")
-            return {
-                "type": "strategy_call",
-                "function": "strategy.order",
-                "name": positional[0] if positional else "",
-                "is_long": side.lower() == "true" or side.strip() == "1",
-                "when": when,
             }
         return None
 
@@ -488,7 +429,7 @@ class PineScriptParser:
             return None
 
         # Strategy call
-        strategy_match = re.match(r'strategy\.(entry|close|exit|order)\((.*)\)', line)
+        strategy_match = re.match(r'strategy\.(entry|close|exit)\((.*)\)', line)
         if strategy_match:
             return self._parse_strategy_call(
                 strategy_match.group(1), strategy_match.group(2)
