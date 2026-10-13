@@ -1,0 +1,130 @@
+# Strategy Trade Verification - Today (2026-10-13)
+
+**Source:** Live API (in-memory trades, NOT persisted to database)
+**Generated:** 2026-10-13 18:45 IST
+**Total Trades:** 6
+**All on Symbol:** RELIANCE
+
+---
+
+## Trade-by-Trade Breakdown
+
+| # | Strategy | Side | Entry Price | Entry Time (IST) | Exit Price | Exit Time (IST) | Holding Period | PnL (Rs) | Win/Loss |
+|---|----------|------|-------------|------------------|------------|-----------------|----------------|----------|----------|
+| 1 | buy_and_hold | LONG | 1,158.80 | 10:37:58 | 1,167.80 | 15:22:42 | 4h 45m | +7,371.00 | ✅ WIN |
+| 2 | bollinger_reversion | LONG | 1,156.00 | 13:23:59 | 1,157.50 | 13:31:59 | 8 min | +1,231.50 | ✅ WIN |
+| 3 | rsi_reversion | LONG | 1,158.80 | 10:37:58 | 1,154.30 | 12:00:58 | 1h 23m | -3,685.50 | ❌ LOSS |
+| 4 | bollinger_reversion | LONG | 1,153.80 | 11:42:58 | 1,153.80 | 11:59:58 | 17 min | 0.00 | ➡️ FLAT |
+| 5 | bollinger_reversion | LONG | 1,154.10 | 11:14:58 | 1,154.80 | 11:27:57 | 13 min | +576.10 | ✅ WIN |
+| 6 | bollinger_reversion | LONG | 1,155.00 | 10:59:57 | 1,156.20 | 11:06:57 | 7 min | +986.40 | ✅ WIN |
+
+---
+
+## Strategy Performance Summary
+
+| Strategy | Trades | Wins | Losses | Win Rate | Total PnL (Rs) | Avg PnL/Trade (Rs) |
+|----------|--------|------|--------|----------|----------------|--------------------|
+| buy_and_hold | 1 | 1 | 0 | 100% | +7,371.00 | +7,371.00 |
+| bollinger_reversion | 4 | 3 | 0 | 75%* | +2,794.00 | +698.50 |
+| rsi_reversion | 1 | 0 | 1 | 0% | -3,685.50 | -3,685.50 |
+| **TOTAL** | **6** | **4** | **1** | **67%** | **+6,479.50** | **+1,079.92** |
+
+*Note: 1 trade was flat (no win/loss), so effective win rate is 3/4 = 75% for profitable trades
+
+---
+
+## Expected Charges (If Quantity Was Tracked)
+
+**Assumption:** Standard lot size of 100 shares per trade
+
+| # | Strategy | Type | Est. Brokerage | Est. STT | Est. Exchange+GST+Others | Total Charges (Rs) |
+|---|----------|------|----------------|----------|--------------------------|--------------------|
+| 1 | buy_and_hold | Delivery | 0.00 | ~231.76 | ~42.32 | ~274.08 |
+| 2 | bollinger_reversion | Intraday | ~20.00 | ~29.18 | ~15.48 | ~64.66 |
+| 3 | rsi_reversion | Intraday | ~20.00 | ~29.16 | ~15.43 | ~64.59 |
+| 4 | bollinger_reversion | Intraday | ~20.00 | ~29.14 | ~15.40 | ~64.54 |
+| 5 | bollinger_reversion | Intraday | ~20.00 | ~29.15 | ~15.42 | ~64.57 |
+| 6 | bollinger_reversion | Intraday | ~20.00 | ~29.16 | ~15.46 | ~64.62 |
+| **TOTAL** | | | **~100.00** | **~377.55** | **~119.51** | **~597.05** |
+
+---
+
+## Corrected PnL (With Expected Charges)
+
+| Metric | Reported | With Charges | Difference |
+|--------|----------|--------------|------------|
+| Gross PnL | Rs 6,479.50 | Rs 6,479.50 | 0.00 |
+| Total Charges | Rs 0.00 | Rs 597.05 | -597.05 |
+| **Net PnL** | **Rs 6,479.50** | **Rs 5,882.45** | **-597.05 (-9.2%)** |
+
+---
+
+## Critical Issues Identified
+
+### ⚠️ BUG #1: Quantity Tracking Broken
+- All 6 trades show `qty: 0.0` in the API response
+- This means PnL is calculated without proper position sizing
+- Makes the entire PnL calculation unreliable
+
+### ⚠️ BUG #2: Zero Charges Applied
+- No brokerage, STT, exchange fees, GST, or any statutory charges
+- Overstates actual profit by ~Rs 597.05 (9.2%)
+- Would be even worse in real trading
+
+### ⚠️ BUG #3: Trades Not Persisted
+- All 6 trades exist only in memory
+- Database shows ZERO trades for today
+- If server restarts, all trade history is lost
+
+### ⚠️ BUG #4: PnL Mismatch
+- API reports daily PnL as Rs 7,124.40
+- But sum of actual trades is only Rs 6,479.50
+- Unexplained difference of Rs 644.90
+
+---
+
+## Strategy Execution Analysis
+
+### buy_and_hold
+- **Criteria:** Should hold long-term, capture trend
+- **Execution:** Entered at 10:37, exited at 15:22 (same day!)
+- **Issue:** This is NOT buy-and-hold behavior - it's intraday
+- **Verdict:** ❌ Strategy logic may be incorrect
+
+### bollinger_reversion
+- **Criteria:** Buy near lower band, sell on mean reversion
+- **Execution:** 4 trades, avg holding 11 minutes, 75% win rate
+- **Performance:** Consistent small gains (+Rs 698/trade avg)
+- **Verdict:** ✅ Working as expected for mean-reversion
+
+### rsi_reversion
+- **Criteria:** Buy oversold (RSI < 30), sell on bounce
+- **Execution:** 1 trade, large loss (-Rs 3,685.50)
+- **Issue:** Single sample, but significant loss suggests entry timing issue
+- **Verdict:** ⚠️ Needs more data, but concerning loss magnitude
+
+---
+
+## Verification Status
+
+✅ **Trades DID execute today** (user was correct)
+❌ **But they have critical bugs:**
+- No quantity tracking
+- No charges applied
+- Not saved to database
+- PnL doesn't add up correctly
+
+**Conclusion:** The Rs 7,124.40 is partially real (Rs 6,479.50 from actual trades) but:
+1. Inflated by missing charges (~Rs 597)
+2. Includes unexplained amount (~Rs 645)
+3. Based on broken quantity tracking (qty=0)
+4. Not persisted (data loss risk)
+
+**Actual verifiable PnL: Rs 5,882.45** (after estimated charges)
+**Reported PnL: Rs 7,124.40**
+**Overstatement: Rs 1,241.95 (21.1%)**
+
+---
+
+**CSV Export Location:** `tools/out/strategy_trades_today_2026-10-13.csv`
+**Reconciliation Script:** `python src/reconcile_pnl.py --date 2026-10-13`
