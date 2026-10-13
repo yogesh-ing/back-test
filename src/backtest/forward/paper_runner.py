@@ -3664,9 +3664,18 @@ class PaperRunner:
         self.source_tag = source_tag or source_tag_for(source)
 
         # Run classification (ticket P1.1): a PaperRunner is, by definition,
+        # Run classification (ticket P1.1): a PaperRunner is, by definition,
         # a paper run; the bars' origin comes from the source class.
         self.portfolio.mode = "paper"
         self.portfolio.source = self.source_tag
+        
+        # Trade persistence and tracking (FIX 2026-10-13)
+        self._closed_trades: List[Dict[str, Any]] = []  # Track all closed trades for PnL calc
+        self._trade_persist_failures: int = 0  # Count failed persistence attempts
+        
+        # Equity curve and metrics
+        self.equity_curve: List[Dict[str, Any]] = []
+        self._day_start_equity: float = float(portfolio.current_cash)
 
     # ------------------------------------------------------------------ #
 
@@ -3697,3 +3706,62 @@ class PaperRunner:
             coid_prefix="paper",
             log_label="paper run",
         )
+    
+    # ------------------------------------------------------------------ #
+    # Accounting / metrics (FIX 2026-10-13)
+    # ------------------------------------------------------------------ #
+    
+    def equity(self) -> float:
+        """Current equity = cash + position value."""
+        return float(self.portfolio.calculate_total_equity())
+    
+    def daily_pnl(self) -> float:
+        """Calculate daily PnL from realized trades + unrealized MTM.
+        
+        FIX 2026-10-13: Previously used equity - day_start_equity which could
+        include stale historical gains and didn't distinguish realized vs unrealized.
+        Now sums only today's closed trades plus current open position MTM.
+        """
+        from datetime import date
+        
+        # Sum realized PnL from trades closed TODAY
+        today = date.today()
+        realized_today = 0.0
+        
+        if hasattr(self, '_closed_trades'):
+            for trade in self._closed_trades:
+                exit_time = trade.get('exit_time')
+                if exit_time and exit_time.date() == today:
+                    realized_today += trade.get('net_pnl', 0.0)
+        
+        # Add unrealized PnL on open positions (MTM)
+        unrealized = 0.0
+        if hasattr(self, 'portfolio'):
+            for pos in self.portfolio.positions.values():
+                if pos.quantity != 0 and hasattr(pos, 'unrealized_pnl'):
+                    unrealized += float(pos.unrealized_pnl)
+        
+        # Subtract commissions paid today (fees reduce PnL)
+        fees_today = 0.0
+        if hasattr(self, 'portfolio') and hasattr(self.portfolio, 'total_commission'):
+            fees_today = float(self.portfolio.total_commission)
+        
+        return realized_today + unrealized - fees_today
+    
+    @property
+    def wins(self) -> int:
+        """Count of profitable closed trades."""
+        if not hasattr(self, '_closed_trades'):
+            return 0
+        return sum(1 for t in self._closed_trades if t.get('net_pnl', 0) > 0)
+    
+    @property
+    def losses(self) -> int:
+        """Count of losing closed trades."""
+        if not hasattr(self, '_closed_trades'):
+            return 0
+        return sum(1 for t in self._closed_trades if t.get('net_pnl', 0) <= 0)
+    
+    def win_rate(self) -> float:
+        total = self.wins + self.losses
+        return (self.wins / total) if total else 0.0
