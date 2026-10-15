@@ -50,6 +50,7 @@ to market. Without it a runner's legs keep their entry premium forever and
 
 from __future__ import annotations
 
+import copy
 import logging
 import time
 from collections import deque
@@ -59,6 +60,7 @@ from typing import Any, Deque, Iterable, Optional
 
 from backtest.data.sources_policy import SourceDisabledError, synthetic_chain_generator
 from backtest.options.execution_gate import (
+    PreTradeRiskGate,
     REASON_EXPIRY_TOO_NEAR,
     REASON_NO_CONTRACT,
     REASON_NO_EXPIRY,
@@ -91,7 +93,7 @@ from backtest.options.intent_journal import (
 )
 from backtest.options.greeks import BlackScholes
 from backtest.options.expiry import EXIT_REASON_SETTLEMENT, ExpiryManager
-from backtest.options.expiry_policy import NearestExpiryPolicy
+from backtest.options.expiry_policy import NearestExpiryPolicy, create_expiry_policy
 from backtest.options.paper_trading import (
     STALE_AFTER_SECONDS,
     OptionPaperBroker,
@@ -101,7 +103,7 @@ from backtest.options.paper_trading import (
 from backtest.options.quote_providers import (
     SyntheticQuoteProvider,
 )
-from backtest.options.selector import ATMSelector, DeltaSelector
+from backtest.options.selector import ATMSelector, DeltaSelector, create_selector
 from backtest.options.structures import (
     BearPutSpread,
     BullCallSpread,
@@ -203,13 +205,69 @@ class OptionsBridge:
         bar_cadence_seconds: Optional[float] = None,
         intent_journal: Optional[Any] = None,
         fee_calculator: Any | None = None,
+        mode: str = "paper",
+        risk_gate: Optional[PreTradeRiskGate] = None,
     ) -> None:
-        self.expression: dict[str, Any] = {**DEFAULT_EXPRESSION, **(expression or {})}
-        self.allowed_structures: frozenset[str] = frozenset(
-            allowed_structures
-            if allowed_structures is not None
-            else V1_ALLOWED_STRUCTURES
+        # Phase 1 (Plan v2.1 §6.2): strict mode is gated on the v2 marker.
+        # v1 expressions keep the legacy path byte-for-byte (default merge,
+        # cross-direction fallbacks) until Phase 4 removes it.
+        self.strict: bool = bool(
+            isinstance(expression, dict)
+            and int(expression.get("expression_version", 0) or 0) == 2
         )
+        self.mode: str = str(mode or "paper").strip().lower()
+        self.risk_gate: Optional[PreTradeRiskGate] = None
+        self._strict_rules: dict[Direction, Any] = {}
+        self._active_rule: Any = None
+        self._halted_codes: set[str] = set()
+        self.last_block_code: Optional[str] = None
+        if self.strict:
+            from backtest.strategy.execution import (
+                DirectionRule,
+                ExecutionSpecError,
+                parse_exit_plan_strict,
+                validate_expression,
+            )
+
+            # The gate is permission; constructing it loads the Layer-1
+            # rulebook fail-closed (a broken limits file refuses here,
+            # never permits by default).
+            self.risk_gate = risk_gate or PreTradeRiskGate(mode=self.mode)
+            permitted = self.risk_gate.permitted_structures()
+            if allowed_structures is not None:
+                permitted = permitted & frozenset(allowed_structures)
+            errors = validate_expression(expression, permitted_structures=permitted)
+            if errors:
+                raise ExecutionSpecError(
+                    "strict (v2) expression refused: " + "; ".join(errors)
+                )
+            self.expression = copy.deepcopy(expression or {})
+            self.allowed_structures = permitted
+            type_cfg = self.expression.get("type")
+            if isinstance(type_cfg, dict):
+                for raw_direction, raw_rule in type_cfg.items():
+                    from backtest.strategy.execution import canonical_direction
+
+                    self._strict_rules[canonical_direction(raw_direction)] = (
+                        DirectionRule.parse(raw_rule)
+                    )
+            elif isinstance(type_cfg, str):
+                rule = DirectionRule.parse(type_cfg)
+                self._strict_rules = {
+                    Direction.BULLISH: rule,
+                    Direction.BEARISH: rule,
+                }
+            # Strict exit parsing (legacy tolerant parser stays on the v1
+            # path below): unknown keys or a missing hard stop refused at
+            # construction, so an incomplete contract can never trade.
+            self._strict_exit_plan = parse_exit_plan_strict(self.expression.get("exit"))
+        else:
+            self.expression: dict[str, Any] = {**DEFAULT_EXPRESSION, **(expression or {})}
+            self.allowed_structures: frozenset[str] = frozenset(
+                allowed_structures
+                if allowed_structures is not None
+                else V1_ALLOWED_STRUCTURES
+            )
         #: Append-only intent journal (PRD decision 8). ``None`` records nothing
         #: — the runner wires it, so a decision is auditable without the paper
         #: path taking a dependency on a database it may not have.
@@ -246,7 +304,25 @@ class OptionsBridge:
             if generated is not None:
                 self.quote_provider.generator = generated
         # -- exit policy (task B1) ------------------------------------------
-        self.exit_policy = ExitPolicy(ExitConfig.from_expression(self.expression.get("exit")))
+        if self.strict:
+            plan = self._strict_exit_plan
+            self.exit_policy = ExitPolicy(
+                ExitConfig(
+                    signal_flip=plan.signal_flip,
+                    neutral_bars=plan.neutral_bars,
+                    stop_loss_pct=plan.stop_loss_pct,
+                    take_profit_pct=plan.take_profit_pct,
+                    stop_loss_points=plan.stop_loss_points,
+                    take_profit_points=plan.take_profit_points,
+                    max_loss_inr=plan.max_loss_inr,
+                    max_bars=plan.max_bars,
+                    min_days_to_expiry=plan.min_days_to_expiry,
+                    reenter=plan.reenter,
+                    max_reentries_per_day=plan.max_reentries_per_day,
+                )
+            )
+        else:
+            self.exit_policy = ExitPolicy(ExitConfig.from_expression(self.expression.get("exit")))
         #: Minutes before the close at which the canonical expiry pipeline
         #: squares a *same-day* expiry off at market (B2). 0 = never (ride to
         #: cash settlement). Daily forward bars land at 09:15, so this only
@@ -372,7 +448,33 @@ class OptionsBridge:
             # Nothing open and no conviction — nothing to do.
             return None
 
-        structure_type = self._structure_type_for(view)
+        if self.strict:
+            rule = self._transitional_direction_rule_for(view)
+            if rule is None:
+                # Silence (NEUTRAL/viewless) or an edge-triggered halt:
+                # either way, no trade and no guessing.
+                if self.last_block_code is not None:
+                    code, self.last_block_code = self.last_block_code, None
+                    return {"rejected": True, "reason": code, "code": code}
+                return None
+            structure_type = rule.structure
+            try:
+                assert self.risk_gate is not None
+                self.risk_gate.check_opening(
+                    structure_type,
+                    quantity=int(self.expression.get("quantity", 1) or 1),
+                    worst_case_loss_inr=(
+                        float(self._strict_exit_plan.max_loss_inr)
+                        if self._strict_exit_plan.max_loss_inr is not None
+                        else None
+                    ),
+                )
+            except Exception as exc:  # gate refusal: coded, halted, no trade
+                code = str(getattr(exc, "reason", "") or type(exc).__name__)
+                self._journal_halt_once(code, str(exc))
+                return {"rejected": True, "reason": str(exc), "code": code}
+        else:
+            structure_type = self._structure_type_for(view)
         if structure_type not in STRUCTURES:
             logger.warning("[options-bridge] unknown structure type %r", structure_type)
             return None
@@ -927,8 +1029,8 @@ class OptionsBridge:
                     # on this row: a structure id is unique for the life of
                     # the structure, unlike a symbol label.
                     "position_key": structure.structure_id,
-                    "stop_loss": self._rule_for(structure.structure_id, self.manual_stop_loss),
-                    "target": self._rule_for(structure.structure_id, self.manual_target),
+                    "stop_loss": self._operator_level_for(structure.structure_id, self.manual_stop_loss),
+                    "target": self._operator_level_for(structure.structure_id, self.manual_target),
                     # Net Greeks for the whole structure (units-scaled), or
                     # None when they cannot be computed honestly.
                     "net_delta": round(net_delta, 2) if greeks_seen else None,
@@ -1759,16 +1861,30 @@ class OptionsBridge:
         # so an entry on expiry day does not get settled one bar after it opens.
         # A calendar that cannot satisfy the knob is a halt, not a licence to
         # trade the too-near expiry anyway (PRD §4.2 — no substitution).
-        if self.expiry_min_days and reference is not None:
-            cutoff = reference + timedelta(days=self.expiry_min_days)
+        floor_days = (
+            int(self._active_rule.expiry_min_days)
+            if (self.strict and self._active_rule is not None)
+            else self.expiry_min_days
+        )
+        if floor_days and reference is not None:
+            cutoff = reference + timedelta(days=floor_days)
             filtered = [e for e in expiries if e >= cutoff]
             if not filtered:
                 raise ContractValidityError(
                     REASON_EXPIRY_TOO_NEAR,
-                    f"{underlying}: no expiry at least {self.expiry_min_days} days out "
+                    f"{underlying}: no expiry at least {floor_days} days out "
                     f"on {reference} (calendar offers {expiries})",
                 )
             expiries = filtered
+        if self.strict and self._active_rule is not None:
+            rule = self._active_rule
+            kwargs: dict[str, Any] = {}
+            if rule.expiry_policy == "fixed_days":
+                kwargs["target_days"] = int(rule.expiry_min_days or 30)
+            elif rule.expiry_policy == "minimum_days":
+                kwargs["min_days"] = int(rule.expiry_min_days)
+            policy = create_expiry_policy(rule.expiry_policy, **kwargs)
+            return policy.select_expiry(expiries, reference_date=reference)
         return NearestExpiryPolicy().select_expiry(expiries, reference_date=reference)
 
     def _entry_dte_block(self) -> Optional[dict[str, Any]]:
@@ -1834,6 +1950,45 @@ class OptionsBridge:
     # ``TemplateBase.direction_rule_for`` (strategy/templates). The manual
     # level helper ``_rule_for`` below is renamed ``_operator_level_for``
     # in the same phase. Do not introduce other ``_rule_for`` variants.
+    def _journal_halt_once(self, code: str, reason: str) -> bool:
+        """Edge-triggered halt (plan §6.2): journal once per code per bridge.
+
+        Returns True the first time a code fires; subsequent bars are
+        silent so a standing refusal cannot spam the journal/logs.
+        """
+        if code in self._halted_codes:
+            return False
+        self._halted_codes.add(code)
+        self.last_block_code = code
+        self._journal_halt(reason, code=code)
+        logger.warning("[options-bridge] OPTION_BLOCKED %s: %s", code, reason)
+        return True
+
+    def _transitional_direction_rule_for(self, view: MarketView) -> Optional[Any]:
+        """TRANSITIONAL strict-mode direction lookup (plan §4.1/§6.2).
+
+        Legacy-expression strategies only. Template-derived strategies
+        resolve direction→rule in ``TemplateBase.direction_rule_for``
+        (strategy side) and never call this. Deprecated at birth; deleted
+        in Phase 4 with the last legacy caller. No cross-direction
+        fallback exists here: an unmapped non-neutral direction is a
+        coded, edge-triggered halt; NEUTRAL is silence and never opens.
+        """
+        if view is None or view.direction is Direction.NEUTRAL:
+            return None
+        rule = self._strict_rules.get(view.direction)
+        if rule is None:
+            code = "NO_DIRECTION_MAPPING"
+            if self._journal_halt_once(
+                code,
+                f"{view.direction.name} has no structure rule in the v2 "
+                "expression; refusing instead of falling back",
+            ):
+                pass
+            return None
+        self._active_rule = rule
+        return rule
+
     def _structure_type_for(self, view: MarketView) -> str:
         type_cfg = self.expression.get("type", DEFAULT_EXPRESSION["type"])
         if isinstance(type_cfg, dict):
@@ -1849,7 +2004,7 @@ class OptionsBridge:
     # Position analytics (Greeks) — Live Order Management
     # ------------------------------------------------------------------ #
 
-    def _rule_for(self, structure_id: str, level: Optional[float]) -> Optional[float]:
+    def _operator_level_for(self, structure_id: str, level: Optional[float]) -> Optional[float]:
         """Report an operator level only against the structure it belongs to."""
         if level is None or self.open_structure_id != structure_id:
             return None
@@ -2164,12 +2319,21 @@ class OptionsBridge:
         direction: Direction,
     ) -> list[Decimal]:
         strikes_sorted = sorted(chain.keys())
-        selection = str(self.expression.get("strike_selection", "atm")).lower()
-        if selection == "delta":
-            target = float(self.expression.get("delta_target", 0.35))
-            selector: Any = DeltaSelector(delta_target=target)
+        if self.strict and self._active_rule is not None:
+            rule = self._active_rule
+            kwargs: dict[str, Any] = {}
+            if rule.strike_selection == "delta":
+                kwargs["delta_target"] = float(rule.delta_target or 0.35)
+            elif rule.strike_selection == "fixed_distance":
+                kwargs["distance_pct"] = float(rule.distance_pct or 0.0)
+            selector = create_selector(rule.strike_selection, **kwargs)
         else:
-            selector = ATMSelector()
+            selection = str(self.expression.get("strike_selection", "atm")).lower()
+            if selection == "delta":
+                target = float(self.expression.get("delta_target", 0.35))
+                selector: Any = DeltaSelector(delta_target=target)
+            else:
+                selector = ATMSelector()
 
         count = _STRICKES_NEEDED.get(structure_type, 1)
         if count == 1:

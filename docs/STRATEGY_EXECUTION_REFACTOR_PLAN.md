@@ -1,6 +1,6 @@
 # Strategy-Owned Execution — Architectural Refactor (v2)
 
-**Status**: Approved — **Phase 0 implemented** (2026-10-15); Phases 1–4 pending phase-by-phase approval
+**Status**: Approved — **Phases 0–1 implemented** (2026-10-15); MVP CE/PE split + Phases 2–4 pending phase-by-phase approval
 **Date**: 2026-10-15 · **Supersedes**: v1 of this document (same date)
 **Author**: Quant Engineering Team · **Reviewer/Owner decisions**: Strategy owns intent; one Risk Gate owns permission; spawn freezes a fingerprinted snapshot.
 
@@ -326,6 +326,10 @@ Risk-first: (1) `CE/PE_instant_buy` split, (2) `immediate_strangle`, (3) directi
 - `/api/strategies` gains the `execution` block; snapshot/fingerprint stamping (§8) added to runner state (additive).
 - Selector/expiry wiring table (§6.2) written; `_transitional_direction_rule_for`/`_operator_level_for` names reserved in a comment-level note.
 - Tests: spec parse/canonicalisation, emits↔structures coverage, strict-vs-legacy exit parsing, resolve/provenance, round-trip **with no key loss** across the full current expression surface (`exit`, `expiry_min_days`, `squareoff_minutes_before`, `max_loss_per_trade`, `stale_after_seconds`, …); risk-limits loader (valid / invalid / overlapping keys — §7.1); bundle hash changes when a template file changes and is stable otherwise (§8).
+
+### Phase 1 — One Gate + strict bridge (behind `expression_version == 2`) ✅ DONE 2026-10-15
+
+*Delivered: `PreTradeRiskGate` in `options/execution_gate.py` (entitlement from `config/risk_limits.yaml`, kill switch, quantity/loss/order-value ceilings — the only runtime permission vocabulary; legacy `check_*` broker-boundary checks unchanged). Bridge strict mode gated on `expression_version == 2`: no `DEFAULT_EXPRESSION` merge, gate-aware construction refusal, strict ExitPlan→ExitConfig mapping, `_transitional_direction_rule_for` with coded edge-triggered halts (NEUTRAL = silence, never a halt, never an entry), per-direction strike selection via `create_selector` and expiry via `create_expiry_policy` (per-rule `expiry_min_days` floor), `_rule_for` → `_operator_level_for`, runner `mode` passed to the bridge. `create_runner` resolves spec'd/v2 spawns server-side (provenance stamped, out-of-menu and gate refusals are 400s; the silent quantity clamp now applies to the legacy v1 path only). Rehydration bundle comparison: mismatch → PAUSED + `STRATEGY_CODE_CHANGED`, `resume()` restamps as a conscious migration. Replay harness validates v2 expressions through the same gate-aware path. Tests: `tests/test_options_bridge_strict.py` + `tests/test_runner_create_validation.py` (21) — 341 passed across Phase 0/1 + options/api suites; forward-suite failure set byte-identical to the clean tree (fresh-venv environment). Note: two-sided fixed-distance strike picking for short strangles remains a Phase-2 item (verified selector semantics still owed there, per §6.2).*
 
 ### Phase 1 — One Gate + strict bridge (behind `expression_version == 2`)
 - `execution_gate.py` evolved into the single Pre-Trade Risk Gate (§6.1); bridge consumes gate-supplied `allowed_structures`.

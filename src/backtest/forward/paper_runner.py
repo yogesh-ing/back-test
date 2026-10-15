@@ -1103,6 +1103,7 @@ class StrategyRunner:
             self.options_bridge = OptionsBridge(
                 capital=config.allocated_capital,
                 expression=config.instrument.get("expression"),
+                mode=config.mode,
                 quote_provider=provider,
                 # Marks land on bar close (plus the portfolio watchdog), so the
                 # freshness SLA is sized off the bar cadence — see OptionsBridge.
@@ -1496,6 +1497,27 @@ class StrategyRunner:
 
     def resume(self) -> None:
         with self._lock:
+            if getattr(self, "strategy_code_changed", False):
+                # Plan §8: resuming after STRATEGY_CODE_CHANGED is the
+                # operator's explicit migration to the new code — restamp
+                # the bundle so the snapshot tells the truth from here.
+                try:
+                    from backtest.strategy.bundle import strategy_bundle
+                    from backtest.strategy.registry import get_strategy
+
+                    cls = get_strategy(self.config.strategy_name)
+                    stamped = strategy_bundle(cls).to_dict()
+                    stamped.update(
+                        {
+                            k: v
+                            for k, v in (self.config.strategy_bundle or {}).items()
+                            if k in ("engine_git_sha", "risk_limits_sha256", "config_sha256")
+                        }
+                    )
+                    self.config.strategy_bundle = stamped
+                except Exception:  # noqa: BLE001 — never block a resume on stamping
+                    pass
+                self.strategy_code_changed = False
             if self.status == STATUS_PAUSED:
                 # Bug #2: restored runners come back PAUSED on whatever chain
                 # they resolved at construction. If the broker is authenticated
