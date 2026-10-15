@@ -137,6 +137,8 @@ class PortfolioSource(StrEnum):
     MSTOCK = "mstock"
     #: Second broker venue (migration 016 widened the DB CHECK to admit it).
     DHAN = "dhan"
+    #: Third broker venue (migration 020 widened the DB CHECK to admit it).
+    UPSTOX = "upstox"
 
 
 class PositionStatus(StrEnum):
@@ -257,9 +259,9 @@ class Portfolio(Base):
     mode: Mapped[str] = mapped_column(
         String(16), nullable=False, default="paper", server_default=text("'paper'")
     )
-    #: Where this run's bars come from (migration 002, widened by 016):
-    #: synthetic = generated, replay = historical DB, mstock | dhan = live
-    #: broker feed.
+    #: Where this run's bars come from (migration 002, widened by 016/020):
+    #: synthetic = generated, replay = historical DB, mstock | dhan | upstox
+    #: = live broker feed.
     source: Mapped[str] = mapped_column(
         String(16), nullable=False, default="synthetic", server_default=text("'synthetic'")
     )

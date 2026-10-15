@@ -77,3 +77,29 @@ Thumbs.db
 /server_5000.out
 /server_5000.err.log
 src/data/feed_quality.log
+
+# Portfolio state backups and snapshots
+src/data/portfolio_state.json.bak_*
+data/portfolio_state.json.bak_*
+
+# Test artifacts
+test-results/
+tradeData/
+tools/out/*.md
+
+# NPBC run errors
+npbc_run*.err
+pywait.err
+wt_boot.err
+
+# Temporary startup scripts
+start_no_db.py
+start_wt_*.py
+app_*_stderr.log
+
+# Worktree metadata
+.worktrees/
+
+# Package manager files (if not part of project)
+package-lock.json
+package.json

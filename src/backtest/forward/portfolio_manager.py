@@ -157,7 +157,11 @@ class PortfolioManager:
         # Gap #1: live mStock bars ride the SAME fan-out as synthetic bars.
         # The feed owns ONE poll thread for all its symbols (rate-limit rule);
         # it only runs while at least one runner trades source=mstock.
-        from backtest.forward.feed_registry import DhanBarFeed, MStockBarFeed
+        from backtest.forward.feed_registry import (
+            DhanBarFeed,
+            MStockBarFeed,
+            UpstoxBarFeed,
+        )
 
         self.mstock_feed = MStockBarFeed(
             feed_client=mstock_feed_client,
@@ -171,6 +175,11 @@ class PortfolioManager:
         self.dhan_feed = DhanBarFeed(poll_interval_s=mstock_poll_interval_s)
         self.dhan_feed.on_bar = self._on_bar
         self.dhan_feed.on_tick_end = self._on_tick_end
+
+        # 2026-10-13: Upstox joins the same fan-out (source=upstox runners).
+        self.upstox_feed = UpstoxBarFeed(poll_interval_s=mstock_poll_interval_s)
+        self.upstox_feed.on_bar = self._on_bar
+        self.upstox_feed.on_tick_end = self._on_tick_end
 
         # U3.3: audit log with scope — every control action logs scope=paper|live|playbook|dashboard
         self._audit_log_entries: Deque[Dict[str, Any]] = deque(maxlen=1000)
@@ -778,8 +787,12 @@ class PortfolioManager:
         when the only candidate is synthetic and the policy has it disabled.
         """
         key = str(source or "").strip().lower()
-        if key in ("mstock", "dhan"):
-            feed = self.mstock_feed if key == "mstock" else self.dhan_feed
+        if key in ("mstock", "dhan", "upstox"):
+            feed = {
+                "mstock": self.mstock_feed,
+                "dhan": self.dhan_feed,
+                "upstox": self.upstox_feed,
+            }[key]
             if feed is None:
                 raise ValueError(
                     f"source={key} needs a {key} broker feed — none is configured "
@@ -791,14 +804,14 @@ class PortfolioManager:
                 raise ValueError(
                     f"source={key or 'unset'!r} would run on the synthetic feed, which "
                     f"config/data_sources.yaml disables — forward runners must be created "
-                    f"with source=mstock (or dhan). Synthetic stays available to the test "
+                    f"with source=mstock, dhan or upstox. Synthetic stays available to "
                     f"suite via BACKTEST_DATA_PROFILE=testing, not to a deployment."
                 )
             assert self.feed is not None  # built iff _synthetic_allowed
             return self.feed
         raise ValueError(
             f"no bar feed for source={source!r} on a forward runner — this manager "
-            f"feeds runners from mstock, dhan, or (policy permitting) synthetic"
+            f"feeds runners from mstock, dhan, upstox, or (policy permitting) synthetic"
         )
 
     def add_runner(
@@ -1850,7 +1863,11 @@ class PortfolioManager:
         first live runner's bars are expected. 2026-09-25: extended to the
         Dhan thread (source=dhan) alongside the mStock thread.
         """
-        for source, feed in (("mstock", self.mstock_feed), ("dhan", self.dhan_feed)):
+        for source, feed in (
+            ("mstock", self.mstock_feed),
+            ("dhan", self.dhan_feed),
+            ("upstox", self.upstox_feed),
+        ):
             has_live = any(
                 r.config.source == source and r.status != STATUS_STOPPED
                 for r in self._runners.values()
