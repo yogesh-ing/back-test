@@ -103,3 +103,22 @@ app_*_stderr.log
 # Package manager files (if not part of project)
 package-lock.json
 package.json
+node_modules/
+
+# Temporary logs and outputs
+*.out
+*.err.log
+*.stdout.log
+*.stderr.log
+boot_check.err
+no_db.err.log
+npbc.err.log
+npbc.py
+wt_boot.out
+
+# Imported strategy plugins (not original work)
+plugins/strategies/*_imported.py
+
+# Summary docs (temporary analysis)
+CHERRY_PICK_SUCCESS_SUMMARY.md
+MAIN_BRANCH_BUG_STATUS.md
