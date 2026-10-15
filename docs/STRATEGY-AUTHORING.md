@@ -207,3 +207,122 @@ Engine guarantees that hold for every strategy (built-in or plugin):
       checklist in [STRATEGY-GUIDELINES.md §9](STRATEGY-GUIDELINES.md#9-review-checklist)
 - [ ] If option-kind: `MarketView.confidence` semantics documented
       (confidence is the bridge's trade/no-trade dial)
+
+---
+
+# v2 Addendum — Strategy-Owned Execution (Refactor Plan v2.1, Phase 0)
+
+> Status: Phase 0 (foundations). The contract below is **available now**
+> and will become **mandatory for option strategies** as each family is
+> rewritten (plan §9). Legacy strategies keep working untouched until
+> their cutover.
+
+## A. Pick a template (decision tree)
+
+```
+What does the strategy trade?
+├─ Equity / index shares .................. EquityStrategy
+└─ Options
+   ├─ "Trade NOW, no signal" .............. InstantLongOptionStrategy
+   │    └─ states side explicitly: CE (calls) or PE (puts)
+   ├─ Signal says bullish/bearish ......... DirectionalOptionStrategy
+   ├─ Two-leg spread (defined risk) ....... SpreadStrategy
+   └─ Strangle / condor family ............ StructureStrategy
+        (name is neutral on purpose: a short strangle is undefined
+         risk — a template name must never claim a risk property)
+```
+
+Templates live in `src/backtest/strategy/templates/`. Resolution of
+direction → structure rule happens **in the template** (`direction_rule_for`),
+strategy-side — never in the bridge (plan §4.1).
+
+## B. The non-negotiables (checklist — conformance will enforce these)
+
+- [ ] **Explicit intent.** The strategy names the actual trade (structure,
+      strike rule, expiry rule) at trigger time. No "direction + hope".
+- [ ] **NEUTRAL = silence.** NEUTRAL never opens a trade. There is no
+      NEUTRAL structure rule; declaring one is a spec error. Want an
+      instant trade? Use `InstantLongOptionStrategy` and state CE/PE.
+- [ ] **Mandatory hard stop.** Every spec's `exit` carries exactly one:
+      `stop_loss_pct`, `stop_loss_points`, `stop_loss_price`, or
+      `structure_capped: true` (long option / defined-risk spread).
+      Target (`take_profit_*`) is optional. Indicator exits go in
+      `strategy_exits` — allowed, but never the *only* protection on an
+      undefined-risk structure (naked shorts, short strangles).
+- [ ] **`emits` ⊇ everything the code can produce.** A runtime view in an
+      undeclared direction is a coded contract breach, not a fallback.
+- [ ] **Sizing is a menu, not a risk limit.** `default_lots/min_lots/max_lots`
+      bound what deployment may *select*. Real protection is ₹-based at
+      the Risk Gate (margin, worst-case loss vs `config/risk_limits.yaml`).
+- [ ] **No data/broker calls from strategy code** (existing C2 rule):
+      bars and chains flow engine → strategy, never the reverse.
+- [ ] **Unique `name`** — collisions are registration errors, never
+      silent precedence.
+
+## C. Declaring the spec (worked skeleton)
+
+```python
+from backtest.strategy.templates import DirectionalOptionStrategy
+
+class MyDirectional(DirectionalOptionStrategy):
+    name = "my_directional"
+    description = "..."
+    version = "1.0"
+    author = "..."
+    eligible_instruments = ["NIFTY", "BANKNIFTY"]
+
+    execution = {
+        "emits": ["bullish", "bearish"],
+        "structures": {
+            "bullish": {"structure": "long_call", "strike_selection": "atm"},
+            "bearish": {"structure": "long_put",  "strike_selection": "atm"},
+        },
+        "exit": {"stop_loss_pct": 0.30, "take_profit_pct": 1.0,
+                 "signal_flip": True, "min_days_to_expiry": 1},
+        "quantity": 1, "min_quantity": 1, "max_quantity": 5,
+        "allowed_overrides": ["quantity", "exit"],
+    }
+    # generate_market_view() emits BULLISH/BEARISH (NEUTRAL = no trade).
+```
+
+Instant-buy shape (the `atm_instant_buy` replacement pattern, plan §9.4):
+
+```python
+class CeInstantBuy(InstantLongOptionStrategy):
+    name = "CE_instant_buy"
+    side = "CE"                      # stated, never smuggled via NEUTRAL
+    execution = {
+        "emits": ["bullish"],        # the one direction that buys calls
+        "structures": {"bullish": {"structure": "long_call",
+                                   "strike_selection": "atm"}},
+        "exit": {"structure_capped": True, "signal_flip": False,
+                 "neutral_bars": 0, "min_days_to_expiry": None},
+        "quantity": 1, "max_quantity": 5,
+    }
+```
+
+## D. Selector / expiry wiring (plan §6.2)
+
+| Spec word | Implementation | Required companion |
+|---|---|---|
+| `strike_selection: atm` | `ATMSelector` | — |
+| `strike_selection: delta` | `DeltaSelector` | `delta_target` ∈ (0, 1] |
+| `strike_selection: fixed_distance` | `FixedDistanceSelector` | `distance_pct` > 0 |
+| `strike_selection: target_price` | `TargetPriceSelector` | view `target_price` |
+| `expiry_policy: nearest` | `NearestExpiryPolicy` | — |
+| `expiry_policy: weekly` | `WeeklyExpiryPolicy` | — |
+| `expiry_policy: fixed_days` | `FixedDaysExpiryPolicy` | days (Phase 1 wiring) |
+| `expiry_policy: minimum_days` | `MinimumDaysExpiryPolicy` | `expiry_min_days` |
+
+Three expiry concepts, never conflated: `expiry_policy` + `expiry_min_days`
+pick the contract at **entry**; `exit.min_days_to_expiry` exits an **open**
+trade near expiry (explicit `null` = ride to settlement).
+
+## E. Who owns what
+
+| Question | Owner |
+|---|---|
+| What to trade, when, with what stop | **Strategy** (this spec) |
+| May this trade happen, at this size, now | **Risk Gate** over `config/risk_limits.yaml` (Phase 1) |
+| What actually ran, under which code | **Spawn snapshot** — `bundle_sha256` over the strategy + its template chain; a mismatch at restart pauses the runner (`STRATEGY_CODE_CHANGED`, plan §8) |
+| Intraday intervention | Operator: pause / close / tighten stop only — never loosen or enlarge |

@@ -898,6 +898,11 @@ class RunnerConfig:
     # rerouted).
     segment: Optional[str] = None
     execution_broker: Optional[str] = None
+    # Phase 0 (plan §8): transitive strategy-bundle fingerprint stamped at
+    # spawn (additive; None for runners created before stamping existed).
+    # Phase 1 compares it at rehydration — a mismatch starts the runner
+    # PAUSED (STRATEGY_CODE_CHANGED) instead of trading new code silently.
+    strategy_bundle: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         self.name = str(self.name).strip()
@@ -3135,6 +3140,7 @@ class StrategyRunner:
                 "last_bar_ts": max(self._last_bar_ts.values()) if self._last_bar_ts else None,
                 "created_ts": self.created_ts,
                 "instrument": dict(self.config.instrument or {"type": "equity"}),
+                "strategy_bundle": self.config.strategy_bundle,
                 "options": options_summary,
                 # R1: runner-level mark freshness fields (mirrored from options_summary)
                 "mark_ts": (options_summary or {}).get("mark_ts"),

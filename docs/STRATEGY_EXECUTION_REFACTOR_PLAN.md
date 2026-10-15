@@ -1,6 +1,6 @@
 # Strategy-Owned Execution — Architectural Refactor (v2)
 
-**Status**: Draft v2 for approval — incorporates architect review decisions B1–B6 (2026-10-15)
+**Status**: Approved — **Phase 0 implemented** (2026-10-15); Phases 1–4 pending phase-by-phase approval
 **Date**: 2026-10-15 · **Supersedes**: v1 of this document (same date)
 **Author**: Quant Engineering Team · **Reviewer/Owner decisions**: Strategy owns intent; one Risk Gate owns permission; spawn freezes a fingerprinted snapshot.
 
@@ -11,8 +11,8 @@
 > 4. **B4** — Every opening intent must carry an **`ExitPlan` with a mandatory hard stop** (price / % / points, or a structure with inherently capped loss). Target is optional. Indicator exits are allowed as *strategy exits*, never as the sole protection on undefined-risk trades.
 > 5. **B5** — Configuration layering follows the institutional model: **hard ceilings, menu-bounded overrides, risk-reducing-only intraday control** (§7).
 > 6. **B6 + Gap #3** — Spawn freezes a snapshot fingerprinted with config hash + a **transitive strategy-bundle hash** (strategy file + template/base/execution modules it inherits, §8); code upgrades affect new runners only, and a bundle mismatch on rehydration **pauses the runner** rather than silently trading new code under old paperwork (§8).
-> 8. **Gaps #4–#7 (review round 2)** — Layer-1 risk limits get an explicit home and phase (§7.1); intraday "reduce" is **descoped** to capabilities that exist today (§7.2); the Phase-3 migration wall is stated as an operational gate (§10); `DefinedRiskStructureStrategy` renamed **`StructureStrategy`** (§5.2). Architect Q&A with binding answers is in **Appendix C**.
-> 7. **New workstreams** — a **template system + strategy-authoring manual** (§5), and a **full strategy rewrite** (§9) against a frozen pre-rewrite snapshot (§9.1). Existing strategies are *not* assumed as the starting template.
+> 7. **Gaps #4–#7 (review round 2)** — Layer-1 risk limits get an explicit home and phase (§7.1); intraday "reduce" is **descoped** to capabilities that exist today (§7.2); the Phase-3 migration wall is stated as an operational gate (§10); `DefinedRiskStructureStrategy` renamed **`StructureStrategy`** (§5.2). Architect Q&A with binding answers is in **Appendix C**.
+> 8. **New workstreams** — a **template system + strategy-authoring manual** (§5), and a **full strategy rewrite** (§9) against a frozen pre-rewrite snapshot (§9.1). Existing strategies are *not* assumed as the starting template.
 
 ---
 
@@ -313,7 +313,9 @@ Risk-first: (1) `CE/PE_instant_buy` split, (2) `immediate_strangle`, (3) directi
 
 ## 10. Migration Path (Phases)
 
-### Phase 0 — Foundations (zero behaviour change)
+### Phase 0 — Foundations (zero behaviour change) ✅ DONE 2026-10-15
+
+*Delivered: `strategy/execution.py` (spec/rule/strict ExitPlan/resolve/validate), `Strategy.execution`+`execution_spec()`+validate wiring, `strategy/templates/` skeleton (5 templates, `TemplateBase.direction_rule_for`), `strategy/bundle.py` (transitive bundle hash + `STRATEGY_CODE_CHANGED` constant), `config/risk_limits.yaml` + `backtest/risk_limits.py` (fail-closed loader, overlap refusal), catalogue/API `execution` block, `RunnerConfig.strategy_bundle` + spawn-time stamping in `create_runner` (additive, best-effort), authoring-manual v2 addendum (§A–E incl. selector/expiry wiring). Tests: `tests/test_strategy_execution.py`, `tests/test_risk_limits.py`, `tests/test_strategy_bundle.py` — 36 passed; regression sweep (api/options/strategies suites) shows zero new failures vs clean tree. Remaining Phase-0-adjacent item: §9.1 freeze item (c) off-checkout tarball — owner's location still pending (gates nothing in Phase 0 code, recorded here honestly).*
 - `src/backtest/strategy/execution.py`: `ExecutionSpec`, `DirectionRule`, strict `ExitPlan` parser, `resolve_expression` implementing §7 field-selection semantics, `validate_expression` (gate-aware, §4.4).
 - `Strategy.execution` + immutable `execution_spec()`; `Strategy.validate()` extended.
 - Templates skeleton (§5.2, incl. `TemplateBase.direction_rule_for`) + authoring manual v2 (§5.3) drafted.

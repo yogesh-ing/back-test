@@ -771,6 +771,21 @@ def create_runner() -> Tuple[Response, int]:
             except SourceDisabledError as exc:
                 return _error(str(exc), 409)
 
+    # Phase 0 (plan §8): stamp the transitive strategy-bundle fingerprint.
+    # Additive and best-effort in Phase 0 — no strategy declares a spec yet,
+    # so this cannot change spawn behaviour; Phase 1 makes it load-bearing
+    # (rehydration comparison → STRATEGY_CODE_CHANGED pause).
+    strategy_bundle = None
+    try:
+        from backtest.strategy.bundle import engine_git_sha, strategy_bundle as _bundle
+        from backtest.strategy.registry import get_strategy as _get_strategy
+
+        _cls = _get_strategy(strategy_name)
+        strategy_bundle = _bundle(_cls).to_dict()
+        strategy_bundle["engine_git_sha"] = engine_git_sha()
+    except Exception:  # noqa: BLE001 — Phase 0 stamping must not break spawn
+        log.warning("strategy bundle stamping failed for %s", strategy_name, exc_info=True)
+
     try:
         config = RunnerConfig(
             name=name,
@@ -821,6 +836,7 @@ def create_runner() -> Tuple[Response, int]:
                 data.get("playbook_snapshot")
                 or data.get("instrument", {}).get("expression")
             ),
+            strategy_bundle=strategy_bundle,
         )
         auto_start = bool(data.get("auto_start", True))
         instance_id = _manager().add_runner(config, start=auto_start)
