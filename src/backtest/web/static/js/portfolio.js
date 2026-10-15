@@ -1677,10 +1677,51 @@
 
   // ---------------------------------------------------------------- boot
   document.addEventListener("DOMContentLoaded", () => {
-    bindEvents();
-    connectStream();
-    // Initial snapshot (SSE will take over)
-    const summaryUrl = "/api/portfolio/summary" + (PAGE_MODE ? "?mode=" + PAGE_MODE : "");
-    api(summaryUrl).then((d) => render(d.portfolio)).catch(() => {});
+    // CRITICAL: Check if broker is authenticated when market is open
+    // If not, show login modal immediately before allowing any trading
+    checkBrokerAuthOnStartup().then(() => {
+      bindEvents();
+      connectStream();
+      // Initial snapshot (SSE will take over)
+      const summaryUrl = "/api/portfolio/summary" + (PAGE_MODE ? "?mode=" + PAGE_MODE : "");
+      api(summaryUrl).then((d) => render(d.portfolio)).catch(() => {});
+    });
   });
+  
+  async function checkBrokerAuthOnStartup() {
+    try {
+      // Check market status first
+      const marketResp = await fetch("/api/market/status");
+      const marketData = await marketResp.json();
+      const isMarketOpen = marketData.is_open && marketData.session_state === "OPEN";
+      
+      if (!isMarketOpen) {
+        return; // Market closed, no need to prompt for login
+      }
+      
+      // Check broker authentication status
+      const brokerResp = await fetch("/api/broker/status");
+      const brokerData = await brokerResp.json();
+      
+      // Check if ANY broker that's needed is authenticated
+      const hasAuthenticatedBroker = Object.values(brokerData.sessions || {}).some(
+        session => session.authenticated
+      );
+      
+      if (!hasAuthenticatedBroker) {
+        // Market is open but no broker authenticated - show login modal immediately
+        console.log("[Portfolio] Market open, no broker authenticated - showing login modal");
+        
+        // Wait a brief moment for UI to settle, then show modal
+        setTimeout(() => {
+          if (window.BrokerAuthUI && typeof window.BrokerAuthUI.open === "function") {
+            window.BrokerAuthUI.open();
+          }
+        }, 500);
+      }
+    } catch (err) {
+      console.error("[Portfolio] Broker auth check failed:", err);
+      // Don't block startup on error
+    }
+  }
 })();

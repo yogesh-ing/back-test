@@ -430,10 +430,107 @@ const BrokerAuthUI = (() => {
         // success state is always visible even if the timer fires immediately
         // (e.g. a test harness that executes setTimeout synchronously).
         showAuthenticated();
+        
+        // CRITICAL: After successful broker login, auto-subscribe to required instruments
+        // and resume paused strategies (only if market is open)
+        try {
+            const marketResp = await fetch("/api/market/status");
+            const marketData = await marketResp.json();
+            if (marketData.is_open && marketData.session_state === "OPEN") {
+                console.log("[BrokerAuth] Market open - triggering auto-subscription and strategy resume");
+                triggerAutoSubscription();
+            }
+        } catch (err) {
+            console.error("[BrokerAuth] Auto-subscription check failed:", err);
+        }
+        
         // Auto-close modal after a brief delay so the user sees success, then
         // returns to the page. `resetView=false` keeps the authenticated view
         // mounted; a later open() re-initialises the step from session state.
         setTimeout(() => close(false), 1500);
+    }
+    
+    async function triggerAutoSubscription() {
+        /**
+         * After broker authentication:
+         * 1. Scan all paused runners to identify required symbols/instruments
+         * 2. Subscribe mStock feed to indices (NIFTY, BANKNIFTY, etc.)
+         * 3. Fetch option chains for option runners
+         * 4. Resume all paused paper runners once subscriptions confirmed
+         */
+        try {
+            // Get current portfolio state to find paused runners
+            const summaryResp = await fetch("/api/portfolio/summary");
+            const summaryData = await summaryResp.json();
+            
+            if (!summaryData.success || !summaryData.portfolio) {
+                console.warn("[AutoSubscribe] Could not get portfolio summary");
+                return;
+            }
+            
+            const pausedRunners = (summaryData.portfolio.runners || [])
+                .filter(r => r.status === "PAUSED" && r.mode === "paper");
+            
+            if (pausedRunners.length === 0) {
+                console.log("[AutoSubscribe] No paused runners to resume");
+                return;
+            }
+            
+            console.log(`[AutoSubscribe] Found ${pausedRunners.length} paused runners`);
+            
+            // Collect unique symbols and option underlyings
+            const symbols = new Set();
+            const optionUnderlyings = new Set();
+            
+            for (const runner of pausedRunners) {
+                if (runner.symbols) {
+                    runner.symbols.forEach(s => symbols.add(s));
+                }
+                if (runner.instrument?.type === "option" && runner.symbols?.length > 0) {
+                    optionUnderlyings.add(runner.symbols[0]);
+                }
+            }
+            
+            console.log(`[AutoSubscribe] Symbols: ${Array.from(symbols).join(", ")}`);
+            console.log(`[AutoSubscribe] Option underlyings: ${Array.from(optionUnderlyings).join(", ")}`);
+            
+            // For each option underlying, trigger chain fetch by resuming one runner at a time
+            // The LiveChainProvider will automatically fetch chains on first use
+            console.log("[AutoSubscribe] Resuming paused runners...");
+            
+            let resumedCount = 0;
+            for (const runner of pausedRunners) {
+                try {
+                    const resumeResp = await fetch(`/api/portfolio/runner/${runner.instance_id}/control`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ action: "resume" })
+                    });
+                    
+                    if (resumeResp.ok) {
+                        resumedCount++;
+                        console.log(`[AutoSubscribe] Resumed: ${runner.name}`);
+                    } else {
+                        console.warn(`[AutoSubscribe] Failed to resume ${runner.name}`);
+                    }
+                } catch (err) {
+                    console.error(`[AutoSubscribe] Error resuming ${runner.name}:`, err);
+                }
+                
+                // Small delay between resumes to avoid overwhelming the API
+                await new Promise(resolve => setTimeout(resolve, 200));
+            }
+            
+            console.log(`[AutoSubscribe] Successfully resumed ${resumedCount}/${pausedRunners.length} runners`);
+            
+            // Show toast notification
+            if (window.showToast) {
+                window.showToast(`✅ Auto-resumed ${resumedCount} strategies with live data`);
+            }
+            
+        } catch (err) {
+            console.error("[AutoSubscribe] Auto-subscription failed:", err);
+        }
     }
 
     // ---- logout ------------------------------------------------------------
