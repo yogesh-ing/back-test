@@ -202,6 +202,10 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                 session_ttl_minutes = DEFAULT_SESSION_TTL_MINUTES
         self._session_ttl = timedelta(minutes=max(session_ttl_minutes, 0.0))
         self._http_timeout = http_timeout
+        
+        # WebSocket market depth feed (initialized after auth)
+        self._ws_feed: Any = None
+        self._ws_subscribed_tokens: set[int] = set()
 
     # ------------------------------------------------------------------
     # Step 1 — credentials
@@ -338,6 +342,171 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             "broker": self.broker_name,
         }
 
+    def _init_websocket_feed(self, access_token: str) -> None:
+        """Initialize WebSocket market depth feed after successful TOTP auth.
+        
+        Starts MTicker in background thread, subscribes to instruments on-demand.
+        Falls back gracefully if tradingapi_a.mticker is not available.
+        """
+        try:
+            # Import MTicker from local copy
+            from backtest.data.mticker import MTicker
+            from backtest.data.mstock_ws_wrapper import MStockWebSocketWrapper
+            
+            api_key = self._api_key()
+            if not api_key:
+                logger.warning("Cannot init WebSocket: API key not configured")
+                return
+            
+            socket_url = os.getenv("MSTOCK_WEBSOCKET_URL", "wss://ws.mstock.trade")
+            
+            logger.info("Initializing mStock WebSocket feed...")
+            ticker = MTicker(
+                api_key=api_key,
+                access_token=access_token,
+                root=socket_url,
+                debug=False,
+                reconnect=True,
+                reconnect_max_tries=50,
+                reconnect_max_delay=60,
+            )
+            
+            # Wrap MTicker for synchronous quote access
+            self._ws_feed = MStockWebSocketWrapper(ticker)
+            
+            # Start WebSocket in background thread
+            ticker.connect(threaded=True)
+            
+            # Wait for connection to establish (up to 5 seconds)
+            if self._ws_feed.wait_for_connection(timeout=5.0):
+                logger.info("mStock WebSocket feed connected and ready")
+                
+                # Auto-subscribe to major indices on login
+                self._subscribe_default_indices()
+            else:
+                logger.warning("WebSocket connection timeout after 5 seconds")
+            
+        except ImportError as e:
+            logger.warning(
+                "MTicker not available - using HTTP LTP-only quotes. Error: %s", e
+            )
+            self._ws_feed = None
+        except Exception as exc:
+            logger.error("Failed to initialize WebSocket feed: %s", exc)
+            import traceback
+            logger.error(traceback.format_exc())
+            self._ws_feed = None
+
+    def _subscribe_default_indices(self) -> None:
+        """Auto-subscribe to major indices on WebSocket connect."""
+        # NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY tokens
+        index_tokens = [26000, 26009, 26013, 26037]
+        
+        for token in index_tokens:
+            try:
+                self.subscribe_to_instrument(token, mode="full")
+            except Exception as exc:
+                logger.debug("Failed to auto-subscribe to index %d: %s", token, exc)
+
+    def subscribe_to_instrument(self, instrument_token: int, mode: str = "full") -> bool:
+        """Subscribe to real-time market depth for an instrument.
+        
+        Parameters
+        ----------
+        instrument_token : int
+            Numeric token (e.g., 26000 for NIFTY, or option contract token).
+        mode : str
+            Streaming mode: "ltp", "quote", or "full" (default: "full" for depth).
+        
+        Returns
+        -------
+        bool
+            True if subscribed successfully, False if WebSocket not available.
+        """
+        if not self._ws_feed:
+            logger.debug("WebSocket not available, skipping subscription for token %d", instrument_token)
+            return False
+        
+        try:
+            # Check if already subscribed
+            if instrument_token in self._ws_subscribed_tokens:
+                return True
+            
+            # Get underlying MTicker instance
+            ticker = getattr(self._ws_feed, '_ticker', None)
+            if not ticker:
+                logger.error("Cannot access MTicker instance")
+                return False
+            
+            # Wait for connection if not ready
+            if not self._ws_feed.wait_for_connection(timeout=3.0):
+                logger.warning("WebSocket not connected, cannot subscribe to token %d", instrument_token)
+                return False
+            
+            # Subscribe and set mode
+            ticker.subscribe([instrument_token])
+            
+            mode_map = {
+                "ltp": ticker.MODE_LTP,
+                "quote": ticker.MODE_QUOTE,
+                "full": ticker.MODE_FULL,
+            }
+            ws_mode = mode_map.get(mode.lower(), ticker.MODE_FULL)
+            ticker.set_mode(ws_mode, [instrument_token])
+            
+            self._ws_subscribed_tokens.add(instrument_token)
+            logger.info("Subscribed to instrument %d (mode=%s)", instrument_token, mode)
+            return True
+            
+        except Exception as exc:
+            logger.error("Failed to subscribe to instrument %d: %s", instrument_token, exc)
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+
+    def get_ws_quote(self, instrument_token: int, max_age_seconds: float = 10.0) -> dict[str, Any]:
+        """Get latest quote from WebSocket cache.
+        
+        Parameters
+        ----------
+        instrument_token : int
+            Numeric instrument token.
+        max_age_seconds : float
+            Reject ticks older than this (default: 10 seconds for fast markets).
+        
+        Returns
+        -------
+        dict
+            Quote with ltp, bid, ask, depth. Empty dict if no recent tick.
+        """
+        if not self._ws_feed:
+            return {}
+        
+        try:
+            quote = self._ws_feed.get_quote(str(instrument_token))
+            if not quote:
+                return {}
+            
+            # Check timestamp freshness if available
+            ts = quote.get("timestamp")
+            if ts:
+                # Parse ISO format timestamp and check age
+                try:
+                    from datetime import datetime
+                    tick_time = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    age = (datetime.now(tz=tick_time.tzinfo) - tick_time).total_seconds()
+                    if age > max_age_seconds:
+                        logger.debug("Stale tick for token %d: %.1fs old, rejecting", instrument_token, age)
+                        return {}
+                except (ValueError, AttributeError):
+                    pass  # Can't parse timestamp, accept it
+            
+            return quote
+            
+        except Exception as exc:
+            logger.error("Error getting WebSocket quote for token %d: %s", instrument_token, exc)
+            return {}
+
     def get_session_token(self) -> str | None:
         """Raw session token — backend use only.
 
@@ -370,6 +539,11 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             expires_at = expires_at.astimezone().replace(tzinfo=None)
         self._session_token = token
         self._expires_at = expires_at
+        
+        # Initialize WebSocket feed for restored sessions too
+        self._init_websocket_feed(token)
+        
+        logger.info("mStock session restored (expires at %s)", expires_at.isoformat() if expires_at else "unknown")
         self._temp_auth_context = None
         logger.info("mStock session restored from remembered token (expires %s)", expires_at)
 
@@ -877,13 +1051,70 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
     def get_option_quote(self, instrument_token: str) -> dict[str, Any]:
         """Fetch L1 quote for an option contract.
 
-        Uses the LTP endpoint with the instrument token.
+        Tries WebSocket cache first (real bid/ask with market depth),
+        falls back to HTTP LTP-only endpoint if WebSocket unavailable.
 
         Returns
         -------
         dict
             ``{"ltp": float, "bid": float, "ask": float, ...}`` or empty dict.
+            WebSocket provides real 5-level depth; HTTP fallback is LTP-only.
         """
+        # Try WebSocket cache first (real-time market depth)
+        ws_quote = self._try_ws_quote(instrument_token)
+        if ws_quote:
+            return ws_quote
+        
+        # Fallback to HTTP LTP-only polling
+        return self._http_option_quote(instrument_token)
+    
+    def _try_ws_quote(self, instrument_token: str) -> dict[str, Any]:
+        """Attempt to get quote from WebSocket cache.
+        
+        Auto-subscribes to the instrument if not already subscribed.
+        Returns empty dict if WebSocket not available or no recent tick.
+        """
+        if not self._ws_feed:
+            return {}
+        
+        # Extract numeric token from trading symbol or OptionContract
+        token_str = getattr(instrument_token, "instrument_token", None)
+        if token_str is None:
+            token_str = str(instrument_token)
+        
+        # Try to parse as integer
+        try:
+            # Handle "NFO:SYMBOL" format - need to look up token
+            if ":" in token_str:
+                # This is a symbol string, not a numeric token
+                # For now, skip WebSocket and use HTTP
+                logger.debug("Symbol format '%s' not supported for WebSocket, using HTTP", token_str)
+                return {}
+            
+            numeric_token = int(token_str)
+        except (ValueError, TypeError):
+            logger.debug("Cannot convert '%s' to numeric token, using HTTP", token_str)
+            return {}
+        
+        # Auto-subscribe if not already subscribed
+        if numeric_token not in self._ws_subscribed_tokens:
+            logger.info("Auto-subscribing to instrument %d via WebSocket", numeric_token)
+            self.subscribe_to_instrument(numeric_token, mode="full")
+            # Wait briefly for first tick to arrive
+            import time
+            time.sleep(0.5)
+        
+        # Get quote from cache
+        quote = self.get_ws_quote(numeric_token, max_age_seconds=10.0)
+        if quote:
+            logger.debug("WebSocket quote for token %d: LTP=%.2f, Bid=%.2f, Ask=%.2f", 
+                        numeric_token, quote.get("ltp", 0), quote.get("bid", 0), quote.get("ask", 0))
+            return quote
+        
+        return {}
+    
+    def _http_option_quote(self, instrument_token: str) -> dict[str, Any]:
+        """HTTP fallback for option quotes (LTP-only, no bid/ask)."""
         token = self._require_session()
         headers = self._session_token_headers(token)
         url = f"{self._base_url()}{_OPTION_QUOTE_PATH}"
@@ -911,7 +1142,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                     data = payload["data"] if isinstance(payload["data"], dict) else {}
                     inner = data.get(f"NFO:{symbol}", data)
                     if isinstance(inner, dict) and "message" not in inner:
-                        return inner
+                        return dict(inner)
                     return {}
                 return payload if isinstance(payload, dict) else {}
             except requests.RequestException as exc:
@@ -924,6 +1155,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             last_exc,
         )
         return {}
+
 
     @staticmethod
     def _parse_option_contract(row: dict[str, Any]) -> OptionContract | None:
