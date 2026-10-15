@@ -59,8 +59,8 @@
 
 ## Freeze checklist (blocking pre-Phase-0 gate — plan §9.1)
 
-- [ ] (a) Snapshot directory committed as a dedicated commit recording the manifest hash
-- [ ] (b) `manifest.json` SHA-256s re-verified clean from that commit
+- [x] (a) Snapshot directory committed as a dedicated commit recording the manifest hash — commit `0449265` (manifest.json sha256 `3ab070d7687c1b054c27dc4b1d580ed385cbcc0a228d80bf4247b949a55e8acf`)
+- [x] (b) `manifest.json` SHA-256s re-verified clean from that commit — 38 files, 0 mismatches
 - [ ] (c) Tarball of this directory + manifest exported outside both repository checkouts — Location: _(fill in)_ · Tarball SHA-256: _(fill in)_
 
 Until all three are checked, this snapshot is a working-tree copy, **not** a freeze.
