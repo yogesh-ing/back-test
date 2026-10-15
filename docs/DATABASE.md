@@ -123,7 +123,7 @@ SENSEX/INDIAVIX.
 #### `portfolios` — Root Aggregate
 ```sql
 -- Columns: portfolio_id (UUID), name, initial_capital, current_cash, status,
---          mode (paper|live), source (synthetic|replay|mstock|dhan),
+--          mode (paper|live), source (synthetic|replay|mstock|dhan|upstox),
 --          segment, execution_broker, created_at
 -- mode/source added by 002_add_mode_source.sql (defaults: paper/synthetic);
 -- source CHECK widened to admit 'dhan' by 016_add_dhan_source.sql (2026-10-01);

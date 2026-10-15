@@ -57,7 +57,7 @@ curl -X POST localhost:5000/api/portfolio/runner/create -H 'Content-Type: applic
 ```
 
 `mode` (`paper`|`live`, default `paper`) and `source`
-(`synthetic`|`replay`|`mstock`|`dhan`, default `synthetic`) tag the instance
+(`synthetic`|`replay`|`mstock`|`dhan`|`upstox`, default `synthetic`) tag the instance
 (ticket P4.1; `dhan` admitted by migration 016, 2026-10-01). `mode: "live"`
 routes equity fills through `LiveEquityGateway` (F-12 closed).
 
