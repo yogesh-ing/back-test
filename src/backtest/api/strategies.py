@@ -37,6 +37,7 @@ def list_strategies() -> tuple:
             "eligible_instruments": s.get("eligible_instruments"),
             "default_segment": s.get("default_segment"),
             "readable_criteria": s.get("readable_criteria"),
+            "execution": s.get("execution"),
         }
         for s in get_all()
         if not (backtest_venue and s["signal_kind"] == "option")

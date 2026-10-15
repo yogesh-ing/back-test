@@ -771,6 +771,35 @@ def create_runner() -> Tuple[Response, int]:
             except SourceDisabledError as exc:
                 return _error(str(exc), 409)
 
+    # Phase 0 (plan §8): stamp the transitive strategy-bundle fingerprint.
+    # Additive and best-effort in Phase 0 — no strategy declares a spec yet,
+    # so this cannot change spawn behaviour; Phase 1 makes it load-bearing
+    # (rehydration comparison → STRATEGY_CODE_CHANGED pause).
+    strategy_bundle = None
+    try:
+        from backtest.strategy.bundle import engine_git_sha, strategy_bundle as _bundle
+        from backtest.strategy.registry import get_strategy as _get_strategy
+
+        _cls = _get_strategy(strategy_name)
+        strategy_bundle = _bundle(_cls).to_dict()
+        strategy_bundle["engine_git_sha"] = engine_git_sha()
+        # §8 completes here: the governing rulebook fingerprint (the loader
+        # exists since Phase 0 §7.1 — a load failure stamps None in Phase 0
+        # and becomes a spawn refusal when Phase 1 makes the gate live)
+        # and the resolved-config fingerprint over the expression as sent.
+        try:
+            from backtest.risk_limits import load_risk_limits
+
+            strategy_bundle["risk_limits_sha256"] = load_risk_limits().sha256
+        except Exception:  # noqa: BLE001 — Phase 0 stamping must not break spawn
+            strategy_bundle["risk_limits_sha256"] = None
+        from backtest.strategy.execution import config_sha256
+
+        _expr = (data.get("instrument") or {}).get("expression") or {}
+        strategy_bundle["config_sha256"] = config_sha256(_expr)
+    except Exception:  # noqa: BLE001 — Phase 0 stamping must not break spawn
+        log.warning("strategy bundle stamping failed for %s", strategy_name, exc_info=True)
+
     try:
         config = RunnerConfig(
             name=name,
@@ -821,6 +850,7 @@ def create_runner() -> Tuple[Response, int]:
                 data.get("playbook_snapshot")
                 or data.get("instrument", {}).get("expression")
             ),
+            strategy_bundle=strategy_bundle,
         )
         auto_start = bool(data.get("auto_start", True))
         instance_id = _manager().add_runner(config, start=auto_start)

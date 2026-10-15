@@ -1827,6 +1827,13 @@ class OptionsBridge:
         # U2.2: same-bar re-entry impossible, ever — even flip+reenter must wait to next bar
         return self._exit_bar_index == self._bar_index
 
+    # Phase 0 reserved names (Refactor Plan v2.1 §4.1/§6.2): Phase 1 adds
+    # ``_transitional_direction_rule_for(view)`` here as the legacy-only
+    # strict-mode lookup — deprecated at birth, deleted in Phase 4; the
+    # end-state owner of direction->rule resolution is
+    # ``TemplateBase.direction_rule_for`` (strategy/templates). The manual
+    # level helper ``_rule_for`` below is renamed ``_operator_level_for``
+    # in the same phase. Do not introduce other ``_rule_for`` variants.
     def _structure_type_for(self, view: MarketView) -> str:
         type_cfg = self.expression.get("type", DEFAULT_EXPRESSION["type"])
         if isinstance(type_cfg, dict):
