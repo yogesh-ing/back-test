@@ -281,10 +281,11 @@ def _warn_if_source_disabled(policy: Any, source: str) -> None:
 
 
 #: Preference order for the automatic fallback. ``db`` first (real, certifiable,
-#: already on disk), then the broker feeds, then CSV. Synthetic is deliberately
+#: already on disk), then the broker feeds (third venue last), then CSV.
+#: Synthetic is deliberately
 #: NOT in this list: an operator who disabled it did so on purpose, and silently
 #: serving generated candles as a "fallback" would defeat the whole policy.
-_FALLBACK_PREFERENCE = ("db", "mstock", "dhan", "csv")
+_FALLBACK_PREFERENCE = ("db", "mstock", "dhan", "upstox", "csv")
 
 
 def resolve_source(policy: Any, requested: str) -> str:
@@ -796,9 +797,9 @@ def main() -> None:
     parser.add_argument(
         "--source",
         default=os.getenv("BACKTEST_SOURCE", ""),
-        choices=["", "synthetic", "csv", "mstock", "dhan", "db", "mock_broker"],
+        choices=["", "synthetic", "csv", "mstock", "dhan", "upstox", "db", "mock_broker"],
         help=(
-            "Data source: synthetic | csv | mstock | dhan | db | mock_broker. "
+            "Data source: synthetic | csv | mstock | dhan | upstox | db | mock_broker. "
             "Empty (the default) lets config/data_sources.yaml choose, so no "
             "source hides in a CLI default; a disabled choice falls back per "
             "the data policy. (mock_broker = synthetic data + zero-credential "

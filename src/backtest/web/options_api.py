@@ -240,7 +240,7 @@ def _live_chain_generator(underlying: str) -> Any | None:
         from backtest.forward.feed_registry import _default_quote_broker, get_chain_bus
 
         name = None
-        for candidate in ("mstock", "dhan"):
+        for candidate in ("mstock", "dhan", "upstox"):
             if _default_quote_broker(candidate) is not None:
                 name = candidate
                 break
