@@ -1832,6 +1832,9 @@ class OptionsBridge:
         if isinstance(type_cfg, dict):
             if view.direction == Direction.BEARISH:
                 return str(type_cfg.get("BEARISH", "bear_put_spread"))
+            elif view.direction == Direction.NEUTRAL:
+                # NEUTRAL direction gets its own mapping (e.g., long_call for ATM instant buy)
+                return str(type_cfg.get("NEUTRAL", type_cfg.get("BULLISH", "bull_call_spread")))
             return str(type_cfg.get("BULLISH", "bull_call_spread"))
         return str(type_cfg)
 

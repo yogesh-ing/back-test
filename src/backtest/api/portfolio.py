@@ -753,6 +753,24 @@ def create_runner() -> Tuple[Response, int]:
             "on — enable db/mstock (or the testing profile's synthetic) first."
         )
 
+    # Pre-flight validation for option runners: ensure the broker session
+    # exists BEFORE creating the runner. Without this, the runner gets added
+    # to the manager but fails silently when it tries to fetch chains, leaving
+    # a zombie runner that shows as RUNNING but processes 0 bars.
+    if (
+        isinstance(instrument, dict)
+        and str(instrument.get("type", "equity")).lower() == "option"
+    ):
+        underlying = symbols[0] if symbols else None
+        if underlying:
+            from backtest.forward.feed_registry import option_quote_provider_for
+            from backtest.data.sources_policy import SourceDisabledError
+
+            try:
+                option_quote_provider_for(runner_source, underlying)
+            except SourceDisabledError as exc:
+                return _error(str(exc), 409)
+
     try:
         config = RunnerConfig(
             name=name,

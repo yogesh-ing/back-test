@@ -2037,7 +2037,10 @@ class PortfolioManager:
         manager = payload.get("manager", {})
         self.total_capital = float(manager.get("total_capital", 0.0))
         self.peak_equity = float(manager.get("peak_equity", 0.0))
-        self._day_start_equity = float(manager.get("day_start_equity", 0.0))
+        # CRITICAL FIX 2026-10-15: Do NOT restore day_start_equity from state —
+        # it's a GHOST from a previous session and causes false daily-loss breaches.
+        # Will be initialized from current equity below (after runners restored).
+        # self._day_start_equity = float(manager.get("day_start_equity", 0.0))
         self._current_day = manager.get("current_day")
         self.halted = False
         self.halt_reason = None
@@ -2054,10 +2057,15 @@ class PortfolioManager:
         # fail-closed for the boot — owner hit this mid-testing).
         # Same rule for the DAY ANCHOR + PEAK: a saved day_start from a
         # previous session is a GHOST — the book may have been rebuilt since
-        # (the ₹1.73 Cr anchor vs a ₹20 L book computed daily P&L of
+        # (the ₹1.73 Cr anchor vs a ₹20 L book computed daily PnL of
         # -₹1.53 Cr and tripped the global breaker instantly). The anchor is
         # re-baselined to the restored book on the first bar (see _on_bar).
-        self._day_start_equity = 0.0
+        # CRITICAL FIX 2026-10-15: Do NOT leave anchors at 0.0 — if no bars
+        # arrive before the first risk check (e.g., market closed, all runners
+        # paused), the daily PnL calc becomes garbage (equity - 0 = massive
+        # fake gain/loss). Initialize from current aggregate so risk checks
+        # are sane even before the first bar.
+        self._day_start_equity = 0.0  # Will be set below after runners restored
         self.peak_equity = 0.0
         self._current_day = None
         self._bucket_day_start = {"paper": 0.0, "live": 0.0}
@@ -2070,6 +2078,24 @@ class PortfolioManager:
             self._bucket_halt_mode[mode] = None
             self._bucket_halted_ts[mode] = None
             # day_start / day stay session-scoped (re-baselined on first bar)
+
+        # CRITICAL FIX 2026-10-15: Initialize daily loss anchors from CURRENT
+        # equity after all runners are restored. This prevents false breaker
+        # trips when the state file has old day_start values from a previous
+        # session and no bars arrive before the first risk check.
+        current_equity = self._aggregate_equity()
+        if current_equity > 0:
+            self._day_start_equity = current_equity
+            for mode in ("paper", "live"):
+                if self._bucket_runners(mode):
+                    self._bucket_day_start[mode] = self._bucket_equity(mode)
+            logger.info(
+                "[state] daily loss anchors initialized from current equity: "
+                "manager=%.2f, paper=%.2f, live=%.2f",
+                self._day_start_equity,
+                self._bucket_day_start.get("paper", 0.0),
+                self._bucket_day_start.get("live", 0.0),
+            )
 
     def _on_bar(self, symbol: str, bar: Dict[str, Any]) -> None:
         """Fan one closed candle out to every runner trading that symbol."""
