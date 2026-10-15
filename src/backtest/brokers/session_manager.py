@@ -72,6 +72,7 @@ class UnknownBrokerError(ValueError):
 _BROKER_REGISTRY: dict[str, Callable[[], BrokerAuthBase]] = {
     "mstock": lambda: _lazy("mstock"),
     "dhan": lambda: _lazy("dhan"),
+    "upstox": lambda: _lazy("upstox"),
 }
 
 
@@ -90,6 +91,10 @@ def _lazy(module: str) -> BrokerAuthBase:
         from backtest.brokers.dhan import DhanBroker
 
         return DhanBroker()
+    if module == "upstox":
+        from backtest.brokers.upstox import UpstoxBroker
+
+        return UpstoxBroker()
     if module == "mock":
         from backtest.brokers.mock import MockBroker
 
@@ -114,7 +119,12 @@ def available_brokers() -> list[dict[str, str]]:
     Returns ``[{"name", "display_name"}, ...]`` without instantiating any
     broker (display names are static class attributes).
     """
-    display_names = {"mstock": "mStock", "dhan": "Dhan", "mock": "Mock (dry-run)"}
+    display_names = {
+        "mstock": "mStock",
+        "dhan": "Dhan",
+        "upstox": "Upstox",
+        "mock": "Mock (dry-run)",
+    }
     return [
         {"name": name, "display_name": display_names.get(name, name.title())}
         for name in _BROKER_REGISTRY

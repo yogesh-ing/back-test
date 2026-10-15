@@ -72,6 +72,7 @@ FALLBACK_SOURCES: dict[str, dict[str, Any]] = {
     "db": {"enabled": True, "label": "Real Data (PostgreSQL)", "certifiable": True},
     "mstock": {"enabled": True, "label": "Broker (mstock)", "certifiable": True},
     "dhan": {"enabled": True, "label": "Broker (dhan)", "certifiable": True},
+    "upstox": {"enabled": True, "label": "Broker (upstox)", "certifiable": True},
     "csv": {"enabled": True, "label": "CSV files", "certifiable": False},
 }
 
@@ -105,6 +106,7 @@ SOURCE_KEY_ALIASES: dict[str, str] = {
     "csv": "csv",
     "mstock": "mstock",
     "dhan": "dhan",
+    "upstox": "upstox",
 }
 
 #: Every source name the policy can meaningfully describe. The vocabulary the
@@ -429,7 +431,7 @@ def default_backtest_source() -> str:
 def default_broker_source() -> str:
     """The source a *trading* path (runner, forward run, live papertrade) gets
     when nothing names one — the broker feed, never an unnamed synthetic one."""
-    return _first_enabled(("synthetic", "mstock", "dhan"))
+    return _first_enabled(("synthetic", "mstock", "dhan", "upstox"))
 
 
 def default_source_tag() -> str:

@@ -3,7 +3,9 @@
 Broker-agnostic contract layer:
 
 * ``BrokerAuthBase`` — two-step auth contract (Task 1.1);
-  ``MStockBroker`` implements it for mStock (Task 1.2).
+  ``MStockBroker`` implements it for mStock (Task 1.2), ``DhanBroker`` for
+  Dhan, and ``UpstoxBroker`` for Upstox (browser OAuth mapped onto the same
+  two steps).
 * ``BrokerOrderBase`` — order lifecycle contract (ticket P3.1):
   place / modify / cancel / book / margin, with the shared value types
   ``BrokerOrderId`` / ``BrokerOrder`` / ``MarginInfo``. A live broker
@@ -31,6 +33,7 @@ from backtest.brokers.base import (
     MarginInfo,
 )
 from backtest.brokers.mstock import MStockBroker, MStockOrderError
+from backtest.brokers.upstox import UpstoxBroker, UpstoxOrderError
 from backtest.brokers.session_manager import (
     BrokerSessionManager,
     get_session_manager,
@@ -46,6 +49,8 @@ __all__ = [
     "ORDER_STATUSES",
     "MStockBroker",
     "MStockOrderError",
+    "UpstoxBroker",
+    "UpstoxOrderError",
     "BrokerSessionManager",
     "get_session_manager",
     "reset_default_manager",

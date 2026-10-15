@@ -65,6 +65,12 @@ default:
       certifiable: true
       note: "Live broker feed (second venue, Phase A multi-broker)."
 
+    upstox:
+      enabled: true
+      label: "Broker (upstox)"
+      certifiable: true
+      note: "Live broker feed (third venue, Upstox OAuth)."
+
     csv:
       enabled: true
       label: "CSV files"
@@ -88,4 +94,6 @@ profiles:
       mstock:
         enabled: false
       dhan:
+        enabled: false
+      upstox:
         enabled: false
