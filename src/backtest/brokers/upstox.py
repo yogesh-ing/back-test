@@ -141,7 +141,7 @@ DEFAULT_SESSION_TTL_MINUTES = 1440.0
 # PRD session state machine: "expiring_soon" inside the last 30 minutes.
 EXPIRING_SOON_WINDOW_MINUTES = 30.0
 
-_AUTH_CODE_PATTERN = re.compile(r"^[A-Za-z0-9._~+/=-]{8,}$")
+_AUTH_CODE_PATTERN = re.compile(r"^[A-Za-z0-9._~+/=-]{4,}$")
 _MAX_MESSAGE_LEN = 200
 
 #: NSE compact option symbol — ``NIFTY26OCT24500CE``: YY + MON + strike +
