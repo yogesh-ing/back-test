@@ -159,6 +159,18 @@ class TestNothingDefaultsToSynthetic:
         app = create_app(source="")
         assert app.config["BACKTEST_SOURCE"] == "synthetic"
 
+    def test_the_third_venue_is_a_fallback_candidate(self):
+        """``_FALLBACK_PREFERENCE`` must list every broker feed, or a deployment
+        that enables only the third venue resolves to nothing.
+        """
+        upstox_only = SourcePolicy(
+            {"upstox": SourceSpec("upstox", enabled=True, certifiable=True)},
+            profile="unit",
+        )
+        app = create_app(source="dhan", data_source_policy=upstox_only)
+        reset_source_policy()
+        assert app.config["BACKTEST_SOURCE"] == "upstox"
+
     def test_no_requested_source_means_no_fallback_claim(self):
         """``fell_back`` is about a substitution, not about the default."""
         app = create_app(source="", data_source_policy=self.REAL_ONLY)

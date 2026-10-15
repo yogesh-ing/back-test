@@ -114,6 +114,29 @@ brokers:
       exchange_txn_options: 0.0003503
       stamp_duty_options: 0.00003
 
+  # Upstox — third live broker (2026-10-13). Same discount shape as mStock:
+  # flat Rs 20 per executed order, delivery free, options flat per ORDER
+  # (a spread pays brokerage once per leg). INDICATIVE — validate against a
+  # real contract note with the Settings → broker profile validator before
+  # trusting a cost-sensitive result; the statutory stack is the same India
+  # schedule as mstock/dhan.
+  upstox:
+    currency: INR
+    default_segment: equity_intraday
+    commission_model:
+      model: flat
+      per_trade: 20
+    delivery_commission_model:
+      model: zero
+    options_commission_model:
+      model: options_flat
+      per_order: 20
+    fee_schedule:
+      schedule: india_equity
+      stt_options_sell: 0.0015           # Budget 2026, effective 2026-04-01
+      exchange_txn_options: 0.0003503
+      stamp_duty_options: 0.00003
+
   # Traditional full-service broker: percentage brokerage, no cap, and a
   # per-order minimum. Useful for showing how much the discount model saves.
   india_full_service:

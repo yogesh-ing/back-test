@@ -51,8 +51,6 @@ class PineScriptConverter:
         Raises:
             PineConversionError: If parsing or generation fails
         """
-        self._audit_source(pine_code)
-
         # 1. Extract strategy name from Pine if not provided. User-provided
         # names are sanitized too — they become a Python class name, so
         # "Outside Bar Strategy" must become "OutsideBarStrategy".
@@ -80,13 +78,8 @@ class PineScriptConverter:
 
         # 5. An `indicator()` script plots but never trades — with no
         # `strategy.entry()` block nothing is wired into entries(), and the
-        # saved plugin would silently stay flat on every bar. strategy.order
-        # scripts take the stateful generate_signals() path instead.
-        if not re.search(
-            r"^\s+(?:long|short)_entries \|=|^\s+def generate_signals\(",
-            python_code,
-            re.MULTILINE,
-        ):
+        # saved plugin would silently stay flat on every bar.
+        if not re.search(r"^\s+(?:long|short)_entries \|=", python_code, re.MULTILINE):
             raise PineConversionError(
                 "No `strategy.entry()` call was found, so nothing can be "
                 "converted into entries. This looks like an `indicator()` "
@@ -102,7 +95,6 @@ class PineScriptConverter:
         # 7. Extract metadata
         metadata = {
             "original_name": strategy_name,
-            "pine_version": int(re.search(r"(?m)^\s*//\s*@version\s*=\s*(\d+)", pine_code).group(1)) if re.search(r"(?m)^\s*//\s*@version\s*=\s*(\d+)", pine_code) else None,
             "indicators_used": self._extract_indicators_list(pine_ast),
             "has_long": self._has_long_trades(pine_ast),
             "has_short": self._has_short_trades(pine_ast),
@@ -111,39 +103,6 @@ class PineScriptConverter:
             "warnings": self._collect_warnings(python_code),
         }
         return python_code, metadata
-
-    @staticmethod
-    def _audit_source(source: str) -> None:
-        """Fail closed on constructs the line-oriented parser cannot preserve.
-
-        This is a compatibility gate, not a full Pine grammar. Add support only
-        alongside semantic fixtures demonstrating equivalent positions.
-        """
-        version = re.search(r"(?m)^\s*//\s*@version\s*=\s*(\d+)", source)
-        if version and version.group(1) not in ("5", "6"):
-            raise PineConversionError(
-                f"Pine v{version.group(1)} is not supported by this converter "
-                "(supported versions: v5 and v6)."
-            )
-        if re.search(r"(?m)^\s*indicator\s*\(", source):
-            raise PineConversionError(
-                "This is an indicator, not an executable strategy. Its CE/PE "
-                "plot/alert signals and displayed stop/targets are not orders. "
-                "Define explicit strategy.entry() calls and exits before importing."
-            )
-        checks = (
-            (r"\brequest\.security\s*\(", "multi-timeframe request.security"),
-            (r"(?m)^\s*var(?:ip)?\s+", "persistent var state"),
-            (r":=", "stateful := reassignment"),
-            (r"\bstrategy\.exit\s*\([^\n]*\bqty_percent\s*=", "partial exits"),
-            (r"\bstrategy\.position_size\s*\[", "position history"),
-        )
-        for pattern, feature in checks:
-            if re.search(pattern, source):
-                raise PineConversionError(
-                    f"Unsupported Pine construct: {feature}. Conversion stopped "
-                    "rather than silently changing trading behavior."
-                )
 
     def save_as_plugin(
         self,
@@ -186,7 +145,7 @@ class PineScriptConverter:
 
         # Add header comment
         header = f'''"""
-Auto-generated from Pine Script v{metadata.get("pine_version") or "unknown"}
+Auto-generated from Pine Script v5
 Generated: {datetime.now().isoformat()}
 
 Original Strategy: {metadata['original_name']}
@@ -339,11 +298,9 @@ import numpy as np
         stops and targets built on ``var`` state (``trailStop := ...``) are
         per-trade bookkeeping, so they never become an ``exits()`` — and the
         Save checklist still accepts them as typed criteria strings, which
-        otherwise leaves the impression the level is enforced in code. The
-        stateful path enforces strategy.exit() levels inside the loop, so it
-        has nothing to warn about.
+        otherwise leaves the impression the level is enforced in code.
         """
-        if re.search(r"^\s+def (exits|generate_signals)\(", python_code, re.MULTILINE):
+        if re.search(r"^\s+def exits\(", python_code, re.MULTILINE):
             return []
         return [
             "No exits() was generated: the strategy enters and then holds the "
@@ -446,10 +403,6 @@ import numpy as np
     def _has_long_trades(self, ast: Dict) -> bool:
         """Check if strategy has long entry signals."""
         for statement in ast.get("statements", []):
-            if statement.get("function") == "strategy.order":
-                if statement.get("is_long"):
-                    return True
-                continue
             if statement.get("type") == "if_statement":
                 for inner in statement.get("body", []):
                     if inner.get("type") == "strategy_call":
@@ -463,10 +416,6 @@ import numpy as np
     def _has_short_trades(self, ast: Dict) -> bool:
         """Check if strategy has short entry signals."""
         for statement in ast.get("statements", []):
-            if statement.get("function") == "strategy.order":
-                if not statement.get("is_long"):
-                    return True
-                continue
             if statement.get("type") == "if_statement":
                 for inner in statement.get("body", []):
                     if inner.get("type") == "strategy_call":
@@ -556,17 +505,6 @@ import numpy as np
         # 1. Entry criteria: the condition(s) feeding strategy.entry.
         for cond, call in all_calls("strategy.entry"):
             entry = entry or cond or call.get("direction", "")
-
-        # 1b. strategy.order(..., when=...) scripts: the when-condition is the
-        #     entry criteria (resolved one level so entry_long reads as its
-        #     isBuyValid/opentrades formula, not a bare variable name).
-        if entry is None:
-            for stmt in ast.get("statements", []):
-                if stmt.get("function") == "strategy.order":
-                    when = str(stmt.get("when", "")).strip()
-                    if when:
-                        entry = resolve(when)
-                        break  # first order is the primary direction
 
         # 2. Exit: strategy.close triggers a reversal/exits.
         for cond, call in all_calls("strategy.close"):

@@ -322,6 +322,20 @@ class TestPortfolioBasics:
         b = Portfolio(name="b", initial_capital=1)
         assert a.portfolio_id != b.portfolio_id
 
+    @pytest.mark.parametrize("source", ["synthetic", "replay", "mstock", "dhan", "upstox"])
+    def test_every_known_source_is_accepted(self, source):
+        """VALID_SOURCES must stay in lockstep with the DB CHECK (002/016/020).
+
+        A source the DB admits but this tuple rejects (or vice versa) means a
+        runner can be built that cannot be persisted — 020 added ``upstox`` to
+        both, and this is the guard that keeps them together.
+        """
+        assert Portfolio(name="x", initial_capital=1000, source=source).source == source
+
+    def test_an_unknown_source_is_still_rejected(self):
+        with pytest.raises(ValidationError, match="unknown source"):
+            Portfolio(name="x", initial_capital=1000, source="zerodha")
+
     def test_container_protocol(self, portfolio):
         portfolio.open_position("INFY", 10, 100)
         assert "INFY" in portfolio

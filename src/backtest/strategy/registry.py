@@ -99,6 +99,10 @@ def get_all() -> list[dict[str, Any]]:
     where ``params`` is the normalised schema and ``signal_kind`` drives the
     spawn form's target-type lock (U6.1). Invalid strategies are skipped with a
     logged warning rather than raising.
+
+    Includes both built-in strategies from ``backtest.strategies`` and
+    plugin strategies from ``plugins/strategies/*.py`` (already registered
+    in _REGISTRY via discover_plugins at startup).
     """
     _discover()
     catalogue: list[dict[str, Any]] = []

@@ -62,7 +62,7 @@ Anything importing these old `StrategyAdapter` names must switch:
   the outbound notifier (Telegram/email).
 - **Runners are currently PAUSED**; the live server runs on **:5000**.
 - **Data routing (2026-09-30 policy, enforced at every source decision).**
-  Forward/paper/portfolio runners bar from the broker feed (mStock/dhan);
+  Forward/paper/portfolio runners bar from the broker feed (mStock/dhan/Upstox);
   historical runs (backtest/optimize) read from the DB. Synthetic data is
   config-gated (`config/data_sources.yaml`) and off by default, with **no
   fallback**: a source-less run refuses instead of silently trading
@@ -148,7 +148,7 @@ POST /api/forward/start
     "capital": 100000,
     "params": {"fast": 20, "slow": 50},
     "mode": "paper",                      # "live" is refused on this replay (see below)
-    "source": "mstock",                   # synthetic|replay|mstock|dhan — "synthetic" is refused
+    "source": "mstock",                   # synthetic|replay|mstock|dhan|upstox — "synthetic" is refused
                                           # unless config/data_sources.yaml enables it
     "bars_per_second": 5                  # optional clock override (0 = manual stepping)
 }
@@ -270,8 +270,8 @@ filter used to be a no-op).
   - **Format v3 (F-04 + ticket #7, 2026-09):** the payload carries
     `state_version: 3`, `engine_id` (the `portfolios.portfolio_id`), the run
     classification `mode` (`paper`|`live`) + `source`
-    (`synthetic`|`replay`|`mstock`|`dhan`) — the same vocabulary as the `portfolios`
-    columns (migration 002, widened to admit `dhan` by 016), derived from the engine's **actual** `config.data`
+    (`synthetic`|`replay`|`mstock`|`dhan`|`upstox`) — the same vocabulary as the `portfolios`
+    columns (migration 002, widened to admit `dhan` by 016 and `upstox` by 020), derived from the engine's **actual** `config.data`
     (a `backtest` data mode is stored as the `paper` bucket — simulated
     fills). Source strings come from the canonical
     `backtest.data.source_tags.SOURCE_TAGS`.
@@ -363,7 +363,7 @@ Both modes run through `forward/paper_runner.py` on the shared
 > `config/data_sources.yaml` enables the synthetic source — the shipped
 > default disables it and there is no fallback (the test suite opts back in
 > via `BACKTEST_DATA_PROFILE=testing`). Paper/live runs name a broker source
-> (`mstock`/`dhan`) instead.
+> (`mstock`/`dhan`/`upstox`) instead.
 
 ## Forward-engine traffic rules (after F-01)
 

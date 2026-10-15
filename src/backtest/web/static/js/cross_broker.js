@@ -85,7 +85,7 @@
     function labelFor(name) {
         const key = String(name == null ? '' : name);
         if (!key) return 'Unassigned';
-        const known = { mstock: 'mStock', dhan: 'Dhan', paper: 'Paper (sim)' };
+        const known = { mstock: 'mStock', dhan: 'Dhan', upstox: 'Upstox', paper: 'Paper (sim)' };
         if (known[key.toLowerCase()]) return known[key.toLowerCase()];
         return key.charAt(0).toUpperCase() + key.slice(1);
     }

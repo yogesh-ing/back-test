@@ -339,8 +339,8 @@ def option_quote_provider_for(
 ) -> tuple[Any, str]:
     """``(quote_provider, label)`` for an option runner's bridge — P1.1.
 
-    * ``source="mstock"``/``"dhan"`` + an authenticated broker of the same
-      name (explicit or via the session manager) → the shared
+    * ``source="mstock"``/``"dhan"``/``"upstox"`` + an authenticated broker
+      of the same name (explicit or via the session manager) → the shared
       :class:`LiveChainProvider` wrapped in :class:`BidAskQuoteProvider`
       (``"live:<broker>+bidask"``): real chains, real LTP, one API budget per
       underlying (ChainBus refcount) — and fills that cross the spread while
@@ -368,7 +368,7 @@ def option_quote_provider_for(
     """
     underlying = str(underlying).upper()
     source_key = str(source).lower()
-    if source_key in ("mstock", "dhan"):
+    if source_key in ("mstock", "dhan", "upstox"):
         broker = quote_broker if quote_broker is not None else _default_quote_broker(source_key)
         # A session-manager-resolved broker always carries broker_name; a
         # duck-typed injected broker may not — accept it for the matching
@@ -396,8 +396,8 @@ def option_quote_provider_for(
     elif not synthetic_enabled():
         raise SourceDisabledError(
             f"option runner on {underlying} requested source={source_key!r}, which "
-            f"is not a broker feed, and synthetic chains are disabled in "
-            f"config/data_sources.yaml — option runners must be created on mstock or dhan."
+            f"is not a broker feed, and synthetic chains are disabled in "                f"config/data_sources.yaml — option runners must be created on mstock, "
+                f"dhan or upstox."
         )
     generator = get_chain_bus().acquire(underlying)
     return option_quote_provider(generator), "synthetic:bs"
@@ -645,6 +645,29 @@ class DhanBarFeed(_BrokerBarFeedBase):
             from backtest.data.dhan_live_feed import DhanLiveFeed
 
             feed_client = DhanLiveFeed()
+        super().__init__(feed_client=feed_client, poll_interval_s=poll_interval_s)
+
+
+class UpstoxBarFeed(_BrokerBarFeedBase):
+    """Live bar feed for ``source=upstox`` runners (2026-10-13).
+
+    Same one-thread-per-manager round-robin as :class:`MStockBarFeed`,
+    delegating to :class:`~backtest.data.upstox_live_feed.UpstoxLiveFeed`.
+    Requires an active Upstox broker session (Upstox data APIs are
+    Bearer-token gated).
+    """
+
+    broker_name = "upstox"
+
+    def __init__(
+        self,
+        feed_client: Any = None,
+        poll_interval_s: float = 60.0,
+    ) -> None:
+        if feed_client is None:
+            from backtest.data.upstox_live_feed import UpstoxLiveFeed
+
+            feed_client = UpstoxLiveFeed()
         super().__init__(feed_client=feed_client, poll_interval_s=poll_interval_s)
 
 

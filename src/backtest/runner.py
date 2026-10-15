@@ -62,12 +62,29 @@ def build_source(name: str, **kwargs):
         from backtest.live.mstock import MStockSource
 
         source = MStockSource()
+    elif source_name == "dhan":
+        # Second broker venue as a candle source: same DataSource shape
+        # (symbol, start, end, interval) as the rest. Constructed lazily like
+        # mstock; both live feeds fail soft to an EMPTY frame without a
+        # session, so an unauthenticated deployment gets a refused-for-no-data
+        # run rather than an import-time crash.
+        from backtest.data.dhan_live_feed import DhanLiveFeed
+
+        source = DhanLiveFeed()
+    elif source_name == "upstox":
+        # Third broker venue — same shape and same fail-soft contract.
+        from backtest.data.upstox_live_feed import UpstoxLiveFeed
+
+        source = UpstoxLiveFeed()
     elif source_name == "db":
         from backtest.data.db_source import DbSource
 
         source = DbSource()
     else:
-        log.error("[source] unsupported source %r (want synthetic|csv|mstock|db)", name)
+        log.error(
+            "[source] unsupported source %r (want synthetic|csv|mstock|dhan|upstox|db)",
+            name,
+        )
         raise ValueError(f"unsupported source: {name}")
     log.debug("[source] %s → %s", source_name, type(source).__name__)
     return source

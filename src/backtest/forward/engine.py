@@ -109,7 +109,9 @@ DEFAULT_STATE_FILE = Path("state/forward_state.json")
 #:   derived from the engine's actual config (never hardcoded).
 #: * **v2** — adds ``state_version``, ``engine_id`` (the portfolio id),
 #:   ``mode`` (paper|live) and ``source`` (synthetic|replay|mstock) mirroring
-#:   the ``portfolios`` columns added by migration 002 (DB-T1).
+#:   the ``portfolios`` columns added by migration 002 (DB-T1) — the
+#:   vocabulary later widened by 016 (dhan) and 020 (upstox); state files
+#:   store whichever tag the engine actually ran on.
 #: * **v3** — current: adds **full resume fidelity**. ``executor`` captures
 #:   the executor's in-flight bar-clock queue (pending orders + which of them
 #:   are already armed) and ``engine_runtime`` captures ``loop_count``, the

@@ -64,8 +64,9 @@
       <div class="broker-auth-success-msg">✅ Credentials verified</div>
       <hr class="broker-auth-divider">
       <div class="broker-auth-form">
+        <div id="broker-auth-totp-hint" class="broker-auth-remember-hint" style="display:none; margin-bottom:10px;"></div>
         <div class="broker-auth-field">
-          <label for="broker-auth-totp-code">TOTP Verification</label>
+          <label for="broker-auth-totp-code" id="broker-auth-totp-label">TOTP Verification</label>
           <input id="broker-auth-totp-code" class="input" type="text" maxlength="6" inputmode="numeric" pattern="[0-9]*" placeholder="Enter 6-digit code" autocomplete="one-time-code">
         </div>
         <div id="broker-auth-totp-error" class="broker-auth-error" role="alert"></div>

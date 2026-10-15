@@ -8,7 +8,8 @@ This module is the single home for three things that used to live in
 * :class:`PaperRunner` — one bar-replay paper run = one
   :class:`~backtest.simulator.portfolio.Portfolio` + one source + one
   strategy. The engine never branches on the data source: only
-  ``source.get_candles()`` differs between synthetic / replay / mstock.
+  ``source.get_candles()`` differs between synthetic / replay / mstock /
+  dhan / upstox.
   Its bar-clock loop is the shared
   :func:`~backtest.simulator.engine_loop.run_engine_loop` — the same code
   :class:`~backtest.engine.backtest_driver.BacktestDriver` drives
@@ -870,7 +871,7 @@ class RunnerConfig:
     # Bucket classification for the portfolio UI (ticket P4.1):
     # 'paper' (simulated fills) or 'live' (broker execution — F-12 wiring).
     mode: str = "paper"
-    # Canonical P1.1 source tag: synthetic / replay / mstock.
+    # Canonical P1.1 source tag: synthetic / replay / mstock / dhan / upstox.
     # Resolved from config/data_sources.yaml at construction, never a literal:
     # an omitted source means the deployment's **broker** feed (mStock), which
     # is what paper and live runners are supposed to bar from. A process whose
@@ -1076,7 +1077,7 @@ class StrategyRunner:
             from backtest.forward.feed_registry import option_quote_provider_for
 
             self._chain_underlying = config.symbols[0] if config.symbols else "NIFTY"
-            # P1.1: source routes the chain — mstock/dhan + authenticated
+            # P1.1: source routes the chain — mstock/dhan/upstox + authenticated
             # session → the shared LiveChainProvider (real chains + LTP, one
             # API budget per underlying); anything else → the synthetic pair.
             # The fallback is deliberate and labelled ("synthetic:bs") so a
@@ -1084,7 +1085,7 @@ class StrategyRunner:
             provider, quote_label = option_quote_provider_for(
                 config.source, self._chain_underlying
             )
-            # The bus STORE the acquire landed in (synthetic|mstock|dhan) —
+            # The bus STORE the acquire landed in (synthetic|mstock|dhan|upstox) —
             # derived from the resolved provider, not from config.source: a
             # requested "mstock"/"dhan" that fell back to synthetic must
             # release the synthetic entry, or stop() leaks the refcount.
@@ -1128,6 +1129,13 @@ class StrategyRunner:
         # Trade persistence and tracking (FIX 2026-10-13)
         self._closed_trades: List[Dict[str, Any]] = []  # Track all closed trades for PnL calc
         self._trade_persist_failures: int = 0  # Count failed persistence attempts
+        
+        # Daily PnL anchors (FIX 2026-10-14): snapshot realized PnL at session start
+        # so daily_pnl() can compute "realized since open + unrealized MTM"
+        self._session_start_realized: float = float(self.portfolio.realized_pnl)
+        self._option_session_start_realized: float = 0.0
+        if self.options_bridge is not None:
+            self._option_session_start_realized = float(self.options_bridge.option_broker.total_realized_pnl)
         
         #: PnL-vs-spot watch series (2026-09-24): one row per closed bar while
         #: an option structure is open — feeds the end-of-day chart export
@@ -1347,7 +1355,7 @@ class StrategyRunner:
         if bridge is None:
             return
         src = str(self.config.source or "").lower()
-        if src not in ("mstock", "dhan"):
+        if src not in ("mstock", "dhan", "upstox"):
             return
         if self._chain_source != "synthetic":
             return  # already live (or never fell back) — nothing to upgrade
@@ -2928,30 +2936,24 @@ class StrategyRunner:
     def daily_pnl(self) -> float:
         """Calculate daily PnL from realized trades + unrealized MTM.
         
-        FIX 2026-10-13: Previously used equity - day_start_equity which could
-        include stale historical gains and didn't distinguish realized vs unrealized.
-        Now sums only today's closed trades plus current open position MTM.
+        FIX 2026-10-14: Previously tried to sum _closed_trades which had no
+        net_pnl field. Now uses portfolio's realized_pnl anchored to session
+        start plus current unrealized MTM, matching the architecture where
+        Portfolio tracks all PnL correctly.
         """
-        from datetime import date
-        
-        # Sum realized PnL from trades closed TODAY
-        today = date.today()
-        realized_today = 0.0
-        
-        if hasattr(self, '_closed_trades'):
-            for trade in self._closed_trades:
-                exit_time = trade.get('exit_time')
-                if exit_time and exit_time.date() == today:
-                    realized_today += trade.get('net_pnl', 0.0)
+        # Realized PnL since session start (portfolio tracks cumulative)
+        # We need to subtract what was already realized before today
+        session_realized = float(self.portfolio.realized_pnl) - self._session_start_realized
         
         # Add unrealized PnL on open positions (MTM)
-        unrealized = 0.0
-        if hasattr(self, 'portfolio'):
-            for pos in self.portfolio.positions.values():
-                if pos.quantity != 0 and hasattr(pos, 'unrealized_pnl'):
-                    unrealized += float(pos.unrealized_pnl)
+        unrealized = float(self.portfolio.unrealized_pnl)
         
-        return realized_today + unrealized
+        # Add option book contribution if present
+        if self.options_bridge is not None:
+            session_realized += float(self.options_bridge.option_broker.total_realized_pnl) - self._option_session_start_realized
+            unrealized += float(self.options_bridge.unrealized_pnl)
+        
+        return session_realized + unrealized
 
     def win_rate(self) -> float:
         total = self.wins + self.losses
@@ -3679,9 +3681,25 @@ class PaperRunner:
         self.source_tag = source_tag or source_tag_for(source)
 
         # Run classification (ticket P1.1): a PaperRunner is, by definition,
+        # Run classification (ticket P1.1): a PaperRunner is, by definition,
         # a paper run; the bars' origin comes from the source class.
         self.portfolio.mode = "paper"
         self.portfolio.source = self.source_tag
+        
+        # Trade persistence and tracking (FIX 2026-10-13)
+        self._closed_trades: List[Dict[str, Any]] = []  # Track all closed trades for PnL calc
+        self._trade_persist_failures: int = 0  # Count failed persistence attempts
+        
+        # Daily PnL anchors (FIX 2026-10-14): snapshot realized PnL at session start
+        # so daily_pnl() can compute "realized since open + unrealized MTM"
+        self._session_start_realized: float = float(self.portfolio.realized_pnl)
+        self._option_session_start_realized: float = 0.0
+        if self.options_bridge is not None:
+            self._option_session_start_realized = float(self.options_bridge.option_broker.total_realized_pnl)
+        
+        # Equity curve and metrics
+        self.equity_curve: List[Dict[str, Any]] = []
+        self._day_start_equity: float = float(portfolio.current_cash)
 
     # ------------------------------------------------------------------ #
 
@@ -3712,3 +3730,62 @@ class PaperRunner:
             coid_prefix="paper",
             log_label="paper run",
         )
+    
+    # ------------------------------------------------------------------ #
+    # Accounting / metrics (FIX 2026-10-13)
+    # ------------------------------------------------------------------ #
+    
+    def equity(self) -> float:
+        """Current equity = cash + position value."""
+        return float(self.portfolio.calculate_total_equity())
+    
+    def daily_pnl(self) -> float:
+        """Calculate daily PnL from realized trades + unrealized MTM.
+        
+        FIX 2026-10-13: Previously used equity - day_start_equity which could
+        include stale historical gains and didn't distinguish realized vs unrealized.
+        Now sums only today's closed trades plus current open position MTM.
+        """
+        from datetime import date
+        
+        # Sum realized PnL from trades closed TODAY
+        today = date.today()
+        realized_today = 0.0
+        
+        if hasattr(self, '_closed_trades'):
+            for trade in self._closed_trades:
+                exit_time = trade.get('exit_time')
+                if exit_time and exit_time.date() == today:
+                    realized_today += trade.get('net_pnl', 0.0)
+        
+        # Add unrealized PnL on open positions (MTM)
+        unrealized = 0.0
+        if hasattr(self, 'portfolio'):
+            for pos in self.portfolio.positions.values():
+                if pos.quantity != 0 and hasattr(pos, 'unrealized_pnl'):
+                    unrealized += float(pos.unrealized_pnl)
+        
+        # Subtract commissions paid today (fees reduce PnL)
+        fees_today = 0.0
+        if hasattr(self, 'portfolio') and hasattr(self.portfolio, 'total_commission'):
+            fees_today = float(self.portfolio.total_commission)
+        
+        return realized_today + unrealized - fees_today
+    
+    @property
+    def wins(self) -> int:
+        """Count of profitable closed trades."""
+        if not hasattr(self, '_closed_trades'):
+            return 0
+        return sum(1 for t in self._closed_trades if t.get('net_pnl', 0) > 0)
+    
+    @property
+    def losses(self) -> int:
+        """Count of losing closed trades."""
+        if not hasattr(self, '_closed_trades'):
+            return 0
+        return sum(1 for t in self._closed_trades if t.get('net_pnl', 0) <= 0)
+    
+    def win_rate(self) -> float:
+        total = self.wins + self.losses
+        return (self.wins / total) if total else 0.0

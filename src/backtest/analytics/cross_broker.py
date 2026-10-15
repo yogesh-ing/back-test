@@ -79,7 +79,12 @@ SLIPPAGE_BUCKETS: Tuple[Tuple[str, float, Optional[float]], ...] = (
 _INTERNAL_QUALITY_KEYS = ("slippage_bps_samples", "fill_time_samples_values")
 
 #: Brand display names. ``mStock`` is a brand, not a title-case of its slug.
-_BROKER_LABELS = {"mstock": "mStock", "dhan": "Dhan", "paper": "Paper (sim)"}
+_BROKER_LABELS = {
+    "mstock": "mStock",
+    "dhan": "Dhan",
+    "upstox": "Upstox",
+    "paper": "Paper (sim)",
+}
 
 #: A P&L change inside this band is noise, not a reason to move a strategy.
 MIGRATION_NOISE_PCT = 2.0

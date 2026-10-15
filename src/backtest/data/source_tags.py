@@ -20,6 +20,7 @@ from backtest.data.db_source import DbSource
 from backtest.data.dhan_live_feed import DhanLiveFeed
 from backtest.data.mstock_live_feed import MStockLiveFeed
 from backtest.data.synthetic import SyntheticSource
+from backtest.data.upstox_live_feed import UpstoxLiveFeed
 
 __all__ = [
     "SOURCE_TAGS",
@@ -39,6 +40,7 @@ SOURCE_TAGS: dict[type, str] = {
     DbSource: "replay",
     MStockLiveFeed: "mstock",
     DhanLiveFeed: "dhan",
+    UpstoxLiveFeed: "upstox",
 }
 
 #: The tag VALUES of :data:`SOURCE_TAGS` — the canonical set for validating a
@@ -66,6 +68,9 @@ APP_SOURCE_TAGS: dict[str, str] = {
     # another venue's name. The mapping's job is to stop silent re-tagging,
     # not to rename venues.
     "dhan": "dhan",
+    # Third live venue (2026-10-13): UpstoxLiveFeed owns its own tag for the
+    # same reason dhan does — a runner must never wear another venue's name.
+    "upstox": "upstox",
     "db": "replay",
 }
 

@@ -213,13 +213,24 @@ def test_store_runs_on_the_hand_migrated_database(sqlite_db: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_chain_009_to_018():
+def test_alembic_chain_009_to_020():
+    """One linear chain, one head — 009 through 020.
+
+    Asserting the *specific* head makes every new revision a failing test
+    that must be updated deliberately (the convention in this repo's git
+    history: "test(db): track alembic head NNN after ... migration"). A
+    drifted head is exactly what this test is for: it is the cheap signal
+    that a revision landed without its chain being checked.
+    """
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script.get_heads() == ["018"]
-    revs = ("009", "010", "011", "012", "013", "014", "015", "016", "017", "018")
+    assert script.get_heads() == ["020"]
+    revs = (
+        "009", "010", "011", "012", "013", "014", "015", "016", "017",
+        "018", "019", "020",
+    )
     chain = {r: script.get_revision(r).down_revision for r in revs}
     assert chain == {
         "009": "008",
@@ -232,6 +243,8 @@ def test_alembic_chain_009_to_018():
         "016": "015",
         "017": "016",
         "018": "017",
+        "019": "018",
+        "020": "019",
     }
 
 

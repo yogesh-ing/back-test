@@ -119,6 +119,25 @@ validation) and a valid `portfolios.source` value (CHECK widened by migration
 venue: a runner's orders route by `execution_broker`/segment, its bars by
 `source` — the two need not match.
 
+### 6. UpstoxLiveFeed (`data/upstox_live_feed.py`)
+
+**Use case:** Real market data from Upstox — websocket/LTP + historical candle
+APIs. Requires an active Upstox session (browser OAuth; `UPSTOX_CLIENT_ID`,
+`UPSTOX_CLIENT_SECRET`, `UPSTOX_REDIRECT_URI`).
+
+**Runner source tag (2026-10-13):** `UpstoxLiveFeed` is registered in
+`data/source_tags.py` (`SOURCE_TAGS[UpstoxLiveFeed] = "upstox"`), so `upstox` is a
+selectable **Data source** for spawned runners (dropdown + `RunnerConfig.source`
+validation) and a valid `portfolios.source` value (CHECK widened by migration
+020). Bars stamped `_source="upstox"` fan out only to runners configured with
+`source="upstox"` (source-isolated bar routing). Same split as the other venues:
+orders route by `execution_broker`/segment, bars by `source`.
+
+The forward path (`forward/feed_registry.py`) exposes it as `UpstoxBarFeed`,
+and `option_quote_provider_for` treats `source="upstox"` as a live-chain
+candidate — an authenticated session gets real option chains and LTP from the
+shared `LiveChainProvider`, never a synthetic fallback.
+
 ### Source registry — how mode and source combine (`data/source_registry.py`)
 
 The single factory deciding where a run's bars come from:
@@ -168,7 +187,7 @@ class MySource:
 
 ### CLI Flag
 ```bash
-python -m backtest.web.app --source synthetic   # or csv, mstock, db
+python -m backtest.web.app --source synthetic   # or csv, mstock, dhan, upstox, db
 ```
 
 ### In Code
