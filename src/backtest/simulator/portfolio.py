@@ -70,11 +70,12 @@ logger = logging.getLogger("backtest.simulator.portfolio")
 
 #: Run classification values, mirroring the CHECK constraints on
 #: ``portfolios.mode`` / ``portfolios.source`` (migration 002, widened by
-#: migration 016 to admit the second broker venue). When a new source tag
-#: joins :data:`backtest.data.source_tags.SOURCE_TAGS`, BOTH must move:
-#: this tuple AND the DB CHECK (``db/migrations/``).
+#: migration 016 for the second broker venue and by 020 for the third). When
+#: a new source tag joins :data:`backtest.data.source_tags.SOURCE_TAGS`,
+#: ALL THREE must move together: this tuple, the DB CHECK (``db/migrations/``),
+#: and ``PortfolioSource`` in ``backtest.db.models``.
 VALID_MODES = ("paper", "live")
-VALID_SOURCES = ("synthetic", "replay", "mstock", "dhan")
+VALID_SOURCES = ("synthetic", "replay", "mstock", "dhan", "upstox")
 
 
 def _utcnow() -> datetime:

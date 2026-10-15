@@ -42,7 +42,7 @@ from backtest.intelligence.regime import LABELS, MarketRegimeDetector, regime_fi
 
 logger = logging.getLogger("backtest.intelligence")
 
-BROKER_SOURCES = frozenset({"mstock", "dhan"})
+BROKER_SOURCES = frozenset({"mstock", "dhan", "upstox"})
 
 
 def _fmt(n: float) -> str:
