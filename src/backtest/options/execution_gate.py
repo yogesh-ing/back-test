@@ -21,7 +21,7 @@ so a payload labelled ``long_call`` with a put inside it is rejected too.
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Any, Iterable
 
 #: What V1 may open: a long call or a long put, nothing else.
 V1_ALLOWED_STRUCTURES: frozenset[str] = frozenset({"long_call", "long_put"})
@@ -46,6 +46,14 @@ _EXPECTED_SIDE = {"long_call": "CE", "long_put": "PE"}
 
 #: Rejection reasons — stable identifiers, safe to log and count.
 REASON_STRUCTURE_TYPE = "STRUCTURE_NOT_IN_V1"
+#: Phase 1 (Plan v2.1 §6.1): the consolidated Pre-Trade Risk Gate reasons.
+#: These are the ONLY runtime permission vocabulary — UI/bridge/API no
+#: longer invent their own refusals, clamps, or fallbacks.
+REASON_STRUCTURE_NOT_PERMITTED = "STRUCTURE_NOT_PERMITTED"
+REASON_MAX_LOSS_EXCEEDED = "MAX_LOSS_EXCEEDED"
+REASON_QUANTITY_CEILING = "QUANTITY_ABOVE_CEILING"
+REASON_ORDER_VALUE_EXCEEDED = "ORDER_VALUE_EXCEEDED"
+REASON_KILL_SWITCH = "KILL_SWITCH_ENGAGED"
 REASON_LEG_COUNT = "MULTI_LEG_NOT_IN_V1"
 REASON_LEG_SIDE = "SHORT_OPTION_NOT_IN_V1"
 REASON_OPTION_SIDE = "OPTION_SIDE_MISMATCH"
@@ -157,3 +165,87 @@ def check_structure_type(
             f"structure_type {structure_type!r} is not executable here "
             f"(allowed: {sorted(allowed_set)})",
         )
+
+
+# --------------------------------------------------------------------------- #
+# Pre-Trade Risk Gate (Phase 1, Plan v2.1 §6.1) — the ONE runtime gate
+# --------------------------------------------------------------------------- #
+
+
+class PreTradeRiskGate:
+    """Permission for a specific opening trade, decided outside the strategy.
+
+    The strategy owns *intent* (what it wants); this gate owns *permission*
+    (whether this account/mode may do it, at this size, right now). Its
+    rulebook is Layer-1 policy (``config/risk_limits.yaml``, Phase 0):
+    loaded fail-closed by :func:`backtest.risk_limits.load_risk_limits`,
+    so constructing a gate over a broken rulebook raises rather than
+    permitting. Legacy module-level ``check_*`` functions above remain the
+    broker-boundary leg checks and are unchanged.
+    """
+
+    def __init__(self, limits: Any = None, *, mode: str = "paper") -> None:
+        if limits is None:
+            from backtest.risk_limits import load_risk_limits
+
+            limits = load_risk_limits()  # fail-closed: raises on a bad rulebook
+        self.limits = limits
+        self.mode = str(mode or "paper").strip().lower()
+        self.kill_switch_engaged = bool(
+            getattr(limits, "kill_switch_engaged_on_boot", False)
+        )
+
+    def permitted_structures(self) -> frozenset[str]:
+        """Structures this mode may trade at all (entitlement, §7 layer 2)."""
+        return self.limits.permitted_structures(self.mode)
+
+    def check_opening(
+        self,
+        structure_type: str,
+        *,
+        quantity: int = 1,
+        worst_case_loss_inr: float | None = None,
+        order_value_inr: float | None = None,
+    ) -> None:
+        """Raise :class:`StructureNotAllowedError` unless this opening is permitted.
+
+        ``worst_case_loss_inr``/``order_value_inr`` are checked when the
+        caller can state them (an intent that can state neither is refused
+        by contract validation upstream, plan §4.3 — the gate never has to
+        guess a number here).
+        """
+        if self.kill_switch_engaged:
+            raise StructureNotAllowedError(
+                REASON_KILL_SWITCH, "kill switch is engaged; no openings permitted"
+            )
+        structure = str(structure_type or "").strip().lower()
+        if structure not in self.permitted_structures():
+            raise StructureNotAllowedError(
+                REASON_STRUCTURE_NOT_PERMITTED,
+                f"structure {structure!r} is not entitled for mode {self.mode!r} "
+                f"(permitted: {sorted(self.permitted_structures())})",
+            )
+        if int(quantity) < 1 or int(quantity) > int(self.limits.per_runner_max_lots):
+            raise StructureNotAllowedError(
+                REASON_QUANTITY_CEILING,
+                f"quantity {quantity} outside [1, {self.limits.per_runner_max_lots}] "
+                "(Layer-1 per-runner ceiling — refused, not clamped)",
+            )
+        if (
+            worst_case_loss_inr is not None
+            and float(worst_case_loss_inr) > float(self.limits.per_trade_max_loss_inr)
+        ):
+            raise StructureNotAllowedError(
+                REASON_MAX_LOSS_EXCEEDED,
+                f"worst-case loss ₹{float(worst_case_loss_inr):,.0f} exceeds the "
+                f"per-trade ceiling ₹{float(self.limits.per_trade_max_loss_inr):,.0f}",
+            )
+        if (
+            order_value_inr is not None
+            and float(order_value_inr) > float(self.limits.per_runner_max_order_value_inr)
+        ):
+            raise StructureNotAllowedError(
+                REASON_ORDER_VALUE_EXCEEDED,
+                f"order value ₹{float(order_value_inr):,.0f} exceeds the per-runner "
+                f"ceiling ₹{float(self.limits.per_runner_max_order_value_inr):,.0f}",
+            )

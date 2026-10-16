@@ -1,9 +1,9 @@
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class SmaCrossover(Strategy):
+class SmaCrossover(EquityStrategy):
     """Simple moving-average crossover: long when fast SMA is above slow SMA."""
 
     name = "sma_crossover"

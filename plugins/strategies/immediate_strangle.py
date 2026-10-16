@@ -40,14 +40,14 @@ from __future__ import annotations
 import pandas as pd
 
 from backtest.alerts.types import AlertType
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import StructureStrategy
 from backtest.strategy.intent import Direction, MarketView
 
 #: Contribution share above which ``alert_response="exit"`` requests a close.
 EXIT_SHARE_MIN = 0.5
 
 
-class ImmediateStrangle(Strategy):
+class ImmediateStrangle(StructureStrategy):
     """Sell the 2%-OTM strangle the moment the runner is deployed."""
 
     name = "immediate_strangle"
@@ -60,6 +60,33 @@ class ImmediateStrangle(Strategy):
     )
     version = "1.1"
     author = "strategy-plan spec 2026-09-18"
+
+    # Phase 2 rewrite (plan §9.2): the opening trade is stated explicitly
+    # here — a short strangle ~2% OTM each side — instead of being smuggled
+    # through an unconditional NEUTRAL view + expression mapping. NEUTRAL
+    # remains the strategy's (non-)opinion; this intent, by name, is what
+    # opens. The ₹100 stop/target that used to live in the runner
+    # expression now lives in the strategy's ExitPlan.
+    opening_structure = {
+        "structure": "strangle",
+        "strike_selection": "fixed_distance",
+        "distance_pct": 2.0,
+        "expiry_policy": "nearest",
+    }
+    execution = {
+        "emits": [],
+        "structures": {},
+        "exit": {
+            "stop_loss_points": 100,
+            "take_profit_points": 100,
+            "signal_flip": False,
+            "min_days_to_expiry": None,
+        },
+        "quantity": 1,
+        "min_quantity": 1,
+        "max_quantity": 3,
+        "allowed_overrides": ["quantity", "exit"],
+    }
     # Portfolio Intelligence: designed for a calm (LOW-VIX) market.
     regime_vix_range = (10.0, 15.0)
     subscribed_alerts = (

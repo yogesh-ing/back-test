@@ -92,6 +92,16 @@ def signal_kind(cls: type) -> str:
     return "option" if cls.generate_market_view is not _BASE_MARKET_VIEW else "equity"
 
 
+def _execution_block(cls: type) -> "dict[str, Any] | None":
+    try:
+        from .execution import execution_summary
+
+        return execution_summary(cls.execution_spec())
+    except Exception:  # noqa: BLE001 — catalogue must never break on one strategy
+        logger.warning("execution block failed for %s", cls.__name__, exc_info=True)
+        return None
+
+
 def get_all() -> list[dict[str, Any]]:
     """Full strategy catalogue as plain dicts.
 
@@ -133,6 +143,9 @@ def get_all() -> list[dict[str, Any]]:
                 # captured by the Strategy Builder (detected or user-typed);
                 # None for hand-written plugins that never went through it.
                 "readable_criteria": getattr(cls, "readable_criteria", None),
+                # Phase 0 (plan §4.4): strategy-owned execution declaration,
+                # or None for legacy strategies — additive for API clients.
+                "execution": _execution_block(cls),
             }
         )
     logger.info(

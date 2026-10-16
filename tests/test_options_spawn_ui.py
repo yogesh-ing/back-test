@@ -214,6 +214,37 @@ def _browser_payload(**overrides):
     return payload
 
 
+def _v2_payload(**overrides):
+    """Phase 2 shape for a rewritten (spec'd) strategy: no expression at
+    all — the strategy's declared defaults resolve server-side, and the
+    client may only send menu-bounded field selections. (The Phase 3 UI
+    will post exactly this; _browser_payload above remains the legacy
+    shape for unmigrated strategies.)"""
+    payload = {
+        "name": "NIFTY-V2",
+        "strategy": "directional_options",
+        "allocated_capital": 1_000_000,
+        "timeframe": "1day",
+        "mode": "paper",
+        "source": "synthetic",
+        "target_type": "SINGLE_SYMBOL",
+        "symbol": "NIFTY",
+        "params": {},
+        "instrument": {"type": "option"},
+        "expression_selections": {
+            "exit": {
+                "min_days_to_expiry": 1,
+                "stop_loss_pct": 0.4,
+                "take_profit_pct": 0.8,
+                "neutral_bars": 2,
+                "reenter": True,
+            }
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
 class TestCreateRunnerApi:
     def test_equity_payload_without_instrument_still_works(self, client):
         response = client.post(
@@ -232,7 +263,10 @@ class TestCreateRunnerApi:
         assert runner["options"] is None
 
     def test_option_payload_spawns_an_option_runner(self, client):
-        response = client.post("/api/portfolio/runner/create", json=_browser_payload())
+        # directional_options was rewritten (Phase 2): the browser's legacy
+        # full-expression payload is refused for spec'd strategies by
+        # design; the v2 selections shape is what spawns now.
+        response = client.post("/api/portfolio/runner/create", json=_v2_payload())
         assert response.status_code == 201, response.get_json()
 
         runner = response.get_json()["runner"]
@@ -249,8 +283,8 @@ class TestCreateRunnerApi:
 
     def test_optional_exit_keys_default_inside_the_engine(self, client):
         """A minimal option payload is still deployable."""
-        payload = _browser_payload()
-        payload["instrument"]["expression"].pop("exit")
+        payload = _v2_payload()
+        payload.pop("expression_selections")
         response = client.post("/api/portfolio/runner/create", json=payload)
         assert response.status_code == 201
         policy = response.get_json()["runner"]["options"]["exit_policy"]
@@ -258,8 +292,8 @@ class TestCreateRunnerApi:
         assert policy["min_days_to_expiry"] == 1  # shipped default
 
     def test_ride_into_settlement_via_explicit_null(self, client):
-        payload = _browser_payload()
-        payload["instrument"]["expression"]["exit"] = {"min_days_to_expiry": None}
+        payload = _v2_payload()
+        payload["expression_selections"] = {"exit": {"min_days_to_expiry": None}}
         response = client.post("/api/portfolio/runner/create", json=payload)
         assert response.status_code == 201
         policy = response.get_json()["runner"]["options"]["exit_policy"]
@@ -288,7 +322,7 @@ class TestCreateRunnerApi:
 
     def test_payload_survives_json_round_trip(self, client):
         """The JS POST is JSON — make sure nothing depends on Python objects."""
-        raw = json.dumps(_browser_payload())
+        raw = json.dumps(_v2_payload())
         response = client.post(
             "/api/portfolio/runner/create",
             data=raw,

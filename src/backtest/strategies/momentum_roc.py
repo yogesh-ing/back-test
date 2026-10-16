@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class MomentumROC(Strategy):
+class MomentumROC(EquityStrategy):
     """ROC momentum — long while N-bar rate of change stays above a floor."""
 
     name = "momentum_roc"

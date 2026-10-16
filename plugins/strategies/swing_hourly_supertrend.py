@@ -23,7 +23,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
 def _supertrend_dir(high: np.ndarray, low: np.ndarray, close: np.ndarray,
@@ -56,7 +56,7 @@ def _supertrend_dir(high: np.ndarray, low: np.ndarray, close: np.ndarray,
     return direction
 
 
-class SwingHourlySupertrend(Strategy):
+class SwingHourlySupertrend(EquityStrategy):
     name = "swing_hourly_supertrend"
     description = (
         "Hourly swing: long on a Supertrend(10,3) bull flip above the "

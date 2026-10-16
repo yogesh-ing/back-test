@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
 def _rsi(close: pd.Series, period: int) -> pd.Series:
@@ -34,7 +34,7 @@ def _rsi(close: pd.Series, period: int) -> pd.Series:
     return 100.0 - 100.0 / (1.0 + rs)
 
 
-class SwingRsi2MeanRev(Strategy):
+class SwingRsi2MeanRev(EquityStrategy):
     name = "swing_rsi2_meanrev"
     description = (
         "Daily swing mean-reversion: buy an RSI(2) washout below the "
