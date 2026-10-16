@@ -673,8 +673,17 @@ def create_runner() -> Tuple[Response, int]:
     instrument = data.get("instrument") or {"type": "equity"}
     # Lots-per-leg: clamp here too so a bad client value can't produce a
     # nonsense multiplier on every leg (fail-closed sizing rule).
-    if (
+    # Phase 1: v2 expressions are EXEMPT from this clamp — strict spawns are
+    # resolved and refused below (fail closed, never silently corrected);
+    # the clamp remains only on the legacy v1 path until Phase 4 deletes it.
+    _is_v2_expression = (
         isinstance(instrument, dict)
+        and isinstance(instrument.get("expression"), dict)
+        and int(instrument["expression"].get("expression_version", 0) or 0) == 2
+    )
+    if (
+        not _is_v2_expression
+        and isinstance(instrument, dict)
         and isinstance(instrument.get("expression"), dict)
         and "quantity" in instrument["expression"]
     ):
@@ -771,6 +780,139 @@ def create_runner() -> Tuple[Response, int]:
             except SourceDisabledError as exc:
                 return _error(str(exc), 409)
 
+    # Phase 0 (plan §8): stamp the transitive strategy-bundle fingerprint.
+    # Additive and best-effort in Phase 0 — no strategy declares a spec yet,
+    # so this cannot change spawn behaviour; Phase 1 makes it load-bearing
+    # (rehydration comparison → STRATEGY_CODE_CHANGED pause).
+    strategy_bundle = None
+    try:
+        from backtest.strategy.bundle import engine_git_sha, strategy_bundle as _bundle
+        from backtest.strategy.registry import get_strategy as _get_strategy
+
+        _cls = _get_strategy(strategy_name)
+        strategy_bundle = _bundle(_cls).to_dict()
+        strategy_bundle["engine_git_sha"] = engine_git_sha()
+        # §8 completes here: the governing rulebook fingerprint (the loader
+        # exists since Phase 0 §7.1 — a load failure stamps None in Phase 0
+        # and becomes a spawn refusal when Phase 1 makes the gate live)
+        # and the resolved-config fingerprint over the expression as sent.
+        try:
+            from backtest.risk_limits import load_risk_limits
+
+            strategy_bundle["risk_limits_sha256"] = load_risk_limits().sha256
+        except Exception:  # noqa: BLE001 — Phase 0 stamping must not break spawn
+            strategy_bundle["risk_limits_sha256"] = None
+        from backtest.strategy.execution import config_sha256
+
+        _expr = (data.get("instrument") or {}).get("expression") or {}
+        strategy_bundle["config_sha256"] = config_sha256(_expr)
+    except Exception:  # noqa: BLE001 — Phase 0 stamping must not break spawn
+        log.warning("strategy bundle stamping failed for %s", strategy_name, exc_info=True)
+
+    # Phase 1 (Plan v2.1 §6/§7): strict resolution happens once, here,
+    # server-side. Applies when the strategy declares an execution spec
+    # or the client sent a v2 expression; legacy v1 spawns are untouched.
+    if (
+        isinstance(instrument, dict)
+        and str(instrument.get("type", "equity")).lower() == "option"
+    ):
+        try:
+            from backtest.strategy.registry import get_strategy as _get_cls
+
+            _spec = None
+            try:
+                _spec = _get_cls(strategy_name).execution_spec()
+            except KeyError:
+                _spec = None
+            _raw_expr = instrument.get("expression")
+            _wants_v2 = _spec is not None or (
+                isinstance(_raw_expr, dict)
+                and int(_raw_expr.get("expression_version", 0) or 0) == 2
+            )
+            if _wants_v2:
+                from backtest.options.execution_gate import PreTradeRiskGate
+                from backtest.strategy.execution import (
+                    resolve_expression,
+                    validate_expression,
+                )
+
+                _gate = PreTradeRiskGate(mode=mode or "paper")  # fail-closed load
+                _permitted = _gate.permitted_structures()
+                if _spec is not None:
+                    _playbook_sel = (
+                        _raw_expr if data.get("playbook_id") else None
+                    )
+                    _user_sel = data.get("expression_selections") or (
+                        None if data.get("playbook_id") else _raw_expr
+                    )
+                    # A client that sends the strategy's own full v2
+                    # expression unchanged (the Phase 3 UI shape) means "no
+                    # selections": the envelope key is stripped and an
+                    # expression identical to the strategy default resolves
+                    # to the default itself. A *modified* full expression is
+                    # applied as leaf selections and must stay inside the
+                    # strategy's menus (unknown/deleting fields refuse).
+                    if isinstance(_user_sel, dict):
+                        _user_sel = {
+                            k: v
+                            for k, v in _user_sel.items()
+                            if k != "expression_version"
+                        }
+                        if _user_sel == {
+                            k: v
+                            for k, v in _spec.to_expression().items()
+                            if k != "expression_version"
+                        }:
+                            _user_sel = None
+                    if isinstance(_playbook_sel, dict):
+                        _playbook_sel = {
+                            k: v
+                            for k, v in _playbook_sel.items()
+                            if k != "expression_version"
+                        }
+                    _resolved, _provenance = resolve_expression(
+                        spec=_spec,
+                        playbook_selections=_playbook_sel
+                        if isinstance(_playbook_sel, dict)
+                        else None,
+                        user_selections=_user_sel
+                        if isinstance(_user_sel, dict)
+                        else None,
+                    )
+                    _errs = validate_expression(_resolved, permitted_structures=_permitted)
+                    if _errs:
+                        return _error("; ".join(_errs))
+                    for _rule in _spec.structures.values():
+                        _gate.check_opening(
+                            _rule.structure,
+                            quantity=int(_resolved.get("quantity", 1) or 1),
+                            worst_case_loss_inr=_spec.exit_plan.max_loss_inr,
+                        )
+                    instrument = {
+                        **instrument,
+                        "expression": _resolved,
+                        "expression_provenance": _provenance,
+                    }
+                else:
+                    _errs = validate_expression(
+                        _raw_expr, permitted_structures=_permitted
+                    )
+                    if _errs:
+                        return _error("; ".join(_errs))
+                    instrument = {
+                        **instrument,
+                        "expression_provenance": {
+                            "expression": "user",
+                        },
+                    }
+        except Exception as exc:  # noqa: BLE001 — refusals are 400s, never 500s
+            from backtest.options.execution_gate import StructureNotAllowedError
+            from backtest.strategy.execution import ExecutionSpecError
+
+            if isinstance(exc, (ExecutionSpecError, StructureNotAllowedError, ValueError)):
+                return _error(str(exc))
+            raise
+
     try:
         config = RunnerConfig(
             name=name,
@@ -821,6 +963,7 @@ def create_runner() -> Tuple[Response, int]:
                 data.get("playbook_snapshot")
                 or data.get("instrument", {}).get("expression")
             ),
+            strategy_bundle=strategy_bundle,
         )
         auto_start = bool(data.get("auto_start", True))
         instance_id = _manager().add_runner(config, start=auto_start)

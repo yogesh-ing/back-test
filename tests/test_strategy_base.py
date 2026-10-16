@@ -173,6 +173,9 @@ def test_get_all_returns_valid_catalogue():
             "default_segment",
             # issues.txt S1 follow-up: readable criteria recorded at save.
             "readable_criteria",
+            # Phase 0 (plan §4.4): strategy-owned execution declaration
+            # (None for legacy strategies) — additive catalogue key.
+            "execution",
         }
         assert entry["params"] == registry.get_params(entry["name"])
         assert entry["signal_kind"] in {"option", "equity"}

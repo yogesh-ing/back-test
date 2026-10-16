@@ -1,0 +1,59 @@
+# =============================================================================
+# Layer-1 Risk Limits — the Pre-Trade Risk Gate's rulebook (Plan v2.1 §7.1)
+# =============================================================================
+# Home decision (Gap #4): version-controlled YAML. Policy changes must be
+# reviewable diffs with an author and a reason — git provides that; a DB
+# would need a change-approval workflow we do not have, and env vars are
+# for secrets, never limits.
+#
+# Loaded and validated ONCE at process start by
+# backtest.risk_limits.load_risk_limits() — fail-closed: an unreadable or
+# invalid file raises RiskLimitsError and option runners must refuse to
+# spawn (Phase 1 wiring). The file's SHA-256 is stamped into every spawn
+# snapshot so a runner's governing limits are reproducible.
+#
+# Changes require a restart and take effect for NEW spawns and NEW trades
+# only — never retroactively re-permit an open position.
+#
+# This file deliberately does NOT duplicate values that live elsewhere:
+# portfolio drawdown / daily-loss breakers stay in GlobalRiskConfig +
+# config/forward_testing.yaml bucket limits. One value, one file — the
+# loader refuses keys that would shadow those surfaces (overlap check).
+#
+# Values below are conservative starting points for the paper bucket.
+# They are policy, not code: tune them by editing this file in a reviewed
+# commit, never from the UI (Phase 3 adds a read-only view only).
+# =============================================================================
+
+# Schema version of THIS file (bump on breaking schema changes).
+schema_version: 1
+
+# Per-trade ceiling: a single opening trade's worst-case loss (from the
+# intent's ExitPlan / structure legs) may not exceed this, in rupees.
+# Sized so one ATM index lot (premium alone can exceed Rs 17k on NIFTY)
+# is tradeable; tighten deliberately, in a reviewed commit, per strategy
+# family as the rewrite lands.
+per_trade_max_loss_inr: 25000
+
+# Per-runner ceilings.
+per_runner:
+  max_lots_per_trade: 10          # hard ceiling; strategy menus may only narrow
+  max_order_value_inr: 200000     # worst-case premium outlay per opening trade
+
+# Structure entitlement per mode (plan §6.1): what this account/mode may
+# trade at all. The strategy requests; this list permits. Anything not
+# listed is refused by the Risk Gate with STRUCTURE_NOT_PERMITTED.
+entitlement:
+  paper:
+    - long_call
+    - long_put
+    - bull_call_spread
+    - bear_put_spread
+  live:
+    - long_call
+    - long_put
+
+# Kill-switch defaults at process start (runtime state is session-scoped
+# and never persisted from here; this only sets the boot posture).
+kill_switch:
+  engaged_on_boot: false

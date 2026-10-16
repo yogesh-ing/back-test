@@ -898,6 +898,11 @@ class RunnerConfig:
     # rerouted).
     segment: Optional[str] = None
     execution_broker: Optional[str] = None
+    # Phase 0 (plan §8): transitive strategy-bundle fingerprint stamped at
+    # spawn (additive; None for runners created before stamping existed).
+    # Phase 1 compares it at rehydration — a mismatch starts the runner
+    # PAUSED (STRATEGY_CODE_CHANGED) instead of trading new code silently.
+    strategy_bundle: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         self.name = str(self.name).strip()
@@ -1098,6 +1103,7 @@ class StrategyRunner:
             self.options_bridge = OptionsBridge(
                 capital=config.allocated_capital,
                 expression=config.instrument.get("expression"),
+                mode=config.mode,
                 quote_provider=provider,
                 # Marks land on bar close (plus the portfolio watchdog), so the
                 # freshness SLA is sized off the bar cadence — see OptionsBridge.
@@ -1491,6 +1497,27 @@ class StrategyRunner:
 
     def resume(self) -> None:
         with self._lock:
+            if getattr(self, "strategy_code_changed", False):
+                # Plan §8: resuming after STRATEGY_CODE_CHANGED is the
+                # operator's explicit migration to the new code — restamp
+                # the bundle so the snapshot tells the truth from here.
+                try:
+                    from backtest.strategy.bundle import strategy_bundle
+                    from backtest.strategy.registry import get_strategy
+
+                    cls = get_strategy(self.config.strategy_name)
+                    stamped = strategy_bundle(cls).to_dict()
+                    stamped.update(
+                        {
+                            k: v
+                            for k, v in (self.config.strategy_bundle or {}).items()
+                            if k in ("engine_git_sha", "risk_limits_sha256", "config_sha256")
+                        }
+                    )
+                    self.config.strategy_bundle = stamped
+                except Exception:  # noqa: BLE001 — never block a resume on stamping
+                    pass
+                self.strategy_code_changed = False
             if self.status == STATUS_PAUSED:
                 # Bug #2: restored runners come back PAUSED on whatever chain
                 # they resolved at construction. If the broker is authenticated
@@ -3135,6 +3162,7 @@ class StrategyRunner:
                 "last_bar_ts": max(self._last_bar_ts.values()) if self._last_bar_ts else None,
                 "created_ts": self.created_ts,
                 "instrument": dict(self.config.instrument or {"type": "equity"}),
+                "strategy_bundle": self.config.strategy_bundle,
                 "options": options_summary,
                 # R1: runner-level mark freshness fields (mirrored from options_summary)
                 "mark_ts": (options_summary or {}).get("mark_ts"),
