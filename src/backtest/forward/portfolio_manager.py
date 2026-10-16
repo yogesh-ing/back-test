@@ -1991,12 +1991,13 @@ class PortfolioManager:
         try:
             self._restoring = True
             try:
-                self._apply_state_payload(payload)
+                restored = self._apply_state_payload(payload)
             finally:
                 self._restoring = False
             logger.warning(
-                "[state] restored %d runner(s) + breaker latches from %s — "
+                "[state] restored %d of %d runner(s) + breaker latches from %s — "
                 "restored runners are PAUSED; resume explicitly",
+                restored,
                 len(payload.get("runners", [])),
                 self._state_store.path,
             )
@@ -2005,23 +2006,30 @@ class PortfolioManager:
                 "[state] restore from %s failed — starting clean", self._state_store.path
             )
 
-    def _apply_state_payload(self, payload: Dict[str, Any]) -> None:
+    def _apply_state_payload(self, payload: Dict[str, Any]) -> int:
         # Runners FIRST (add_runner re-subscribes feeds + the registry and
         # re-books capital + recomputes anchors), then manager scalars and
         # breaker latches override whatever add_runner initialised.
+        # Returns the number of runners actually restored.
+        restored = 0
         for runner_snap in payload.get("runners", []):
             from backtest.forward.state_store import _config_from_dict
 
-            config = _config_from_dict(runner_snap["config"])
+            # Per-runner isolation: a runner that cannot be re-created —
+            # a 'live' runner with no armed broker session (ValueError), or
+            # a strategy retired/renamed since the state was written, whose
+            # lookup raises KeyError from the registry — is skipped and
+            # logged. It must never abort the loop: before this catch was
+            # widened, one retired name (e.g. a pre-Phase-2 strategy)
+            # silently dropped every later runner plus the manager scalars
+            # below, all reported as "starting clean".
             try:
+                config = _config_from_dict(runner_snap["config"])
                 self.add_runner(config, start=False)
-            except ValueError as exc:
-                # e.g. a mode='live' runner with no armed broker session this
-                # boot — fail-closed: skip THAT runner, never block the boot.
+            except (ValueError, KeyError) as exc:
                 logger.warning(
-                    "[state] runner %s (%s) refused on restore: %s — skipped",
-                    config.instance_id,
-                    config.name,
+                    "[state] runner (%s) refused on restore: %s — skipped",
+                    runner_snap.get("config", {}).get("name", "?"),
                     exc,
                 )
                 continue
@@ -2033,6 +2041,7 @@ class PortfolioManager:
                 )
                 continue
             restore_runner(runner, runner_snap)
+            restored += 1
 
         manager = payload.get("manager", {})
         self.total_capital = float(manager.get("total_capital", 0.0))
@@ -2096,6 +2105,8 @@ class PortfolioManager:
                 self._bucket_day_start.get("paper", 0.0),
                 self._bucket_day_start.get("live", 0.0),
             )
+
+        return restored
 
     def _on_bar(self, symbol: str, bar: Dict[str, Any]) -> None:
         """Fan one closed candle out to every runner trading that symbol."""

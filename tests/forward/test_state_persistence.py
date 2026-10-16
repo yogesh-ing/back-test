@@ -443,3 +443,46 @@ class TestRobustness:
         payload["some_future_key"] = 123
         config = _config_from_dict(payload)
         assert config.name == "FUT"
+
+
+# ---------------------------------------------------------------------------
+# Restore isolation: one un-restorable runner must not abort the restore
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreIsolation:
+    def test_retired_strategy_runner_is_skipped_not_fatal(self, tmp_path):
+        """Deploy hazard (Phase 2 flag): state written before a strategy
+        was retired (atm_instant_buy etc.) must not abort the restore
+        loop — the retired runner is skipped, later runners restore, and
+        manager scalars still apply."""
+        import copy
+
+        from backtest.forward.state_store import capture_runner
+
+        src = _manager(tmp_path / "src.json")
+        instance_id = src.add_runner(_runner_config("KEEP-ME"))
+        valid_snap = capture_runner(src._runners[instance_id])
+
+        retired_snap = copy.deepcopy(valid_snap)
+        retired_snap["config"] = dict(
+            valid_snap["config"],
+            name="GONE",
+            strategy_name="atm_instant_buy",  # retired in Phase 2
+            instance_id="retired-instance",
+        )
+
+        dst = _manager(tmp_path / "dst.json")
+        restored = dst._apply_state_payload(
+            {
+                # Retired FIRST: proves the loop continues past it.
+                "runners": [retired_snap, valid_snap],
+                "manager": {"total_capital": 123.0, "tick_count": 7},
+                "buckets": {},
+            }
+        )
+        assert restored == 1
+        assert [r.config.name for r in dst._runners.values()] == ["KEEP-ME"]
+        assert dst.tick_count == 7  # manager scalars after the loop applied
+        src.shutdown()
+        dst.shutdown()

@@ -276,3 +276,39 @@ def test_survivor_signals_match_snapshot_original():
         )
     finally:
         registry.unregister("supertrendstrategy")
+
+
+def test_strangle_declared_distance_actually_selects_the_legs():
+    # Flag refinement on the Phase 2 strangle: the declared distance_pct
+    # must DRIVE leg selection, not merely coincide with the builder's
+    # hardcoded default (±2%). Open at 2% and at 5% and compare strikes.
+    from backtest.forward.options_bridge import OptionsBridge
+
+    cls = _get("immediate_strangle")
+    strategy = cls()
+    view = MarketView(
+        direction=Direction.NEUTRAL, confidence=1.0, underlying="NIFTY",
+        spot_price=Decimal("24800"),
+    )
+
+    def open_at(distance_pct):
+        bridge = OptionsBridge(
+            capital=1_000_000.0,
+            expression=cls.default_expression(),
+            quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+            mode="paper",
+        )
+        intent = strategy.build_opening_intent(view)
+        intent["distance_pct"] = distance_pct
+        result = bridge.on_intent(intent, view, "immediate_strangle")
+        assert result and not result.get("rejected"), result
+        structure = bridge.option_broker.get_open_structures()[0]
+        strikes = sorted(float(leg.strike) for leg in structure.legs)
+        return strikes  # [put_strike, call_strike]
+
+    put_2, call_2 = open_at(2.0)
+    put_5, call_5 = open_at(5.0)
+    spot = 24800.0
+    assert call_2 > spot * 1.02 and put_2 < spot * 0.98
+    assert call_5 > spot * 1.05 and put_5 < spot * 0.95
+    assert call_5 > call_2 and put_5 < put_2  # wider declaration, wider legs

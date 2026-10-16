@@ -2239,7 +2239,16 @@ class OptionsBridge:
                 f"{underlying}: no strike on the {expiry} chain within tolerance of {spot}",
             )
         self._validate_entry_contracts(strikes, chain, option_type)
-        intent = structure.build(view, strikes, chain, expiry, strategy_name=strategy_name)
+        # A declared fixed distance (strict mode: the DirectionRule the
+        # strategy/spec stated) reaches builders that select their own
+        # strikes (ShortStrangle); the rest ignore it. Legacy v1 passes
+        # none and builders use their own defaults.
+        build_kwargs: dict[str, Any] = {}
+        if self.strict and self._active_rule is not None and self._active_rule.distance_pct:
+            build_kwargs["distance_pct"] = float(self._active_rule.distance_pct)
+        intent = structure.build(
+            view, strikes, chain, expiry, strategy_name=strategy_name, **build_kwargs
+        )
         quantity = int(self.expression.get("quantity", 1) or 1)
         if quantity > 1:
             intent = self._scale_intent(intent, quantity)
