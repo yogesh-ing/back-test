@@ -285,8 +285,6 @@ _BRIDGE_SCALARS = (
     "_structure_expiry",
     "_entry_premium",
     "_settlement_count",
-    "_reentries_today",
-    "_reentry_day",
     "last_unrealized_pnl",
     "last_spot",
     "last_mtm_ts",

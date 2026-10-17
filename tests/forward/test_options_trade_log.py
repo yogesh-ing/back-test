@@ -31,7 +31,7 @@ from backtest.forward.paper_runner import (
     StrategyRunner,
 )
 from backtest.options.quote_providers import SyntheticChainGenerator
-from options_support import research_profile
+from options_support import wide_gate,  research_profile
 
 
 # ---------------------------------------------------------------------------
@@ -59,11 +59,26 @@ def _bars(closes, start_day=1):
 
 
 def _runner(exit_cfg=None, **overrides):
-    expression = {
-        "type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"},
-        "exit": exit_cfg
+    exit_cfg = dict(
+        exit_cfg
         if exit_cfg is not None
-        else {"min_days_to_expiry": None, "signal_flip": False},
+        else {"min_days_to_expiry": None, "signal_flip": False}
+    )
+    # Phase 4: v2 expression; the strict ExitPlan needs a hard stop —
+    # tests that do not declare one get a far-away points stop.
+    if not any(
+        k in exit_cfg
+        for k in ("stop_loss_pct", "stop_loss_points", "stop_loss_price", "structure_capped")
+    ):
+        exit_cfg["stop_loss_points"] = 900_000.0
+    expression = {
+        "expression_version": 2,
+        "type": {
+            "BULLISH": {"structure": "bull_call_spread", "strike_selection": "atm"},
+            "BEARISH": {"structure": "bear_put_spread", "strike_selection": "atm"},
+        },
+        "quantity": 1,
+        "exit": exit_cfg,
     }
     kwargs = dict(
         name="opt-runner",
@@ -79,6 +94,8 @@ def _runner(exit_cfg=None, **overrides):
     # The trade log is exercised on two-leg structures, which the V1 execution
     # gate refuses for a real runner — widen this book to the research profile.
     research_profile(runner)
+    if runner.options_bridge is not None:
+        runner.options_bridge.risk_gate = wide_gate()
     return runner
 
 
@@ -108,12 +125,14 @@ class TestOptionTradeLog:
         assert trades, "a closed structure must appear in the trade log"
         trade = trades[0]
         assert trade["kind"] == "option"
-        assert trade["structure_type"] == "bull_call_spread"
+        # End-state: directional_options trades long premium — the bridge
+        # expression no longer chooses the structure, the strategy does.
+        assert trade["structure_type"] == "long_call"
         assert trade["underlying"] == "NIFTY"
-        assert trade["symbol"] == "NIFTY bull_call_spread"
+        assert trade["symbol"] == "NIFTY long_call"
         assert trade["qty"] == 1  # lots per leg
         assert trade["units"] == 75  # contracts per leg
-        assert trade["legs"] == 2
+        assert trade["legs"] == 1
         assert trade["exit_reason"] == "stop_loss"
         assert trade["pnl"] < 0
         assert trade["win"] is False

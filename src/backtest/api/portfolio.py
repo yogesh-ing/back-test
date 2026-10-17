@@ -706,28 +706,9 @@ def create_runner() -> Tuple[Response, int]:
 
     params = data.get("params") or {}
     instrument = data.get("instrument") or {"type": "equity"}
-    # Lots-per-leg: clamp here too so a bad client value can't produce a
-    # nonsense multiplier on every leg (fail-closed sizing rule).
-    # Phase 1: v2 expressions are EXEMPT from this clamp — strict spawns are
-    # resolved and refused below (fail closed, never silently corrected);
-    # the clamp remains only on the legacy v1 path until Phase 4 deletes it.
-    _is_v2_expression = (
-        isinstance(instrument, dict)
-        and isinstance(instrument.get("expression"), dict)
-        and int(instrument["expression"].get("expression_version", 0) or 0) == 2
-    )
-    if (
-        not _is_v2_expression
-        and isinstance(instrument, dict)
-        and isinstance(instrument.get("expression"), dict)
-        and "quantity" in instrument["expression"]
-    ):
-        try:
-            instrument["expression"]["quantity"] = max(
-                1, min(int(instrument["expression"]["quantity"]), 100)
-            )
-        except (TypeError, ValueError):
-            instrument["expression"]["quantity"] = 1
+    # Phase 4: the legacy [1, 100] quantity clamp is deleted. Quantities
+    # are menu-bounded by the strategy's spec and refused when outside
+    # it — never silently corrected here or anywhere else.
     if (
         isinstance(instrument, dict)
         and str(instrument.get("type", "equity")).lower() == "option"
@@ -815,34 +796,34 @@ def create_runner() -> Tuple[Response, int]:
             except SourceDisabledError as exc:
                 return _error(str(exc), 409)
 
-    # Phase 0 (plan §8): stamp the transitive strategy-bundle fingerprint.
-    # Additive and best-effort in Phase 0 — no strategy declares a spec yet,
-    # so this cannot change spawn behaviour; Phase 1 makes it load-bearing
-    # (rehydration comparison → STRATEGY_CODE_CHANGED pause).
+    # Plan §8: stamp the transitive strategy-bundle fingerprint.
+    # Phase 4 makes stamping FAIL-CLOSED: a runner whose code/config
+    # cannot be fingerprinted must not spawn — an unstamped runner would
+    # silently defeat the rehydration drift check (Phase 3 carry-forward).
     strategy_bundle = None
     try:
         from backtest.strategy.bundle import engine_git_sha, strategy_bundle as _bundle
         from backtest.strategy.registry import get_strategy as _get_strategy
 
         _cls = _get_strategy(strategy_name)
+    except KeyError:
+        return _error(f"unknown strategy: {strategy_name}")
+    try:
         strategy_bundle = _bundle(_cls).to_dict()
         strategy_bundle["engine_git_sha"] = engine_git_sha()
-        # §8 completes here: the governing rulebook fingerprint (the loader
-        # exists since Phase 0 §7.1 — a load failure stamps None in Phase 0
-        # and becomes a spawn refusal when Phase 1 makes the gate live)
-        # and the resolved-config fingerprint over the expression as sent.
-        try:
-            from backtest.risk_limits import load_risk_limits
+        from backtest.risk_limits import load_risk_limits
 
-            strategy_bundle["risk_limits_sha256"] = load_risk_limits().sha256
-        except Exception:  # noqa: BLE001 — Phase 0 stamping must not break spawn
-            strategy_bundle["risk_limits_sha256"] = None
+        strategy_bundle["risk_limits_sha256"] = load_risk_limits().sha256
         from backtest.strategy.execution import config_sha256
 
         _expr = (data.get("instrument") or {}).get("expression") or {}
         strategy_bundle["config_sha256"] = config_sha256(_expr)
-    except Exception:  # noqa: BLE001 — Phase 0 stamping must not break spawn
+    except Exception as exc:  # noqa: BLE001 — fail closed, loudly
         log.warning("strategy bundle stamping failed for %s", strategy_name, exc_info=True)
+        return _error(
+            f"strategy fingerprinting failed for {strategy_name}: {exc} — "
+            "spawn refused (fail closed, plan §8)"
+        )
 
     # Phase 1 (Plan v2.1 §6/§7): strict resolution happens once, here,
     # server-side. Applies when the strategy declares an execution spec
@@ -929,6 +910,17 @@ def create_runner() -> Tuple[Response, int]:
                         "expression_provenance": _provenance,
                     }
                 else:
+                    if not (
+                        isinstance(_raw_expr, dict)
+                        and int(_raw_expr.get("expression_version", 0) or 0) == 2
+                    ):
+                        return _error(
+                            f"strategy {strategy_name} declares no execution "
+                            "spec, and no valid v2 expression was supplied — "
+                            "an option runner needs one or the other (plan "
+                            "§11); rewritten strategies declare a spec, "
+                            "legacy v1 expressions were removed in Phase 4"
+                        )
                     _errs = validate_expression(
                         _raw_expr, permitted_structures=_permitted
                     )

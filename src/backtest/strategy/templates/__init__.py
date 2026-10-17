@@ -26,7 +26,7 @@ from typing import Any
 
 from ..base import Strategy
 from ..execution import DirectionRule, ExecutionSpecError
-from ..intent import MarketView
+from ..intent import Direction, MarketView
 
 __all__ = [
     "TemplateBase",
@@ -78,6 +78,15 @@ class TemplateBase(Strategy):
         """
         rule = self.direction_rule_for(view)
         if rule is None or view is None:
+            if view is not None and view.direction is not Direction.NEUTRAL:
+                # §11: a runtime view direction outside the declared spec
+                # is a coded refusal, not silence. NEUTRAL (and viewless)
+                # remains silence by definition (§4.2).
+                raise ExecutionSpecError(
+                    f"{self.name}: emitted {view.direction.name} with no "
+                    "structure rule in its execution spec — refusing "
+                    "instead of falling back (plan §11)"
+                )
             return None
         spec = self.execution_spec()
         assert spec is not None  # direction_rule_for already enforced this

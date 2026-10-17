@@ -26,6 +26,30 @@ import pytest
 from backtest.options.execution_gate import RESEARCH_STRUCTURES
 
 
+def wide_gate():
+    """A PreTradeRiskGate wide enough for synthetic-chain premiums.
+
+    The rulebook's ₹25k per-trade ceiling (pending the user's sign-off)
+    sits below one ATM NIFTY premium (~₹28k), so suites exercising
+    mechanics rather than the ceiling scaffold a wider gate — the same
+    spirit as :func:`research_profile`. Nothing in ``src/`` reads this.
+    """
+    from backtest.options.execution_gate import PreTradeRiskGate
+    from backtest.risk_limits import RiskLimits
+
+    return PreTradeRiskGate(
+        RiskLimits(
+            per_trade_max_loss_inr=1_000_000.0,
+            per_runner_max_lots=100,
+            per_runner_max_order_value_inr=10_000_000.0,
+            entitlement={"paper": frozenset(RESEARCH_STRUCTURES)},
+            kill_switch_engaged_on_boot=False,
+            sha256="x" * 64,
+        ),
+        mode="paper",
+    )
+
+
 def research_profile(target):
     """Widen a ``StrategyRunner``, ``OptionsBridge``, book or trader. Returns it."""
     bridge = getattr(target, "options_bridge", target)

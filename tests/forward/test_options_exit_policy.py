@@ -78,24 +78,62 @@ def _view(direction: Direction, spot: float = 24_800.0) -> MarketView:
     )
 
 
+def _v2(expression: dict | None) -> dict:
+    """Wrap a legacy-shaped test expression as a v2 expression (Phase 4).
+
+    The strict ExitPlan demands exactly one hard stop; tests that do not
+    declare one get ``structure_capped`` (a long option's worst case is
+    its premium — no price level to interfere with the rule under test).
+    """
+    expression = dict(expression or {})
+    exit_cfg = dict(expression.get("exit") or {})
+    hard = ("stop_loss_pct", "stop_loss_points", "stop_loss_price")
+    if not any(k in exit_cfg for k in hard) and not exit_cfg.get("structure_capped"):
+        exit_cfg["structure_capped"] = True
+    type_ = expression.get("type", "long_call")
+    if isinstance(type_, dict):
+        type_ = {
+            d: ({"structure": v, "strike_selection": "atm"} if isinstance(v, str) else v)
+            for d, v in type_.items()
+        }
+    out = {
+        "expression_version": 2,
+        "type": type_,
+        "quantity": expression.get("quantity", 1),
+        "exit": exit_cfg,
+    }
+    for key in ("max_loss_per_trade", "expiry_min_days"):
+        if key in expression:
+            out[key] = expression[key]
+    return out
+
+
 def _bridge(expression: dict | None = None, capital: float = 1_000_000.0) -> OptionsBridge:
     return OptionsBridge(
         capital=capital,
-        expression=expression or {"type": "long_call"},
+        expression=_v2(expression or {"type": "long_call"}),
         quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
         allowed_structures=RESEARCH_STRUCTURES,
     )
 
 
 def _open(bridge: OptionsBridge, direction: Direction = Direction.BULLISH, spot: float = 24_800.0):
-    result = bridge.on_market_view(_view(direction, spot), "directional_options")
-    assert result is not None and not result.get("rejected")
+    rule = bridge._strict_rules.get(direction) or next(iter(bridge._strict_rules.values()))
+    result = bridge.on_intent(
+        {"structure": rule.structure, "strike_selection": "atm"},
+        _view(direction, spot),
+        "directional_options",
+    )
+    assert result is not None and not result.get("rejected"), result
     return bridge.option_broker.get_open_structures()[0]
 
 
 def _runner(exit_cfg: dict, expression_extra: dict | None = None, **overrides):
-    expression = {"type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"}}
-    expression["exit"] = exit_cfg
+    # End-state: the runner's expression is the strategy spec's own
+    # resolution (long_call/long_put for directional_options).
+    expression = _v2(
+        {"type": {"BULLISH": "long_call", "BEARISH": "long_put"}, "exit": exit_cfg}
+    )
     expression.update(expression_extra or {})
     kwargs = dict(
         name="opt-runner",
@@ -384,60 +422,43 @@ class TestBridgeExits:
         bridge.on_market_view(_view(Direction.BEARISH), "s")  # signal exit
         assert bridge.pop_exit_event() is None  # not queued for the bar drain
 
-    def test_reentry_opens_the_reverse_structure_next_bar(self):
-        """U2.2: flip + ``reenter`` closes on this bar, reverses on the NEXT bar.
+    def test_flip_close_never_auto_reverses_reentry_is_strategy_driven(self):
+        """Phase 4 end-state: entries arrive only as explicit intents.
 
-        Same-bar re-entry is impossible by design (it churned −₹41,844 in the
-        2026-09-16 forward experiment): the exit-bar view must leave the book
-        flat; only a view on a later bar may open the reverse structure.
+        The legacy bridge auto-reversed on a flip when ``reenter`` was set
+        (U2.2; the −₹41,844 churn lesson). That machinery is deleted: the
+        flip closes the trade, a bare opposite view afterwards is silence,
+        and the strategy re-enters — if it wants to — by emitting a fresh
+        intent on a later bar. ``reenter``/``max_reentries_per_day`` remain
+        declared ExitPlan fields but no longer move the bridge.
         """
         bridge = _bridge(
             {
-                "type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"},
+                "type": {"BULLISH": "long_call", "BEARISH": "long_put"},
                 "exit": {"reenter": True, "min_days_to_expiry": None},
             }
         )
         structure = _open(bridge)
-        assert structure.structure_type == "bull_call_spread"
+        assert structure.structure_type == "long_call"
 
         result = bridge.on_market_view(_view(Direction.BEARISH), "s")
 
-        # Exit bar: the flip closes, nothing re-opens yet.
+        # Exit bar: the flip closes, nothing re-opens.
         assert result["exited"] is True
         assert bridge.closed_count == 1
         assert bridge.option_broker.get_open_structures() == []
 
-        # Next bar: the bar clock advances, then the bearish view re-enters.
+        # Next bar: a bare bearish view is NOT an entry any more.
         bridge.on_bar("NIFTY", 24_700.0, "2026-09-11T09:15:00")
-        entry = bridge.on_market_view(_view(Direction.BEARISH), "s")
-        assert entry is not None and not entry.get("rejected")
+        assert bridge.on_market_view(_view(Direction.BEARISH), "s") is None
+        assert bridge.executed_count == 1
+
+        # The strategy's fresh intent opens the reverse structure.
+        _open(bridge, Direction.BEARISH)
         opens = bridge.option_broker.get_open_structures()
         assert len(opens) == 1
-        assert opens[0].structure_type == "bear_put_spread"
-
-    def test_max_reentries_per_day_limits_the_day_to_one_reversal(self):
-        """The knob reaches the policy config instead of a raw expression lookup."""
-        bridge = _bridge(
-            {
-                "type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"},
-                "exit": {
-                    "reenter": True,
-                    "max_reentries_per_day": 1,
-                    "min_days_to_expiry": None,
-                },
-            }
-        )
-        _open(bridge)
-        assert bridge.on_market_view(_view(Direction.BEARISH), "s")["exited"] is True
-
-        bridge.on_bar("NIFTY", 24_700.0, "2026-09-11T09:15:00")
-        assert bridge.on_market_view(_view(Direction.BEARISH), "s") is not None
-        assert bridge.executed_count == 2  # the day's one reversal is used up
-
-        closed = bridge.on_market_view(_view(Direction.BULLISH), "s")
-        assert closed["exited"] is True
-        assert bridge.open_structure_id is None
-        assert bridge.executed_count == 2, "a second reversal the same day is refused"
+        assert opens[0].structure_type == "long_put"
+        assert bridge.executed_count == 2
 
     def test_no_same_bar_reentry_after_a_stop(self):
         """A stop-out must not immediately re-open the same trade."""
@@ -451,7 +472,8 @@ class TestBridgeExits:
         bridge.on_bar("NIFTY", 21_000.0, "2026-09-11T09:15:00")
         assert bridge.pop_exit_event()["reason"] == EXIT_STOP_LOSS
 
-        # Still bullish on the same bar → the bridge must stay flat.
+        # Still bullish on the same bar → no intent, no trade: the bridge
+        # stays flat (entries are intent-only since Phase 4).
         assert bridge.on_market_view(_view(Direction.BULLISH, 21_000.0), "s") is None
         assert bridge.executed_count == 1
 
@@ -468,7 +490,11 @@ class TestBridgeExits:
         expiry = bridge._select_expiry(generator, "NIFTY")
         bridge.on_bar("NIFTY", 24_800.0, f"{(expiry - timedelta(days=1)).isoformat()}T09:15:00")
 
-        result = bridge.on_market_view(_view(Direction.BULLISH), "s")
+        result = bridge.on_intent(
+            {"structure": "long_call", "strike_selection": "atm"},
+            _view(Direction.BULLISH),
+            "s",
+        )
 
         assert result is not None and result.get("rejected")
         assert "entries paused" in result["reason"]
@@ -797,7 +823,7 @@ class TestRunnerExits:
         assert summary["open_structures"] == 1
         assert summary["settled_count"] == 0
         entries = [s for s in runner.signal_log if s["kind"] == "OPTION_ENTRY"]
-        assert "bear_put_spread" in entries[-1]["reason"]
+        assert "long_put" in entries[-1]["reason"]
 
     def test_replay_past_the_expiry_keeps_trading(self):
         """Regression: the expiry calendar must follow the bar clock.

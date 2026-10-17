@@ -27,6 +27,40 @@ def _view(direction, underlying="NIFTY", spot=25000):
     )
 
 
+_V2_LONG_CALL = {
+    "expression_version": 2,
+    "type": "long_call",
+    "quantity": 1,
+    "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+}
+
+
+def _wide_gate():
+    """Scaffold gate (unsigned ₹25k ceiling < one ATM premium in tests)."""
+    from backtest.options.execution_gate import PreTradeRiskGate
+    from backtest.risk_limits import RiskLimits
+
+    return PreTradeRiskGate(
+        RiskLimits(
+            per_trade_max_loss_inr=1_000_000.0,
+            per_runner_max_lots=100,
+            per_runner_max_order_value_inr=10_000_000.0,
+            entitlement={"paper": frozenset({"long_call", "long_put"})},
+            kill_switch_engaged_on_boot=False,
+            sha256="x" * 64,
+        ),
+        mode="paper",
+    )
+
+
+def _open_long_call(bridge):
+    return bridge.on_intent(
+        {"structure": "long_call", "strike_selection": "atm"},
+        _view(Direction.BULLISH),
+        "test",
+    )
+
+
 def test_summary_totals_include_dashboard_book():
     """Totals = runners + manual book."""
     mgr = reset_portfolio_manager(auto_start_feed=False)
@@ -41,9 +75,9 @@ def test_summary_totals_include_dashboard_book():
     # Open a structure in the dashboard broker
     from backtest.forward.options_bridge import OptionsBridge
 
-    bridge = OptionsBridge(capital=100000, expression={"type": "long_call", "strike_selection": "atm", "quantity": 1}, option_broker=broker, quote_provider=provider)
+    bridge = OptionsBridge(capital=100000, expression=_V2_LONG_CALL, option_broker=broker, quote_provider=provider, risk_gate=_wide_gate())
     bridge.on_bar("NIFTY", 25000, ts="2026-09-16T09:15:00")
-    bridge.on_market_view(_view(Direction.BULLISH), "test")
+    _open_long_call(bridge)
 
     # Inject as singleton
     options_api._broker = broker
@@ -77,9 +111,9 @@ def test_flatten_closes_manual_structure():
 
     from backtest.forward.options_bridge import OptionsBridge
 
-    bridge = OptionsBridge(capital=100000, expression={"type": "long_call", "strike_selection": "atm", "quantity": 1}, option_broker=broker, quote_provider=provider)
+    bridge = OptionsBridge(capital=100000, expression=_V2_LONG_CALL, option_broker=broker, quote_provider=provider, risk_gate=_wide_gate())
     bridge.on_bar("NIFTY", 25000, ts="2026-09-16T09:15:00")
-    bridge.on_market_view(_view(Direction.BULLISH), "test")
+    _open_long_call(bridge)
 
     assert len(broker.get_open_structures()) == 1
 

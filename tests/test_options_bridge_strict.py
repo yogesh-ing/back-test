@@ -48,6 +48,13 @@ def _view(direction: Direction, spot: float = 24_800.0) -> MarketView:
     )
 
 
+def _enter(bridge: OptionsBridge, view: MarketView, structure: str = "long_call"):
+    """The end-state entry: an explicit intent, never a bare view."""
+    return bridge.on_intent(
+        {"structure": structure, "strike_selection": "atm"}, view, "t"
+    )
+
+
 def _strict(expression=None, **kwargs) -> OptionsBridge:
     return OptionsBridge(
         capital=1_000_000.0,
@@ -131,14 +138,20 @@ def test_strict_does_not_merge_defaults():
     # entitlement is a ceiling, not a menu (Phase 2).
 
 
-def test_legacy_path_unchanged():
-    bridge = OptionsBridge(
-        capital=1_000_000.0, expression={"type": "long_call"},
-        quote_provider=_provider(),
-    )
-    assert bridge.strict is False
-    assert bridge.expression["quantity"] == 1  # DEFAULT_EXPRESSION merged as before
-    assert bridge._structure_type_for(_view(Direction.NEUTRAL)) == "long_call"
+def test_legacy_expression_refused_at_construction():
+    # Phase 4: the legacy path is deleted, not deprecated — a v1
+    # expression (or none) refuses at construction, and there is no
+    # default expression left to merge.
+    import backtest.forward.options_bridge as bridge_module
+
+    assert not hasattr(bridge_module, "DEFAULT_EXPRESSION")
+    with pytest.raises(ExecutionSpecError, match="Phase 4"):
+        OptionsBridge(
+            capital=1_000_000.0, expression={"type": "long_call"},
+            quote_provider=_provider(),
+        )
+    with pytest.raises(ExecutionSpecError, match="Phase 4"):
+        OptionsBridge(capital=1_000_000.0, quote_provider=_provider())
 
 
 # --------------------------------------------------------------------------- #
@@ -152,24 +165,20 @@ def test_strict_neutral_is_silence_never_an_entry():
     assert bridge.executed_count == 0
 
 
-def test_strict_no_cross_direction_fallback_and_halt_is_edge_triggered():
+def test_strict_no_cross_direction_fallback():
+    # Phase 4 end-state: the bridge has no direction lookup at all. A
+    # bare BEARISH view against a BULLISH-only expression is silence —
+    # the coded refusal for an unmapped emission lives in the template
+    # (build_opening_intent raises; pinned in test_phase4_cleanup.py).
     expr = {
         **V2,
         "type": {"BULLISH": {"structure": "long_call", "strike_selection": "atm"}},
     }
     journal = MemoryJournal()
     bridge = _strict(expr, intent_journal=journal)
-    first = bridge.on_market_view(_view(Direction.BEARISH), "t")
-    assert first == {
-        "rejected": True,
-        "reason": "NO_DIRECTION_MAPPING",
-        "code": "NO_DIRECTION_MAPPING",
-    }
-    # Subsequent bars: silent (no repeated journal spam), still no trade.
     assert bridge.on_market_view(_view(Direction.BEARISH), "t") is None
+    assert bridge.on_market_view(_view(Direction.BULLISH), "t") is None
     assert bridge.executed_count == 0
-    halts = [e for e in journal._events if e.kind == KIND_HALTED]
-    assert len(halts) == 1
 
 
 def test_strict_unmapped_neutral_does_not_halt():
@@ -187,24 +196,14 @@ def test_strict_gate_refusal_at_trade_time_is_coded():
     # tighten: simulate by swapping the gate (entitlement changed intraday).
     bridge = _strict()
     bridge.risk_gate = gate
-    result = bridge.on_market_view(_view(Direction.BULLISH), "t")
+    result = _enter(bridge, _view(Direction.BULLISH))
     assert result["rejected"] is True
     assert result["code"] == "STRUCTURE_NOT_PERMITTED"
     assert bridge.executed_count == 0
 
 
-def test_transitional_lookup_is_bridge_side_and_template_never_needs_it():
-    bridge = _strict()
-    rule = bridge._transitional_direction_rule_for(_view(Direction.BULLISH))
-    assert rule.structure == "long_call"
-    assert bridge._transitional_direction_rule_for(_view(Direction.NEUTRAL)) is None
-
-
 def test_operator_level_helper_renamed():
-    bridge = OptionsBridge(
-        capital=1_000_000.0, expression={"type": "long_call"},
-        quote_provider=_provider(),
-    )
+    bridge = _strict()
     assert hasattr(bridge, "_operator_level_for")
     assert not hasattr(bridge, "_rule_for")
     assert bridge._operator_level_for("nope", 10.0) is None  # no open structure
@@ -222,7 +221,7 @@ def test_strict_per_direction_strike_selection_applied():
         },
     }
     bridge = _strict(expr)
-    bridge._transitional_direction_rule_for(_view(Direction.BULLISH))
+    bridge._active_rule = bridge._strict_rules[Direction.BULLISH]
     from decimal import Decimal as D
 
     strikes = [D(str(24_000 + 50 * i)) for i in range(41)]  # 24000..26000
@@ -251,7 +250,7 @@ def test_gate_ceilings_fire_at_entry_from_live_quotes():
     # entry, from quoted premium — coded, nothing booked.
     gate = PreTradeRiskGate(_limits(per_trade_max_loss_inr=1.0), mode="paper")
     bridge = _strict(risk_gate=gate)
-    result = bridge.on_market_view(_view(Direction.BULLISH), "t")
+    result = _enter(bridge, _view(Direction.BULLISH))
     assert result["rejected"] is True
     assert result["code"] == "MAX_LOSS_EXCEEDED"
     assert bridge.executed_count == 0
@@ -284,6 +283,5 @@ def test_strict_string_form_type_is_one_rule_for_all_directions():
     bridge = _strict(expr)
     assert bridge.strict is True
     for direction in (Direction.BULLISH, Direction.BEARISH):
-        rule = bridge._transitional_direction_rule_for(_view(direction))
-        assert rule.structure == "long_call"
-    assert bridge._transitional_direction_rule_for(_view(Direction.NEUTRAL)) is None
+        assert bridge._strict_rules[direction].structure == "long_call"
+    assert Direction.NEUTRAL not in bridge._strict_rules

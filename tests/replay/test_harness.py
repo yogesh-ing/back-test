@@ -7,7 +7,6 @@ from decimal import Decimal
 import pandas as pd
 import pytest
 
-from backtest.forward.options_bridge import DEFAULT_EXPRESSION as FORWARD_DEFAULT_EXPRESSION
 from backtest.replay import (
     NoFreshReplayQuote,
     PointInTimeReplayFeed,
@@ -135,7 +134,9 @@ def config(**expression_overrides) -> ReplayConfig:
 
 
 def test_replay_config_exports_the_existing_forward_expression_defaults():
-    assert ReplayConfig().expression == FORWARD_DEFAULT_EXPRESSION
+    # Phase 4: no default expression anywhere — the harness resolves the
+    # strategy's spec defaults at run time and refuses if there are none.
+    assert ReplayConfig().expression == {}
 
 
 def run_harness(dataset, *, fault_plan=None, replay_config=None):

@@ -97,9 +97,12 @@ class TestLotsPerLeg:
         )
 
     def test_default_is_one_lot(self):
-        from backtest.forward.options_bridge import DEFAULT_EXPRESSION
+        # Phase 4: DEFAULT_EXPRESSION is deleted — the default lot count
+        # is the strategy spec's declared ``default_lots``.
+        from backtest.strategy.registry import get_strategy
 
-        assert int(DEFAULT_EXPRESSION.get("quantity", 1)) == 1
+        spec = get_strategy("directional_options").execution_spec()
+        assert int(spec.default_lots) == 1
 
     def test_user_chosen_lots_are_accepted(self, client):
         resp = self._post(client, "NIFTY", selections={"quantity": 3})

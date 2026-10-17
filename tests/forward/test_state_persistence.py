@@ -327,10 +327,10 @@ class TestOptionBookRestore:
                 instrument={
                     "type": "option",
                     "expression": {
+                        "expression_version": 2,
                         "type": "bull_call_spread",
-                        "strike_selection": "atm",
                         "quantity": 3,
-                        "exit": {"min_days_to_expiry": 2},
+                        "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": 2},
                     },
                 },
             )

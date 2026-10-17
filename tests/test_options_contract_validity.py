@@ -85,11 +85,35 @@ class _RecordingProvider:
         return self.inner.get_quote(instrument_token)
 
 
+_V2 = {
+    "expression_version": 2,
+    "type": {"BULLISH": {"structure": "long_call", "strike_selection": "atm"}},
+    "quantity": 1,
+    "exit": {"stop_loss_pct": 0.5, "min_days_to_expiry": None},
+}
+
+
 def _bridge(expression=None, provider=None) -> OptionsBridge:
     return OptionsBridge(
         capital=1_000_000.0,
-        expression=expression or {"type": "long_call"},
+        expression=expression or _V2,
         quote_provider=provider or SyntheticQuoteProvider(SyntheticChainGenerator()),
+    )
+
+
+def _open(bridge: OptionsBridge):
+    # A complete intent, as a template builds it: the declared rule's
+    # fields ride along (structure, strike rule, expiry rule).
+    rule = next(iter(bridge._strict_rules.values()))
+    return bridge.on_intent(
+        {
+            "structure": rule.structure,
+            "strike_selection": rule.strike_selection,
+            "expiry_policy": rule.expiry_policy,
+            "expiry_min_days": rule.expiry_min_days,
+        },
+        _view(),
+        "s",
     )
 
 
@@ -111,14 +135,26 @@ def test_a_calendar_below_expiry_min_days_halts_instead_of_substituting():
     """The old fallback traded the too-near expiry, which the exit rule then
     closed on the next bar — a one-bar round trip dressed up as a position."""
     provider = SyntheticQuoteProvider(_NearExpiryCalendar())
-    bridge = _bridge({"type": "long_call", "expiry_min_days": 7}, provider)
+    bridge = _bridge(
+        {
+            **_V2,
+            "type": {
+                "BULLISH": {
+                    "structure": "long_call",
+                    "strike_selection": "atm",
+                    "expiry_min_days": 7,
+                }
+            },
+        },
+        provider,
+    )
     bridge.on_bar("NIFTY", 24_800.0, "2026-10-05T09:15:00")
 
     with pytest.raises(ContractValidityError) as exc:
         bridge._select_expiry(bridge._generator(), "NIFTY")
     assert exc.value.reason == REASON_EXPIRY_TOO_NEAR
 
-    result = bridge.on_market_view(_view(), "s")
+    result = _open(bridge)
     assert result is not None and result.get("rejected")
     assert REASON_EXPIRY_TOO_NEAR in result["reason"]
     assert bridge.executed_count == 0, "a halt must not open a substituted contract"
@@ -128,7 +164,19 @@ def test_the_knob_is_inert_without_a_bar_clock():
     """Replay anchoring needs a bar: with no bar clock there is no reference
     date to measure minimum days against, so selection stays on the calendar."""
     provider = SyntheticQuoteProvider(_NearExpiryCalendar())
-    bridge = _bridge({"type": "long_call", "expiry_min_days": 7}, provider)
+    bridge = _bridge(
+        {
+            **_V2,
+            "type": {
+                "BULLISH": {
+                    "structure": "long_call",
+                    "strike_selection": "atm",
+                    "expiry_min_days": 7,
+                }
+            },
+        },
+        provider,
+    )
 
     expiry = bridge._select_expiry(bridge._generator(), "NIFTY")
     assert expiry is not None
@@ -144,7 +192,7 @@ def test_a_contract_with_no_chain_lot_size_is_refused():
     the position, the premium outlay and every rupee stop off thin air."""
     bridge = _bridge(provider=SyntheticQuoteProvider(_NoLotCalendar()))
 
-    result = bridge.on_market_view(_view(), "s")
+    result = _open(bridge)
 
     assert result is not None and result.get("rejected")
     assert REASON_NO_LOT_SIZE in result["reason"]
@@ -165,7 +213,7 @@ def test_a_calendar_with_no_expiries_at_all_halts():
 
     bridge = _bridge(provider=SyntheticQuoteProvider(_NoExpiries()))
 
-    result = bridge.on_market_view(_view(), "s")
+    result = _open(bridge)
 
     assert result is not None and result.get("rejected")
     assert REASON_NO_EXPIRY in result["reason"]
@@ -179,7 +227,7 @@ def test_an_empty_chain_halts_instead_of_trading_a_missing_strike():
 
     bridge = _bridge(provider=SyntheticQuoteProvider(_EmptyChain()))
 
-    result = bridge.on_market_view(_view(), "s")
+    result = _open(bridge)
 
     assert result is not None and result.get("rejected")
     assert REASON_NO_STRIKE in result["reason"]
@@ -196,7 +244,7 @@ def test_the_entry_gate_drops_the_cache_before_reading_every_leg():
     spy = _RecordingProvider(bridge.quote_provider)
     bridge.quote_provider = spy
 
-    result = bridge.on_market_view(_view(), "s")
+    result = _open(bridge)
 
     assert result is not None and not result.get("rejected")
     reads = [index for index, (kind, _) in enumerate(spy.calls) if kind == "get_quote"]
@@ -213,7 +261,7 @@ def test_a_dead_session_answer_is_not_a_quote():
     provider = SyntheticQuoteProvider(SyntheticChainGenerator())
     bridge = _bridge(provider=_RecordingProvider(provider, quote={"ltp": 0.0}))
 
-    result = bridge.on_market_view(_view(), "s")
+    result = _open(bridge)
 
     assert result is not None and result.get("rejected")
     assert REASON_NO_FRESH_QUOTE in result["reason"]

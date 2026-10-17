@@ -276,7 +276,15 @@ def _option_runner(source: str) -> RunnerConfig:
         source=source,
         instrument={
             "type": "option",
-            "expression": {"type": "bull_call_spread", "strike_selection": "atm", "quantity": 1},
+            "expression": {
+                "expression_version": 2,
+                "type": {
+                    "BULLISH": {"structure": "long_call", "strike_selection": "atm"},
+                    "BEARISH": {"structure": "long_put", "strike_selection": "atm"},
+                },
+                "quantity": 1,
+                "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+            },
         },
     )
 
@@ -514,7 +522,16 @@ class TestQuoteProviderRegisterContractConformance:
         broken = _BrokenProvider()
         assert not callable(getattr(broken, "register_contract", None))
 
-        bridge = OptionsBridge(capital=100_000, quote_provider=broken)
+        bridge = OptionsBridge(
+            capital=100_000,
+            expression={
+                "expression_version": 2,
+                "type": "long_call",
+                "quantity": 1,
+                "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+            },
+            quote_provider=broken,
+        )
         leg = OptionPosition(
             position_id="p1",
             structure_id="s1",

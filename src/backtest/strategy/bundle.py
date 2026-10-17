@@ -108,7 +108,15 @@ def _module_files(cls: type) -> list[Path]:
             candidates.append(path)
 
     root: Path | None = None
-    own = inspect.getfile(cls)
+    try:
+        own = inspect.getfile(cls)
+    except TypeError:
+        # A plugin class whose module was evicted from sys.modules by a
+        # re-import-on-change cycle: the class is orphaned, but its MRO
+        # modules (templates, execution) still fingerprint — an orphan
+        # must not make the strategy unspawnable (Phase 4 fail-closed
+        # stamping turned this latent gap into a spawn refusal).
+        own = None
     if own:
         root = _repo_root_for(Path(own))
     if root is not None:

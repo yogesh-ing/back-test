@@ -140,6 +140,11 @@ class Strategy(ABC):
     # enforces it. Import is lazy (execution imports intent only) to keep
     # this module the bottom of the dependency stack.
     execution: Any = None
+    # DEPRECATED (Phase 4): legacy class-level stop/target for the equity
+    # backtest path. Nothing in the execution contract reads these; exit
+    # criteria belong in the strategy's ExitPlan (options) or its signal
+    # logic (equity). Declaring them emits a DeprecationWarning from
+    # validate(); removal is scheduled for 2027-03-31.
     stop_loss: float | None = None
     take_profit: float | None = None
     # Instrument eligibility (2026-09-22): ``None`` = trades any symbol the
@@ -389,6 +394,19 @@ class Strategy(ABC):
         if not isinstance(getattr(cls, "name", ""), str) or not cls.name.strip():
             raise StrategyContractError(
                 f"{cls.__name__}: strategy must define a non-empty string 'name'"
+            )
+        # Phase 4 deprecation: class-level stop_loss/take_profit are
+        # legacy equity-backtest attrs the execution contract ignores.
+        if cls.stop_loss is not None or cls.take_profit is not None:
+            import warnings
+
+            warnings.warn(
+                f"{cls.name}: class-level stop_loss/take_profit are "
+                "deprecated (Phase 4) and ignored by the execution "
+                "contract — declare exits in the ExitPlan (options) or "
+                "signal logic (equity). Removal scheduled 2027-03-31.",
+                DeprecationWarning,
+                stacklevel=2,
             )
         if not isinstance(cls.params, dict):
             raise StrategyContractError(f"{cls.name}: 'params' must be a dict")

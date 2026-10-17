@@ -2223,8 +2223,16 @@ class StrategyRunner:
 
             if isinstance(self.strategy, TemplateBase) and view is not None:
                 _intent = self.strategy.build_opening_intent(view)
-        except Exception:  # noqa: BLE001 — intent building must not kill the bar
+        except Exception as exc:  # noqa: BLE001 — intent building must not kill the bar
+            # Not a fallback (Phase 4): the bridge takes entries only from
+            # intents, so a failed build means this bar simply cannot
+            # enter; the view call below can still manage an open
+            # structure's exits. Loud in the signal log, never silent.
             _intent = None
+            self._log_signal(
+                symbol, "ERROR", None, self.last_price.get(symbol),
+                f"intent build failed: {exc}",
+            )
         # A viewless bar is meaningful (B1): the bridge counts it towards the
         # neutral exit rule and can close a position the strategy walked away
         # from. So the call happens even when the strategy has no opinion.

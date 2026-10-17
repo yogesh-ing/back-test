@@ -176,7 +176,9 @@ def test_v2_expression_without_spec_is_gate_validated(client):
     assert "hard stop" in r.get_json()["error"] or "exactly one" in r.get_json()["error"]
 
 
-def test_legacy_v1_spawn_still_works_and_keeps_clamp(client):
+def test_legacy_v1_spawn_is_refused_never_clamped(client):
+  # Phase 4: the clamp and the legacy parser are gone together. A spec-less
+  # strategy spawned with a v1 expression refuses with the §11 remediation.
   with _LegacyProbeContext() as probe:
     r = client.post(
         "/api/portfolio/runner/create",
@@ -193,9 +195,8 @@ def test_legacy_v1_spawn_still_works_and_keeps_clamp(client):
             },
         },
     )
-    assert r.status_code == 201, r.get_json()
-    # Legacy silent clamp still in place until Phase 4 (documented, not liked).
-    assert r.get_json()["runner"]["instrument"]["expression"]["quantity"] == 100
+    assert r.status_code == 400, r.get_json()
+    assert "execution spec" in r.get_json()["error"]
 
 
 # --------------------------------------------------------------------------- #
@@ -317,7 +318,8 @@ def test_restart_mid_position_preserves_structure_and_exits(client):
         direction=Direction.BULLISH, confidence=0.9, underlying="NIFTY",
         spot_price=Decimal("24800"),
     )
-    opened = runner.options_bridge.on_market_view(view, "directional_options")
+    intent = runner.strategy.build_opening_intent(view)
+    opened = runner.options_bridge.on_intent(intent, view, "directional_options")
     assert opened and runner.options_bridge.open_structure_id
 
     revived = _make()
