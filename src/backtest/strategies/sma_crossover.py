@@ -10,6 +10,34 @@ class SmaCrossover(EquityStrategy):
     description = (
         "Moving-average crossover — long while the fast SMA is above the slow SMA, flat otherwise."
     )
+    description_sections = {
+        'overview': (
+            'Classic trend-following baseline: stay long while the fast simple moving average'
+            'sits above the slow one, flat otherwise.'
+        ),
+        'regime': (
+            'Works in sustained directional trends where moves persist for many bars. Struggles'
+            'badly in sideways, choppy markets — repeated crossovers whipsaw in and out around'
+            'the averages.'
+        ),
+        'entry': (
+            'Goes long on the bar where the fast SMA crosses (and stays) above the slow SMA;'
+            'there is no additional filter or confirmation.'
+        ),
+        'construction': (
+            'Single-instrument equity/index position, long only, fully invested while the signal'
+            'is on. No leverage, no shorting.'
+        ),
+        'exits_risk': (
+            'Exits when the fast SMA crosses back below the slow SMA — the exit is the mirror of'
+            'the entry, so there is no fixed stop or target; worst case is the adverse move'
+            'between crossovers, which can be large in a sharp reversal.'
+        ),
+        'parameters': (
+            'fast=20 (fast SMA window), slow=50 (slow SMA window). Shorter windows trade more and'
+            'whipsaw more; longer windows lag entries and exits.'
+        ),
+    }
     version = "1.0"
     author = "Trading Bot"
     params = {

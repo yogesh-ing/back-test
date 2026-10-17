@@ -58,6 +58,38 @@ class ImmediateStrangle(StructureStrategy):
         "Immediate short strangle: unconditional NEUTRAL view on deploy; "
         "expression maps every direction to short_strangle (~2% OTM legs)."
     )
+    description_sections = {
+        'overview': (
+            'Immediate short strangle: on deploy it sells a strangle (~2% OTM call and put) to'
+            'harvest premium from a range-bound underlying. It is a volatility-selling structure,'
+            'not a directional view.'
+        ),
+        'regime': (
+            'Works in calm, range-bound markets where realised volatility stays below what the'
+            'sold premium priced in. Struggles violently in trending or event-driven markets — a'
+            'fast one-sided move runs through a short leg and losses accelerate.'
+        ),
+        'entry': (
+            'Unconditional: the entry intent fires on the first bar after deploy, with no signal'
+            "condition. Timing the market regime is entirely the operator's job."
+        ),
+        'construction': (
+            'Short strangle: simultaneously sold OTM call and OTM put (~2% away) on the same'
+            'expiry, 1 lot by default (max 3). Short options carry margin requirements and'
+            'theoretically uncapped risk on the call side.'
+        ),
+        'exits_risk': (
+            'Declared plan: combined stop at 100 points adverse, target at 100 points favourable.'
+            "IMPORTANT: a short strangle's true worst case is far larger than the stop if price"
+            'gaps through it — the pre-trade risk gate requires a declared worst case and the'
+            'strangle entitlement before it will fill, and this strategy should only run where'
+            'that entitlement is granted.'
+        ),
+        'parameters': (
+            "underlying=NIFTY; alert_response='pause' (how the runner reacts to risk alerts)."
+            'Quantity 1-3 lots via override.'
+        ),
+    }
     version = "1.1"
     author = "strategy-plan spec 2026-09-18"
 

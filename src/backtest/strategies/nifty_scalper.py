@@ -22,6 +22,34 @@ class NiftyScalper(EquityStrategy):
         "Nifty Scalper — fast intraday index momentum/scalp using dual EMAs and RSI confirmation, "
         "enforcing strict stop-loss and take-profit targets."
     )
+    description_sections = {
+        'overview': (
+            'Intraday NIFTY index scalper: dual-EMA momentum with RSI confirmation, built for'
+            'short holds with strict per-trade exits.'
+        ),
+        'regime': (
+            'Works in intraday sessions with a clear directional bias and follow-through after'
+            'EMA crosses. Struggles in narrow, low-volatility ranges where crosses are frequent'
+            'and RSI confirmation whipsaws.'
+        ),
+        'entry': (
+            'Long when the fast EMA is above the slow EMA and RSI confirms strength (RSI above'
+            'the long threshold), i.e. momentum and trend agree.'
+        ),
+        'construction': (
+            'Trades the NIFTY index instrument directly (equity path), long only, intraday — flat'
+            'by session end.'
+        ),
+        'exits_risk': (
+            'Strict declared stop-loss and take-profit on every trade plus exit when the EMA/RSI'
+            'signal turns off. Worst case per trade is the stop distance (plus slippage on fast'
+            'bars).'
+        ),
+        'parameters': (
+            'fast_ema=9, slow_ema=21, rsi_period=14, rsi_long_threshold=52. Designed for intraday'
+            'timeframes (1-15 min).'
+        ),
+    }
     version = "1.0"
     author = "Trading Bot"
 

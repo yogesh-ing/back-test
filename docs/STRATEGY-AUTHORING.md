@@ -135,7 +135,7 @@ loader (skip-with-warning) and `tests/test_strategy_conformance.py`
 | 1 | unique non-empty `name` | empty/blank names; a name colliding with a registered strategy (the file is skipped, the built-in untouched) |
 | 2 | `Strategy.validate()` | no signal hook; malformed params schema |
 | 3 | signal-kind consistency | kind derived from the `generate_market_view` override — a class cannot claim "option" without implementing it |
-| 4 | metadata | missing `description` / `version` / `author` |
+| 4 | metadata | missing `description` / `version` / `author`; a malformed `description_sections` card (unknown/empty sections) |
 | 5 | params UI labels | schema params without a `label` |
 | 6 | output shape | non-Series / misaligned equity output; direction-less views |
 | 7 | determinism | two runs, different outputs |
@@ -267,6 +267,18 @@ from backtest.strategy.templates import DirectionalOptionStrategy
 class MyDirectional(DirectionalOptionStrategy):
     name = "my_directional"
     description = "..."
+    # Strategy card (required): structured long-form description shown on
+    # the backtest page above the performance metrics. All six sections,
+    # plain language, honest about worst case. Enforced by
+    # tests/test_strategy_descriptions.py.
+    description_sections = {
+        "overview": "One or two sentences: what it does.",
+        "regime": "Where it works, and where it struggles.",
+        "entry": "The exact trigger; what silence means.",
+        "construction": "Structure/strikes/expiry (options) or position shape (equity).",
+        "exits_risk": "Stop, target, exit rules — and the true worst case.",
+        "parameters": "Key parameters with defaults and what they trade off.",
+    }
     version = "1.0"
     author = "..."
     eligible_instruments = ["NIFTY", "BANKNIFTY"]

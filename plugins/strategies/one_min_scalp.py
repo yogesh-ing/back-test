@@ -28,6 +28,33 @@ class OneMinScalp(EquityStrategy):
         "Buys on next bar after a green candle (close > open), exits at "
         "+5pt TP / -3pt SL. Generates frequent trades for paper trading tests."
     )
+    description_sections = {
+        'overview': (
+            'One-minute scalper for paper-trading tests: buys the bar after a green candle and'
+            'takes a quick fixed target.'
+        ),
+        'regime': (
+            'Works when green candles reliably see next-bar continuation at 1-minute scale'
+            '(strong intraday momentum). Struggles in choppy minute bars — green/red alternation'
+            'triggers entries right into reversals, and costs dominate the 5-point target.'
+        ),
+        'entry': (
+            'A green candle (close above open) arms the entry; the buy fires on the next bar.'
+        ),
+        'construction': (
+            'Single-instrument equity position (default RELIANCE), long only, 1-minute timeframe,'
+            'one trade at a time.'
+        ),
+        'exits_risk': (
+            'Fixed bracket on every trade: +5 points take-profit, -3 points stop-loss. Worst case'
+            'per trade is the 3-point stop plus slippage — the entire edge rests on hitting +5'
+            'first more often than chance.'
+        ),
+        'parameters': (
+            'take_profit=5.0, stop_loss=3.0, symbol=RELIANCE. Points are absolute — retune for'
+            'other instruments.'
+        ),
+    }
     version = "1.0"
     author = "paper-trading-validation"
     

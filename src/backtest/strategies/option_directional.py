@@ -42,6 +42,38 @@ class DirectionalOptions(DirectionalOptionStrategy):
         "Directional options — emits a bullish/bearish MarketView from short-term "
         "EMA momentum; feed it into the expression layer (long call/put, spreads)."
     )
+    description_sections = {
+        'overview': (
+            'Directional index options: converts short-term EMA momentum on NIFTY into a declared'
+            'bullish/bearish view, expressed as ATM long calls or puts.'
+        ),
+        'regime': (
+            "Works when intraday momentum persists long enough for the option's delta to pay."
+            'Struggles in choppy, theta-heavy tape — repeated small premium losses and time decay'
+            'erode the account even when direction calls are roughly right.'
+        ),
+        'entry': (
+            'Bullish when the EMA momentum score clears the minimum confidence, bearish on the'
+            'mirror; the score scales the recent move (points) against the scale parameter.'
+        ),
+        'construction': (
+            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put'
+            "on the underlying's nearest eligible expiry — a defined-risk, single-leg structure."
+            'Size is 1 lot by default (override 1-5 lots where the spawn form allows).'
+        ),
+        'exits_risk': (
+            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit'
+            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst'
+            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long'
+            'option can never lose more than the premium paid.'
+        ),
+        'parameters': (
+            'ema_period=9, scale_points=100.0 (move size that maps to full confidence),'
+            'min_confidence=0.3 (signals below this are silence — no trade). underlying=NIFTY.'
+            'Size defaults to 1 lot; quantity (and, where listed, exit levels) can be overridden'
+            'at spawn within the declared menu.'
+        ),
+    }
     version = "1.0"
     author = "Trading Bot"
 

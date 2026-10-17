@@ -46,6 +46,37 @@ class VwapEmaRsi(DirectionalOptionStrategy):
         "trigger, RSI(14) 45–60 pullback filter. Long calls above VWAP on "
         "a bullish cross, long puts below VWAP on a bearish cross."
     )
+    description_sections = {
+        'overview': (
+            'Intraday trend stack: VWAP sets the bias, an EMA 9/15 cross pulls the trigger, and'
+            'an RSI 45-60 band filters entries to healthy pullback momentum.'
+        ),
+        'regime': (
+            'Works on intraday trend days where price respects VWAP as support/resistance.'
+            'Struggles in balanced, VWAP-hugging ranges — crosses fire repeatedly with no'
+            'follow-through and premium bleed accumulates.'
+        ),
+        'entry': (
+            'Bullish cross above VWAP with RSI inside 45-60 → long call; bearish cross below VWAP'
+            'with RSI in band → long put. Outside the band or on the wrong side of VWAP: silence.'
+        ),
+        'construction': (
+            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put'
+            "on the underlying's nearest eligible expiry — a defined-risk, single-leg structure."
+            'Size is 1 lot by default (override 1-5 lots where the spawn form allows).'
+        ),
+        'exits_risk': (
+            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit'
+            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst'
+            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long'
+            'option can never lose more than the premium paid.'
+        ),
+        'parameters': (
+            'ema_fast=9, ema_slow=15, rsi_period=14, rsi_low=45.0, rsi_high=60.0,'
+            'underlying=NIFTY. Size defaults to 1 lot; quantity (and, where listed, exit levels)'
+            'can be overridden at spawn within the declared menu.'
+        ),
+    }
     version = "1.0"
     author = "user spec 2026-09-21"
 

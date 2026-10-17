@@ -101,6 +101,34 @@ class SupertrendStrategy(EquityStrategy):
 
     name = "supertrend_equity"
     description = "Imported from Pine Script v5 via Strategy Builder"
+    description_sections = {
+        'overview': (
+            'Supertrend trend-follower imported from Pine Script via the Strategy Builder: long'
+            'while price holds above the Supertrend line, flat below it.'
+        ),
+        'regime': (
+            'Works in persistent trends where the ATR-based trailing band keeps you in through'
+            'normal pullbacks. Struggles in sideways markets — price crosses the band repeatedly'
+            'and each flip locks in a small loss.'
+        ),
+        'entry': (
+            'Goes long when the Supertrend direction flips bullish (close above the band) and'
+            'stays long while direction remains up.'
+        ),
+        'construction': (
+            'Single-instrument equity position, long only, fully invested while the trend flag is'
+            'up.'
+        ),
+        'exits_risk': (
+            'Exits on the bearish Supertrend flip — the ATR band is effectively a wide trailing'
+            'stop, so worst case per trade is roughly the band distance (factor × ATR) from the'
+            'extreme, which is large in volatile names.'
+        ),
+        'parameters': (
+            'atrPeriod=10, factor=3.0. A smaller factor tracks price tighter (earlier exits, more'
+            'whipsaw); larger factor rides deeper pullbacks.'
+        ),
+    }
     version = "1.0"
     author = "Pine Converter"
 

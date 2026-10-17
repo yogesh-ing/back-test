@@ -129,6 +129,13 @@ def get_all() -> list[dict[str, Any]]:
             {
                 "name": cls.name,
                 "description": getattr(cls, "description", "") or "",
+                # Structured long-form card (backtest page, above metrics);
+                # None → the UI falls back to the short description.
+                "description_sections": (
+                    cls.description_card()
+                    if hasattr(cls, "description_card")
+                    else None
+                ),
                 "version": getattr(cls, "version", "") or "",
                 "author": getattr(cls, "author", "") or "",
                 "params": cls.param_schema(),

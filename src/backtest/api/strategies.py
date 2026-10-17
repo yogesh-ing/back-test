@@ -30,6 +30,7 @@ def list_strategies() -> tuple:
         {
             "name": s["name"],
             "description": s["description"],
+            "description_sections": s.get("description_sections"),
             "version": s["version"],
             "author": s["author"],
             "params": s["params"],

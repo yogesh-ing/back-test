@@ -14,6 +14,20 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+#: Canonical strategy-card sections, in display order. ``overview`` is the
+#: always-visible summary; the rest render as expandable detail on the
+#: backtest page. A registered strategy must fill every section (enforced
+#: by the conformance suite).
+DESCRIPTION_SECTION_KEYS: tuple[str, ...] = (
+    "overview",
+    "regime",
+    "entry",
+    "construction",
+    "exits_risk",
+    "parameters",
+)
+
+
 class StrategyContractError(Exception):
     """Raised when a strategy fails to meet the BaseStrategy contract.
 
@@ -439,6 +453,43 @@ class Strategy(ABC):
                 f"{cls.name}: strategy must define a non-empty 'description'. "
                 "Add a brief explanation of what the strategy does and when to use it."
             )
+
+        # Structured description ("strategy card"): when present it must be
+        # a dict of known, non-empty string sections. Presence for every
+        # registered strategy is enforced by the conformance suite.
+        sections = getattr(cls, "description_sections", None)
+        if sections is not None:
+            if not isinstance(sections, dict):
+                raise StrategyContractError(
+                    f"{cls.name}: 'description_sections' must be a dict of "
+                    f"section text keyed by {list(DESCRIPTION_SECTION_KEYS)}"
+                )
+            unknown = sorted(set(sections) - set(DESCRIPTION_SECTION_KEYS))
+            if unknown:
+                raise StrategyContractError(
+                    f"{cls.name}: unknown description section(s) {unknown}; "
+                    f"allowed: {list(DESCRIPTION_SECTION_KEYS)}"
+                )
+            for key, text in sections.items():
+                if not isinstance(text, str) or not text.strip():
+                    raise StrategyContractError(
+                        f"{cls.name}: description section '{key}' must be "
+                        "a non-empty string"
+                    )
+
+    @classmethod
+    def description_card(cls) -> dict[str, str] | None:
+        """Normalised strategy card: known sections only, stripped, in
+        canonical order; ``None`` when the strategy declares no sections."""
+        sections = getattr(cls, "description_sections", None)
+        if not isinstance(sections, dict):
+            return None
+        card = {
+            key: sections[key].strip()
+            for key in DESCRIPTION_SECTION_KEYS
+            if isinstance(sections.get(key), str) and sections[key].strip()
+        }
+        return card or None
 
     @staticmethod
     def _validate_param(strategy_name: str, pname: str, spec: Any) -> None:

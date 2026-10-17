@@ -41,6 +41,34 @@ class SwingRsi2MeanRev(EquityStrategy):
         "threshold while price holds above the 200-SMA; exit when the close "
         "reclaims the fast SMA (the reversion is done)."
     )
+    description_sections = {
+        'overview': (
+            'Connors-style RSI(2) swing mean-reversion: buy a sharp 2-day washout inside a'
+            'long-term uptrend, sell the snap-back.'
+        ),
+        'regime': (
+            'Works in uptrending instruments with sharp, short pullbacks that mean-revert within'
+            'days. Struggles when a washout is the first leg of a real decline — RSI(2) stays'
+            'pinned low while price keeps falling toward (and through) the 200-SMA filter'
+            'boundary.'
+        ),
+        'entry': (
+            'Close above the 200-SMA (uptrend) AND RSI(2) below the buy threshold (default 10) —'
+            'a statistically stretched dip.'
+        ),
+        'construction': (
+            'Single-instrument equity position, long only, daily bars, typical holds of a few'
+            'days.'
+        ),
+        'exits_risk': (
+            'Exits when the close reclaims the fast SMA (default 5) — the reversion is complete.'
+            'There is no hard price stop: worst case is a washout that becomes a trend break'
+            'before any reclaim, the known tail risk of all RSI(2) systems.'
+        ),
+        'parameters': (
+            'rsi_period=2, rsi_buy=10.0, sma_trend=200, sma_exit=5. Daily timeframe intended.'
+        ),
+    }
     version = "1.0"
     author = "quant-workshop"
 

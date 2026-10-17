@@ -30,6 +30,34 @@ class SwingDonchianBreakout(EquityStrategy):
         "ATR%% volatility floor; exit on the slower M-bar low break. "
         "Classic Turtle trend-following, long-only."
     )
+    description_sections = {
+        'overview': (
+            'Daily/weekly Turtle-style breakout: buys a new entry_n-bar high (with a volatility'
+            'floor) and exits on a slower channel break. Long-only swing trend-following.'
+        ),
+        'regime': (
+            'Works in multi-week trends on daily bars — the classic Turtle habitat. Struggles'
+            'through long consolidations: repeated 55-bar-high probes fail, and the wide 20-bar'
+            'exit gives back open profit before triggering.'
+        ),
+        'entry': (
+            'Close at a new entry_n-bar high AND the ATR% volatility floor met (no entries in'
+            'dead, compressed ranges).'
+        ),
+        'construction': (
+            'Single-instrument equity position, long only, held for days to weeks on daily/weekly'
+            'bars.'
+        ),
+        'exits_risk': (
+            'Exits when price breaks the exit_n-bar low — a trailing channel stop. No fixed stop'
+            'or target: worst case is a breakout that reverses the full channel width; the ATR%'
+            'floor keeps it out of the choppiest entries but does not cap loss.'
+        ),
+        'parameters': (
+            'entry_n=55, exit_n=20, atr_pct_min=1.0 (% ATR floor). The 55/20 Turtle pairing is'
+            'conservative; shorter entry windows trade more, earlier, and falser.'
+        ),
+    }
     version = "1.0"
     author = "quant-workshop"
 

@@ -27,6 +27,36 @@ class PeInstantBuy(InstantLongOptionStrategy):
         "held for the day so MTM P&L mirrors the underlying's fluctuation. "
         "Replaces atm_instant_buy (puts half)."
     )
+    description_sections = {
+        'overview': (
+            'Mechanics validator, not an edge: buys an ATM NIFTY put on the first bar and holds'
+            'it for the day so live/paper plumbing (fills, MTM, charges) can be verified'
+            'end-to-end.'
+        ),
+        'regime': (
+            'There is no regime logic — it trades on every deploy, up days and down days alike.'
+            'Expect it to make or lose roughly whatever an ATM put does that day; do not read'
+            'performance into it.'
+        ),
+        'entry': (
+            'One explicit long-put intent on the first bar after deploy. No indicator, filter, or'
+            'confirmation of any kind.'
+        ),
+        'construction': (
+            'Single ATM long put on the nearest eligible NIFTY expiry, 1 lot (override up to 5).'
+            'Defined risk: the premium paid is the most the position itself can lose.'
+        ),
+        'exits_risk': (
+            'Held for the day — no stop or target in the declared plan; the position rides to the'
+            'session/day close unless the operator exits. Worst case is the full premium if the'
+            'put expires worthless intraday-value-wise; the risk gate still prices and caps every'
+            'entry.'
+        ),
+        'parameters': (
+            'underlying=NIFTY. Quantity 1-5 lots via override. Use it to smoke-test execution,'
+            'never as a return strategy.'
+        ),
+    }
     version = "2.0"
     author = "Trading Bot"
 

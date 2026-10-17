@@ -302,6 +302,16 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; fon
 .research-links a { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); text-decoration: none; }
 .research-links a:hover { color: var(--primary); }
 .results-panel { min-width: 0; }
+/* Strategy card (backtest): sits in the results column, directly above the
+   performance metrics, populated when a strategy is selected. */
+.backtest-grid > .strategy-card { grid-column: 2; align-self: start; }
+.backtest-grid > .results-panel { grid-column: 2; }
+.strategy-card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.strategy-card-head h3 { font-size: 13px; margin: 0; }
+.strategy-card-overview { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 8px 0 0; }
+.strategy-card-sections { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 8px 14px; margin: 14px 0 0; }
+.strategy-card-sections dt { font-size: 11px; font-weight: 600; }
+.strategy-card-sections dd { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .results-overview-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; }
 .results-overview-head h2 { font-size: 15px; }
 .results-overview-head span { font-size: 10px; color: var(--muted); }

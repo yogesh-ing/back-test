@@ -72,6 +72,40 @@ class EmaReversionPob(DirectionalOptionStrategy):
         "band. Pair with a tight premium-percentage stop and 1:2+ target "
         "in the runner expression (aggressive OTM buying)."
     )
+    description_sections = {
+        'overview': (
+            'EMA reversion + Point of Balance: a daily 5-EMA mean-reversion bias filtered through'
+            "the first 30-minute candle's 0.44-0.50 Fibonacci balance band."
+        ),
+        'regime': (
+            'Works when the underlying oscillates around its daily 5-EMA (reversion regime) and'
+            'the opening range sets a respected balance zone. Struggles on strong trend days —'
+            'price leaves the band and never reverts, and the bias fights the tape.'
+        ),
+        'entry': (
+            'Above the 50% balance level = bullish (long call); below the 0.44 level = bearish'
+            '(long put); inside the band it holds its prior state rather than flipping on noise.'
+        ),
+        'construction': (
+            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put'
+            "on the underlying's nearest eligible expiry — a defined-risk, single-leg structure."
+            'Size is 1 lot by default (override 1-5 lots where the spawn form allows).'
+        ),
+        'exits_risk': (
+            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit'
+            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst'
+            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long'
+            'option can never lose more than the premium paid. The authoring note recommends'
+            'pairing with a tight premium stop and at least a 1:2 target in the runner expression'
+            '— this is an aggressive long-premium buyer.'
+        ),
+        'parameters': (
+            'ema_period=5, ema_gap_pct=0.0, require_ema_alignment=False, pob_lower=0.44,'
+            'pob_upper=0.50, scale_points=50.0, min_confidence=0.35, underlying=NIFTY. Size'
+            'defaults to 1 lot; quantity (and, where listed, exit levels) can be overridden at'
+            'spawn within the declared menu.'
+        ),
+    }
     version = "1.0"
     author = "Trading Bot"
 

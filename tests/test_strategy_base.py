@@ -176,6 +176,9 @@ def test_get_all_returns_valid_catalogue():
             # Phase 0 (plan §4.4): strategy-owned execution declaration
             # (None for legacy strategies) — additive catalogue key.
             "execution",
+            # 2026-10-17: structured strategy card (backtest page) —
+            # additive catalogue key; None when a strategy has no card.
+            "description_sections",
         }
         assert entry["params"] == registry.get_params(entry["name"])
         assert entry["signal_kind"] in {"option", "equity"}
