@@ -992,7 +992,7 @@
       const playbookList = (pbs.playbooks || []).filter(
         (p) => !String(p.playbook_id || "").startsWith("pb_default_") || true,
       );
-      pbSel.innerHTML = '<option value="">(engine defaults — no playbook)</option>' +
+      pbSel.innerHTML = '<option value="">(strategy defaults — no playbook)</option>' +
         playbookList.map((p) =>
           '<option value="' + p.playbook_id + '">' + p.name + " v" + (p.version ?? 1) + "</option>").join("");
 
@@ -1302,6 +1302,9 @@
       syncLotUnitLabel();
     }
 
+    // Phase 3: execution contract panel follows the strategy pick.
+    renderExecutionPanel();
+
     // Pool rows follow target type (unchanged behaviour).
     const pool = targetSel.value === "pool";
     $("spawn-symbol-row").hidden = pool;
@@ -1311,6 +1314,101 @@
     // S2: the strategy↔segment link preselects the capital partition this
     // strategy is designed for (until the operator picks one themselves).
     preselectSegment();
+  }
+
+  // Phase 3 (plan §7/Phase 3): the spawn form renders the strategy's
+  // declared execution contract from the catalogue and sends FIELD
+  // SELECTIONS ONLY. It never builds an expression: no hardcoded
+  // structures, no form-owned exits, no client-side silent fixes — an
+  // out-of-menu value travels to the server and comes back as a refusal
+  // naming the field, the menu, and the provenance layer.
+  function selectedExecution() {
+    const strat = selectedStrategy();
+    return strat && strat.execution ? strat.execution : null;
+  }
+
+  function renderExecutionPanel() {
+    const strat = selectedStrategy();
+    const isOption = strat && strat.signal_kind === "option";
+    const row = $("spawn-execution-row");
+    if (!row) return;
+    row.hidden = !isOption;
+    if (!isOption) return;
+    const exec = selectedExecution();
+    const summary = $("spawn-execution-summary");
+    const lotsInput = $("spawn-lots");
+    const prov = $("spawn-lots-provenance");
+    if (!exec) {
+      // No registered option strategy lacks a spec after Phase 2; this is
+      // the defensive label if one ever appears (legacy spawn path).
+      summary.textContent = "⚠ Legacy strategy — no declared execution contract; this spawn uses the legacy path.";
+      if (prov) prov.textContent = "";
+      renderExitOverrides(null);
+      if (lotsInput) { lotsInput.min = 1; lotsInput.max = 100; }
+      return;
+    }
+    summary.textContent = exec.summary;
+    if (lotsInput && exec.lots) {
+      lotsInput.min = exec.lots.min;
+      lotsInput.max = exec.lots.max;
+      lotsInput.value = exec.lots.default;
+    }
+    if (prov && exec.lots) {
+      prov.textContent = "Strategy menu: " + exec.lots.min + "–" + exec.lots.max +
+        " lots · default " + exec.lots.default +
+        " · above the menu the server refuses — it never clamps.";
+    }
+    renderExitOverrides(exec);
+  }
+
+  function renderExitOverrides(exec) {
+    const box = $("spawn-overrides");
+    if (!box) return;
+    if (!exec || !(exec.allowed_overrides || []).includes("exit")) {
+      box.innerHTML = "";
+      return;
+    }
+    const ex = exec.exit || {};
+    const pctLabel = (v) => (v === null || v === undefined ? "—" : Math.round(v * 100) + "%");
+    box.innerHTML =
+      "<div class='spawn-params-title'>Execution overrides " +
+      "<span class='muted'>(menu-bounded · blank = strategy default)</span></div>" +
+      "<div class='two-col'>" +
+      "<div class='form-row'><label for='spawn-ov-stop'>Stop loss % " +
+      "<span class='muted'>(strategy: " + pctLabel(ex.stop_loss_pct) + ")</span></label>" +
+      "<input id='spawn-ov-stop' class='input' type='number' min='1' max='99' step='1' placeholder='default'></div>" +
+      "<div class='form-row'><label for='spawn-ov-target'>Take profit % " +
+      "<span class='muted'>(strategy: " + pctLabel(ex.take_profit_pct) + ")</span></label>" +
+      "<input id='spawn-ov-target' class='input' type='number' min='1' step='1' placeholder='default'></div>" +
+      "</div>" +
+      "<div class='form-row'><label for='spawn-ov-mindte'>Exit before expiry " +
+      "<span class='muted'>(strategy: " + (ex.min_days_to_expiry === null || ex.min_days_to_expiry === undefined ? "ride to settlement" : ex.min_days_to_expiry + " day(s)") + ")</span></label>" +
+      "<select id='spawn-ov-mindte' class='input input-select'>" +
+      "<option value=''>Strategy default</option><option value='0'>Exit on expiry day</option>" +
+      "<option value='1'>1+ days before expiry</option><option value='ride'>Ride to settlement</option>" +
+      "</select></div>";
+  }
+
+  // The user's menu-bounded selections (the ONLY execution input this
+  // form may send). Empty object → strategy defaults, unmodified.
+  function buildUserSelections() {
+    const sel = {};
+    const lotsEl = $("spawn-lots");
+    if (lotsEl && lotsEl.value !== "") {
+      const n = parseInt(lotsEl.value, 10);
+      if (!Number.isNaN(n)) sel.quantity = n;
+    }
+    const exitSel = {};
+    const stop = $("spawn-ov-stop");
+    const target = $("spawn-ov-target");
+    const mindte = $("spawn-ov-mindte");
+    if (stop && stop.value !== "") exitSel.stop_loss_pct = parseFloat(stop.value) / 100;
+    if (target && target.value !== "") exitSel.take_profit_pct = parseFloat(target.value) / 100;
+    if (mindte && mindte.value !== "") {
+      exitSel.min_days_to_expiry = mindte.value === "ride" ? null : parseInt(mindte.value, 10);
+    }
+    if (Object.keys(exitSel).length) sel.exit = exitSel;
+    return sel;
   }
 
   async function submitSpawn() {
@@ -1380,7 +1478,13 @@
       // view (the adapter builds the view from params.underlying).
       params.underlying = symbolUpper;
       const pbId = $("spawn-playbook") ? $("spawn-playbook").value : "";
-      const lots = Math.max(1, parseInt($("spawn-lots") && $("spawn-lots").value, 10) || 1);
+      // No silent clamp (Phase 3): an unreadable lots value is a loud
+      // form error here; an out-of-menu one is the server's refusal.
+      const lots = parseInt($("spawn-lots") && $("spawn-lots").value, 10);
+      if (Number.isNaN(lots) || lots < 1) {
+        toast("Lots per leg must be a whole number of 1 or more.", "error");
+        return;
+      }
       // Capital guard: lots × exchange units × est. premium must fit the
       // allocation — oversizing fails HERE, not as a -98% runner in the book.
       const units = selectedLotUnits();
@@ -1398,6 +1502,12 @@
           return;
         }
       }
+      // Phase 3: the form sends field selections only — the strategy's
+      // declared defaults (plus any playbook bundle, itself selections)
+      // resolve server-side. There is no form-built expression anymore:
+      // the hardcoded direction-aware-spread default that caused the
+      // NIFTY/BANKNIFTY asymmetry is deleted, not replaced.
+      const selections = buildUserSelections();
       if (pbId) {
         try {
           const pbResp = await api("/api/playbooks/" + pbId + "/spawn", "POST", {
@@ -1408,6 +1518,11 @@
           });
           const rc = pbResp.runner_config || pbResp.config;
           if (rc && rc.instrument) body.instrument = rc.instrument;
+          // Spec'd strategy: the playbook arrives as layer-4 selections.
+          if (rc && rc.playbook_selections) body.playbook_selections = rc.playbook_selections;
+          if (rc && rc.playbook_snapshot) body.playbook_snapshot = rc.playbook_snapshot;
+          // Legacy (unmigrated) playbook form: expression travels as-is,
+          // with the lots choice applied as before.
           if (body.instrument && body.instrument.expression) {
             body.instrument.expression.quantity = lots;
           }
@@ -1417,15 +1532,9 @@
           }
         } catch (e) { toast("Playbook spawn failed: " + e.message, "error"); return; }
       } else {
-        // Engine defaults (direction-aware spreads, churn-guarded exits).
-        body.instrument = {
-          type: "option",
-          expression: {
-            type: { BULLISH: "bull_call_spread", BEARISH: "bear_put_spread" },
-            quantity: lots,
-          },
-        };
+        body.instrument = { type: "option" };
       }
+      if (Object.keys(selections).length) body.expression_selections = selections;
     }
     if (targetType === "pool") {
       body.target_type = "SYMBOL_UNIVERSE";
@@ -1444,7 +1553,7 @@
     try {
       const data = await api("/api/portfolio/runner/create", "POST", body);
       const kindLabel = body.instrument && body.instrument.type === "option"
-        ? " · option (" + ((body.playbook_id && $("spawn-playbook") && $("spawn-playbook").selectedOptions[0]) ? $("spawn-playbook").selectedOptions[0].textContent : "engine defaults") + ")"
+        ? " · option (" + ((body.playbook_id && $("spawn-playbook") && $("spawn-playbook").selectedOptions[0]) ? $("spawn-playbook").selectedOptions[0].textContent : "strategy defaults") + ")"
         : "";
       addAudit(
         "Spawned " + data.runner.name + " (" + data.runner.target_label + kindLabel + ")",

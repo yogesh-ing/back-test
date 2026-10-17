@@ -1,9 +1,9 @@
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class DonchianBreakout(Strategy):
+class DonchianBreakout(EquityStrategy):
     """Donchian channel breakout: enter on a new high, exit on a new low."""
 
     name = "donchian_breakout"

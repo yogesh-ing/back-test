@@ -186,6 +186,24 @@ def spawn_from_playbook(playbook_id: str) -> Tuple[Response, int]:
         source=requested_source or _default_runner_source(),
         name=data.get("name"),
     )
+    # Phase 3 (plan §7): for a strategy that declares an execution spec,
+    # the playbook travels as layer-4 *selections* — the runner config
+    # carries no expression at all, and resolution at create time refuses
+    # any playbook choice outside the strategy's menus. The legacy
+    # expression snapshot is retained for audit/display.
+    try:
+        from backtest.strategy.registry import get_strategy as _get_strategy
+
+        _spec = _get_strategy(strategy_name).execution_spec()
+    except Exception:  # noqa: BLE001 — unmigrated strategies keep legacy form
+        _spec = None
+    if _spec is not None:
+        runner_config_dict = {
+            **runner_config_dict,
+            "instrument": {"type": "option"},
+            "playbook_selections": pb.to_selections(),
+        }
+
     if data.get("params"):
         runner_config_dict["params"] = data["params"]
     if data.get("strategy_params"):

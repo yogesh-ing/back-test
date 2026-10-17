@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class MacdTrend(Strategy):
+class MacdTrend(EquityStrategy):
     """MACD trend — long while the MACD line leads its signal line."""
 
     name = "macd_trend"

@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class PriceMove(Strategy):
+class PriceMove(EquityStrategy):
     """Threshold-based price movement signal."""
 
     name = "price_move"

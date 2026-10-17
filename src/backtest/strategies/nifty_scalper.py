@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class NiftyScalper(Strategy):
+class NiftyScalper(EquityStrategy):
     """Nifty Scalper — Fast EMA momentum + RSI filter with engine-enforced stops."""
 
     name = "nifty_scalper"

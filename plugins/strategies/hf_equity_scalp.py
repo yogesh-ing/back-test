@@ -16,10 +16,10 @@ Designed to stress-test:
 from __future__ import annotations
 
 import pandas as pd
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class HF_EquityScalp(Strategy):
+class HF_EquityScalp(EquityStrategy):
     """High-frequency momentum scalp on equities."""
     
     name = "hf_equity_scalp"

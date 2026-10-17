@@ -20,10 +20,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class SwingDonchianBreakout(Strategy):
+class SwingDonchianBreakout(EquityStrategy):
     name = "swing_donchian_breakout"
     description = (
         "Daily/weekly swing: long entry on an N-bar high breakout with an "

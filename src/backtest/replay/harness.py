@@ -262,6 +262,21 @@ class ReplayHarness:
             commission_per_lot=float(self.config.commission_per_lot),
         )
         expression = copy.deepcopy(self.config.expression)
+        if int(expression.get("expression_version", 0) or 0) == 2:
+            # Phase 1 (plan §6.3): replay may not keep a private mapping
+            # logic — a v2 expression goes through the same validation as
+            # the forward path, gate entitlement included.
+            from backtest.options.execution_gate import PreTradeRiskGate
+            from backtest.strategy.execution import validate_expression
+
+            _errs = validate_expression(
+                expression,
+                permitted_structures=PreTradeRiskGate(
+                    mode="paper"
+                ).permitted_structures(),
+            )
+            if _errs:
+                raise ValueError("v2 replay expression refused: " + "; ".join(_errs))
         bridge = OptionsBridge(
             capital=float(self.config.initial_capital),
             expression=expression,

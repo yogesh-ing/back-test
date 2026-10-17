@@ -34,6 +34,34 @@
     return "safe";
   }
 
+  // Phase 3 (plan §7.1): Layer-1 rulebook, read-only. The ceilings the
+  // one Pre-Trade Risk Gate enforces; rendered from the same fail-closed
+  // loader the gate uses — a broken rulebook shows here as an error,
+  // never as silent empty limits.
+  async function loadLimits() {
+    const body = $("risk-limits-body");
+    if (!body) return;
+    try {
+      const data = await fetchJSON("/api/portfolio/risk/limits");
+      const lim = data.limits || {};
+      const rows = [
+        ["Max loss per trade", fmtMoney(lim.per_trade_max_loss_inr)],
+        ["Max lots per runner", String(lim.per_runner_max_lots ?? "—")],
+        ["Max order value per runner", fmtMoney(lim.per_runner_max_order_value_inr)],
+        ["Kill switch on boot", lim.kill_switch_engaged_on_boot ? "ENGAGED" : "off"],
+        ["Rulebook fingerprint", String(lim.sha256 || "—").slice(0, 16) + "…"],
+      ];
+      const entitlement = Object.entries(lim.entitlement || {})
+        .map(([mode, structs]) => "<tr><td class='muted'>Permitted · " + mode +
+          "</td><td>" + structs.join(", ") + "</td></tr>").join("");
+      body.innerHTML = "<table class='dd-table dd-kv'><tbody>" +
+        rows.map(([k, v]) => "<tr><td class='muted'>" + k + "</td><td>" + v + "</td></tr>").join("") +
+        entitlement + "</tbody></table>";
+    } catch (e) {
+      body.innerHTML = "<div class='card-error'>Rulebook unavailable: " + e.message + "</div>";
+    }
+  }
+
   async function loadRisk() {
     const mode = $("risk-page-mode")?.value || "";
     const url = mode ? `/api/portfolio/risk?mode=${mode}` : "/api/portfolio/risk";
@@ -253,7 +281,7 @@
       const msg = $("risk-save-msg");
       if (msg) { msg.textContent = "✓ Saved"; setTimeout(()=>msg.textContent="",2000); }
       if (window.showToast) window.showToast("Global risk config saved", "success");
-      loadRisk();
+      loadRisk(); loadLimits();
     } catch (e) {
       if (window.showToast) window.showToast("Save failed: " + e.message, "error");
     }
@@ -271,7 +299,7 @@
     try {
       await fetchJSON("/api/portfolio/risk/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ buckets }) });
       if (window.showToast) window.showToast("Bucket overrides saved", "success");
-      loadRisk();
+      loadRisk(); loadLimits();
     } catch (e) {
       if (window.showToast) window.showToast("Save failed: " + e.message, "error");
     }
@@ -561,12 +589,12 @@
   document.addEventListener("DOMContentLoaded", () => {
     if (!$("risk-page")) return;
     bind();
-    loadRisk();
+    loadRisk(); loadLimits();
     loadConfig();
     // Auto-refresh dashboard every 2s
     setInterval(() => {
       const activeTab = document.querySelector("#risk-page .tab.active")?.dataset.tab;
-      if (activeTab === "config" || !activeTab) loadRisk();
+      if (activeTab === "config" || !activeTab) loadRisk(); loadLimits();
     }, 2000);
   });
 

@@ -26,6 +26,15 @@
     <div id="risk-broker-cards" class="risk-broker-cards" hidden></div>
   </div>
 
+  <!-- Phase 3 (plan §7.1): the Layer-1 rulebook, read-only. Limits live
+       in version-controlled config/risk_limits.yaml; this card renders
+       them and cannot change them. -->
+  <div id="risk-limits-card" style="margin-top:20px;">
+    <h3 style="margin-bottom:10px;">Pre-Trade Risk Gate — rulebook (read-only)</h3>
+    <div id="risk-limits-body" class="muted">Loading…</div>
+    <small class="muted">Source: <code>config/risk_limits.yaml</code> — changes are reviewed diffs applied at restart; spawning and trading refuse above these ceilings, never clamp to them.</small>
+  </div>
+
   <!-- Tabs for sub-sections -->
   <div class="tabs" style="margin-top:20px;">
     <button class="tab active" data-tab="config" type="button">⚙️ Risk Configuration</button>
