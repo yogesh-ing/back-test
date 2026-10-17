@@ -1,10 +1,10 @@
 import numpy as np
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class RsiReversion(Strategy):
+class RsiReversion(EquityStrategy):
     """RSI mean-reversion: go long when RSI is oversold, exit on recovery."""
 
     name = "rsi_reversion"

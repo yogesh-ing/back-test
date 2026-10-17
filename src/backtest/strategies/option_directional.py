@@ -21,11 +21,11 @@ from decimal import Decimal
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import DirectionalOptionStrategy
 from backtest.strategy.intent import Direction, MarketView
 
 
-class DirectionalOptions(Strategy):
+class DirectionalOptions(DirectionalOptionStrategy):
     """EMA-momentum directional view for the options expression layer."""
 
     name = "directional_options"
@@ -44,6 +44,28 @@ class DirectionalOptions(Strategy):
     )
     version = "1.0"
     author = "Trading Bot"
+
+    # Phase 2 rewrite (plan §9.2): the strategy's own execution declaration.
+    # Signal logic below is unchanged from the snapshot; what changed is
+    # that the direction->structure mapping and the exit contract now live
+    # here, once, instead of in UI defaults / bridge fallbacks.
+    execution = {
+        "emits": ["bullish", "bearish", "neutral"],
+        "structures": {
+            "bullish": {"structure": "long_call", "strike_selection": "atm"},
+            "bearish": {"structure": "long_put", "strike_selection": "atm"},
+        },
+        "exit": {
+            "stop_loss_pct": 0.50,
+            "take_profit_pct": 1.0,
+            "signal_flip": True,
+            "min_days_to_expiry": 1,
+        },
+        "quantity": 1,
+        "min_quantity": 1,
+        "max_quantity": 5,
+        "allowed_overrides": ["quantity", "exit"],
+    }
     params = {
         "ema_period": {
             "default": 9,

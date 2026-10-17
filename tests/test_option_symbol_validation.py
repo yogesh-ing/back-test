@@ -37,22 +37,24 @@ def client():
 
 
 class TestBackendOptionSymbolValidation:
-    def _post(self, client, symbol, instrument=None):
-        return client.post(
-            "/api/portfolio/runner/create",
-            json={
-                "name": "gap2-test",
-                "strategy": "vwap_ema_rsi",
-                "timeframe": "1min",
-                "allocated_capital": 100_000,
-                "mode": "paper",
-                "source": "synthetic",
-                "target_type": "SINGLE_SYMBOL",
-                "symbol": symbol,
-                "instrument": instrument
-                or {"type": "option", "expression": {"type": {"BULLISH": "bull_call_spread"}}},
-            },
-        )
+    def _post(self, client, symbol, instrument=None, selections=None):
+        # Phase 2: vwap_ema_rsi is spec'd — spawns resolve from the
+        # strategy's declared defaults; clients send menu-bounded
+        # selections only, never a raw expression.
+        body = {
+            "name": "gap2-test",
+            "strategy": "vwap_ema_rsi",
+            "timeframe": "1min",
+            "allocated_capital": 100_000,
+            "mode": "paper",
+            "source": "synthetic",
+            "target_type": "SINGLE_SYMBOL",
+            "symbol": symbol,
+            "instrument": instrument or {"type": "option"},
+        }
+        if selections is not None:
+            body["expression_selections"] = selections
+        return client.post("/api/portfolio/runner/create", json=body)
 
     def test_option_runner_on_nifty_is_accepted(self, client):
         resp = self._post(client, "NIFTY")
@@ -83,13 +85,16 @@ class TestBackendOptionSymbolValidation:
 class TestLotsPerLeg:
     """Owner rule (2026-09-22): lot size is USER-SELECTED at instance creation,
 
-    defaults to 1, is clamped server-side, and is IMMUTABLE afterwards — to
+    defaults to 1, is menu-bounded server-side (Phase 2: out-of-menu values
+    are REFUSED, never clamped), and is IMMUTABLE afterwards — to
     change size the user spawns a new instance (or risk management halts the
     runner). No in-place lot mutation exists by design.
     """
 
-    def _post(self, client, symbol, instrument=None):
-        return TestBackendOptionSymbolValidation()._post(client, symbol, instrument)
+    def _post(self, client, symbol, instrument=None, selections=None):
+        return TestBackendOptionSymbolValidation()._post(
+            client, symbol, instrument, selections
+        )
 
     def test_default_is_one_lot(self):
         from backtest.forward.options_bridge import DEFAULT_EXPRESSION
@@ -97,46 +102,24 @@ class TestLotsPerLeg:
         assert int(DEFAULT_EXPRESSION.get("quantity", 1)) == 1
 
     def test_user_chosen_lots_are_accepted(self, client):
-        resp = self._post(
-            client,
-            "NIFTY",
-            instrument={
-                "type": "option",
-                "expression": {
-                    "type": {"BULLISH": "bull_call_spread"},
-                    "quantity": 3,
-                },
-            },
-        )
+        resp = self._post(client, "NIFTY", selections={"quantity": 3})
         assert resp.status_code in (200, 201), resp.get_json()
         expr = resp.get_json()["runner"]["instrument"]["expression"]
         assert int(expr["quantity"]) == 3
 
-    def test_lots_are_clamped_to_1_100(self, client):
-        resp = self._post(
-            client,
-            "NIFTY",
-            instrument={
-                "type": "option",
-                "expression": {"type": {"BULLISH": "bull_call_spread"}, "quantity": 9999},
-            },
-        )
-        assert resp.status_code in (200, 201), resp.get_json()
-        expr = resp.get_json()["runner"]["instrument"]["expression"]
-        assert int(expr["quantity"]) == 100
+    def test_lots_above_the_menu_are_refused_not_clamped(self, client):
+        # Phase 2 contract change: the [1, 100] silent clamp is abolished
+        # for spec'd strategies. Quantity is menu-bounded by the strategy
+        # (vwap_ema_rsi: 1..5); above the menu the spawn REFUSES — ceilings
+        # refuse, never clamp (plan §7).
+        resp = self._post(client, "NIFTY", selections={"quantity": 9999})
+        assert resp.status_code == 400, resp.get_json()
 
-    def test_bad_lots_fall_back_to_one(self, client):
-        resp = self._post(
-            client,
-            "NIFTY",
-            instrument={
-                "type": "option",
-                "expression": {"type": {"BULLISH": "bull_call_spread"}, "quantity": "abc"},
-            },
-        )
-        assert resp.status_code in (200, 201), resp.get_json()
-        expr = resp.get_json()["runner"]["instrument"]["expression"]
-        assert int(expr["quantity"]) == 1
+    def test_bad_lots_are_refused_not_repaired(self, client):
+        # Likewise, an unparseable quantity used to fall back to 1; under
+        # the v2 contract it refuses at spawn.
+        resp = self._post(client, "NIFTY", selections={"quantity": "abc"})
+        assert resp.status_code == 400, resp.get_json()
 
     def test_no_in_place_lot_mutation_endpoint_exists(self):
         """The API has create + control only — no update/patch of a runner's

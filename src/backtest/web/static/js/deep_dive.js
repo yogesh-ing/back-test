@@ -210,6 +210,24 @@
       rows.push(["Lots per leg", expr.quantity == null ? 1 : expr.quantity]);
       rows.push(["Exit policy", exitSummary(exit)]);
     }
+    // Phase 3 (plan §8): the spawn snapshot's fingerprints and any
+    // version drift — the runner trades the code it was spawned under;
+    // if the bundle changed while it was down it sits PAUSED with
+    // STRATEGY_CODE_CHANGED until an operator resumes it consciously.
+    const bundle = r.strategy_bundle || {};
+    const short = (h) => (h ? String(h).slice(0, 12) + "…" : "—");
+    if (bundle.bundle_sha256) rows.push(["Code fingerprint (bundle)", short(bundle.bundle_sha256)]);
+    if (bundle.engine_git_sha) rows.push(["Engine git SHA", short(bundle.engine_git_sha)]);
+    if (bundle.risk_limits_sha256) rows.push(["Risk-limits fingerprint", short(bundle.risk_limits_sha256)]);
+    if (bundle.config_sha256) rows.push(["Config fingerprint", short(bundle.config_sha256)]);
+    const provenance = (r.instrument || {}).expression_provenance || {};
+    const provKeys = Object.keys(provenance);
+    if (provKeys.length) {
+      rows.push(["Selection provenance", provKeys.map((k) => k + ": " + provenance[k]).join(" · ")]);
+    }
+    if (r.strategy_code_changed) {
+      rows.push(["Version drift", "⚠ STRATEGY_CODE_CHANGED — code changed since spawn; paused until resumed"]);
+    }
     const paramRows = Object.entries(r.params || {}).map(([k, v]) =>
       "<tr><td class='muted'>param." + esc(k) + "</td><td>" + esc(JSON.stringify(v)) + "</td></tr>");
     return '<table class="dd-table dd-kv"><tbody>' +
@@ -298,6 +316,11 @@
       " · " + r.timeframe + " · " + r.status;
 
     $("dd-body").innerHTML =
+      (r.strategy_code_changed
+        ? '<div class="card-error" style="margin-bottom:10px">⚠ STRATEGY_CODE_CHANGED — ' +
+          "the strategy/template code changed while this runner was down. It is PAUSED; " +
+          "resuming restamps the spawn fingerprint as a conscious migration.</div>"
+        : "") +
       '<div class="dd-stats">' +
       stat("Equity", "₹" + Math.round(r.equity || 0).toLocaleString("en-IN")) +
       stat("Daily P&L", fmtSigned(r.daily_pnl), pnlClass(r.daily_pnl)) +

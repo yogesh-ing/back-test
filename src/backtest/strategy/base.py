@@ -133,6 +133,13 @@ class Strategy(ABC):
     version: str = ""
     author: str = ""
     params: dict[str, Any] = {}
+    # Strategy-Owned Execution (Refactor Plan v2.1, Phase 0): the strategy's
+    # declarative execution spec — dict form or an ExecutionSpec. ``None``
+    # (default) = legacy strategy; behaviour is exactly as before. When set,
+    # :meth:`execution_spec` parses/validates/freezes it and :meth:`validate`
+    # enforces it. Import is lazy (execution imports intent only) to keep
+    # this module the bottom of the dependency stack.
+    execution: Any = None
     stop_loss: float | None = None
     take_profit: float | None = None
     # Instrument eligibility (2026-09-22): ``None`` = trades any symbol the
@@ -339,6 +346,36 @@ class Strategy(ABC):
                 schema[key] = entry
         return schema
 
+    # -- execution spec (Phase 0, plan §4.4) ------------------------------
+
+    @classmethod
+    def execution_spec(cls) -> Any:
+        """Parsed, immutable :class:`ExecutionSpec`, or ``None`` if legacy.
+
+        Parses the declared ``execution`` (dict or spec) once per class and
+        caches it on the class; the cached spec's mappings are frozen, so a
+        caller cannot mutate the shared declaration. A changed declaration
+        (tests, hot reload) re-parses because the cache keys on the raw
+        object's identity.
+        """
+        raw = cls.execution
+        if raw is None:
+            return None
+        cache = cls.__dict__.get("_execution_spec_cache")
+        if cache is not None and cache[0] is raw:
+            return cache[1]
+        from .execution import ExecutionSpec
+
+        spec = ExecutionSpec.from_declared(raw)
+        cls._execution_spec_cache = (raw, spec)  # noqa: SLF001 — own class attr
+        return spec
+
+    @classmethod
+    def default_expression(cls) -> "dict[str, Any] | None":
+        """The v2 ``instrument.expression`` block derived from the spec."""
+        spec = cls.execution_spec()
+        return spec.to_expression() if spec is not None else None
+
     # -- contract validation (Task 1.1) ---------------------------------
 
     @classmethod
@@ -366,6 +403,16 @@ class Strategy(ABC):
                 f"{cls.name}: strategy must implement generate_signals(candles) "
                 "or entries(candles)"
             )
+
+        # Execution spec validation (Phase 0, plan §4.4): only strategies
+        # that declare one are held to it; legacy strategies are untouched.
+        if cls.execution is not None:
+            try:
+                cls.execution_spec()
+            except Exception as exc:  # ExecutionSpecError + friends
+                raise StrategyContractError(
+                    f"{cls.name}: invalid execution spec: {exc}"
+                ) from exc
 
         # Description validation (new requirement, 2026-09-29)
         description = getattr(cls, "description", "")

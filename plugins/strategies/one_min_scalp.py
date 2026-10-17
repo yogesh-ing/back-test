@@ -16,10 +16,10 @@ Designed to generate frequent trades for validating:
 from __future__ import annotations
 
 import pandas as pd
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class OneMinScalp(Strategy):
+class OneMinScalp(EquityStrategy):
     """Simple 1-min momentum scalp: buy green candles, TP=5pts, SL=3pts."""
     
     name = "one_min_scalp"

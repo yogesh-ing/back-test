@@ -1,9 +1,9 @@
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class BuyAndHold(Strategy):
+class BuyAndHold(EquityStrategy):
     """Passive benchmark: buy on the first bar and hold to the end."""
 
     name = "buy_and_hold"

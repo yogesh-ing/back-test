@@ -46,7 +46,11 @@ def client():
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_option_config_js_behaviour():
-    """Drive the real payload builder the browser uses."""
+    """Drive the real option vocabulary module the browser loads.
+
+    Phase 3: this module no longer builds payloads (that was the deleted
+    hardcoded-expression path); the harness pins the vocabulary and the
+    builders' absence."""
     result = subprocess.run(
         ["node", str(_JS_HARNESS)],
         cwd=REPO_ROOT,
@@ -58,16 +62,16 @@ def test_option_config_js_behaviour():
     assert result.returncode == 0, (
         f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-    assert "29 tests passed" in result.stdout
+    assert "test_option_config: 2 passed" in result.stdout
 
 
 @pytest.mark.parametrize(
     "url", ["/", "/portfolio", "/portfolio/paper", "/portfolio/live"]
 )
 def test_option_components_are_loaded_on_every_page(client, url):
-    """The payload builder and the book renderer ride along on every page."""
+    """The structure vocabulary and the book renderer ride along on every page."""
     html = client.get(url).get_data(as_text=True)
-    assert "js/components/option_config.js" in html, f"{url} does not load the builder"
+    assert "js/components/option_config.js" in html, f"{url} does not load the vocabulary"
     assert "js/components/option_view.js" in html, f"{url} does not load the renderer"
 
 
@@ -171,10 +175,33 @@ class TestSpawnForm:
         js = (REPO_ROOT / "src/backtest/web/static/js/portfolio.js").read_text(
             encoding="utf-8"
         )
-        # Option routing: playbook snapshot or engine defaults — never form fields.
+        # Phase 3: selections only — strategy defaults or a playbook
+        # bundle (itself selections); the form builds NO expression.
         assert "body.instrument" in js
         assert "/api/playbooks/" in js
-        assert "bull_call_spread" in js  # engine-default expression
+        assert "body.expression_selections" in js
+        assert "body.playbook_selections" in js
+        # The hardcoded engine-default expression is deleted, not replaced:
+        assert 'BULLISH: "bull_call_spread"' not in js
+        assert "engine defaults" not in js
+
+    def test_js_renders_execution_contract_from_catalogue(self):
+        js = (REPO_ROOT / "src/backtest/web/static/js/portfolio.js").read_text(
+            encoding="utf-8"
+        )
+        modal = (REPO_ROOT / "src/backtest/web/templates/_portfolio_center.html").read_text(
+            encoding="utf-8"
+        )
+        # Summary + menu-bounded override pickers, provenance rendered.
+        assert 'id="spawn-execution-summary"' in modal
+        assert 'id="spawn-overrides"' in modal
+        assert 'id="spawn-lots-provenance"' in modal
+        assert "exec.summary" in js
+        assert "renderExecutionPanel" in js
+        assert "buildUserSelections" in js
+        # The lots value is sent as a selection; the submit-path silent
+        # clamp is gone (a display label elsewhere may still phrase 1 lot).
+        assert "const lots = Math.max(1, parseInt" not in js
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +241,37 @@ def _browser_payload(**overrides):
     return payload
 
 
+def _v2_payload(**overrides):
+    """Phase 2 shape for a rewritten (spec'd) strategy: no expression at
+    all — the strategy's declared defaults resolve server-side, and the
+    client may only send menu-bounded field selections. (The Phase 3 UI
+    will post exactly this; _browser_payload above remains the legacy
+    shape for unmigrated strategies.)"""
+    payload = {
+        "name": "NIFTY-V2",
+        "strategy": "directional_options",
+        "allocated_capital": 1_000_000,
+        "timeframe": "1day",
+        "mode": "paper",
+        "source": "synthetic",
+        "target_type": "SINGLE_SYMBOL",
+        "symbol": "NIFTY",
+        "params": {},
+        "instrument": {"type": "option"},
+        "expression_selections": {
+            "exit": {
+                "min_days_to_expiry": 1,
+                "stop_loss_pct": 0.4,
+                "take_profit_pct": 0.8,
+                "neutral_bars": 2,
+                "reenter": True,
+            }
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
 class TestCreateRunnerApi:
     def test_equity_payload_without_instrument_still_works(self, client):
         response = client.post(
@@ -232,7 +290,10 @@ class TestCreateRunnerApi:
         assert runner["options"] is None
 
     def test_option_payload_spawns_an_option_runner(self, client):
-        response = client.post("/api/portfolio/runner/create", json=_browser_payload())
+        # directional_options was rewritten (Phase 2): the browser's legacy
+        # full-expression payload is refused for spec'd strategies by
+        # design; the v2 selections shape is what spawns now.
+        response = client.post("/api/portfolio/runner/create", json=_v2_payload())
         assert response.status_code == 201, response.get_json()
 
         runner = response.get_json()["runner"]
@@ -249,8 +310,8 @@ class TestCreateRunnerApi:
 
     def test_optional_exit_keys_default_inside_the_engine(self, client):
         """A minimal option payload is still deployable."""
-        payload = _browser_payload()
-        payload["instrument"]["expression"].pop("exit")
+        payload = _v2_payload()
+        payload.pop("expression_selections")
         response = client.post("/api/portfolio/runner/create", json=payload)
         assert response.status_code == 201
         policy = response.get_json()["runner"]["options"]["exit_policy"]
@@ -258,8 +319,8 @@ class TestCreateRunnerApi:
         assert policy["min_days_to_expiry"] == 1  # shipped default
 
     def test_ride_into_settlement_via_explicit_null(self, client):
-        payload = _browser_payload()
-        payload["instrument"]["expression"]["exit"] = {"min_days_to_expiry": None}
+        payload = _v2_payload()
+        payload["expression_selections"] = {"exit": {"min_days_to_expiry": None}}
         response = client.post("/api/portfolio/runner/create", json=payload)
         assert response.status_code == 201
         policy = response.get_json()["runner"]["options"]["exit_policy"]
@@ -288,7 +349,7 @@ class TestCreateRunnerApi:
 
     def test_payload_survives_json_round_trip(self, client):
         """The JS POST is JSON — make sure nothing depends on Python objects."""
-        raw = json.dumps(_browser_payload())
+        raw = json.dumps(_v2_payload())
         response = client.post(
             "/api/portfolio/runner/create",
             data=raw,

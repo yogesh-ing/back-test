@@ -1,0 +1,349 @@
+{
+  "snapshot": "2026-10-15",
+  "purpose": "Frozen pre-rewrite copy of every live strategy. Reference only - NOT discovered/imported (discovery scans only plugins/strategies and src/backtest/strategies). Originals remain live until each rewritten replacement passes the cutover gate in STRATEGY_EXECUTION_REFACTOR_PLAN v2, then are deleted from live dirs per-strategy.",
+  "count": 38,
+  "files": [
+    {
+      "origin": "plugins",
+      "file": "atm_instant_buy.py",
+      "snapshot": "plugins/atm_instant_buy.py",
+      "strategy_name": "atm_instant_buy",
+      "cls": "AtmInstantBuy",
+      "sha256": "303d63dca3b1c352f2800d525d675c7cf9290b4b6f51cbeca3419585eb574951",
+      "bytes": 2992
+    },
+    {
+      "origin": "plugins",
+      "file": "delta_momentum.py",
+      "snapshot": "plugins/delta_momentum.py",
+      "strategy_name": "delta_momentum",
+      "cls": "DeltaMomentum",
+      "sha256": "cfb8cecdf0af3b1d2a638b6de8d4cd03378248ad66f23c3b116ad0ee2a74bb14",
+      "bytes": 6537
+    },
+    {
+      "origin": "plugins",
+      "file": "ema_reversion_pob.py",
+      "snapshot": "plugins/ema_reversion_pob.py",
+      "strategy_name": "ema_reversion_pob",
+      "cls": "EmaReversionPob",
+      "sha256": "7d6ad7159764117eb8de2f15606a8f31ae6373f2830f58b21bef983ba9629ea0",
+      "bytes": 13350
+    },
+    {
+      "origin": "plugins",
+      "file": "hf_equity_scalp.py",
+      "snapshot": "plugins/hf_equity_scalp.py",
+      "strategy_name": "hf_equity_scalp",
+      "cls": "HF_EquityScalp",
+      "sha256": "f446f50e033ea882c65160127db903c7f5647964bae3c66cd7247d35fda94d34",
+      "bytes": 3558
+    },
+    {
+      "origin": "plugins",
+      "file": "immediate_entry.py",
+      "snapshot": "plugins/immediate_entry.py",
+      "strategy_name": "immediate_entry",
+      "cls": "ImmediateEntry",
+      "sha256": "257442cfe87a90e3c5e78b1ce268f1f3ee2e1bea04e2813b1af81788bc33451c",
+      "bytes": 2587
+    },
+    {
+      "origin": "plugins",
+      "file": "immediate_strangle.py",
+      "snapshot": "plugins/immediate_strangle.py",
+      "strategy_name": "immediate_strangle",
+      "cls": "ImmediateStrangle",
+      "sha256": "a0a2a68080fcf2db41e69b1f393dfadb44372e57446fe287f42dac5ea994c05d",
+      "bytes": 5746
+    },
+    {
+      "origin": "plugins",
+      "file": "momentum_burst.py",
+      "snapshot": "plugins/momentum_burst.py",
+      "strategy_name": "momentum_burst",
+      "cls": "MomentumBurst",
+      "sha256": "9cd8b9e5a54ff10946a521bed29cc387a6fdeb34df751476bca143466fe132ff",
+      "bytes": 4260
+    },
+    {
+      "origin": "plugins",
+      "file": "my_supertrend_v1_imported.py",
+      "snapshot": "plugins/my_supertrend_v1_imported.py",
+      "strategy_name": "mysupertrendv1",
+      "cls": "MySupertrendV1",
+      "sha256": "d4b5f6763ccf680133b05481985a873440a6b17ea99b67db96fed153d297d929",
+      "bytes": 3989
+    },
+    {
+      "origin": "plugins",
+      "file": "nifty_instant_buy.py",
+      "snapshot": "plugins/nifty_instant_buy.py",
+      "strategy_name": "nifty_instant_buy",
+      "cls": "Nifty_InstantBuy",
+      "sha256": "605f88ce601ed69c0783cc2705b8648a072d3f322fcf3a129179dab1cc956418",
+      "bytes": 3753
+    },
+    {
+      "origin": "plugins",
+      "file": "one_min_scalp.py",
+      "snapshot": "plugins/one_min_scalp.py",
+      "strategy_name": "one_min_scalp",
+      "cls": "OneMinScalp",
+      "sha256": "d6c314caa6747515de43f2d1dea5e5cee791e684efe85d3011dd2acc30d69e7d",
+      "bytes": 3312
+    },
+    {
+      "origin": "plugins",
+      "file": "outside_bar_strategy_imported.py",
+      "snapshot": "plugins/outside_bar_strategy_imported.py",
+      "strategy_name": "outsidebarstrategy",
+      "cls": "OutsideBarStrategy",
+      "sha256": "7606655329aa51c049f18e15f98b7d7a278b8da7954f5a9b067e360f0425b5c8",
+      "bytes": 4001
+    },
+    {
+      "origin": "plugins",
+      "file": "outsidebarstrategy_imported.py",
+      "snapshot": "plugins/outsidebarstrategy_imported.py",
+      "strategy_name": "outsidebarstrategy",
+      "cls": "OutsideBarStrategy",
+      "sha256": "893b73315cbadd2c3f8532a8a2f1e25448dc270a29c06f2df876675b6f6f0c4e",
+      "bytes": 1887
+    },
+    {
+      "origin": "plugins",
+      "file": "supertrend_strategy_imported.py",
+      "snapshot": "plugins/supertrend_strategy_imported.py",
+      "strategy_name": "supertrendstrategy",
+      "cls": "SupertrendStrategy",
+      "sha256": "b8aae360e32142012da1911d3e472a11f2ae857e14b3e688a8140ed0c3268614",
+      "bytes": 4001
+    },
+    {
+      "origin": "plugins",
+      "file": "supertrendstrategy_imported.py",
+      "snapshot": "plugins/supertrendstrategy_imported.py",
+      "strategy_name": "supertrendstrategy",
+      "cls": "SupertrendStrategy",
+      "sha256": "7884924cccea8d1cb1ffec7b0f3b61d78642a8741b0ad0ebc4ee3c57e1876ccd",
+      "bytes": 4001
+    },
+    {
+      "origin": "plugins",
+      "file": "swing_donchian_breakout.py",
+      "snapshot": "plugins/swing_donchian_breakout.py",
+      "strategy_name": "swing_donchian_breakout",
+      "cls": "SwingDonchianBreakout",
+      "sha256": "31f4ef1f593db7c64dd5dde682357cd5addf7ada843c3f325b4531c22245870a",
+      "bytes": 2751
+    },
+    {
+      "origin": "plugins",
+      "file": "swing_ema_pullback.py",
+      "snapshot": "plugins/swing_ema_pullback.py",
+      "strategy_name": "swing_ema_pullback",
+      "cls": "SwingEmaPullback",
+      "sha256": "6a8ae5ef8887271210e4e186c5acbf95506b894e4d7beef7ed6c957fb32af98f",
+      "bytes": 2619
+    },
+    {
+      "origin": "plugins",
+      "file": "swing_hourly_supertrend.py",
+      "snapshot": "plugins/swing_hourly_supertrend.py",
+      "strategy_name": "swing_hourly_supertrend",
+      "cls": "SwingHourlySupertrend",
+      "sha256": "8b19a17fff8195d3a20b63a71423faf191cf672f5128c6cebe5e96b52fe10fe5",
+      "bytes": 4024
+    },
+    {
+      "origin": "plugins",
+      "file": "swing_rsi2_meanrev.py",
+      "snapshot": "plugins/swing_rsi2_meanrev.py",
+      "strategy_name": "swing_rsi2_meanrev",
+      "cls": "SwingRsi2MeanRev",
+      "sha256": "b82423d28f801aea756043fd917531622af5e97aaab345a983fa92d9e216c82b",
+      "bytes": 3055
+    },
+    {
+      "origin": "plugins",
+      "file": "time_alternator.py",
+      "snapshot": "plugins/time_alternator.py",
+      "strategy_name": "time_alternator",
+      "cls": "TimeAlternator",
+      "sha256": "c814885af5da3f0f3b54090077322ce682c8ec0d5f59340eccb035f57ecba996",
+      "bytes": 4108
+    },
+    {
+      "origin": "plugins",
+      "file": "v1_imported.py",
+      "snapshot": "plugins/v1_imported.py",
+      "strategy_name": "v1",
+      "cls": "V1",
+      "sha256": "a1ffdc2a1b273755560abaf8fee7ec2b1372105d50b0f78ed77601cb9d383940",
+      "bytes": 3953
+    },
+    {
+      "origin": "plugins",
+      "file": "v2_imported.py",
+      "snapshot": "plugins/v2_imported.py",
+      "strategy_name": "v2",
+      "cls": "V2",
+      "sha256": "83002c75c56435cc0612508d931bffa58613cd1564911eea1bf2ef222f4c518e",
+      "bytes": 3953
+    },
+    {
+      "origin": "plugins",
+      "file": "v3_imported.py",
+      "snapshot": "plugins/v3_imported.py",
+      "strategy_name": "v3",
+      "cls": "V3",
+      "sha256": "ad2441ceffb6c99a0428c2450eeb384184c7f147476249f88264e80bbe84aeed",
+      "bytes": 3953
+    },
+    {
+      "origin": "plugins",
+      "file": "volume_oi_surge.py",
+      "snapshot": "plugins/volume_oi_surge.py",
+      "strategy_name": "volume_oi_surge",
+      "cls": "VolumeOISurge",
+      "sha256": "565bf5256a2968150448b497d916ccf430177f2e9e7d397fdca3c31bee193cde",
+      "bytes": 7048
+    },
+    {
+      "origin": "plugins",
+      "file": "vwap_ema_rsi.py",
+      "snapshot": "plugins/vwap_ema_rsi.py",
+      "strategy_name": "vwap_ema_rsi",
+      "cls": "VwapEmaRsi",
+      "sha256": "18243d8abfcb5feae2f2d00d62a878b02269388e6b3ec555a8a304f983b26241",
+      "bytes": 8464
+    },
+    {
+      "origin": "builtin",
+      "file": "__init__.py",
+      "snapshot": "builtin/__init__.py",
+      "strategy_name": null,
+      "cls": null,
+      "sha256": "94e8d8d920f40728429efad59e1efec09234c0511b0dd61924bffce6688c07d3",
+      "bytes": 145
+    },
+    {
+      "origin": "builtin",
+      "file": "atm_instant_buy.py",
+      "snapshot": "builtin/atm_instant_buy.py",
+      "strategy_name": "atm_instant_buy",
+      "cls": "AtmInstantBuy",
+      "sha256": "98b6b5dd1993fdadebcb60cf481a40a0adcdb09a6cfb81a438c44cf3f1a85400",
+      "bytes": 1288
+    },
+    {
+      "origin": "builtin",
+      "file": "banknifty_straddle.py",
+      "snapshot": "builtin/banknifty_straddle.py",
+      "strategy_name": "banknifty_straddle",
+      "cls": "BankNiftyStraddle",
+      "sha256": "3796d3b9c997cd645e2341b07d59b2b3b4751c9b7b0c8a58b0af3b516e3fafb6",
+      "bytes": 4092
+    },
+    {
+      "origin": "builtin",
+      "file": "bollinger_reversion.py",
+      "snapshot": "builtin/bollinger_reversion.py",
+      "strategy_name": "bollinger_reversion",
+      "cls": "BollingerReversion",
+      "sha256": "e027e8320722cb93e094ee4279f3e7446d6684d29aee21bed01e54a90b0f900c",
+      "bytes": 2312
+    },
+    {
+      "origin": "builtin",
+      "file": "buy_and_hold.py",
+      "snapshot": "builtin/buy_and_hold.py",
+      "strategy_name": "buy_and_hold",
+      "cls": "BuyAndHold",
+      "sha256": "768a3b38ea8516f28e3365c3ba618ac1edbcd95a51630cd4b2793cfea7975109",
+      "bytes": 561
+    },
+    {
+      "origin": "builtin",
+      "file": "donchian_breakout.py",
+      "snapshot": "builtin/donchian_breakout.py",
+      "strategy_name": "donchian_breakout",
+      "cls": "DonchianBreakout",
+      "sha256": "22dd05b0cb7a27eb4e60e3328fbd42729c802507a81823a73d0008b2a8cb85cd",
+      "bytes": 1107
+    },
+    {
+      "origin": "builtin",
+      "file": "ema_pullback.py",
+      "snapshot": "builtin/ema_pullback.py",
+      "strategy_name": "ema_pullback",
+      "cls": "EmaPullback",
+      "sha256": "281b35fb77e805cbd02cdc8c10be7247f8d76e47a39a5f0db0d1221f452e2a60",
+      "bytes": 3265
+    },
+    {
+      "origin": "builtin",
+      "file": "macd_trend.py",
+      "snapshot": "builtin/macd_trend.py",
+      "strategy_name": "macd_trend",
+      "cls": "MacdTrend",
+      "sha256": "9038da02cab6e1e3db706fa5329a64a60d2b556b170603775fd92a0baaec5683",
+      "bytes": 2107
+    },
+    {
+      "origin": "builtin",
+      "file": "momentum_roc.py",
+      "snapshot": "builtin/momentum_roc.py",
+      "strategy_name": "momentum_roc",
+      "cls": "MomentumROC",
+      "sha256": "163cab7ffa90899b469e01caff9a95c9cd7d2c043936ebbb7d52731592aaa6d0",
+      "bytes": 1584
+    },
+    {
+      "origin": "builtin",
+      "file": "nifty_scalper.py",
+      "snapshot": "builtin/nifty_scalper.py",
+      "strategy_name": "nifty_scalper",
+      "cls": "NiftyScalper",
+      "sha256": "9db2dbf2a8725c55b6c9b3b746d7f36c5c78205018050a67f3183fba61cb1f31",
+      "bytes": 3192
+    },
+    {
+      "origin": "builtin",
+      "file": "option_directional.py",
+      "snapshot": "builtin/option_directional.py",
+      "strategy_name": "directional_options",
+      "cls": "DirectionalOptions",
+      "sha256": "846293d4bc46ed1e5b6f2e57f9334eb978bb2cef4ecd2ae5d8df5e0f07dd444c",
+      "bytes": 5033
+    },
+    {
+      "origin": "builtin",
+      "file": "price_move.py",
+      "snapshot": "builtin/price_move.py",
+      "strategy_name": "price_move",
+      "cls": "PriceMove",
+      "sha256": "cdd3f3cf5e5d0daf7af94b88140638b6c07df289dfbecb997586e75965b80901",
+      "bytes": 1948
+    },
+    {
+      "origin": "builtin",
+      "file": "rsi_reversion.py",
+      "snapshot": "builtin/rsi_reversion.py",
+      "strategy_name": "rsi_reversion",
+      "cls": "RsiReversion",
+      "sha256": "2b5a711446ceca3a2a7c42373b62155c1e4c4c563e638e6a770292807a2e47d8",
+      "bytes": 2110
+    },
+    {
+      "origin": "builtin",
+      "file": "sma_crossover.py",
+      "snapshot": "builtin/sma_crossover.py",
+      "strategy_name": "sma_crossover",
+      "cls": "SmaCrossover",
+      "sha256": "91da4669ae4c62c13e08f5bee0346ea33d01422b8410f5d45942fe537aa3ece2",
+      "bytes": 1095
+    }
+  ]
+}

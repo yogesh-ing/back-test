@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class SwingEmaPullback(Strategy):
+class SwingEmaPullback(EquityStrategy):
     name = "swing_ema_pullback"
     description = (
         "Daily swing: buy a pullback to the 20-EMA in a confirmed uptrend "

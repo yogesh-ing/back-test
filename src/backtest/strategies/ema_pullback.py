@@ -19,10 +19,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class EmaPullback(Strategy):
+class EmaPullback(EquityStrategy):
     """EMA pullback — buy dips to the fast EMA inside a slow-EMA uptrend."""
 
     name = "ema_pullback"

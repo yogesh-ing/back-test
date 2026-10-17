@@ -19,8 +19,9 @@ Contract adaptation
 -------------------
 * Deterministic: pure function of the candles — passes the conformance
   battery (same candles → same view, every time).
-* Exits are NOT here (C2 layering): the playbook/expression layer owns
-  TP/SL/re-entries. This class only speaks direction + confidence.
+* Exits: the declared ``execution`` spec below owns the exit contract
+  (50% stop / 100% target / signal flip). This class speaks direction +
+  confidence; the contract it trades under is stated here, once.
 * On 1-minute bars the strategy emits a view only on crossover bars; the
   runner's re-entry policy decides what happens after an exit.
 """
@@ -29,11 +30,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import DirectionalOptionStrategy
 from backtest.strategy.intent import Direction, MarketView
 
 
-class VwapEmaRsi(Strategy):
+class VwapEmaRsi(DirectionalOptionStrategy):
     """VWAP bias + EMA(9/15) cross trigger + RSI pullback band."""
 
     name = "vwap_ema_rsi"
@@ -47,6 +48,29 @@ class VwapEmaRsi(Strategy):
     )
     version = "1.0"
     author = "user spec 2026-09-21"
+
+    # Phase 2 rewrite (plan §9.2): the strategy's own execution declaration.
+    # Signal logic below is unchanged from the snapshot; what changed is
+    # that the direction->structure mapping and the exit contract now live
+    # here, once, instead of in UI defaults / bridge fallbacks.
+    execution = {
+        "emits": ["bullish", "bearish", "neutral"],
+        "structures": {
+            "bullish": {"structure": "long_call", "strike_selection": "atm"},
+            "bearish": {"structure": "long_put", "strike_selection": "atm"},
+        },
+        "exit": {
+            "stop_loss_pct": 0.50,
+            "take_profit_pct": 1.0,
+            "signal_flip": True,
+            "min_days_to_expiry": 1,
+        },
+        "quantity": 1,
+        "min_quantity": 1,
+        "max_quantity": 5,
+        "allowed_overrides": ["quantity", "exit"],
+    }
+
 
     params = {
         "ema_fast": {

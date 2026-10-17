@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class BollingerReversion(Strategy):
+class BollingerReversion(EquityStrategy):
     """Bollinger mean-reversion — buy the lower band, exit at the mid-band."""
 
     name = "bollinger_reversion"
