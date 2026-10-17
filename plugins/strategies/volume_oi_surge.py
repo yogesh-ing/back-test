@@ -6,20 +6,16 @@ participation burst on index bars) AND whose close finishes
 the move decisively. Volume without conviction (a big candle that closes
 mid-range) stays silent — pump bars without participation are noise.
 
-The options layer is where volume earns its keep in this strategy: the runner
-should be spawned with a volume-topped strike selection::
+Execution (Phase 2 rewrite): this strategy declares its own contract below
+— BULLISH→ATM long call, BEARISH→ATM long put, 50% stop / 100% target.
 
-    instrument.expression = {
-        "type": {"BULLISH": "long_call", "BEARISH": "long_put"},
-        "strike_selection": "volume",
-        "quantity": 1,
-    }
-
-``strike_selection: "volume"`` (added to the bridge's ``_pick_strikes``) picks
-the strike near ATM carrying the highest traded volume — liquidity where
-participants actually traded, instead of the geometrically closest strike.
-When no quote row carries volume data (e.g. a synthetic chain, which books 0),
-the selection degrades to ATM rather than inventing a preference.
+An earlier version of this docstring claimed a volume-topped strike
+selection (``strike_selection: "volume"``). That selector was never
+implemented: the bridge silently degraded it to ATM — a silent fallback of
+exactly the kind the execution refactor abolishes. ATM is therefore now the
+*declared* behaviour (and always was the traded behaviour). A volume
+selector may return only as a real implementation with quote-level volume
+access, declared in the spec like any other selection.
 
 Signal (deterministic, on OHLCV candles):
   avgvol   = rolling mean of volume over ``avg_bars`` prior bars
@@ -36,26 +32,76 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import DirectionalOptionStrategy
 from backtest.strategy.intent import Direction, MarketView
 
 
-class VolumeOISurge(Strategy):
+class VolumeOISurge(DirectionalOptionStrategy):
     """Volume-surge gate whose runner picks the busiest strike."""
 
     name = "volume_oi_surge"
     eligible_instruments = ["NIFTY", "BANKNIFTY"]
-    recommended_expression = {
-        "type": {"BULLISH": "long_call", "BEARISH": "long_put"},
-        "strike_selection": "volume",
+    # Phase 2 rewrite (plan §9.2): the strategy's own execution declaration.
+    # Signal logic below is unchanged from the snapshot; what changed is
+    # that the direction->structure mapping and the exit contract now live
+    # here, once, instead of in UI defaults / bridge fallbacks.
+    execution = {
+        "emits": ["bullish", "bearish", "neutral"],
+        "structures": {
+            "bullish": {"structure": "long_call", "strike_selection": "atm"},
+            "bearish": {"structure": "long_put", "strike_selection": "atm"},
+        },
+        "exit": {
+            "stop_loss_pct": 0.50,
+            "take_profit_pct": 1.0,
+            "signal_flip": True,
+            "min_days_to_expiry": 1,
+        },
         "quantity": 1,
+        "min_quantity": 1,
+        "max_quantity": 5,
+        "allowed_overrides": ["quantity", "exit"],
     }
+
     description = (
         "Options traded on volume bursts: candle volume surge + decisive "
         "close; spawn with instrument.expression "
         "{'strike_selection': 'volume'} so the bridge buys the strike with "
         "the most traded volume near ATM."
     )
+    description_sections = {
+        'overview': (
+            'Volume-surge options: a candle whose volume bursts well above average with a'
+            'decisive directional close fires a same-direction view.'
+        ),
+        'regime': (
+            'Works when volume surges mark genuine institutional participation that continues.'
+            'Struggles around open/close auction bars and expiry-day volume distortions, where'
+            'surges are mechanical rather than informative.'
+        ),
+        'entry': (
+            'Volume above surge_multiple × the rolling average AND a close decisively in one'
+            'direction (body fraction of range) with a minimum points move.'
+        ),
+        'construction': (
+            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put'
+            "on the underlying's nearest eligible expiry — a defined-risk, single-leg structure."
+            'Size is 1 lot by default (override 1-5 lots where the spawn form allows). Spawned'
+            "with the 'volume' strike selection, the bridge buys the most-traded strike near ATM"
+            'instead.'
+        ),
+        'exits_risk': (
+            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit'
+            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst'
+            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long'
+            'option can never lose more than the premium paid.'
+        ),
+        'parameters': (
+            'avg_bars=20, surge_multiple=1.5, move_points=20.0, body_fraction=0.5,'
+            'underlying=NIFTY. Size defaults to 1 lot; quantity (and, where listed, exit levels)'
+            'can be overridden at spawn within the declared menu.'
+        ),
+    }
     version = "1.0"
     author = "Trading Bot"
 

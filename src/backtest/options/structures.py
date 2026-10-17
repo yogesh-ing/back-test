@@ -60,6 +60,7 @@ class OptionStructure(ABC):
         chain: dict[Decimal, OptionContract],
         expiry: date,
         strategy_name: str = "",
+        distance_pct: float | None = None,
     ) -> TradeIntent:
         """Build a TradeIntent from the given parameters.
 
@@ -213,6 +214,7 @@ class LongCall(OptionStructure):
         chain: dict[Decimal, OptionContract],
         expiry: date,
         strategy_name: str = "",
+        distance_pct: float | None = None,
     ) -> TradeIntent:
         if not strikes:
             raise ValueError("LongCall requires at least one strike")
@@ -264,6 +266,7 @@ class LongPut(OptionStructure):
         chain: dict[Decimal, OptionContract],
         expiry: date,
         strategy_name: str = "",
+        distance_pct: float | None = None,
     ) -> TradeIntent:
         if not strikes:
             raise ValueError("LongPut requires at least one strike")
@@ -315,6 +318,7 @@ class BullCallSpread(OptionStructure):
         chain: dict[Decimal, OptionContract],
         expiry: date,
         strategy_name: str = "",
+        distance_pct: float | None = None,
     ) -> TradeIntent:
         if len(strikes) < 2:
             raise ValueError("BullCallSpread requires exactly 2 strikes")
@@ -377,6 +381,7 @@ class BearPutSpread(OptionStructure):
         chain: dict[Decimal, OptionContract],
         expiry: date,
         strategy_name: str = "",
+        distance_pct: float | None = None,
     ) -> TradeIntent:
         if len(strikes) < 2:
             raise ValueError("BearPutSpread requires exactly 2 strikes")
@@ -449,6 +454,7 @@ class ShortStrangle(OptionStructure):
         chain: Any,
         expiry: date,
         strategy_name: str = "",
+        distance_pct: float | None = None,
     ) -> TradeIntent:
         """Build the 2-leg credit strangle.
 
@@ -464,7 +470,12 @@ class ShortStrangle(OptionStructure):
         if not chain:
             raise ValueError("ShortStrangle requires a non-empty chain")
 
-        band = self.OTM_PCT / 100.0
+        # The strategy's declared distance wins; OTM_PCT is the default
+        # for legacy callers that declare none. (Before the Phase 2 wiring
+        # fix the declaration never reached this builder at all — legs
+        # were right only because the two values happened to coincide.)
+        otm_pct = float(distance_pct) if distance_pct is not None else self.OTM_PCT
+        band = otm_pct / 100.0
         call_target = Decimal(str(spot * (1.0 + band)))
         put_target = Decimal(str(spot * (1.0 - band)))
         all_strikes = sorted(
@@ -475,7 +486,7 @@ class ShortStrangle(OptionStructure):
         put_strike = next((s for s in reversed(all_strikes) if s < put_target), None)
         if call_strike is None or put_strike is None:
             raise ValueError(
-                f"ShortStrangle: no strikes beyond ±{self.OTM_PCT}% band "
+                f"ShortStrangle: no strikes beyond ±{otm_pct}% band "
                 f"(spot={spot}, call_target={call_target}, put_target={put_target})"
             )
 

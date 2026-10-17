@@ -499,6 +499,64 @@ async function init() {
         infoEl.innerHTML = html;
     }
 
+    function strategyDisplayName(name) {
+        const acronyms = new Set(["sma", "ema", "rsi", "macd", "roc", "vwap"]);
+        return name.split("_").map((part, index) =>
+            acronyms.has(part) ? part.toUpperCase() : index === 0
+                ? part.charAt(0).toUpperCase() + part.slice(1) : part
+        ).join(" ");
+    }
+
+    // Strategy card: structured description shown above the performance
+    // metrics. Overview always visible; the remaining sections expand.
+    const STRATEGY_SECTION_LABELS = [
+        ["regime", "Market regime"],
+        ["entry", "Entry trigger"],
+        ["construction", "Trade construction"],
+        ["exits_risk", "Exits & risk"],
+        ["parameters", "Key parameters"],
+    ];
+    function renderStrategyCard(stratName) {
+        const card = $("strategyCard");
+        if (!card) return;
+        const strat = strategies.find((s) => s.name === stratName);
+        const sections = strat && strat.description_sections ? strat.description_sections : null;
+        const overview = (sections && sections.overview) || (strat && strat.description) || "";
+        if (!strat || !overview) { card.hidden = true; return; }
+        $("strategyCardTitle").textContent = `About: ${strategyDisplayName(strat.name)}`;
+        $("strategyCardOverview").textContent = overview;
+        const dl = $("strategyCardSections");
+        dl.innerHTML = "";
+        if (sections) {
+            STRATEGY_SECTION_LABELS.forEach(([key, label]) => {
+                if (!sections[key]) return;
+                const dt = document.createElement("dt");
+                dt.textContent = label;
+                const dd = document.createElement("dd");
+                dd.textContent = sections[key];
+                dl.append(dt, dd);
+            });
+        }
+        // Reset to collapsed on every strategy change.
+        dl.hidden = true;
+        const toggle = $("strategyCardToggle");
+        toggle.hidden = dl.children.length === 0;
+        toggle.setAttribute("aria-expanded", "false");
+        toggle.textContent = "Show details";
+        card.hidden = false;
+    }
+
+    const strategyCardToggle = $("strategyCardToggle");
+    if (strategyCardToggle) {
+        strategyCardToggle.addEventListener("click", () => {
+            const dl = $("strategyCardSections");
+            const expand = dl.hidden;
+            dl.hidden = !expand;
+            strategyCardToggle.setAttribute("aria-expanded", String(expand));
+            strategyCardToggle.textContent = expand ? "Hide details" : "Show details";
+        });
+    }
+
     try {
         // venue=backtest: the server omits option strategies, because a
         // backtest runs on DB candles and the DB holds no historical chains.
@@ -508,11 +566,7 @@ async function init() {
             const option = document.createElement("option");
             option.value = strategy.name;
             option.title = strategy.name;
-            const acronyms = new Set(["sma", "ema", "rsi", "macd", "roc", "vwap"]);
-            option.textContent = strategy.name.split("_").map((part, index) =>
-                acronyms.has(part) ? part.toUpperCase() : index === 0
-                    ? part.charAt(0).toUpperCase() + part.slice(1) : part
-            ).join(" ");
+            option.textContent = strategyDisplayName(strategy.name);
             $("strategy").appendChild(option);
         });
     } catch (err) {
@@ -523,6 +577,7 @@ async function init() {
     // strategy change → dynamic params & segment info
     $("strategy").addEventListener("change", async () => {
         updateStrategySegmentInfo($("strategy").value);
+        renderStrategyCard($("strategy").value);
         try {
             renderParams(await fetchJSON(`/api/strategies/${encodeURIComponent($("strategy").value)}/params`));
         } catch (err) { showToast(err.message, "error"); }
@@ -534,6 +589,7 @@ async function init() {
         const cfg = pre.config;
         $("strategy").value = cfg.strategy;
         updateStrategySegmentInfo(cfg.strategy);
+        renderStrategyCard(cfg.strategy);
         if (cfg.symbol) {
             symbolPicker.setValue(cfg.symbol);
             Timeframes.applyTo($("timeframe"), document.body.dataset.source === "synthetic" ? ["1day"] : symbolPicker.timeframesFor(cfg.symbol));
@@ -555,6 +611,7 @@ async function init() {
     } else if ($("strategy").value) {
         // default: render params and segment info for the first strategy
         updateStrategySegmentInfo($("strategy").value);
+        renderStrategyCard($("strategy").value);
         try {
             renderParams(await fetchJSON(`/api/strategies/${encodeURIComponent($("strategy").value)}/params`));
         } catch { /* ignore */ }

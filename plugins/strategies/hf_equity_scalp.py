@@ -16,10 +16,10 @@ Designed to stress-test:
 from __future__ import annotations
 
 import pandas as pd
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class HF_EquityScalp(Strategy):
+class HF_EquityScalp(EquityStrategy):
     """High-frequency momentum scalp on equities."""
     
     name = "hf_equity_scalp"
@@ -29,6 +29,34 @@ class HF_EquityScalp(Strategy):
         "+3pt TP / -2pt SL or after 5 bars. Generates frequent trades for "
         "paper trading validation."
     )
+    description_sections = {
+        'overview': (
+            'Aggressive equity scalper for paper-trading validation: buys positive momentum and'
+            'is out within a handful of bars, win or lose.'
+        ),
+        'regime': (
+            'Works in liquid, fast-moving tape where 3-point targets are reachable before'
+            'momentum stalls. Struggles in slow or gappy conditions — the 5-bar time stop'
+            'dominates and costs (spread/slippage) eat the tiny targets.'
+        ),
+        'entry': (
+            'Buys on positive short-term momentum; frequency is the point — it is meant to'
+            'generate many small trades to exercise the paper pipeline.'
+        ),
+        'construction': (
+            'Single-instrument equity position, long only, one trade at a time, very short'
+            'holding period.'
+        ),
+        'exits_risk': (
+            'Hard exits on every trade: take-profit at +3 points, stop-loss at -2 points, and a'
+            'forced exit after 5 bars regardless. Worst case per trade is the 2-point stop (plus'
+            'slippage).'
+        ),
+        'parameters': (
+            'take_profit=3.0, stop_loss=2.0, max_hold_bars=5 — all in points/bars; scale to the'
+            "instrument's price and timeframe."
+        ),
+    }
     version = "1.0"
     author = "paper-trading-validation"
     

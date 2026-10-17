@@ -69,7 +69,19 @@ def _option_config(**overrides):
         # Exits are task B1; these tests isolate accounting, so hold forever.
         instrument={
             "type": "option",
-            "expression": {"exit": {"signal_flip": False, "min_days_to_expiry": None}},
+            "expression": {
+                "expression_version": 2,
+                "type": {
+                    "BULLISH": {"structure": "long_call", "strike_selection": "atm"},
+                    "BEARISH": {"structure": "long_put", "strike_selection": "atm"},
+                },
+                "quantity": 1,
+                "exit": {
+                    "stop_loss_points": 900_000.0,
+                    "signal_flip": False,
+                    "min_days_to_expiry": None,
+                },
+            },
         },
     )
     kwargs.update(overrides)
@@ -91,6 +103,14 @@ def _equity_config(**overrides):
 def _feed(runner, bars):
     for bar in bars:
         runner.process_candle_event("NIFTY", bar)
+
+
+def _widen(runner):
+    """Scaffold gate (options_support.wide_gate): the unsigned ₹25k
+    ceiling sits below one ATM premium; these tests isolate accounting."""
+    if getattr(runner, "options_bridge", None) is not None:
+        runner.options_bridge.risk_gate = wide_gate()
+    return runner
 
 
 RISING = [24800 + i * 40 for i in range(20)]

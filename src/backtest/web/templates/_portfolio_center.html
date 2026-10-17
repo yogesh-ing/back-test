@@ -509,8 +509,17 @@
                 <small id="spawn-strategy-hint" class="muted"></small>
             </div>
             <div class="form-row" id="spawn-playbook-row">
-                <label for="spawn-playbook">Playbook <span class="muted">(option trading rules — optional)</span></label>
+                <label for="spawn-playbook">Playbook <span class="muted">(selection bundle — optional)</span></label>
                 <select id="spawn-playbook" class="input input-select"></select>
+            </div>
+            <!-- Phase 3 (plan §7): the strategy's declared execution
+                 contract, rendered from the catalogue — the form asks no
+                 structure/exit questions of its own. Overrides below are
+                 menu-bounded pickers for declared fields only. -->
+            <div class="form-row" id="spawn-execution-row" hidden>
+                <label>Execution contract <span class="muted">(declared by the strategy — spawn sends selections only)</span></label>
+                <div id="spawn-execution-summary" class="muted"></div>
+                <div id="spawn-overrides"></div>
             </div>
             <div class="two-col">
                 <div class="form-row">
@@ -597,6 +606,7 @@
                 <div class="form-row" id="spawn-lots-row" hidden>
                     <label for="spawn-lots">Lots per leg (options)</label>
                     <input id="spawn-lots" class="input" type="number" value="1" min="1" max="100">
+                    <small id="spawn-lots-provenance" class="muted"></small>
                 </div>
                 <div class="form-row" id="spawn-universe-row" hidden>
                     <label for="spawn-universe">Universe / Pool</label>

@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class BollingerReversion(Strategy):
+class BollingerReversion(EquityStrategy):
     """Bollinger mean-reversion — buy the lower band, exit at the mid-band."""
 
     name = "bollinger_reversion"
@@ -26,6 +26,33 @@ class BollingerReversion(Strategy):
         "Bollinger-band mean reversion — enter long when the close closes below "
         "the lower band, exit when it recovers to the mid-band."
     )
+    description_sections = {
+        'overview': (
+            'Mean-reversion: buys when price closes below the lower Bollinger band on the'
+            'assumption the stretch snaps back toward the mean.'
+        ),
+        'regime': (
+            'Works in range-bound, oscillating markets where extremes revert. Struggles in strong'
+            'breakouts and trending sell-offs, where price can ride the band down and keep'
+            "falling ('catching a falling knife')."
+        ),
+        'entry': (
+            'Enters long when the close crosses below the lower band (mean minus num_std standard'
+            'deviations).'
+        ),
+        'construction': (
+            'Single-instrument equity/index position, long only, one position at a time.'
+        ),
+        'exits_risk': (
+            'Exits when the close recovers to the middle band (the moving average itself). There'
+            'is no hard stop: worst case is a continued trend against the position, so size'
+            'accordingly — the exit rule does not cap the loss.'
+        ),
+        'parameters': (
+            'period=20 (band lookback), num_std=2.0 (band width in standard deviations). Wider'
+            'bands trade less often but enter at more extreme stretches.'
+        ),
+    }
     version = "1.0"
     author = "Trading Bot"
     params = {

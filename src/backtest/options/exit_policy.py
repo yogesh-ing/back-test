@@ -233,8 +233,12 @@ class ExitConfig:
     def from_expression(cls, expression: Any) -> "ExitConfig":
         """Build from ``expression["exit"]``; tolerant of junk by design.
 
-        A malformed exit block must never stop a runner from spawning — bad
-        keys are warned about and skipped, valid ones still apply.
+        LEGACY-FENCED (Phase 4): the trading path never calls this — the
+        bridge parses exit plans strictly (``parse_exit_plan_strict``)
+        and refuses junk at construction. This tolerant parser survives
+        only for loading legacy-shaped data outside the trading path
+        (state files and tactical-eval of pre-v2 configs). Do not wire it
+        back into a spawn or trading path.
         """
         if expression is None:
             return cls()

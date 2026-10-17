@@ -55,6 +55,22 @@ KNOWN_FAILS: dict[str, dict[str, str]] = {
             "R-D2 — frame-anchored VWAP; rare disagreements on 1-min"
         ),
     },
+    "supertrend_equity": {
+        "test_decisions_change_somewhere": (
+            "R-S3 — long-only Pine conversion (shorts folded into entries); "
+            "on the template's short scenario windows the supertrend never "
+            "flips, so the decision is constant there. It does flip on "
+            "sustained reversals (pinned vs the snapshot original in "
+            "tests/test_phase2_rewrites.py)."
+        ),
+    },
+    "swing_donchian_breakout": {
+        "test_decisions_change_somewhere": (
+            "R-S3 — pre-existing: no breakout triggers on the template "
+            "scenario windows at its default channel length (unchanged by "
+            "the Phase 2 EquityStrategy port, which is signal-identical)."
+        ),
+    },
     "ema_reversion_pob": {
         "test_positional_index_fallback": (
             "R-T2 — raises on a RangeIndex feed (no parseable timestamps)"
@@ -72,10 +88,13 @@ KNOWN_FAILS: dict[str, dict[str, str]] = {
 }
 
 #: Strategies whose docstrings document a DELIBERATE unconditional NEUTRAL
-#: view (fixed single-structure expression: every direction maps to one
-#: structure, so NEUTRAL is the "enter now" signal — template flag
-#: ``ALLOWS_NEUTRAL_VIEW``). Anything else returning NEUTRAL is a bug.
-DELIBERATE_NEUTRAL = {"atm_instant_buy", "immediate_entry", "immediate_strangle"}
+#: view (template flag ``ALLOWS_NEUTRAL_VIEW``). Anything else returning
+#: NEUTRAL is a bug. Post-Phase-2 only ``immediate_strangle`` qualifies:
+#: it speaks a NEUTRAL view and enters via an explicit named intent
+#: (``build_opening_intent``), never via NEUTRAL-as-entry. The old
+#: NEUTRAL-abuse instant entries (``atm_instant_buy``, ``immediate_entry``)
+#: were abolished by the CE/PE split.
+DELIBERATE_NEUTRAL = {"immediate_strangle"}
 
 #: Strategies whose docstrings declare a constant/holding contract — the
 #: template's ``EXPECTS_DECISION_CHANGES`` is set False for them via a
@@ -87,9 +106,9 @@ CONSTANT_DECISION = {
     "time_alternator",
     "vwap_ema_rsi",
     # Instant-entry instruments: unconditional view on EVERY bar by design
-    # ("book the structure at once, hold per the runner's exit config").
-    "atm_instant_buy",
-    "immediate_entry",
+    # ("book the structure at once, hold per the strategy's exit contract").
+    "CE_instant_buy",
+    "PE_instant_buy",
     "immediate_strangle",
 }
 

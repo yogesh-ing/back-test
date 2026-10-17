@@ -198,25 +198,39 @@ def test_live_trader_defaults_to_the_v1_profile():
 # ---------------------------------------------------------------------------
 
 
-def test_bridge_default_expression_opens_a_long_call():
-    from backtest.forward.options_bridge import OptionsBridge
+_V2_SPREADS = {
+    "expression_version": 2,
+    "type": {
+        "BULLISH": {"structure": "bull_call_spread", "strike_selection": "atm"},
+        "BEARISH": {"structure": "bear_put_spread", "strike_selection": "atm"},
+    },
+    "quantity": 1,
+    "exit": {
+        "stop_loss_points": 250.0,
+        "take_profit_pct": 0.5,
+        "signal_flip": True,
+        "min_days_to_expiry": None,
+    },
+}
 
-    bridge = OptionsBridge(capital=1_000_000)
-    result = bridge.on_market_view(_view(), "gate-test")
-    assert result is not None and result["structure_type"] == "long_call"
+
+def test_bridge_without_a_v2_expression_refuses():
+    # Phase 4: the default expression is deleted — no expression, no bridge.
+    from backtest.forward.options_bridge import OptionsBridge
+    from backtest.strategy.execution import ExecutionSpecError
+
+    with pytest.raises(ExecutionSpecError, match="Phase 4"):
+        OptionsBridge(capital=1_000_000)
 
 
 def test_bridge_refuses_a_spread_expression_with_a_logged_reason():
+    # Spreads against the live entitlement (long premium only) refuse at
+    # construction — the gate-aware validation fires before any bar.
     from backtest.forward.options_bridge import OptionsBridge
+    from backtest.strategy.execution import ExecutionSpecError
 
-    bridge = OptionsBridge(
-        capital=1_000_000,
-        expression={"type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"}},
-    )
-    result = bridge.on_market_view(_view(), "gate-test")
-    assert result["rejected"] is True
-    assert REASON_STRUCTURE_TYPE in result["reason"]
-    assert bridge.option_broker.get_open_structures() == []
+    with pytest.raises(ExecutionSpecError, match="not permitted"):
+        OptionsBridge(capital=1_000_000, expression=_V2_SPREADS, mode="live")
 
 
 def test_bridge_research_profile_opens_a_spread():
@@ -224,9 +238,13 @@ def test_bridge_research_profile_opens_a_spread():
 
     bridge = OptionsBridge(
         capital=1_000_000,
-        expression={"type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"}},
+        expression=_V2_SPREADS,
         allowed_structures=RESEARCH_STRUCTURES,
         option_broker=OptionPaperBroker(capital=1_000_000, allowed_structures=RESEARCH_STRUCTURES),
     )
-    result = bridge.on_market_view(_view(), "gate-test")
+    result = bridge.on_intent(
+        {"structure": "bull_call_spread", "strike_selection": "atm"},
+        _view(),
+        "gate-test",
+    )
     assert result is not None and result["structure_type"] == "bull_call_spread"

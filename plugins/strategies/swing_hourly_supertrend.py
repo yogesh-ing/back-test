@@ -23,7 +23,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
 def _supertrend_dir(high: np.ndarray, low: np.ndarray, close: np.ndarray,
@@ -56,13 +56,40 @@ def _supertrend_dir(high: np.ndarray, low: np.ndarray, close: np.ndarray,
     return direction
 
 
-class SwingHourlySupertrend(Strategy):
+class SwingHourlySupertrend(EquityStrategy):
     name = "swing_hourly_supertrend"
     description = (
         "Hourly swing: long on a Supertrend(10,3) bull flip above the "
         "200-EMA regime filter; exit on the bear flip. Multi-day holds, "
         "needs 1-hour history (resampled from 1-minute bars)."
     )
+    description_sections = {
+        'overview': (
+            'Hourly swing: Supertrend flips filtered by a 200-EMA regime line — long only above'
+            'the regime, with multi-day holds.'
+        ),
+        'regime': (
+            'Works in sustained hourly trends (multi-day directional legs). Struggles when price'
+            'chops around the 200-EMA: the regime filter toggles and Supertrend flips compound'
+            'into serial small losses.'
+        ),
+        'entry': (
+            'Supertrend flips bullish while price is above the 200-EMA regime line; a bull flip'
+            'below the regime is ignored.'
+        ),
+        'construction': (
+            'Single-instrument equity position, long only, on 1-hour bars (needs 1-minute history'
+            'resampled up).'
+        ),
+        'exits_risk': (
+            'Exits on the bearish Supertrend flip. The band doubles as a trailing stop; worst'
+            'case is approximately the band distance at the flip, larger after volatile'
+            'expansions.'
+        ),
+        'parameters': (
+            'st_period=10, st_factor=3.0, ema_regime=200. Hourly timeframe intended.'
+        ),
+    }
     version = "1.0"
     author = "quant-workshop"
 

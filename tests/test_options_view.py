@@ -34,7 +34,7 @@ from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRun
 from backtest.strategy.base import Strategy
 from backtest.strategy.intent import Direction, MarketView
 from backtest.strategy import registry as _registry
-from options_support import pin_session_clock, research_profile, stale_marks
+from options_support import pin_session_clock, research_profile, stale_marks, wide_gate
 
 if "silent_option_fixture" not in _registry._REGISTRY:
 
@@ -98,11 +98,15 @@ def _option_runner_config(**overrides) -> RunnerConfig:
     instrument = {
         "type": "option",
         "expression": {
+            "expression_version": 2,
             "type": "bull_call_spread",
-            "strike_selection": "atm",
             "quantity": 12,
             # 2 bars: enough to force one close, deterministic and view-free.
-            "exit": {"max_bars": 2, "min_days_to_expiry": 1},
+            "exit": {
+                "stop_loss_points": 10_000.0,
+                "max_bars": 2,
+                "min_days_to_expiry": 1,
+            },
         },
     }
     # NOTE (2026-09-21): option runners are exempt from the warmup gate, so
@@ -145,6 +149,7 @@ def option_runner():
     runner = StrategyRunner(_option_runner_config(), ledger=OrderLedger())
     runner.start()
     research_profile(runner)
+    runner.options_bridge.risk_gate = wide_gate()
 
     for bar in _bars([25_000, 25_010, 25_020, 25_030, 25_040]):
         runner.process_candle_event("NIFTY", bar)
@@ -153,13 +158,21 @@ def option_runner():
     assert bridge is not None
 
     # 1) first structure — the time stop closes it two bars later
-    bridge.on_market_view(_bull_view(runner.last_price["NIFTY"]), runner.config.strategy_name)
+    bridge.on_intent(
+        {"structure": "bull_call_spread", "strike_selection": "atm"},
+        _bull_view(runner.last_price["NIFTY"]),
+        runner.config.strategy_name,
+    )
     for bar in _bars([25_120, 25_240, 25_360], day_offset=6):
         runner.process_candle_event("NIFTY", bar)
 
     # 2) second structure — one bar later it is still open (max_bars closes on
     # the *second* bar), so the render has a live book to show.
-    bridge.on_market_view(_bull_view(runner.last_price["NIFTY"]), runner.config.strategy_name)
+    bridge.on_intent(
+        {"structure": "bull_call_spread", "strike_selection": "atm"},
+        _bull_view(runner.last_price["NIFTY"]),
+        runner.config.strategy_name,
+    )
     for bar in _bars([25_650], day_offset=10):
         runner.process_candle_event("NIFTY", bar)
 
@@ -459,10 +472,14 @@ def test_live_api_payload_renders_option_columns(api_client, tmp_path):
         "instrument": {
             "type": "option",
             "expression": {
+                "expression_version": 2,
                 "type": "bull_call_spread",
-                "strike_selection": "atm",
                 "quantity": 5,
-                "exit": {"max_bars": 2, "min_days_to_expiry": 1},
+                "exit": {
+                    "stop_loss_points": 10_000.0,
+                    "max_bars": 2,
+                    "min_days_to_expiry": 1,
+                },
             },
         },
     }
@@ -472,13 +489,22 @@ def test_live_api_payload_renders_option_columns(api_client, tmp_path):
 
     runner = get_portfolio_manager().get_runner(iid)
     research_profile(runner)  # bull call spread: widen before the first bar
+    runner.options_bridge.risk_gate = wide_gate()
     for bar in _bars([25_000, 25_010, 25_020, 25_030, 25_040]):
         runner.process_candle_event("NIFTY", bar)
     bridge = runner.options_bridge
-    bridge.on_market_view(_bull_view(runner.last_price["NIFTY"]), payload["strategy"])
+    bridge.on_intent(
+        {"structure": "bull_call_spread", "strike_selection": "atm"},
+        _bull_view(runner.last_price["NIFTY"]),
+        payload["strategy"],
+    )
     for bar in _bars([25_120, 25_240, 25_360], day_offset=6):
         runner.process_candle_event("NIFTY", bar)
-    bridge.on_market_view(_bull_view(runner.last_price["NIFTY"]), payload["strategy"])
+    bridge.on_intent(
+        {"structure": "bull_call_spread", "strike_selection": "atm"},
+        _bull_view(runner.last_price["NIFTY"]),
+        payload["strategy"],
+    )
     for bar in _bars([25_650], day_offset=10):
         runner.process_candle_event("NIFTY", bar)
 

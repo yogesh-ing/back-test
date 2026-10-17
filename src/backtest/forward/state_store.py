@@ -285,8 +285,6 @@ _BRIDGE_SCALARS = (
     "_structure_expiry",
     "_entry_premium",
     "_settlement_count",
-    "_reentries_today",
-    "_reentry_day",
     "last_unrealized_pnl",
     "last_spot",
     "last_mtm_ts",
@@ -467,8 +465,33 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
     if gateway_state and callable(restore_gateway):
         restore_gateway(gateway_state)
 
+    # Phase 1 (Plan §8): a spawn snapshot freezes configuration, not code.
+    # If the strategy bundle (strategy file + template chain) changed while
+    # we were down, the runner must not trade new code under old paperwork:
+    # it comes back PAUSED with STRATEGY_CODE_CHANGED until an operator
+    # resumes it (resume() restamps the bundle — a conscious migration).
+    runner.strategy_code_changed = False
+    _bundle = getattr(runner.config, "strategy_bundle", None)
+    if isinstance(_bundle, dict) and _bundle.get("bundle_files"):
+        try:
+            from backtest.strategy.bundle import bundle_matches
+            from backtest.strategy.execution import STRATEGY_CODE_CHANGED
+            from backtest.strategy.registry import get_strategy
+
+            _cls = get_strategy(runner.config.strategy_name)
+            if not bundle_matches(_cls, _bundle["bundle_files"]):
+                runner.strategy_code_changed = True
+                runner.error = (
+                    f"{STRATEGY_CODE_CHANGED}: strategy/template code changed "
+                    "since this runner was spawned; resume to migrate consciously"
+                )
+        except Exception:  # noqa: BLE001 — an unverifiable bundle must not crash restore
+            runner.strategy_code_changed = False
+
     saved_status = snapshot.get("status", STATUS_STOPPED)
-    if saved_status == STATUS_RUNNING:
+    if runner.strategy_code_changed:
+        runner.status = STATUS_PAUSED
+    elif saved_status == STATUS_RUNNING:
         runner.status = STATUS_PAUSED
     else:
         runner.status = (

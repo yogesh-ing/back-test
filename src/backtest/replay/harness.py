@@ -20,7 +20,6 @@ from typing import Any, Callable, Mapping
 
 import pandas as pd
 
-from backtest.forward.options_bridge import DEFAULT_EXPRESSION as FORWARD_DEFAULT_EXPRESSION
 from backtest.forward.options_bridge import OptionsBridge
 from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRunner
 from backtest.options.paper_trading import OptionPaperBroker
@@ -56,9 +55,11 @@ class ReplayConfig:
         if not self.strategy_name:
             raise ValueError("strategy_name must not be empty")
         self.strategy_params = copy.deepcopy(self.strategy_params or {})
-        expression_overrides = copy.deepcopy(self.expression or {})
-        self.expression = copy.deepcopy(FORWARD_DEFAULT_EXPRESSION)
-        self.expression.update(expression_overrides)
+        # Phase 4: no default expression exists to inherit. A replay with
+        # no explicit v2 expression resolves the strategy's declared spec
+        # defaults at run time (and refuses if the strategy declares
+        # none); explicit overrides must themselves be a v2 expression.
+        self.expression = copy.deepcopy(self.expression or {})
         if self.initial_capital <= 0:
             raise ValueError("initial_capital must be positive")
         if self.commission_per_lot < 0:
@@ -262,6 +263,31 @@ class ReplayHarness:
             commission_per_lot=float(self.config.commission_per_lot),
         )
         expression = copy.deepcopy(self.config.expression)
+        if not expression:
+            _cls = get_strategy(self.config.strategy_name)
+            _spec = _cls.execution_spec()
+            if _spec is None:
+                raise ValueError(
+                    f"replay of {self.config.strategy_name}: strategy "
+                    "declares no execution spec and no v2 expression was "
+                    "supplied — nothing to resolve (Phase 4)"
+                )
+            expression = _spec.to_expression()
+        if int(expression.get("expression_version", 0) or 0) == 2:
+            # Phase 1 (plan §6.3): replay may not keep a private mapping
+            # logic — a v2 expression goes through the same validation as
+            # the forward path, gate entitlement included.
+            from backtest.options.execution_gate import PreTradeRiskGate
+            from backtest.strategy.execution import validate_expression
+
+            _errs = validate_expression(
+                expression,
+                permitted_structures=PreTradeRiskGate(
+                    mode="paper"
+                ).permitted_structures(),
+            )
+            if _errs:
+                raise ValueError("v2 replay expression refused: " + "; ".join(_errs))
         bridge = OptionsBridge(
             capital=float(self.config.initial_capital),
             expression=expression,

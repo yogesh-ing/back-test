@@ -457,6 +457,41 @@ def aggregated_trades() -> Tuple[Response, int]:
     ), 200
 
 
+@portfolio_bp.get("/api/portfolio/risk/limits")
+def risk_limits_view() -> Tuple[Response, int]:
+    """Read-only view of the Layer-1 rulebook (``config/risk_limits.yaml``).
+
+    The file is version-controlled policy: this endpoint renders it, it
+    cannot change it (limits change by reviewed diff + restart, plan
+    §7.1). A rulebook that fails to load is a loud 500 here — the same
+    fail-closed loader the Risk Gate uses.
+    """
+    try:
+        from backtest.risk_limits import load_risk_limits
+
+        limits = load_risk_limits()
+    except Exception as exc:  # noqa: BLE001 — broken rulebook must be loud
+        return _error(f"risk limits unavailable: {exc}", 500)
+    return jsonify(
+        {
+            "success": True,
+            "read_only": True,
+            "limits": {
+                "sha256": limits.sha256,
+                "schema_version": limits.schema_version,
+                "per_trade_max_loss_inr": limits.per_trade_max_loss_inr,
+                "per_runner_max_lots": limits.per_runner_max_lots,
+                "per_runner_max_order_value_inr": limits.per_runner_max_order_value_inr,
+                "kill_switch_engaged_on_boot": limits.kill_switch_engaged_on_boot,
+                "entitlement": {
+                    mode: sorted(structures)
+                    for mode, structures in sorted(limits.entitlement.items())
+                },
+            },
+        }
+    ), 200
+
+
 @portfolio_bp.get("/api/portfolio/risk/config")
 def risk_config_view() -> Tuple[Response, int]:
     mgr = _manager()
@@ -671,19 +706,9 @@ def create_runner() -> Tuple[Response, int]:
 
     params = data.get("params") or {}
     instrument = data.get("instrument") or {"type": "equity"}
-    # Lots-per-leg: clamp here too so a bad client value can't produce a
-    # nonsense multiplier on every leg (fail-closed sizing rule).
-    if (
-        isinstance(instrument, dict)
-        and isinstance(instrument.get("expression"), dict)
-        and "quantity" in instrument["expression"]
-    ):
-        try:
-            instrument["expression"]["quantity"] = max(
-                1, min(int(instrument["expression"]["quantity"]), 100)
-            )
-        except (TypeError, ValueError):
-            instrument["expression"]["quantity"] = 1
+    # Phase 4: the legacy [1, 100] quantity clamp is deleted. Quantities
+    # are menu-bounded by the strategy's spec and refused when outside
+    # it — never silently corrected here or anywhere else.
     if (
         isinstance(instrument, dict)
         and str(instrument.get("type", "equity")).lower() == "option"
@@ -771,6 +796,150 @@ def create_runner() -> Tuple[Response, int]:
             except SourceDisabledError as exc:
                 return _error(str(exc), 409)
 
+    # Plan §8: stamp the transitive strategy-bundle fingerprint.
+    # Phase 4 makes stamping FAIL-CLOSED: a runner whose code/config
+    # cannot be fingerprinted must not spawn — an unstamped runner would
+    # silently defeat the rehydration drift check (Phase 3 carry-forward).
+    strategy_bundle = None
+    try:
+        from backtest.strategy.bundle import engine_git_sha, strategy_bundle as _bundle
+        from backtest.strategy.registry import get_strategy as _get_strategy
+
+        _cls = _get_strategy(strategy_name)
+    except KeyError:
+        return _error(f"unknown strategy: {strategy_name}")
+    try:
+        strategy_bundle = _bundle(_cls).to_dict()
+        strategy_bundle["engine_git_sha"] = engine_git_sha()
+        from backtest.risk_limits import load_risk_limits
+
+        strategy_bundle["risk_limits_sha256"] = load_risk_limits().sha256
+        from backtest.strategy.execution import config_sha256
+
+        _expr = (data.get("instrument") or {}).get("expression") or {}
+        strategy_bundle["config_sha256"] = config_sha256(_expr)
+    except Exception as exc:  # noqa: BLE001 — fail closed, loudly
+        log.warning("strategy bundle stamping failed for %s", strategy_name, exc_info=True)
+        return _error(
+            f"strategy fingerprinting failed for {strategy_name}: {exc} — "
+            "spawn refused (fail closed, plan §8)"
+        )
+
+    # Phase 1 (Plan v2.1 §6/§7): strict resolution happens once, here,
+    # server-side. Applies when the strategy declares an execution spec
+    # or the client sent a v2 expression; legacy v1 spawns are untouched.
+    if (
+        isinstance(instrument, dict)
+        and str(instrument.get("type", "equity")).lower() == "option"
+    ):
+        try:
+            from backtest.strategy.registry import get_strategy as _get_cls
+
+            _spec = None
+            try:
+                _spec = _get_cls(strategy_name).execution_spec()
+            except KeyError:
+                _spec = None
+            _raw_expr = instrument.get("expression")
+            _wants_v2 = _spec is not None or (
+                isinstance(_raw_expr, dict)
+                and int(_raw_expr.get("expression_version", 0) or 0) == 2
+            )
+            if _wants_v2:
+                from backtest.options.execution_gate import PreTradeRiskGate
+                from backtest.strategy.execution import (
+                    resolve_expression,
+                    validate_expression,
+                )
+
+                _gate = PreTradeRiskGate(mode=mode or "paper")  # fail-closed load
+                _permitted = _gate.permitted_structures()
+                if _spec is not None:
+                    _playbook_sel = data.get("playbook_selections") or (
+                        _raw_expr if data.get("playbook_id") else None
+                    )
+                    _user_sel = data.get("expression_selections") or (
+                        None if data.get("playbook_id") else _raw_expr
+                    )
+                    # A client that sends the strategy's own full v2
+                    # expression unchanged (the Phase 3 UI shape) means "no
+                    # selections": the envelope key is stripped and an
+                    # expression identical to the strategy default resolves
+                    # to the default itself. A *modified* full expression is
+                    # applied as leaf selections and must stay inside the
+                    # strategy's menus (unknown/deleting fields refuse).
+                    if isinstance(_user_sel, dict):
+                        _user_sel = {
+                            k: v
+                            for k, v in _user_sel.items()
+                            if k != "expression_version"
+                        }
+                        if _user_sel == {
+                            k: v
+                            for k, v in _spec.to_expression().items()
+                            if k != "expression_version"
+                        }:
+                            _user_sel = None
+                    if isinstance(_playbook_sel, dict):
+                        _playbook_sel = {
+                            k: v
+                            for k, v in _playbook_sel.items()
+                            if k != "expression_version"
+                        }
+                    _resolved, _provenance = resolve_expression(
+                        spec=_spec,
+                        playbook_selections=_playbook_sel
+                        if isinstance(_playbook_sel, dict)
+                        else None,
+                        user_selections=_user_sel
+                        if isinstance(_user_sel, dict)
+                        else None,
+                    )
+                    _errs = validate_expression(_resolved, permitted_structures=_permitted)
+                    if _errs:
+                        return _error("; ".join(_errs))
+                    for _rule in _spec.structures.values():
+                        _gate.check_opening(
+                            _rule.structure,
+                            quantity=int(_resolved.get("quantity", 1) or 1),
+                            worst_case_loss_inr=_spec.exit_plan.max_loss_inr,
+                        )
+                    instrument = {
+                        **instrument,
+                        "expression": _resolved,
+                        "expression_provenance": _provenance,
+                    }
+                else:
+                    if not (
+                        isinstance(_raw_expr, dict)
+                        and int(_raw_expr.get("expression_version", 0) or 0) == 2
+                    ):
+                        return _error(
+                            f"strategy {strategy_name} declares no execution "
+                            "spec, and no valid v2 expression was supplied — "
+                            "an option runner needs one or the other (plan "
+                            "§11); rewritten strategies declare a spec, "
+                            "legacy v1 expressions were removed in Phase 4"
+                        )
+                    _errs = validate_expression(
+                        _raw_expr, permitted_structures=_permitted
+                    )
+                    if _errs:
+                        return _error("; ".join(_errs))
+                    instrument = {
+                        **instrument,
+                        "expression_provenance": {
+                            "expression": "user",
+                        },
+                    }
+        except Exception as exc:  # noqa: BLE001 — refusals are 400s, never 500s
+            from backtest.options.execution_gate import StructureNotAllowedError
+            from backtest.strategy.execution import ExecutionSpecError
+
+            if isinstance(exc, (ExecutionSpecError, StructureNotAllowedError, ValueError)):
+                return _error(str(exc))
+            raise
+
     try:
         config = RunnerConfig(
             name=name,
@@ -821,6 +990,7 @@ def create_runner() -> Tuple[Response, int]:
                 data.get("playbook_snapshot")
                 or data.get("instrument", {}).get("expression")
             ),
+            strategy_bundle=strategy_bundle,
         )
         auto_start = bool(data.get("auto_start", True))
         instance_id = _manager().add_runner(config, start=auto_start)

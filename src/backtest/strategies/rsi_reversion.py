@@ -1,10 +1,10 @@
 import numpy as np
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class RsiReversion(Strategy):
+class RsiReversion(EquityStrategy):
     """RSI mean-reversion: go long when RSI is oversold, exit on recovery."""
 
     name = "rsi_reversion"
@@ -12,6 +12,32 @@ class RsiReversion(Strategy):
         "RSI mean-reversion — enter long when RSI dips below the oversold level, "
         "exit when it recovers past the exit level."
     )
+    description_sections = {
+        'overview': (
+            'RSI mean-reversion: buys oversold dips (RSI below the lower level) and sells the'
+            'recovery once RSI normalises.'
+        ),
+        'regime': (
+            'Works in range-bound markets where oversold readings reliably bounce. Struggles in'
+            'strong downtrends — RSI can stay oversold for long stretches while price keeps'
+            'making new lows.'
+        ),
+        'entry': (
+            'Enters long when RSI crosses below the oversold level (default 30).'
+        ),
+        'construction': (
+            'Single-instrument equity/index position, long only, one position at a time.'
+        ),
+        'exits_risk': (
+            'Exits when RSI recovers past the exit level (default 55) — a momentum-recovery exit,'
+            'not a price target. No hard stop; worst case is a downtrend that keeps RSI pinned'
+            'while price falls.'
+        ),
+        'parameters': (
+            'period=14 (RSI window), lower=30 (oversold entry), exit_level=55 (recovery exit).'
+            'Lower entry levels wait for deeper washouts.'
+        ),
+    }
     version = "1.0"
     author = "Trading Bot"
     params = {

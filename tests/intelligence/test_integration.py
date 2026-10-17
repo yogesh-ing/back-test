@@ -52,14 +52,20 @@ def mgr():
 
 
 def strangle_config(name="Strangle A", **params):
+    # Phase 4: the runner expression is the strategy spec's own resolution.
+    from backtest.strategy.execution import resolve_expression
+    from backtest.strategy.registry import get_strategy
+
+    expression, _provenance = resolve_expression(
+        spec=get_strategy("immediate_strangle").execution_spec()
+    )
     return RunnerConfig(
         name=name,
         strategy_name="immediate_strangle",
         allocated_capital=500000,
         symbols=["NIFTY"],
         target_type="SINGLE_SYMBOL",
-        instrument={"type": "option",
-                    "expression": {"type": "strangle", "strike_selection": "atm", "quantity": 1}},
+        instrument={"type": "option", "expression": expression},
         mode="paper",
         strategy_params=params,
     )

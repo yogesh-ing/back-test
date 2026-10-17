@@ -71,6 +71,19 @@
         <div id="runError" class="run-error" role="alert" hidden></div>
     </section>
 
+    {# Strategy card: structured description of the selected strategy,
+       shown directly above the performance metrics. Overview is always
+       visible; the remaining sections expand via the toggle. Populated by
+       backtest.js from /api/strategies (description_sections). #}
+    <section id="strategyCard" class="card strategy-card" aria-label="Strategy description" hidden>
+        <div class="strategy-card-head">
+            <h3 id="strategyCardTitle">About this strategy</h3>
+            <button id="strategyCardToggle" class="btn btn-ghost btn-small" type="button" aria-expanded="false" hidden>Show details</button>
+        </div>
+        <p id="strategyCardOverview" class="strategy-card-overview"></p>
+        <dl id="strategyCardSections" class="strategy-card-sections" hidden></dl>
+    </section>
+
     <section id="results" class="results-panel" aria-label="Backtest results" hidden>
         <div class="results-overview-head"><h2>Performance overview</h2><span id="backtest-result-caption">Historical simulation</span></div>
         <div id="persistBadge" class="prov-strip" hidden></div>

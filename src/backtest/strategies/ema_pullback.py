@@ -19,10 +19,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class EmaPullback(Strategy):
+class EmaPullback(EquityStrategy):
     """EMA pullback — buy dips to the fast EMA inside a slow-EMA uptrend."""
 
     name = "ema_pullback"
@@ -30,6 +30,33 @@ class EmaPullback(Strategy):
         "Dual-EMA pullback — in a slow-EMA uptrend, enter long when price "
         "pulls back to the fast EMA; exit on a stretch-target or trend break."
     )
+    description_sections = {
+        'overview': (
+            'Trend pullback: only buys dips inside an established uptrend — waiting for price to'
+            'come back to the fast EMA rather than chasing strength.'
+        ),
+        'regime': (
+            'Works in orderly uptrends with regular shallow pullbacks. Struggles when the trend'
+            'turns choppy or the pullback is the start of a real reversal — entries keep'
+            'triggering into a falling market until the trend filter switches off.'
+        ),
+        'entry': (
+            'Requires the slow EMA uptrend (price/fast EMA above slow EMA), then enters when'
+            'price pulls back to touch the fast EMA.'
+        ),
+        'construction': (
+            'Single-instrument equity/index position, long only, one position at a time.'
+        ),
+        'exits_risk': (
+            'Exits on a stretch-target above the fast EMA or when the trend breaks (fast EMA'
+            'loses the slow EMA). The trend break is the de-facto stop; worst case is the adverse'
+            'move between entry and that break.'
+        ),
+        'parameters': (
+            'fast=10, slow=50 (EMA windows), stretch_pct=1.0 (% stretch above the fast EMA that'
+            "counts as 'target reached')."
+        ),
+    }
     version = "1.0"
     author = "Trading Bot"
     params = {

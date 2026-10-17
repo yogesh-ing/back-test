@@ -350,10 +350,16 @@ def test_the_options_bridge_cannot_invent_a_chain(production_policy):
         def get_quote(self, instrument_token):
             return {}
 
+    _V2 = {
+        "expression_version": 2,
+        "type": "long_call",
+        "quantity": 1,
+        "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+    }
     with pytest.raises(SourceDisabledError, match="data_sources.yaml"):
-        OptionsBridge(capital=100_000)
+        OptionsBridge(capital=100_000, expression=_V2)
 
-    bridge = OptionsBridge(capital=100_000, quote_provider=_QuotesButNoChain())
+    bridge = OptionsBridge(capital=100_000, expression=_V2, quote_provider=_QuotesButNoChain())
     assert getattr(bridge.quote_provider, "generator", None) is None, "no silent fitting-out"
     with pytest.raises(SourceDisabledError, match="no option chain feed"):
         bridge._generator()
@@ -367,7 +373,15 @@ def test_the_options_bridge_still_builds_for_the_testing_profile():
     sp.reset_source_policy()
     sp._POLICY = sp.build_policy(profile="testing")
     try:
-        bridge = OptionsBridge(capital=100_000, expression={"type": "long_call"})
+        bridge = OptionsBridge(
+            capital=100_000,
+            expression={
+                "expression_version": 2,
+                "type": "long_call",
+                "quantity": 1,
+                "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+            },
+        )
         assert bridge.quote_provider.__class__.__name__ == "SyntheticQuoteProvider"
         assert bridge._generator() is bridge.quote_provider.generator
     finally:

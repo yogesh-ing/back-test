@@ -114,10 +114,11 @@ def _long_equity_runner(entry_price: float = 100.0) -> StrategyRunner:
 
 def _option_runner(**overrides) -> StrategyRunner:
     expression = {
+        "expression_version": 2,
         "type": "bull_call_spread",
         "quantity": 1,
         # Entry allowed on the bar; nothing else closes it unless we say so.
-        "exit": {"min_days_to_expiry": 1},
+        "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": 1},
     }
     kwargs = dict(
         name="NIFTY-BCS",
@@ -157,7 +158,12 @@ def _open_option_structure(runner: StrategyRunner, spot: float = 24_800.0):
     bar_dt = datetime.combine(BASE_DAY, _time(9, 15))
     bridge._bar_dt = bar_dt
     bridge._sync_market("NIFTY", spot, bar_dt.isoformat())
-    result = bridge.on_market_view(_view(spot=spot), runner.config.strategy_name)
+    rule = next(iter(bridge._strict_rules.values()))
+    result = bridge.on_intent(
+        {"structure": rule.structure, "strike_selection": "atm"},
+        _view(spot=spot),
+        runner.config.strategy_name,
+    )
     assert result and not result.get("rejected"), result
     return bridge.option_broker.get_open_structures()[0]
 
@@ -503,7 +509,16 @@ class TestOptionStructureControl:
     def test_no_implied_vol_means_no_invented_greeks(self):
         """Greeks need a vol: use the chain's when there is one, and report
         nothing (not zeros) when there is not."""
-        bridge = OptionsBridge(capital=100_000, allowed_structures=RESEARCH_STRUCTURES)
+        bridge = OptionsBridge(
+            capital=100_000,
+            expression={
+                "expression_version": 2,
+                "type": "long_call",
+                "quantity": 1,
+                "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+            },
+            allowed_structures=RESEARCH_STRUCTURES,
+        )
 
         class Leg:
             instrument_token = "MISSING"
@@ -518,7 +533,16 @@ class TestOptionStructureControl:
         assert bridge._leg_vol(Known()) == pytest.approx(0.12)
 
     def test_the_bridge_refuses_levels_with_nothing_open(self):
-        bridge = OptionsBridge(capital=100_000, allowed_structures=RESEARCH_STRUCTURES)
+        bridge = OptionsBridge(
+            capital=100_000,
+            expression={
+                "expression_version": 2,
+                "type": "long_call",
+                "quantity": 1,
+                "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+            },
+            allowed_structures=RESEARCH_STRUCTURES,
+        )
         with pytest.raises(ValueError):
             bridge.set_manual_rule(stop_loss=10.0)
 
@@ -559,7 +583,15 @@ class TestManagerSurfaces:
         _, option = self._add(manager, RunnerConfig(
             name="OPT", strategy_name="directional_options", allocated_capital=500_000,
             symbols=["NIFTY"], timeframe="1day", mode="live", source="synthetic",
-            instrument={"type": "option", "expression": {"type": "bull_call_spread"}},
+            instrument={
+                "type": "option",
+                "expression": {
+                    "expression_version": 2,
+                    "type": "long_call",
+                    "quantity": 1,
+                    "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+                },
+            },
         ))
         _open_option_structure(option)
 
@@ -567,7 +599,7 @@ class TestManagerSurfaces:
         kinds = {r["kind"]: r for r in rows}
         assert set(kinds) == {"equity", "option"}
         assert kinds["equity"]["runner"] == "EQ"
-        assert kinds["option"]["structure_type"] == "bull_call_spread"
+        assert kinds["option"]["structure_type"] == "long_call"
         assert kinds["option"]["can_partial_close"] is False
         assert kinds["option"]["stale"] is False  # both are RUNNING
 

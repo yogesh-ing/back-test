@@ -14,6 +14,20 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+#: Canonical strategy-card sections, in display order. ``overview`` is the
+#: always-visible summary; the rest render as expandable detail on the
+#: backtest page. A registered strategy must fill every section (enforced
+#: by the conformance suite).
+DESCRIPTION_SECTION_KEYS: tuple[str, ...] = (
+    "overview",
+    "regime",
+    "entry",
+    "construction",
+    "exits_risk",
+    "parameters",
+)
+
+
 class StrategyContractError(Exception):
     """Raised when a strategy fails to meet the BaseStrategy contract.
 
@@ -133,6 +147,18 @@ class Strategy(ABC):
     version: str = ""
     author: str = ""
     params: dict[str, Any] = {}
+    # Strategy-Owned Execution (Refactor Plan v2.1, Phase 0): the strategy's
+    # declarative execution spec — dict form or an ExecutionSpec. ``None``
+    # (default) = legacy strategy; behaviour is exactly as before. When set,
+    # :meth:`execution_spec` parses/validates/freezes it and :meth:`validate`
+    # enforces it. Import is lazy (execution imports intent only) to keep
+    # this module the bottom of the dependency stack.
+    execution: Any = None
+    # DEPRECATED (Phase 4): legacy class-level stop/target for the equity
+    # backtest path. Nothing in the execution contract reads these; exit
+    # criteria belong in the strategy's ExitPlan (options) or its signal
+    # logic (equity). Declaring them emits a DeprecationWarning from
+    # validate(); removal is scheduled for 2027-03-31.
     stop_loss: float | None = None
     take_profit: float | None = None
     # Instrument eligibility (2026-09-22): ``None`` = trades any symbol the
@@ -339,6 +365,36 @@ class Strategy(ABC):
                 schema[key] = entry
         return schema
 
+    # -- execution spec (Phase 0, plan §4.4) ------------------------------
+
+    @classmethod
+    def execution_spec(cls) -> Any:
+        """Parsed, immutable :class:`ExecutionSpec`, or ``None`` if legacy.
+
+        Parses the declared ``execution`` (dict or spec) once per class and
+        caches it on the class; the cached spec's mappings are frozen, so a
+        caller cannot mutate the shared declaration. A changed declaration
+        (tests, hot reload) re-parses because the cache keys on the raw
+        object's identity.
+        """
+        raw = cls.execution
+        if raw is None:
+            return None
+        cache = cls.__dict__.get("_execution_spec_cache")
+        if cache is not None and cache[0] is raw:
+            return cache[1]
+        from .execution import ExecutionSpec
+
+        spec = ExecutionSpec.from_declared(raw)
+        cls._execution_spec_cache = (raw, spec)  # noqa: SLF001 — own class attr
+        return spec
+
+    @classmethod
+    def default_expression(cls) -> "dict[str, Any] | None":
+        """The v2 ``instrument.expression`` block derived from the spec."""
+        spec = cls.execution_spec()
+        return spec.to_expression() if spec is not None else None
+
     # -- contract validation (Task 1.1) ---------------------------------
 
     @classmethod
@@ -352,6 +408,19 @@ class Strategy(ABC):
         if not isinstance(getattr(cls, "name", ""), str) or not cls.name.strip():
             raise StrategyContractError(
                 f"{cls.__name__}: strategy must define a non-empty string 'name'"
+            )
+        # Phase 4 deprecation: class-level stop_loss/take_profit are
+        # legacy equity-backtest attrs the execution contract ignores.
+        if cls.stop_loss is not None or cls.take_profit is not None:
+            import warnings
+
+            warnings.warn(
+                f"{cls.name}: class-level stop_loss/take_profit are "
+                "deprecated (Phase 4) and ignored by the execution "
+                "contract — declare exits in the ExitPlan (options) or "
+                "signal logic (equity). Removal scheduled 2027-03-31.",
+                DeprecationWarning,
+                stacklevel=2,
             )
         if not isinstance(cls.params, dict):
             raise StrategyContractError(f"{cls.name}: 'params' must be a dict")
@@ -367,6 +436,16 @@ class Strategy(ABC):
                 "or entries(candles)"
             )
 
+        # Execution spec validation (Phase 0, plan §4.4): only strategies
+        # that declare one are held to it; legacy strategies are untouched.
+        if cls.execution is not None:
+            try:
+                cls.execution_spec()
+            except Exception as exc:  # ExecutionSpecError + friends
+                raise StrategyContractError(
+                    f"{cls.name}: invalid execution spec: {exc}"
+                ) from exc
+
         # Description validation (new requirement, 2026-09-29)
         description = getattr(cls, "description", "")
         if not isinstance(description, str) or not description.strip():
@@ -374,6 +453,43 @@ class Strategy(ABC):
                 f"{cls.name}: strategy must define a non-empty 'description'. "
                 "Add a brief explanation of what the strategy does and when to use it."
             )
+
+        # Structured description ("strategy card"): when present it must be
+        # a dict of known, non-empty string sections. Presence for every
+        # registered strategy is enforced by the conformance suite.
+        sections = getattr(cls, "description_sections", None)
+        if sections is not None:
+            if not isinstance(sections, dict):
+                raise StrategyContractError(
+                    f"{cls.name}: 'description_sections' must be a dict of "
+                    f"section text keyed by {list(DESCRIPTION_SECTION_KEYS)}"
+                )
+            unknown = sorted(set(sections) - set(DESCRIPTION_SECTION_KEYS))
+            if unknown:
+                raise StrategyContractError(
+                    f"{cls.name}: unknown description section(s) {unknown}; "
+                    f"allowed: {list(DESCRIPTION_SECTION_KEYS)}"
+                )
+            for key, text in sections.items():
+                if not isinstance(text, str) or not text.strip():
+                    raise StrategyContractError(
+                        f"{cls.name}: description section '{key}' must be "
+                        "a non-empty string"
+                    )
+
+    @classmethod
+    def description_card(cls) -> dict[str, str] | None:
+        """Normalised strategy card: known sections only, stripped, in
+        canonical order; ``None`` when the strategy declares no sections."""
+        sections = getattr(cls, "description_sections", None)
+        if not isinstance(sections, dict):
+            return None
+        card = {
+            key: sections[key].strip()
+            for key in DESCRIPTION_SECTION_KEYS
+            if isinstance(sections.get(key), str) and sections[key].strip()
+        }
+        return card or None
 
     @staticmethod
     def _validate_param(strategy_name: str, pname: str, spec: Any) -> None:

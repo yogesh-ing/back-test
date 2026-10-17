@@ -205,7 +205,7 @@ def test_round_trip_through_to_dict():
 
 
 @pytest.mark.parametrize("strategy", ["sma_crossover", "rsi_reversion", "bollinger_reversion",
-                                      "directional_options", "banknifty_straddle"])
+                                      "directional_options", "banknifty_ema_momentum"])
 def test_default_space_is_always_valid_and_contains_the_default(strategy):
     rows = default_space(strategy)
     assert rows and any(r["optimize"] for r in rows)
