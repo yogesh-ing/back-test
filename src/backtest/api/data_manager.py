@@ -26,7 +26,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Protocol
 
 import requests
 from flask import Blueprint, jsonify, request
@@ -972,55 +972,29 @@ def _run_fetch_job_inner(
                 )
 
         try:
-            # Route to broker-specific fetcher
-            if broker == "mstock":
-                bars, chunk_errors = _fetch_bars_chunked(
-                    api_key,
-                    token,
-                    sec_token,
-                    from_date,
-                    to_date,
-                    inst_exchange,
-                    mstock_tf,
-                    chunk_days,
+            # Route to broker-specific fetcher via dispatcher
+            fetcher = _get_broker_fetcher(broker)
+            if not fetcher:
+                log.error("[data] %s: unsupported broker '%s' — skipping", symbol, broker)
+                bars, chunk_errors = [], 0
+            else:
+                bars, chunk_errors = fetcher(
+                    instrument_token=sec_token,
+                    from_date=from_date,
+                    to_date=to_date,
+                    exchange=inst_exchange,
+                    timeframe=timeframe,
+                    chunk_days=chunk_days,
                     should_cancel=lambda: bool(_job.get("cancel")) or breaker.tripped,
                     on_progress=_on_chunk,
                     windows=needed_windows,
                     breaker=breaker,
+                    engine=engine,
+                    symbol=symbol,
+                    api_key=api_key,
+                    token=token,
+                    mstock_tf=mstock_tf,
                 )
-            elif broker == "upstox":
-                # Convert mStock instrument_token to Upstox instrument_key format
-                # Upstox uses: EXCHANGE_SEGMENT|SYMBOL or EXCHANGE_SEGMENT|ISIN
-                # We need to look up the proper format from the instruments table
-                upstox_instrument_key = _resolve_upstox_instrument_key(
-                    engine, symbol, sec_token, inst_exchange
-                )
-                
-                if not upstox_instrument_key:
-                    log.warning(
-                        "[data] %s: cannot resolve Upstox instrument key for token %s — skipping",
-                        symbol, sec_token,
-                    )
-                    with _lock:
-                        _job["failed"] += 1
-                        _job["failed_list"].append((symbol, "Upstox instrument mapping not found"))
-                        _job["fetched"] += 1
-                    continue
-                
-                bars, chunk_errors = _fetch_upstox_bars_chunked(
-                    upstox_instrument_key,
-                    from_date,
-                    to_date,
-                    inst_exchange,
-                    timeframe,
-                    chunk_days,
-                    should_cancel=lambda: bool(_job.get("cancel")) or breaker.tripped,
-                    on_progress=_on_chunk,
-                    windows=needed_windows,
-                    breaker=breaker,
-                )
-            elif broker == "dhan":
-                # Dhan is static/no auth - skip or use mock data
                 log.warning("[data] %s: Dhan broker selected but no live API configured — skipping", symbol)
                 bars, chunk_errors = [], 0
             else:
@@ -2145,6 +2119,150 @@ def _fetch_upstox_bars_chunked(
     )
     
     return all_bars, chunk_errors
+
+
+# ---------------------------------------------------------------------------
+# Broker fetcher dispatcher (extensible pattern)
+# ---------------------------------------------------------------------------
+
+class _BrokerFetcher(Protocol):
+    """Type signature for broker-specific fetch functions."""
+    def __call__(
+        self,
+        instrument_token: str,
+        from_date: str,
+        to_date: str,
+        exchange: str,
+        timeframe: str,
+        chunk_days: int,
+        should_cancel=None,
+        on_progress=None,
+        windows: list | None = None,
+        breaker: "_CircuitBreaker | None" = None,
+        engine=None,
+        symbol: str = "",
+        api_key: str = "",
+        token: str = "",
+        mstock_tf: str = "",
+    ) -> tuple[list[dict], int]: ...
+
+
+def _fetch_mstock_wrapper(
+    instrument_token: str,
+    from_date: str,
+    to_date: str,
+    exchange: str,
+    timeframe: str,
+    chunk_days: int,
+    should_cancel=None,
+    on_progress=None,
+    windows: list | None = None,
+    breaker: "_CircuitBreaker | None" = None,
+    engine=None,
+    symbol: str = "",
+    api_key: str = "",
+    token: str = "",
+    mstock_tf: str = "",
+) -> tuple[list[dict], int]:
+    """Wrapper to match _BrokerFetcher signature for mStock."""
+    return _fetch_bars_chunked(
+        api_key,
+        token,
+        instrument_token,
+        from_date,
+        to_date,
+        exchange,
+        mstock_tf,
+        chunk_days,
+        should_cancel=should_cancel,
+        on_progress=on_progress,
+        windows=windows,
+        breaker=breaker,
+    )
+
+
+def _fetch_upstox_wrapper(
+    instrument_token: str,
+    from_date: str,
+    to_date: str,
+    exchange: str,
+    timeframe: str,
+    chunk_days: int,
+    should_cancel=None,
+    on_progress=None,
+    windows: list | None = None,
+    breaker: "_CircuitBreaker | None" = None,
+    engine=None,
+    symbol: str = "",
+    api_key: str = "",
+    token: str = "",
+    mstock_tf: str = "",
+) -> tuple[list[dict], int]:
+    """Wrapper to resolve Upstox instrument key and fetch data."""
+    upstox_instrument_key = _resolve_upstox_instrument_key(
+        engine, symbol, instrument_token, exchange
+    )
+    
+    if not upstox_instrument_key:
+        log.warning(
+            "[data] %s: cannot resolve Upstox instrument key for token %s — skipping",
+            symbol, instrument_token,
+        )
+        return [], 0
+    
+    return _fetch_upstox_bars_chunked(
+        upstox_instrument_key,
+        from_date,
+        to_date,
+        exchange,
+        timeframe,
+        chunk_days,
+        should_cancel=should_cancel,
+        on_progress=on_progress,
+        windows=windows,
+        breaker=breaker,
+    )
+
+
+def _fetch_dhan_stub(
+    instrument_token: str,
+    from_date: str,
+    to_date: str,
+    exchange: str,
+    timeframe: str,
+    chunk_days: int,
+    should_cancel=None,
+    on_progress=None,
+    windows: list | None = None,
+    breaker: "_CircuitBreaker | None" = None,
+    engine=None,
+    symbol: str = "",
+    api_key: str = "",
+    token: str = "",
+    mstock_tf: str = "",
+) -> tuple[list[dict], int]:
+    """Stub for Dhan broker (no live API configured)."""
+    log.warning("[data] %s: Dhan broker selected but no live API configured — skipping", symbol)
+    return [], 0
+
+
+#: Registry of broker fetchers keyed by broker name.
+#: To add a new broker: implement its fetch function, add a wrapper if needed,
+#: then register it here. No if/else chains in the main loop.
+_BROKER_FETCHERS: dict[str, _BrokerFetcher] = {
+    "mstock": _fetch_mstock_wrapper,
+    "upstox": _fetch_upstox_wrapper,
+    "dhan": _fetch_dhan_stub,
+}
+
+
+def _get_broker_fetcher(broker: str) -> _BrokerFetcher | None:
+    """Look up the fetch function for a broker by name.
+    
+    Returns None if the broker is not registered (caller should handle gracefully).
+    To register a new broker, add it to _BROKER_FETCHERS dict above.
+    """
+    return _BROKER_FETCHERS.get(broker)
 
 
 def _resolve_upstox_instrument_key(
