@@ -1688,7 +1688,7 @@ def _compute_freshness() -> dict:
         )
         target = _last_settled_session(now_ist, holidays)
         out["target_day"] = target.isoformat()
-        per, worst = {}, 0
+        per, best_missing = {}, None
         for tf, last in rows:
             last_d = _as_session_date(last)
             missing = _count_missing_sessions(last_d, target, holidays)
@@ -1706,7 +1706,11 @@ def _compute_freshness() -> dict:
                 "from_date": missing_dates[0] if missing_dates else None,
                 "to_date": target.isoformat(),
             }
-            worst = max(worst, missing)
+            # Track the BEST (most current) timeframe — if ANY stock/timeframe
+            # is up-to-date, the system should report current, not drag the
+            # display down to the worst stale timeframe.
+            if best_missing is None or missing < best_missing:
+                best_missing = missing
         out["per_timeframe"] = per
         out["db_available"] = True
         if fetching:
@@ -1718,7 +1722,11 @@ def _compute_freshness() -> dict:
             out["label"] = "NO CACHED DATA"
             out["title"] = "market_data_cache is empty — fetch the curated universe."
         else:
-            level = "current" if worst == 0 else ("amber" if worst == 1 else "red")
+            # Use the BEST (most current) timeframe, not the worst. If even one
+            # stock has data through today, show current — users care about what
+            # IS available, not what's missing from other stocks.
+            missing = best_missing if best_missing is not None else 0
+            level = "current" if missing == 0 else ("amber" if missing == 1 else "red")
             details = " · ".join(
                 f"{tf}: {v['last_day'] or 'no data'}"
                 + (f" ({v['missing']} behind)" if v["missing"] else "")
@@ -1726,7 +1734,7 @@ def _compute_freshness() -> dict:
             )
             out["level"] = level
             out["label"] = ("DATA CURRENT" if level == "current"
-                            else f"DATA {worst} SESSION{'S' if worst > 1 else ''} BEHIND")
+                            else f"DATA {missing} SESSION{'S' if missing > 1 else ''} BEHIND")
             out["title"] = (
                 f"Last completed session: {target.isoformat()}. {details}."
                 + ("" if level == "current" else " Click to fetch on the Data tab.")
