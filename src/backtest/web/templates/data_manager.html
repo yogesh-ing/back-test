@@ -11,6 +11,16 @@
         <p class="muted small">Download historical OHLCV data from mStock and store in PostgreSQL.</p>
 
         <div class="form-row">
+            <label for="dm-broker">Data source broker</label>
+            <select id="dm-broker" class="input">
+                <option value="mstock" selected>mStock</option>
+                <option value="upstox">Upstox</option>
+                <option value="dhan">Dhan (static)</option>
+            </select>
+            <div class="hint">Choose which broker to fetch historical data from. mStock is the default.</div>
+        </div>
+
+        <div class="form-row">
             <label for="dm-timeframe">Timeframe</label>
             <select id="dm-timeframe" class="input">
                 <option value="1min" selected>1 Minute</option>

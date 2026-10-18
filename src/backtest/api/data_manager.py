@@ -277,7 +277,7 @@ def fetch_clear() -> tuple:
 def fetch_start() -> tuple:
     """Start a background fetch job.
 
-    Body: { symbols?: string[], scope?: 'equity,index'|'equity'|'index',
+    Body: { broker?: 'mstock'|'upstox'|'dhan', symbols?: string[], scope?: 'equity,index'|'equity'|'index',
             timeframe?: string, from_date?: string, to_date?: string }
 
     ``symbols`` wins when present. With nothing ticked, ``scope`` selects
@@ -289,6 +289,7 @@ def fetch_start() -> tuple:
             return jsonify({"error": "A fetch job is already running. Stop it first."}), 409
 
     data = request.get_json(silent=True) or {}
+    broker = data.get("broker", "mstock")
     timeframe = data.get("timeframe", "1min")
     from_date = data.get("from_date", "2024-01-01")
     to_date = data.get("to_date", date.today().isoformat())
@@ -376,7 +377,7 @@ def fetch_start() -> tuple:
     # Launch background thread
     thread = threading.Thread(
         target=_run_fetch_job,
-        args=(token, timeframe, from_date, to_date, symbols, scope),
+        args=(broker, token, timeframe, from_date, to_date, symbols, scope),
         daemon=True,
     )
     thread.start()
@@ -796,6 +797,7 @@ def coverage() -> tuple:
 
 
 def _run_fetch_job_inner(
+    broker: str,
     token: str,
     timeframe: str,
     from_date: str,
@@ -970,20 +972,42 @@ def _run_fetch_job_inner(
                 )
 
         try:
-            bars, chunk_errors = _fetch_bars_chunked(
-                api_key,
-                token,
-                sec_token,
-                from_date,
-                to_date,
-                inst_exchange,
-                mstock_tf,
-                chunk_days,
-                should_cancel=lambda: bool(_job.get("cancel")) or breaker.tripped,
-                on_progress=_on_chunk,
-                windows=needed_windows,
-                breaker=breaker,
-            )
+            # Route to broker-specific fetcher
+            if broker == "mstock":
+                bars, chunk_errors = _fetch_bars_chunked(
+                    api_key,
+                    token,
+                    sec_token,
+                    from_date,
+                    to_date,
+                    inst_exchange,
+                    mstock_tf,
+                    chunk_days,
+                    should_cancel=lambda: bool(_job.get("cancel")) or breaker.tripped,
+                    on_progress=_on_chunk,
+                    windows=needed_windows,
+                    breaker=breaker,
+                )
+            elif broker == "upstox":
+                bars, chunk_errors = _fetch_upstox_bars_chunked(
+                    sec_token,
+                    from_date,
+                    to_date,
+                    inst_exchange,
+                    timeframe,
+                    chunk_days,
+                    should_cancel=lambda: bool(_job.get("cancel")) or breaker.tripped,
+                    on_progress=_on_chunk,
+                    windows=needed_windows,
+                    breaker=breaker,
+                )
+            elif broker == "dhan":
+                # Dhan is static/no auth - skip or use mock data
+                log.warning("[data] %s: Dhan broker selected but no live API configured — skipping", symbol)
+                bars, chunk_errors = [], 0
+            else:
+                log.error("[data] %s: unknown broker '%s' — skipping", symbol, broker)
+                bars, chunk_errors = [], 0
             if chunk_errors:
                 # Partial coverage: some chunks died even after retries. The
                 # symbol still counts as fetched, but the UI must not claim a
@@ -1077,6 +1101,7 @@ def _run_fetch_job_inner(
 
 
 def _run_fetch_job(
+    broker: str,
     token: str,
     timeframe: str,
     from_date: str,
@@ -1093,7 +1118,7 @@ def _run_fetch_job(
     UI shows why and the Start button comes back (2026-10-04).
     """
     try:
-        _run_fetch_job_inner(token, timeframe, from_date, to_date, symbols, scope)
+        _run_fetch_job_inner(broker, token, timeframe, from_date, to_date, symbols, scope)
     except Exception as exc:  # noqa: BLE001 — a wedged job hides the real cause
         log.error(
             "[data] fetch job crashed unexpectedly — %s: %s",
@@ -1890,6 +1915,34 @@ def _fetch_bars_chunked(
             len(all_bars),
         )
     return all_bars, chunk_errors
+
+
+def _fetch_upstox_bars_chunked(
+    instrument_token: str,
+    from_date: str,
+    to_date: str,
+    exchange: str,
+    timeframe: str,
+    chunk_days: int,
+    should_cancel=None,
+    on_progress=None,
+    windows: list | None = None,
+    breaker: "_CircuitBreaker | None" = None,
+) -> tuple[list[dict], int]:
+    """Fetch OHLCV bars from Upstox API, chunked by date range.
+
+    NOTE: Upstox historical data API is not yet implemented in this codebase.
+    This stub returns empty results until the Upstox broker module adds
+    historical data fetching support.
+
+    Returns ``(bars, chunk_errors)``.
+    """
+    log.warning(
+        "[data] Upstox historical data fetch not implemented — "
+        "symbol=%s, range=%s..%s, tf=%s",
+        instrument_token, from_date, to_date, timeframe,
+    )
+    return [], 0
 
 
 def _extract_bars(payload) -> list[dict]:

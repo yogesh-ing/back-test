@@ -314,6 +314,7 @@ function applyJobState(j) {
 }
 
 $('dm-fetchBtn').addEventListener('click', async () => {
+    const broker = $('dm-broker').value;
     const timeframe = $('dm-timeframe').value;
     const fromDate = $('dm-fromDate').value;
     const toDate = $('dm-toDate').value;
@@ -323,7 +324,7 @@ $('dm-fetchBtn').addEventListener('click', async () => {
         return;
     }
 
-    const body = { timeframe, from_date: fromDate, to_date: toDate };
+    const body = { broker, timeframe, from_date: fromDate, to_date: toDate };
     if (dmState.selected.size) {
         body.symbols = [...dmState.selected].sort();
     }

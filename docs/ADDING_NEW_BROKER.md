@@ -141,9 +141,41 @@ def zerodha_oauth_callback() -> Response:
 If the broker provides historical market data, implement a fetcher following the pattern in `mstock.py`. The fetcher should:
 
 - Accept instrument symbols and date ranges
-- Return OHLCV bars in a standard format
+- Return OHLCV bars in a standard format (list of dicts with keys: `t`/`time`, `o`/`open`, `h`/`high`, `l`/`low`, `c`/`close`, `v`/`volume`)
 - Handle rate limits and retries gracefully
 - Never fabricate data — use broker APIs only
+
+**Integration point**: Add your broker's fetch function to `src/backtest/api/data_manager.py`:
+
+```python
+def _fetch_<broker>_bars_chunked(
+    instrument_token: str,
+    from_date: str,
+    to_date: str,
+    exchange: str,
+    timeframe: str,
+    chunk_days: int,
+    should_cancel=None,
+    on_progress=None,
+    windows: list | None = None,
+    breaker: "_CircuitBreaker | None" = None,
+) -> tuple[list[dict], int]:
+    """Fetch OHLCV bars from <Broker> API."""
+    # Implementation here
+    return bars, chunk_errors
+```
+
+Then add routing in `_run_fetch_job_inner()` (around line 975):
+
+```python
+if broker == "<broker_name>":
+    bars, chunk_errors = _fetch_<broker>_bars_chunked(...)
+```
+
+**Current status**:
+- **mStock**: Fully implemented with chunked fetching, retry logic, and circuit breaker
+- **Upstox**: Stub added (returns empty), needs implementation
+- **Dhan**: Static/no auth mode, no live API configured
 
 ### 5. Update Frontend (Optional)
 
