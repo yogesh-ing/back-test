@@ -2051,7 +2051,14 @@ def _fetch_upstox_bars_chunked(
         instrument_key = instrument_token
         
         # Build URL with path parameters
-        url = f"{base_url}/historical-candle/{instrument_key}/{upstox_interval}/{win_from}/{win_to}"
+        # Upstox requires dates in YYYY-MM-DD format (no time component)
+        # _build_windows returns datetime objects, so format them
+        from_date_str = win_from.strftime("%Y-%m-%d") if hasattr(win_from, 'strftime') else str(win_from)[:10]
+        to_date_str = win_to.strftime("%Y-%m-%d") if hasattr(win_to, 'strftime') else str(win_to)[:10]
+        
+        url = f"{base_url}/historical-candle/{instrument_key}/{upstox_interval}/{from_date_str}/{to_date_str}"
+        
+        log.debug("[data] Upstox: fetching %s for %s..%s", instrument_key, from_date_str, to_date_str)
         
         # Retry logic for transient failures
         max_retries = 3
