@@ -322,23 +322,30 @@ def fetch_start() -> tuple:
             400,
         )
 
-    # Resolve the session token: prefer the live Broker session (the same
-    # one the chain/quote paths use), fall back to the persisted token file
-    # at the PROJECT ROOT. The old `os.getcwd()` lookup broke whenever the
-    # app was launched from src/ (cwd ≠ project root) → phantom
-    # "No auth token" despite an active login (fixed 2026-09-22).
+    # Resolve the session token for the REQUESTED broker: prefer the live
+    # Broker session (the same one the chain/quote paths use), fall back to
+    # the persisted token file. The old code ignored the broker parameter and
+    # always fetched mStock's token even when upstox was requested (fixed
+    # 2026-10-18).
     token: str | None = None
     try:
         from backtest.brokers.session_manager import get_session_manager
 
-        token = get_session_manager().get_active_session_token()
+        token = get_session_manager().get_active_session_token(broker)
     except Exception:  # noqa: BLE001 — fall through to the file
         token = None
     if not token:
+        # Fallback: broker-specific token files
+        token_file_map = {
+            "mstock": ".mstock_session_token",
+            "upstox": ".upstox_session_token",
+            "dhan": ".dhan_session_token",
+        }
+        token_filename = token_file_map.get(broker, ".mstock_session_token")
         token_file = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             os.pardir,
-            ".mstock_session_token",
+            token_filename,
         )
         token_file = os.path.normpath(token_file)
         if os.path.exists(token_file):
