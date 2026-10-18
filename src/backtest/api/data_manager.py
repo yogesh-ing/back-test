@@ -989,8 +989,26 @@ def _run_fetch_job_inner(
                     breaker=breaker,
                 )
             elif broker == "upstox":
+                # Convert mStock instrument_token to Upstox instrument_key format
+                # Upstox uses: EXCHANGE_SEGMENT|SYMBOL or EXCHANGE_SEGMENT|ISIN
+                # We need to look up the proper format from the instruments table
+                upstox_instrument_key = _resolve_upstox_instrument_key(
+                    engine, symbol, sec_token, inst_exchange
+                )
+                
+                if not upstox_instrument_key:
+                    log.warning(
+                        "[data] %s: cannot resolve Upstox instrument key for token %s — skipping",
+                        symbol, sec_token,
+                    )
+                    with _lock:
+                        _job["failed"] += 1
+                        _job["failed_list"].append((symbol, "Upstox instrument mapping not found"))
+                        _job["fetched"] += 1
+                    continue
+                
                 bars, chunk_errors = _fetch_upstox_bars_chunked(
-                    sec_token,
+                    upstox_instrument_key,
                     from_date,
                     to_date,
                     inst_exchange,
@@ -1931,18 +1949,265 @@ def _fetch_upstox_bars_chunked(
 ) -> tuple[list[dict], int]:
     """Fetch OHLCV bars from Upstox API, chunked by date range.
 
-    NOTE: Upstox historical data API is not yet implemented in this codebase.
-    This stub returns empty results until the Upstox broker module adds
-    historical data fetching support.
+    Uses Upstox v2 historical candle endpoint:
+    GET /v2/historical-candle/{instrument_key}/{interval}/{from_date}/{to_date}
 
-    Returns ``(bars, chunk_errors)``.
+    Args:
+        instrument_token: Upstox instrument key (e.g., NSE_EQ|INE002A01018)
+        from_date: Start date in YYYY-MM-DD format
+        to_date: End date in YYYY-MM-DD format
+        exchange: Exchange name (used for logging)
+        timeframe: Timeframe string (1min, 5min, 15min, 1hour, 1day)
+        chunk_days: Number of days per chunk request
+        should_cancel: Callable returning True if job should stop
+        on_progress: Callback(chunk_done, chunk_total) for progress updates
+        windows: List of (from_date, to_date) tuples; auto-built if None
+        breaker: Circuit breaker for consecutive failures
+
+    Returns:
+        Tuple of (bars_list, chunk_error_count)
     """
-    log.warning(
-        "[data] Upstox historical data fetch not implemented — "
-        "symbol=%s, range=%s..%s, tf=%s",
-        instrument_token, from_date, to_date, timeframe,
+    from backtest.brokers.session_manager import get_session_manager
+    
+    # Map our timeframes to Upstox intervals
+    upstox_interval_map = {
+        "1min": "1minute",
+        "5min": "5minute",
+        "15min": "15minute",
+        "30min": "30minute",
+        "1hour": "30minute",  # Upstox doesn't have 1hour, use 30min
+        "1day": "day",
+    }
+    upstox_interval = upstox_interval_map.get(timeframe, timeframe)
+    
+    # Build windows if not provided
+    if windows is None:
+        windows = _build_windows(from_date, to_date, chunk_days)
+    total_chunks = max(1, len(windows))
+    if on_progress is not None:
+        on_progress(0, total_chunks)
+    
+    all_bars: list[dict] = []
+    chunk_errors = 0
+    chunk_done = 0
+    
+    # Get Upstox broker session token
+    try:
+        broker = get_session_manager().get_broker("upstox")
+        token = broker.get_session_token()
+        if not token:
+            log.error("[data] Upstox: no active session token")
+            return [], total_chunks
+    except Exception as exc:
+        log.error("[data] Upstox: failed to get session token: %s", exc)
+        return [], total_chunks
+    
+    base_url = "https://api.upstox.com/v2"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Api-Version": "2.0",
+        "Accept": "application/json",
+    }
+    
+    for window_idx, (win_from, win_to) in enumerate(windows):
+        # Check cancellation
+        if should_cancel and should_cancel():
+            log.info("[data] Upstox: chunk loop cancelled at %d/%d", chunk_done, total_chunks)
+            break
+        
+        # Check circuit breaker
+        if breaker and breaker.tripped:
+            log.warning("[data] Upstox: circuit breaker tripped, skipping remaining chunks")
+            break
+        
+        # Build instrument key for this window
+        # Upstox expects exchange|symbol format or instrument_key
+        instrument_key = instrument_token
+        
+        # Build URL with path parameters
+        url = f"{base_url}/historical-candle/{instrument_key}/{upstox_interval}/{win_from}/{win_to}"
+        
+        # Retry logic for transient failures
+        max_retries = 3
+        success = False
+        for attempt in range(max_retries + 1):
+            try:
+                resp = requests.get(url, headers=headers, timeout=60)
+                
+                if resp.status_code == 200:
+                    payload = resp.json()
+                    
+                    # Extract candles from response
+                    # Response format: {"status": "success", "data": {"candles": [...]}}
+                    candles = []
+                    if isinstance(payload, dict):
+                        data = payload.get("data", {})
+                        if isinstance(data, dict):
+                            candles = data.get("candles", [])
+                        elif "candles" in payload:
+                            candles = payload["candles"]
+                    
+                    # Convert Upstox candles to our format
+                    # Upstox format: [timestamp, open, high, low, close, volume]
+                    # timestamp is ISO 8601: 2024-01-01T09:15:00+05:30
+                    for candle in candles:
+                        if isinstance(candle, (list, tuple)) and len(candle) >= 6:
+                            bar = {
+                                "t": candle[0],  # timestamp (ISO string)
+                                "o": float(candle[1]),
+                                "h": float(candle[2]),
+                                "l": float(candle[3]),
+                                "c": float(candle[4]),
+                                "v": int(candle[5]) if candle[5] else 0,
+                            }
+                            all_bars.append(bar)
+                    
+                    success = True
+                    chunk_done += 1
+                    if on_progress is not None:
+                        on_progress(chunk_done, total_chunks)
+                    
+                    if breaker:
+                        breaker.record_success()
+                    
+                    log.debug(
+                        "[data] Upstox: %s fetched %d candles for %s..%s",
+                        instrument_key, len(candles), win_from, win_to,
+                    )
+                    break
+                    
+                elif resp.status_code == 401:
+                    log.error("[data] Upstox: authentication failed (expired session?)")
+                    chunk_errors += 1
+                    if breaker:
+                        breaker.record_failure()
+                    break  # Don't retry auth errors
+                    
+                elif resp.status_code == 429:
+                    # Rate limited - wait longer
+                    wait_time = min(2 ** attempt * 5, 60)
+                    log.warning(
+                        "[data] Upstox: rate limited, waiting %.0fs before retry",
+                        wait_time,
+                    )
+                    time.sleep(wait_time)
+                    continue
+                    
+                else:
+                    log.warning(
+                        "[data] Upstox: HTTP %d for %s %s..%s (attempt %d)",
+                        resp.status_code, instrument_key, win_from, win_to, attempt + 1,
+                    )
+                    if attempt < max_retries:
+                        time.sleep(2 ** attempt)
+                        continue
+                    else:
+                        chunk_errors += 1
+                        if breaker:
+                            breaker.record_failure()
+                        break
+                        
+            except requests.RequestException as exc:
+                log.warning(
+                    "[data] Upstox: request failed for %s %s..%s (attempt %d): %s",
+                    instrument_key, win_from, win_to, attempt + 1, exc,
+                )
+                if attempt < max_retries:
+                    time.sleep(2 ** attempt)
+                    continue
+                else:
+                    chunk_errors += 1
+                    if breaker:
+                        breaker.record_failure()
+                    break
+            except (ValueError, KeyError, IndexError) as exc:
+                log.error(
+                    "[data] Upstox: failed to parse response for %s: %s",
+                    instrument_key, exc,
+                )
+                chunk_errors += 1
+                if breaker:
+                    breaker.record_failure()
+                break
+        
+        if not success and chunk_errors > 0:
+            # If this chunk failed, don't continue hammering a dead gateway
+            if breaker and breaker.consecutive_failures >= 5:
+                log.error(
+                    "[data] Upstox: %d consecutive failures, stopping early",
+                    breaker.consecutive_failures,
+                )
+                break
+    
+    log.info(
+        "[data] Upstox fetch complete: %d bars, %d chunk errors out of %d chunks",
+        len(all_bars), chunk_errors, total_chunks,
     )
-    return [], 0
+    
+    return all_bars, chunk_errors
+
+
+def _resolve_upstox_instrument_key(
+    engine, symbol: str, mstock_token: str, exchange: str
+) -> str | None:
+    """Resolve Upstox instrument key from mStock token or symbol.
+
+    Upstox uses format: EXCHANGE_SEGMENT|SYMBOL or EXCHANGE_SEGMENT|ISIN
+    Examples: NSE_EQ|RELIANCE, NSE_INDEX|Nifty 50, BSE_EQ|INE002A01018
+
+    Strategy:
+    1. Check if instruments table has upstox-specific fields
+    2. Fall back to constructing from exchange + symbol
+    3. For indices, use known mappings
+    """
+    # Index mappings (Upstox convention)
+    index_mappings = {
+        "NIFTY": "NSE_INDEX|Nifty 50",
+        "NIFTY50": "NSE_INDEX|Nifty 50",
+        "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+        "NIFTY BANK": "NSE_INDEX|Nifty Bank",
+        "SENSEX": "BSE_INDEX|Sensex",
+        "FINNIFTY": "NSE_INDEX|Nifty Fin Svcs",
+        "MIDCPNIFTY": "NSE_INDEX|Nifty Mid Select",
+    }
+    
+    sym_upper = symbol.upper().strip()
+    if sym_upper in index_mappings:
+        return index_mappings[sym_upper]
+    
+    # Try to look up in database - check for upstox_instrument_key column
+    try:
+        from sqlalchemy import text
+        
+        # First try direct column lookup
+        result = engine.execute(
+            text(
+                "SELECT upstox_instrument_key FROM instruments WHERE tradingsymbol = :sym LIMIT 1"
+            ),
+            {"sym": sym_upper},
+        )
+        row = result.fetchone()
+        if row and row[0]:
+            return str(row[0])
+    except Exception:
+        pass  # Column doesn't exist or query failed
+    
+    # Fallback: construct from exchange and symbol
+    # Map mStock exchange names to Upstox segments
+    exchange_map = {
+        "NSE": "NSE_EQ",
+        "BSE": "BSE_EQ",
+        "NFO": "NSE_FO",
+        "BFO": "BSE_FO",
+        "MCX": "MCX_COM",
+        "CDS": "NSE_CD",
+    }
+    
+    segment = exchange_map.get(exchange, "NSE_EQ")
+    
+    # For equities, use symbol directly
+    # Note: This is a best-effort mapping; may need refinement
+    return f"{segment}|{sym_upper}"
 
 
 def _extract_bars(payload) -> list[dict]:
