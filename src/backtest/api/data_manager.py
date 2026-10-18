@@ -995,11 +995,6 @@ def _run_fetch_job_inner(
                     token=token,
                     mstock_tf=mstock_tf,
                 )
-                log.warning("[data] %s: Dhan broker selected but no live API configured — skipping", symbol)
-                bars, chunk_errors = [], 0
-            else:
-                log.error("[data] %s: unknown broker '%s' — skipping", symbol, broker)
-                bars, chunk_errors = [], 0
             if chunk_errors:
                 # Partial coverage: some chunks died even after retries. The
                 # symbol still counts as fetched, but the UI must not claim a
