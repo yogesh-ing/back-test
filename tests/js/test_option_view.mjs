@@ -311,6 +311,7 @@ test("exit reasons read as English", () => {
     assert.equal(OptionView.exitReasonLabel("stop_loss"), "Stop loss");
     assert.equal(OptionView.exitReasonLabel("expiry_settlement"), "Expiry settlement");
     assert.equal(OptionView.exitReasonLabel("signal_flip"), "View flipped");
+    assert.equal(OptionView.exitReasonLabel("risk_cap"), "Risk cap");
     assert.equal(OptionView.exitReasonLabel("auto_square_off"), "Squared off pre-expiry");
     assert.equal(OptionView.exitReasonLabel("who_knows"), "who knows");
     assert.equal(OptionView.exitReasonLabel(null), "—");

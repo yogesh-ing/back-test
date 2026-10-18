@@ -31,6 +31,7 @@ from decimal import Decimal
 import pytest
 
 from backtest.instruments.option import OptionContract
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.expiry import (
     ExpiryAlertType,
     ExpiryManager,
@@ -121,6 +122,7 @@ class TestFiveStrategySession:
             capital=5_000_000.0,
             slippage_pct=0.0,
             commission_per_lot=20.0,
+            allowed_structures=RESEARCH_STRUCTURES,
         )
 
     @pytest.fixture()
@@ -359,7 +361,8 @@ class TestFeesThroughPipeline:
 class TestExpiryThroughPipeline:
     def test_hold_through_expiry_settlement(self):
         broker = OptionPaperBroker(
-            capital=1_000_000.0, slippage_pct=0.0, commission_per_lot=0.0
+            capital=1_000_000.0, slippage_pct=0.0, commission_per_lot=0.0,
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         quotes = FakeQuoteProvider(default_price=100.0)
 
@@ -453,7 +456,7 @@ class TestExpiryThroughPipeline:
         assert ExpiryAlertType.SETTLED in types
 
     def test_process_expiries_report_shape(self):
-        broker = OptionPaperBroker(capital=100_000.0)
+        broker = OptionPaperBroker(capital=100_000.0, allowed_structures=RESEARCH_STRUCTURES)
         manager = ExpiryManager(broker)
         report = manager.process_expiries(
             quote_provider=FakeQuoteProvider(),

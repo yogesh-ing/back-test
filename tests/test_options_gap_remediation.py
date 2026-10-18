@@ -21,6 +21,7 @@ import pandas as pd
 import pytest
 
 from backtest.instruments.base import OptionType
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.paper_trading import (
     FakeQuoteProvider,
     OptionPaperBroker,
@@ -204,6 +205,7 @@ class TestCashBearingFees:
         broker = OptionPaperBroker(
             capital=100_000.0, slippage_pct=0.0, commission_per_lot=0.0,
             fee_calculator=CommissionCalculator.for_broker("mstock"),
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         quotes = FakeQuoteProvider(default_price=120.50)
         broker.execute_structure(self._intent([("L1", "BUY")]), quotes)
@@ -220,6 +222,7 @@ class TestCashBearingFees:
         broker = OptionPaperBroker(
             capital=100_000.0, slippage_pct=0.0, commission_per_lot=0.0,
             fee_calculator=CommissionCalculator.for_broker("mstock"),
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         quotes = FakeQuoteProvider(default_price=120.50)
         positions = broker.execute_structure(self._intent([("L1", "BUY")]), quotes)
@@ -233,7 +236,7 @@ class TestCashBearingFees:
         assert broker.available_cash < cash_before_close + D_("9750.00")
 
     def test_no_calculator_stays_free(self):
-        broker = OptionPaperBroker(capital=100_000.0, slippage_pct=0.0, commission_per_lot=0.0)
+        broker = OptionPaperBroker(capital=100_000.0, slippage_pct=0.0, commission_per_lot=0.0, allowed_structures=RESEARCH_STRUCTURES)
         quotes = FakeQuoteProvider(default_price=120.50)
         broker.execute_structure(self._intent([("L1", "BUY")]), quotes)
         assert broker.total_statutory_fees_paid == D_("0")
@@ -246,6 +249,7 @@ class TestCashBearingFees:
         broker = OptionPaperBroker(
             capital=9_050.0, slippage_pct=0.0, commission_per_lot=0.0,
             fee_calculator=CommissionCalculator.for_broker("mstock"),
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         quotes = FakeQuoteProvider(default_price=120.50)
         # Premium 9037.50 alone fits in 9050, but + 27.63 fees does not.
@@ -413,15 +417,18 @@ class TestTradeDriverApi:
         assert pos["side"] == "BUY" and pos["strike"] == "24800"
         assert float(pos["entry_price"]) > 100  # BS-priced, not ₹100 fake
 
-    def test_open_spread_two_legs(self, client):
+    def test_spread_is_refused_at_the_api(self, client):
+        """The dashboard is an "any source" path, so V1 buys one option there:
+        a multi-leg spread is refused before any quote or order."""
         resp = client.post(
             "/api/options/trade",
             json={"underlying": "NIFTY", "structure_type": "bull_call_spread", "quantity": 1},
         )
-        assert resp.status_code == 201
-        out = resp.get_json()
-        assert len(out["positions"]) == 2
-        assert {p["side"] for p in out["positions"]} == {"BUY", "SELL"}
+        assert resp.status_code == 400
+        body = resp.get_json()
+        assert "STRUCTURE_NOT_IN_V1" in body["error"]
+        assert "bull_call_spread" in body["error"]
+        assert get_option_broker().get_open_structures() == [], "refusal leaves no book"
 
     def test_open_put_side_uses_pe_chain(self, client):
         resp = client.post(

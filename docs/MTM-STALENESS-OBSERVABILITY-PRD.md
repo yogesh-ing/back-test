@@ -1,6 +1,7 @@
 # MTM Staleness Observability — Design Draft
 
-- **Status:** BUILT — implemented in code (verified 2026-10-06): R1/R3/R4 in `src/backtest/forward/options_bridge.py` + `src/backtest/options/paper_trading.py` (`mark_stale`, `quote_error`, `STALE_AFTER_BARS`, throttled logging, stale-mark alerts); R2/R7 UI badge + Refresh marks in `web/static/js/`; R6 watchdog endpoint `POST /api/portfolio/runner/<id>/refresh-marks` in `src/backtest/api/portfolio.py`
+- **Status:** BUILT — implemented in code (verified 2026-10-06): R1/R3/R4 in `src/backtest/forward/options_bridge.py` + `src/backtest/options/paper_trading.py` (`mark_stale`, `quote_error`, throttled logging, stale-mark alerts); R2/R7 UI badge + Refresh marks in `web/static/js/`; R6 watchdog endpoint `POST /api/portfolio/runner/<id>/refresh-marks` in `src/backtest/api/portfolio.py`
+- **Revised 2026-10-07:** the staleness *metric* moved from failed-bar count to **market-session seconds** since the last successful mark (`STALE_AFTER_BARS` → `STALE_AFTER_SECONDS`, grace 180 s; each runner's threshold is its bar cadence + that grace, overridable by `stale_after_seconds` in the expression), evaluated only while the session is trading — a book carried overnight has not aged. The session check is pure clock arithmetic (weekdays, 09:15–15:30 IST): the holiday calendar is a database read and sits on every mark, so it is deliberately not consulted — a market holiday reads as a normal session and ages marks. See `docs/OPTION-STRATEGY-BUILDER-ARCHITECT-PRD.md` §1.1 row 5. Everything else in this document (fields, watchdog, badge, alerts) is unchanged; `mtm_failures`/`last_quote_error` stay as logging and exit-suppression signals.
 - **Date:** 2026-10-01
 - **Severity:** High (silent wrong data on the Open Positions tab; risk exits operate on frozen marks)
 - **Related:** `docs/DATA-FEED-IMPROVEMENTS.md`, `docs/MULTI-BROKER-PRD.md` §8.4 (deployed-view honesty), fail-closed marking guard (2026-09-23)
@@ -65,7 +66,7 @@ Per leg and per structure, add to the existing detail/aggregate rows:
 | Field | Type | Meaning |
 |---|---|---|
 | `mark_ts` | ISO-8601 UTC | wall-clock time of the last SUCCESSFUL quote mark (`OptionPosition.last_updated` already exists, `paper_trading.py:163` — currently never exposed) |
-| `mark_stale` | bool | runner is RUNNING **and** MTM was attempted ≥ `STALE_AFTER_BARS` (default 2) times since `mark_ts` — bar-count based, not wall-clock, so it degrades correctly with feed gaps |
+| `mark_stale` | bool | runner is RUNNING **and** the market session is open **and** the last successful mark is older than `stale_after_seconds` — elapsed time, not bar count (2026-10-07) |
 | `quote_error` | str \| None | last failure reason (`"empty quote row"`, `"Invalid symbol"`, exception text), for tooltips/logs |
 
 Implementation sketch:
@@ -223,8 +224,12 @@ Guardrails (agreed 2026-10-01):
    manual stop/target checks and strategy exits log loudly and the audit trail records
    the blind spot. Stronger option: freeze *new* entries (not exits) on a runner whose
    book is stale. Which side of the honesty/safety line do we want?
-2. `STALE_AFTER_BARS` default: 2 (today's proposal) or 3 (tolerates one transient
-   rate-limit blip without alarming)?
+2. ~~`STALE_AFTER_BARS` default: 2 or 3?~~ **Superseded 2026-10-07:** the counter is no
+   longer the staleness clock. `STALE_AFTER_SECONDS` starts at a 180 s grace (sized to
+   clear the 60 s R6 watchdog pass) and each runner's threshold is that grace plus its
+   bar cadence in market minutes, overridable by `stale_after_seconds` in the
+   expression; per-underlying values come from the §8.1 latency calibration in the
+   options PRD.
 3. Alert integration (R4): wire into `backtest/alerts/` now, or wait until the badge has
    earned trust in paper for a week?
 4. Should `mark_stale` gate the equity-curve `record=True` MTM points (today the curve

@@ -30,6 +30,7 @@ See ``docs/OPTIONS-FORWARD-TESTING.md`` → task D1.
 
 from __future__ import annotations
 
+
 import random
 from datetime import datetime, timedelta, timezone
 
@@ -46,6 +47,7 @@ from backtest.forward.portfolio_manager import PortfolioManager
 from backtest.forward.paper_runner import RunnerConfig
 from backtest.forward.risk_supervisor import GlobalRiskConfig
 from backtest.options.quote_providers import SyntheticChainGenerator
+from options_support import research_profile
 
 INDEX_SYMBOLS = ["NIFTY", "BANKNIFTY", "nifty", "banknifty"]
 EQUITY_SYMBOLS = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "SBIN", "BTC/USD", "ETH/USD"]
@@ -287,6 +289,7 @@ def test_default_param_option_runner_opens_structures_on_index_scale(manager):
         )
     )
     runner = manager.get_runner(instance_id)
+    research_profile(runner)  # bull call spread: the V1 gate would refuse it
     assert runner is not None
 
     manager.feed.warmup()

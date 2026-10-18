@@ -32,6 +32,7 @@ import pytest
 
 from backtest.forward.options_bridge import OptionsBridge
 from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRunner
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.exit_policy import EXIT_DTE
 from backtest.options.expiry import EXIT_REASON_SETTLEMENT
 from backtest.options.paper_trading import PositionStatus
@@ -40,6 +41,7 @@ from backtest.options.quote_providers import (
     SyntheticQuoteProvider,
 )
 from backtest.strategy.intent import Direction, MarketView
+from options_support import research_profile
 
 
 # ---------------------------------------------------------------------------
@@ -62,12 +64,17 @@ def _bars(closes, start_day=1):
     ]
 
 
-def _view(direction: Direction, spot: float = 24_800.0) -> MarketView:
+def _view(
+    direction: Direction,
+    spot: float = 24_800.0,
+    bar_timestamp: str | None = None,
+) -> MarketView:
     return MarketView(
         direction=direction,
         confidence=0.9,
         underlying="NIFTY",
         spot_price=Decimal(str(spot)),
+        bar_timestamp=bar_timestamp,
     )
 
 
@@ -80,13 +87,18 @@ def _ride_to_settlement_bridge(capital: float = 1_000_000.0) -> OptionsBridge:
             "exit": {"min_days_to_expiry": None, "signal_flip": False},
         },
         quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+        allowed_structures=RESEARCH_STRUCTURES,
     )
 
 
 def _open_at_bar(bridge: OptionsBridge, day: date, spot: float = 24_800.0):
     """Open a structure on a given bar date and return it."""
-    bridge.on_bar("NIFTY", spot, f"{day.isoformat()}T09:15:00")
-    result = bridge.on_market_view(_view(Direction.BULLISH, spot), "s")
+    bar_timestamp = f"{day.isoformat()}T09:15:00"
+    bridge.on_bar("NIFTY", spot, bar_timestamp)
+    result = bridge.on_market_view(
+        _view(Direction.BULLISH, spot, bar_timestamp),
+        "s",
+    )
     assert result is not None and not result.get("rejected")
     return bridge.option_broker.get_open_structures()[0]
 
@@ -107,6 +119,7 @@ def _runner(**expression_exit):
         ledger=OrderLedger(),
     )
     runner.start()
+    research_profile(runner)
     return runner
 
 
@@ -160,17 +173,20 @@ class TestExpirySettlement:
         units = structure.legs[0].total_quantity
         expiry = structure.expiry
 
-        # Settle 300 points above a 24,800 ATM strike.
-        bridge.on_bar("NIFTY", 25_100.0, f"{expiry.isoformat()}T09:15:00")
+        # Settle far enough above a 24,800 ATM strike to overcome the
+        # deterministic 22-day historical Black-Scholes entry premium. This
+        # used to depend on wall-clock pricing after the static expiry passed.
+        intrinsic = Decimal("500")
+        bridge.on_bar("NIFTY", 25_300.0, f"{expiry.isoformat()}T09:15:00")
         settled = bridge.option_broker.get_closed_structures()[0]
         pnl = settled.total_realized_pnl
 
         assert pnl > 0
         # ≤ the spread's max payoff (intrinsic × units); and strictly less than
         # gross intrinsic because the premium is netted out.
-        assert pnl < Decimal("300") * Decimal(str(units))
+        assert pnl < intrinsic * Decimal(str(units))
         assert pnl == pytest.approx(
-            (Decimal("300") - entry_premium / Decimal(str(units)))
+            (intrinsic - entry_premium / Decimal(str(units)))
             * Decimal(str(units)),
             rel=1e-3,
         )
@@ -220,6 +236,7 @@ class TestExpirySettlement:
             capital=1_000_000.0,
             expression={"type": "long_call", "exit": {"signal_flip": False}},
             quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         structure = _open_at_bar(bridge, date(2026, 9, 2))
         expiry = structure.expiry
@@ -266,6 +283,7 @@ class TestRoll:
                 "exit": {"min_days_to_expiry": None, "signal_flip": False},
             },
             quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         first = _open_at_bar(bridge, date(2026, 9, 2))
         first_id, first_expiry = first.structure_id, first.expiry

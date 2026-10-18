@@ -16,9 +16,37 @@
         return state === 'amber' || state === 'red';
     }
 
-    chip.addEventListener('click', () => {
+    chip.addEventListener('click', async () => {
         if (actionable(chip.dataset.state)) {
-            window.location.href = '/data';
+            // Fetch freshness data to get pre-filled dates
+            try {
+                const resp = await fetch('/api/data/freshness');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    // Find the worst timeframe (most missing sessions)
+                    let bestFrom = null;
+                    let bestTo = null;
+                    for (const [tf, info] of Object.entries(data.per_timeframe || {})) {
+                        if (info.from_date && info.to_date) {
+                            // Use the earliest from_date across timeframes
+                            if (!bestFrom || info.from_date < bestFrom) {
+                                bestFrom = info.from_date;
+                                bestTo = info.to_date;
+                            }
+                        }
+                    }
+                    // Redirect with date params if available
+                    if (bestFrom && bestTo) {
+                        window.location.href = `/data?from=${bestFrom}&to=${bestTo}`;
+                    } else {
+                        window.location.href = '/data';
+                    }
+                } else {
+                    window.location.href = '/data';
+                }
+            } catch (err) {
+                window.location.href = '/data';
+            }
         }
     });
 

@@ -57,17 +57,24 @@
       hard delete of the deprecated UI shell.
 ```
 
-### Exit precedence (per bar, tactical tier inside engine emergency wrapper)
+### Exit precedence (options path, as shipped — `options/exit_policy.py`)
 
 | Priority | Exit | Owner | Notes |
 |---|---|---|---|
-| 0 | Emergency flatten / breakers | **Engine** | Unconditional. Overrides everything. |
-| 1 | `stop_loss_pct` | Playbook | Risk control beats strategy signal. |
-| 2 | `take_profit_pct` | Playbook | Profit-taking is also protective. |
-| 3 | Time/DTE square-off | Playbook-configured, engine-executed | `min_days_to_expiry` default 1. |
-| 4 | `signal_flip` | Strategy | Last. Only if 1–3 didn't fire. |
+| 0 | Emergency flatten / breakers | **Engine / runner** | Unconditional. Overrides everything. `flatten_all` closing option structures is the open half (options PRD row 11). |
+| 1 | `max_loss_inr` risk cap | Playbook-configured, engine-enforced | Per-trade ₹ ceiling on structure P&L; opt-in, and read before the strategy's own levels. |
+| 2 | Time/DTE square-off | Playbook-configured, engine-executed | `min_days_to_expiry` default 1. Scheduled, so it fires even on a stale mark. |
+| 3 | `stop_loss_pct` / `stop_loss_points` | Playbook | Risk control beats strategy signal. |
+| 4 | `take_profit_pct` / `take_profit_points` | Playbook | Profit-taking is also protective. |
+| 5 | `max_bars` time stop | Playbook | |
+| 6 | `signal_flip` / `neutral_bars` | Strategy | Last. Only if 1–5 didn't fire. |
 
-**Re-entry:** when `reenter=true`, re-entry happens on the **next bar only** — never same-bar. Default **false**. (Evidence: same-bar re-enter churned −₹41,844 in the 2026-09-16 forward experiment.) V1.1 option: `max_reentries_per_day` (default 2).
+1, 3 and 4 read their trigger off the structure's mark (`PRICE_MEASURED_REASONS`)
+and are suppressed while it is stale or failed; 2, 5 and 6 never consult it.
+`forward/execution_engine.py` keeps an older, differently-tiered `EXIT_PRECEDENCE`
+table and is production-dead (only its own unit tests import it).
+
+**Re-entry:** when `reenter=true`, re-entry happens on the **next bar only** — never same-bar. Default **false**. (Evidence: same-bar re-enter churned −₹41,844 in the 2026-09-16 forward experiment.) `max_reentries_per_day` (default 2) budgets the reversals inside one day.
 
 ---
 

@@ -11,9 +11,19 @@ returns the reason to close (or ``None`` to keep holding). The bridge owns
 the bookkeeping (bar clock, neutral counter, closing the structure), so the
 rules stay unit-testable without a broker.
 
-Rule order (first match wins — risk before opinion)::
+Rule order (first match wins — the exit precedence in
+`docs/OPTION-STRATEGY-BUILDER-ARCHITECT-PRD.md` §2 "Risk & exits", protective
+before opinion)::
 
-    stop loss → take profit → days-to-expiry → time stop → signal flip → signal neutral
+    risk cap → days-to-expiry square-off → stop loss → take profit
+    → time stop → signal flip → signal neutral
+
+The tier above all of these, an emergency flatten from a breaker or an
+operator, bypasses this policy — the runner owns it.
+
+The cap is the platform's authority and the square-off is a scheduled close, so
+neither may be pre-empted by the strategy's own, softer stop/target.
+See :data:`PRICE_MEASURED_REASONS` for the tiers a bad mark must not drive.
 
 Configuration lives in the runner's expression block::
 
@@ -24,6 +34,7 @@ Configuration lives in the runner's expression block::
             "exit": {
                 "signal_flip": true,          # close when the view turns
                 "neutral_bars": 3,            # close after N bars with no view
+                "max_loss_inr": 5000,         # per-trade risk cap (₹ of P&L)
                 "stop_loss_pct": 0.5,         # 50% of the net premium
                 "take_profit_pct": 1.0,       # +100% of the net premium
                 "stop_loss_points": 2000.0,   # ...or absolute ₹ of structure P&L
@@ -31,6 +42,7 @@ Configuration lives in the runner's expression block::
                 "max_bars": 10,               # time stop, in bars
                 "min_days_to_expiry": 1,      # square off the day before expiry
                 "reenter": false,             # flip = close only, or close + reverse
+                "max_reentries_per_day": 2,   # only when reenter is true
             },
         },
     }
@@ -65,6 +77,8 @@ EXIT_SIGNAL_NEUTRAL = "signal_neutral"
 EXIT_STOP_LOSS = "stop_loss"
 #: Structure mark hit the target.
 EXIT_TAKE_PROFIT = "take_profit"
+#: The trade's P&L breached the per-trade risk cap (`max_loss_inr`).
+EXIT_RISK_CAP = "risk_cap"
 #: Held for ``max_bars`` bars.
 EXIT_TIME_STOP = "time_stop"
 #: The structure mark hit a stop the OPERATOR set from the dashboard
@@ -82,6 +96,7 @@ EXIT_DTE = "auto_square_off"
 #: levels are mechanical too: they must fire on a viewless bar.
 RISK_REASONS = frozenset(
     {
+        EXIT_RISK_CAP,
         EXIT_STOP_LOSS,
         EXIT_TAKE_PROFIT,
         EXIT_TIME_STOP,
@@ -91,12 +106,21 @@ RISK_REASONS = frozenset(
     }
 )
 
+#: The reasons whose trigger is read off the structure's mark. A stale or
+#: failed mark can only produce a wrong answer here, so the bridge suppresses
+#: exactly this set while it cannot trust the price — the calendar and
+#: time-based tiers keep firing.
+PRICE_MEASURED_REASONS = frozenset(
+    {EXIT_RISK_CAP, EXIT_STOP_LOSS, EXIT_TAKE_PROFIT}
+)
+
 #: Every reason a policy can emit (plus the two operator-set levels the
 #: bridge emits directly).
 EXIT_REASONS = frozenset(
     {
         EXIT_SIGNAL_FLIP,
         EXIT_SIGNAL_NEUTRAL,
+        EXIT_RISK_CAP,
         EXIT_STOP_LOSS,
         EXIT_TAKE_PROFIT,
         EXIT_TIME_STOP,
@@ -110,6 +134,7 @@ _KNOWN_KEYS = frozenset(
     {
         "signal_flip",
         "neutral_bars",
+        "max_loss_inr",
         "stop_loss_pct",
         "take_profit_pct",
         "stop_loss_points",
@@ -117,6 +142,7 @@ _KNOWN_KEYS = frozenset(
         "max_bars",
         "min_days_to_expiry",
         "reenter",
+        "max_reentries_per_day",
     }
 )
 
@@ -174,8 +200,8 @@ class ExitConfig:
 
     Defaults are deliberately conservative: close on a view flip (the strategy
     changed its mind) and square off one day before expiry (don't ride into
-    settlement). Stops/targets are opt-in — a wrong default there would
-    silently cap every trade.
+    settlement). Stops, targets and the risk cap are opt-in — a wrong default
+    there would silently cap every trade.
     """
 
     #: Close when the view flips against the structure's direction.
@@ -189,12 +215,19 @@ class ExitConfig:
     #: Stop / target in absolute structure P&L (₹).
     stop_loss_points: Optional[float] = None
     take_profit_points: Optional[float] = None
+    #: Per-trade risk cap in ₹ of structure P&L. The platform's hard ceiling:
+    #: it is checked before the calendar tier and before any strategy stop, so
+    #: a mis-set stop can never widen the worst loss above this.
+    max_loss_inr: Optional[float] = None
     #: Time stop — maximum bars in the trade.
     max_bars: Optional[int] = None
     #: Square off this many days before expiry (``None`` rides to settlement).
     min_days_to_expiry: Optional[int] = 1
     #: After a flip-triggered close, immediately open the opposite structure.
     reenter: bool = False
+    #: Flip re-entries allowed per day. Only meaningful with ``reenter`` —
+    #: same-bar re-entry is impossible regardless (churn finding, U2.2).
+    max_reentries_per_day: int = 2
 
     @classmethod
     def from_expression(cls, expression: Any) -> "ExitConfig":
@@ -222,6 +255,7 @@ class ExitConfig:
         return cls(
             signal_flip=_as_bool(expression.get("signal_flip"), defaults.signal_flip),
             neutral_bars=_count(expression.get("neutral_bars"), "neutral_bars", 0) or 0,
+            max_loss_inr=_positive(expression.get("max_loss_inr"), "max_loss_inr"),
             stop_loss_pct=_positive(expression.get("stop_loss_pct"), "stop_loss_pct"),
             take_profit_pct=_positive(expression.get("take_profit_pct"), "take_profit_pct"),
             stop_loss_points=_positive(
@@ -241,6 +275,18 @@ class ExitConfig:
                 else _count(expression.get("min_days_to_expiry"), "min_days_to_expiry", 0)
             ),
             reenter=_as_bool(expression.get("reenter"), defaults.reenter),
+            # ``0`` is a real setting (never re-enter), so an omitted key keeps
+            # the default while an explicit 0 must not read as "disabled".
+            max_reentries_per_day=(
+                defaults.max_reentries_per_day
+                if "max_reentries_per_day" not in expression
+                else _count(
+                    expression.get("max_reentries_per_day"),
+                    "max_reentries_per_day",
+                    0,
+                )
+                or 0
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -248,6 +294,7 @@ class ExitConfig:
         return {
             "signal_flip": self.signal_flip,
             "neutral_bars": self.neutral_bars,
+            "max_loss_inr": self.max_loss_inr,
             "stop_loss_pct": self.stop_loss_pct,
             "take_profit_pct": self.take_profit_pct,
             "stop_loss_points": self.stop_loss_points,
@@ -255,6 +302,7 @@ class ExitConfig:
             "max_bars": self.max_bars,
             "min_days_to_expiry": self.min_days_to_expiry,
             "reenter": self.reenter,
+            "max_reentries_per_day": self.max_reentries_per_day,
         }
 
 
@@ -342,6 +390,22 @@ class ExitPolicy:
     ) -> Optional[ExitDecision]:
         cfg = self.config
 
+        # -- the platform's hard ceiling first, whatever the strategy set ------
+        if cfg.max_loss_inr is not None and pnl <= -Decimal(str(cfg.max_loss_inr)):
+            return ExitDecision(
+                EXIT_RISK_CAP, f"loss {pnl:,.0f} ≤ cap -{cfg.max_loss_inr:,.0f}"
+            )
+
+        # -- then the scheduled square-off: it does not depend on the mark ----
+        if (
+            cfg.min_days_to_expiry is not None
+            and bar_date is not None
+            and expiry is not None
+            and (expiry - bar_date).days <= cfg.min_days_to_expiry
+        ):
+            days = (expiry - bar_date).days
+            return ExitDecision(EXIT_DTE, f"{days}d to expiry ≤ {cfg.min_days_to_expiry}d")
+
         if cfg.stop_loss_points is not None and pnl <= -Decimal(str(cfg.stop_loss_points)):
             return ExitDecision(
                 EXIT_STOP_LOSS, f"stop {pnl:,.0f} ≤ -{cfg.stop_loss_points:,.0f}"
@@ -368,17 +432,6 @@ class ExitPolicy:
             return ExitDecision(
                 EXIT_TAKE_PROFIT,
                 f"target {pnl:,.0f} ≥ {cfg.take_profit_pct:.0%} of premium {premium:,.0f}",
-            )
-
-        if (
-            cfg.min_days_to_expiry is not None
-            and bar_date is not None
-            and expiry is not None
-            and (expiry - bar_date).days <= cfg.min_days_to_expiry
-        ):
-            days = (expiry - bar_date).days
-            return ExitDecision(
-                EXIT_DTE, f"{days}d to expiry ≤ {cfg.min_days_to_expiry}d"
             )
 
         if cfg.max_bars is not None and bars_held >= cfg.max_bars:

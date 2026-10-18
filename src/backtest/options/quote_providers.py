@@ -537,23 +537,46 @@ class CachedQuoteProvider:
 
 
 # ---------------------------------------------------------------------------
-# BidAskQuoteProvider (Gap-PRD P4 — buy at ask, sell at bid, opt-in)
+# BidAskQuoteProvider (PRD §4.1 — buy at ask, sell at bid, mark at the other side)
 # ---------------------------------------------------------------------------
 
 
+class NoExecutableQuoteError(ValueError):
+    """No crossable price for one leg.
+
+    Carries the PRD's stable reason code so a soak can count the class, and
+    subclasses ``ValueError`` because the execution seam treats it as a client
+    rejection (400 at the API, ``{"rejected": True}`` at the bridge) rather
+    than a server fault.
+    """
+
+    reason = "NO_EXECUTION_QUOTE"
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"{self.reason}: {detail}")
+
+
 class BidAskQuoteProvider:
-    """Execution realism wrapper: market orders cross the spread (P4).
+    """Execution realism wrapper: market orders cross the spread (PRD §4.1).
 
-    Wraps any protocol provider. ``get_quote`` passes through UNCHANGED —
-    MTM, Greeks and dashboards keep marking off LTP. The realism is in
-    :meth:`execution_quote`, which the paper broker calls when (and only
-    when) its provider offers it: the returned quote's ``ltp`` is the ASK
-    for a BUY and the BID for a SELL, the price a market order actually
-    pays. Books without this wrapper fill at LTP exactly as before.
+    Wraps any protocol provider. ``get_quote`` passes through UNCHANGED — the
+    dashboard, Greeks and chain snapshots keep showing LTP, which is what an
+    operator reads as "where the market is". The realism lives in two
+    side-aware methods the paper broker calls:
 
-    Fail-open on payload variance: live venues sometimes omit or zero the
-    bid/ask — the quote then falls back to LTP rather than pricing a leg
-    at ₹0 (same fail-closed spirit as the ltp=0 phantom-price guard).
+    * :meth:`execution_quote` — the price an order actually pays: the ASK for a
+      BUY, the BID for a SELL.
+    * :meth:`mark_quote` — the conservative mark for a held leg: what closing
+      it *now* would fetch (bid if long, ask if short), never LTP.
+
+    **Fail-closed** (§4.1): when the side the order needs is missing or zero —
+    venues do sometimes return a one-sided book, and a dead session returns a
+    row of zeros — there is no fill and no mark. The method raises
+    :class:`NoExecutableQuoteError` (or, for marks, flags the quote as failed)
+    instead of substituting LTP, because pricing a leg off a number nobody was
+    willing to trade at is exactly the phantom fill this wrapper exists to
+    remove. A structure that cannot be priced stays unopened; a held structure
+    keeps its last honest mark and the staleness halt deals with it.
 
     Note ``OptionPaperBroker.slippage_pct`` still applies ON TOP: the
     spread is where the market stands, slippage models your own impact.
@@ -569,13 +592,47 @@ class BidAskQuoteProvider:
         return self.inner.get_quote(instrument_token)
 
     def execution_quote(self, instrument_token: str, side: str) -> dict[str, Any]:
-        """Side-aware quote: ``ltp`` becomes ask (BUY) / bid (SELL)."""
-        quote = dict(self.inner.get_quote(instrument_token))
-        key = "ask" if str(side).upper() == "BUY" else "bid"
+        """Side-aware fill quote: ``ltp`` becomes ask (BUY) / bid (SELL)."""
+        normalized = str(side).upper()
+        quote = dict(self.inner.get_quote(instrument_token) or {})
+        key = "ask" if normalized == "BUY" else "bid"
+        return self._side_price(quote, key, normalized, instrument_token)
+
+    def mark_quote(self, instrument_token: str, position_side: str) -> dict[str, Any]:
+        """Conservative mark for a held leg: bid if long, ask if short.
+
+        A long position is worth what a buyer would pay for it — the bid. The
+        returned dict keeps ``ltp`` as the mark so every existing consumer
+        (unrealized P&L, exit rules, dashboards reading the book) reads the
+        conservative number without knowing about this wrapper.
+        """
+        quote = dict(self.inner.get_quote(instrument_token) or {})
+        held = str(position_side).upper()
+        key = "bid" if held == "BUY" else "ask"
         price = float(quote.get(key) or 0.0)
-        if price > 0:
-            quote["ltp"] = price
-            quote["execution_side"] = str(side).upper()
+        if price <= 0 or bool(quote.get("error")):
+            # Do NOT invent a mark: label the row failed so the broker's
+            # fail-closed MTM keeps the last known price and counts the
+            # failure (the same path a dead broker session takes).
+            quote["error"] = quote.get("error") or (
+                f"no {key} quote to mark {instrument_token} (held {held})"
+            )
+            return quote
+        quote["ltp"] = price
+        quote["mark_basis"] = key
+        return quote
+
+    def _side_price(
+        self, quote: dict[str, Any], key: str, side: str, instrument_token: str
+    ) -> dict[str, Any]:
+        price = float(quote.get(key) or 0.0)
+        if price <= 0 or bool(quote.get("error")):
+            raise NoExecutableQuoteError(
+                f"{instrument_token}: no {key} to {side} against "
+                f"(quote={quote.get('error') or 'one-sided or zero ' + key})"
+            )
+        quote["ltp"] = price
+        quote["execution_side"] = side
         return quote
 
     def register_contract(self, contract: Any) -> None:

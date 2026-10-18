@@ -7,10 +7,11 @@ Covers:
 - T4.5: Order status polling
 - T4.6: Fill reconciliation
 - T4.7: Handle partial fills, rejections
-- T4.8: Retry logic with exponential backoff
+- T4.8: No blind retry — one placement per decision, reconcile instead
 - T4.9: Dry-run mode
 - T4.11: Error logging
 - T4.12: Integration test (dry-run)
+- Intent journal wiring: idempotency keys, decided/submitted/filled/halted events
 """
 
 from __future__ import annotations
@@ -22,7 +23,23 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import pytest
 
 from backtest.brokers.base import BrokerOrder, BrokerOrderId
-from backtest.brokers.mstock import MStockBroker, MStockOrderError
+from backtest.brokers.mstock import (
+    MStockBroker,
+    MStockOrderError,
+    OrderOutcomeUnknown,
+)
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
+from backtest.options.intent_journal import (
+    KIND_DECIDED,
+    KIND_FILLED,
+    KIND_HALTED,
+    KIND_RECONCILED,
+    KIND_REJECTED,
+    KIND_SUBMITTED,
+    KIND_UNCERTAIN,
+    MemoryJournal,
+    intent_key,
+)
 from backtest.strategy.intent import (
     Direction,
     MarketView,
@@ -33,7 +50,6 @@ from backtest.options.live_trading import (
     LegResult,
     LegStatus,
     LiveOptionTrader,
-    RetryConfig,
     StructureExecStatus,
     StructureResult,
 )
@@ -49,6 +65,7 @@ def _make_view() -> MarketView:
         confidence=0.8,
         underlying="NIFTY",
         spot_price=Decimal("24800"),
+        bar_timestamp=datetime(2026, 10, 5, 4, 30),
     )
 
 
@@ -103,49 +120,45 @@ def _make_mock_broker() -> MStockBroker:
     return broker
 
 
-def _make_filled_order(order_id: str = "ORD123") -> MagicMock:
-    """Create a mock filled order."""
-    order = MagicMock()
-    order.broker_order_id = order_id
-    order.status = "EXECUTED"
-    order.average_fill_price = 100.0
-    order.filled_qty = 25
-    return order
+def _research_trader(broker, **kwargs) -> LiveOptionTrader:
+    """Trader widened to the research profile — the multi-leg mechanics tests
+    submit spreads, which the V1 execution gate refuses by design."""
+    kwargs.setdefault("allowed_structures", RESEARCH_STRUCTURES)
+    return LiveOptionTrader(broker=broker, **kwargs)
 
 
-def _make_pending_order(order_id: str = "ORD123") -> MagicMock:
-    """Create a mock pending order."""
-    order = MagicMock()
-    order.broker_order_id = order_id
-    order.status = "OPEN"
-    order.average_fill_price = None
-    order.filled_qty = 0
-    return order
+def _make_filled_order(order_id: str = "ORD123") -> BrokerOrder:
+    """A real ``BrokerOrder`` as the order book would report it, executed."""
+    return BrokerOrder(
+        broker_order_id=BrokerOrderId(order_id),
+        symbol="NIFTY26SEP24800CE",
+        side="BUY",
+        quantity=25,
+        status="EXECUTED",
+        filled_quantity=25,
+        average_fill_price=100.0,
+    )
 
 
-# ---------------------------------------------------------------------------
-# RetryConfig tests
-# ---------------------------------------------------------------------------
+def _make_pending_order(order_id: str = "ORD123") -> BrokerOrder:
+    """An accepted order the broker has not filled yet."""
+    return BrokerOrder(
+        broker_order_id=BrokerOrderId(order_id),
+        symbol="NIFTY26SEP24800CE",
+        side="BUY",
+        quantity=25,
+        status="OPEN",
+        filled_quantity=0,
+        average_fill_price=None,
+    )
 
-class TestRetryConfig:
-    def test_default_config(self):
-        config = RetryConfig()
-        assert config.max_retries == 3
-        assert config.base_delay_seconds == 1.0
 
-    def test_delay_backoff(self):
-        config = RetryConfig(base_delay_seconds=1.0, backoff_factor=2.0)
-        assert config.delay_for_attempt(0) == 1.0
-        assert config.delay_for_attempt(1) == 2.0
-        assert config.delay_for_attempt(2) == 4.0
-
-    def test_delay_max_cap(self):
-        config = RetryConfig(
-            base_delay_seconds=1.0,
-            backoff_factor=10.0,
-            max_delay_seconds=5.0,
-        )
-        assert config.delay_for_attempt(5) == 5.0  # capped
+def _live_trader(broker, **kwargs) -> LiveOptionTrader:
+    """Trader armed for live against a mock broker (env gate already set)."""
+    kwargs.setdefault("dry_run", False)
+    kwargs.setdefault("confirm_live", True)
+    kwargs.setdefault("poll_timeout_seconds", 1.0)
+    return LiveOptionTrader(broker=broker, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -216,8 +229,7 @@ class TestDryRun:
         broker.place_order.assert_not_called()
 
     def test_dry_run_records_leg_results(self):
-        broker = _make_mock_broker()
-        trader = LiveOptionTrader(broker=broker, dry_run=True)
+        trader = _research_trader(_make_mock_broker(), dry_run=True)
 
         intent = _make_bull_call_spread_intent()
         result = trader.execute_structure(intent)
@@ -344,7 +356,9 @@ class TestLiveExecutionSuccess:
             [_make_filled_order("ORD002")],
         ]
 
-        trader = LiveOptionTrader(broker=broker, dry_run=False, confirm_live=True, poll_timeout_seconds=1.0)
+        trader = _research_trader(
+            broker, dry_run=False, confirm_live=True, poll_timeout_seconds=1.0
+        )
         intent = _make_bull_call_spread_intent()
         result = trader.execute_structure(intent)
 
@@ -366,23 +380,19 @@ class TestLiveExecutionRollback:
     def test_second_leg_rejects_rollback_first(self):
         broker = _make_mock_broker()
         # leg 1: submit + poll → filled
-        # leg 2: submit fails with MStockOrderError (retry 0)
-        # leg 2: retry fails again (retry 1)
+        # leg 2: submit fails with MStockOrderError (no retry)
         # rollback: flatten leg 1
         broker.place_order.side_effect = [
             BrokerOrderId("ORD001"),  # leg 1 submit
-            MStockOrderError("Rejected: insufficient margin"),  # leg 2 attempt 0
-            MStockOrderError("Rejected: insufficient margin"),  # leg 2 attempt 1
+            MStockOrderError("Rejected: insufficient margin"),  # leg 2
             BrokerOrderId("ROLL001"),  # rollback
         ]
         broker.get_order_book.side_effect = [
             [_make_filled_order("ORD001")],  # leg 1 poll → filled
         ]
 
-        trader = LiveOptionTrader(
-            broker=broker, dry_run=False, confirm_live=True,
-            retry_config=RetryConfig(max_retries=1, base_delay_seconds=0.01),
-            poll_timeout_seconds=1.0,
+        trader = _research_trader(
+            broker, dry_run=False, confirm_live=True, poll_timeout_seconds=1.0
         )
         intent = _make_bull_call_spread_intent()
         result = trader.execute_structure(intent)
@@ -390,78 +400,140 @@ class TestLiveExecutionRollback:
         assert result.status == StructureExecStatus.ROLLED_BACK
         assert result.any_rejected
         assert "Leg 2 failed" in result.error
-        # Rollback was attempted
-        assert broker.place_order.call_count == 4  # leg1 + leg2(×2 retries) + rollback
+        # Rollback was attempted — no retries on the reject
+        assert broker.place_order.call_count == 3
 
     def test_first_leg_rejects_no_rollback_needed(self):
         broker = _make_mock_broker()
         broker.place_order.side_effect = [
             MStockOrderError("Rejected: session expired"),
-            MStockOrderError("Rejected: session expired"),  # retry 1
         ]
         broker.get_order_book.return_value = []
 
         trader = LiveOptionTrader(
-            broker=broker, dry_run=False, confirm_live=True,
-            retry_config=RetryConfig(max_retries=1, base_delay_seconds=0.01),
-            poll_timeout_seconds=1.0,
+            broker=broker, dry_run=False, confirm_live=True, poll_timeout_seconds=1.0
         )
         intent = _make_long_call_intent()
         result = trader.execute_structure(intent)
 
         assert result.status == StructureExecStatus.ROLLED_BACK
         assert result.any_rejected
-        # No rollback needed (no filled legs to cancel)
-        assert broker.place_order.call_count == 2  # 2 retries, no rollback
+        # No rollback needed (no filled legs to cancel), one attempt only
+        assert broker.place_order.call_count == 1
 
 
 # ---------------------------------------------------------------------------
-# Retry logic
+# No blind retry — idempotency keys and reconcile-once
 # ---------------------------------------------------------------------------
 
-class TestRetryLogic:
+
+class TestNoBlindRetry:
 
     @pytest.fixture(autouse=True)
     def _allow_live_orders(self, monkeypatch):
         """These classes exercise the LIVE path against a mock broker."""
         monkeypatch.setenv("ALLOW_LIVE_ORDERS", "1")
-    def test_retries_on_failure(self):
-        broker = _make_mock_broker()
-        broker.place_order.side_effect = [
-            MStockOrderError("Timeout"),
-            MStockOrderError("Timeout"),
-            BrokerOrderId("ORD003"),  # succeeds on 3rd try
-        ]
-        broker.get_order_book.return_value = [_make_filled_order("ORD003")]
 
-        trader = LiveOptionTrader(
-            broker=broker,
-            dry_run=False, confirm_live=True,
-            retry_config=RetryConfig(max_retries=3, base_delay_seconds=0.01),
-            poll_timeout_seconds=1.0,
+    def test_a_definite_reject_is_not_retried(self):
+        broker = _make_mock_broker()
+        broker.place_order.side_effect = MStockOrderError("RMS: max positions exceeded")
+
+        trader = _live_trader(broker)
+        result = trader.execute_structure(_make_long_call_intent())
+
+        assert result.legs[0].status == LegStatus.REJECTED
+        assert not result.legs[0].uncertain
+        assert broker.place_order.call_count == 1
+
+    def test_an_uncertain_submit_halts_and_does_not_retry(self):
+        broker = _make_mock_broker()
+        broker.place_order.side_effect = OrderOutcomeUnknown("gateway 502")
+        broker.get_order_book.return_value = []
+
+        journal = MemoryJournal()
+        trader = _live_trader(broker, journal=journal)
+        ts = datetime(2026, 10, 5, 4, 30)
+        result = trader.execute_structure(_make_long_call_intent(), timestamp=ts)
+
+        assert result.status == StructureExecStatus.HALTED
+        assert result.legs[0].uncertain
+        assert broker.place_order.call_count == 1
+        # The uncertain event is recorded with dedupe=False (it may repeat if
+        # the operator retries after a failed reconcile), so check kinds() instead.
+        assert KIND_UNCERTAIN in journal.kinds(result.intent_id)
+
+    def test_reconciliation_finds_the_ticket_and_sets_it_filled(self):
+        broker = _make_mock_broker()
+        broker.place_order.side_effect = OrderOutcomeUnknown("timeout")
+        # The order book already has the ticket, executed.
+        broker.get_order_book.return_value = [_make_filled_order("ORD-RECON")]
+
+        journal = MemoryJournal()
+        trader = _live_trader(broker, journal=journal)
+        result = trader.execute_structure(_make_long_call_intent())
+
+        assert result.legs[0].status == LegStatus.FILLED
+        assert not result.legs[0].uncertain
+        assert result.legs[0].broker_order_id == "ORD-RECON"
+        assert journal.order_id_for(result.intent_id, 0) == "ORD-RECON"
+
+    def test_a_replayed_decision_skips_place_order(self):
+        """The idempotency key prevents a second ``place_order`` for the same leg."""
+        broker = _make_mock_broker()
+        broker.get_order_book.return_value = [_make_filled_order("ORD-REPLAY")]
+
+        journal = MemoryJournal()
+        intent = _make_long_call_intent()
+        ts = datetime(2026, 10, 5, 4, 30)
+        iid = intent_key(intent, clock=ts)
+
+        # Pre-seed: the previous run submitted this leg and we lost the answer.
+        journal.append(
+            intent_id=iid, kind=KIND_SUBMITTED, leg_index=0, broker_order_id="ORD-REPLAY"
         )
+
+        trader = _live_trader(broker, journal=journal)
+        result = trader.execute_structure(intent, timestamp=ts)
+
+        assert result.legs[0].status == LegStatus.FILLED
+        assert result.legs[0].broker_order_id == "ORD-REPLAY"
+        assert broker.place_order.call_count == 0
+
+    def test_poll_timeout_is_uncertain_and_halts(self):
+        broker = _make_mock_broker()
+        broker.place_order.return_value = BrokerOrderId("ORD-TIMEOUT")
+        broker.get_order_book.return_value = [_make_pending_order("ORD-TIMEOUT")]
+
+        journal = MemoryJournal()
+        trader = _live_trader(broker, journal=journal, poll_timeout_seconds=0.2)
+        result = trader.execute_structure(_make_long_call_intent())
+
+        assert result.legs[0].uncertain
+        assert result.status == StructureExecStatus.HALTED
+        assert journal.has(result.intent_id, KIND_UNCERTAIN, 0)
+        assert journal.order_id_for(result.intent_id, 0) == "ORD-TIMEOUT"
+
+    def test_journal_records_decided_submitted_and_filled(self):
+        broker = _make_mock_broker()
+        broker.place_order.return_value = BrokerOrderId("ORD-J")
+        broker.get_order_book.return_value = [_make_filled_order("ORD-J")]
+
+        journal = MemoryJournal()
+        trader = _live_trader(broker, journal=journal)
+        result = trader.execute_structure(_make_long_call_intent())
+
+        kinds = journal.kinds(result.intent_id)
+        assert {KIND_DECIDED, KIND_SUBMITTED, KIND_FILLED} <= kinds
+        assert journal.order_id_for(result.intent_id, 0) == "ORD-J"
+
+    def test_dry_run_still_records_the_decision(self):
+        journal = MemoryJournal()
+        trader = LiveOptionTrader(broker=_make_mock_broker(), dry_run=True, journal=journal)
         intent = _make_long_call_intent()
         result = trader.execute_structure(intent)
 
         assert result.status == StructureExecStatus.FILLED
-        assert result.legs[0].retries == 2  # failed twice, succeeded on 3rd
-
-    def test_exhausts_retries(self):
-        broker = _make_mock_broker()
-        broker.place_order.side_effect = MStockOrderError("Always fails")
-
-        trader = LiveOptionTrader(
-            broker=broker,
-            dry_run=False, confirm_live=True,
-            retry_config=RetryConfig(max_retries=2, base_delay_seconds=0.01),
-            poll_timeout_seconds=1.0,
-        )
-        intent = _make_long_call_intent()
-        result = trader.execute_structure(intent)
-
-        assert result.status == StructureExecStatus.ROLLED_BACK
-        assert result.legs[0].status == LegStatus.FAILED
-        assert result.legs[0].retries == 2
+        assert journal.has(result.intent_id, KIND_DECIDED)
 
 
 # ---------------------------------------------------------------------------
@@ -498,8 +570,7 @@ class TestOrderPayload:
 class TestIntegrationDryRun:
     def test_full_workflow_dry_run(self):
         """T4.12: Execute a bull call spread in dry-run mode."""
-        broker = _make_mock_broker()
-        trader = LiveOptionTrader(broker=broker, dry_run=True)
+        trader = _research_trader(_make_mock_broker(), dry_run=True)
 
         intent = _make_bull_call_spread_intent()
         result = trader.execute_structure(intent)
@@ -538,31 +609,23 @@ class TestErrorLogging:
         broker = _make_mock_broker()
         broker.place_order.side_effect = MStockOrderError("RMS rejection: max positions exceeded")
 
-        trader = LiveOptionTrader(
-            broker=broker,
-            dry_run=False, confirm_live=True,
-            retry_config=RetryConfig(max_retries=0, base_delay_seconds=0.01),
-            poll_timeout_seconds=1.0,
-        )
-        intent = _make_long_call_intent()
-        result = trader.execute_structure(intent)
+        trader = _live_trader(broker)
+        result = trader.execute_structure(_make_long_call_intent())
 
         assert "RMS rejection" in result.legs[0].error
         assert result.error or result.legs[0].error
 
-    def test_timeout_logged(self):
+    def test_timeout_is_uncertain_and_halts(self):
         broker = _make_mock_broker()
         broker.place_order.return_value = BrokerOrderId("ORD999")
-        # Order never fills
+        # Order never fills within the poll window
         broker.get_order_book.return_value = [_make_pending_order("ORD999")]
 
-        trader = LiveOptionTrader(
-            broker=broker,
-            dry_run=False, confirm_live=True,
-            retry_config=RetryConfig(max_retries=0),
-            poll_timeout_seconds=0.5,
-        )
-        intent = _make_long_call_intent()
-        result = trader.execute_structure(intent)
+        journal = MemoryJournal()
+        trader = _live_trader(broker, journal=journal, poll_timeout_seconds=0.2)
+        result = trader.execute_structure(_make_long_call_intent())
 
+        assert result.status == StructureExecStatus.HALTED
+        assert result.legs[0].uncertain
         assert "not filled within timeout" in result.legs[0].error
+        assert journal.has(result.intent_id, KIND_UNCERTAIN, 0)

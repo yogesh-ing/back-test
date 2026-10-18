@@ -21,6 +21,7 @@ from backtest.forward.paper_runner import RunnerConfig
 from backtest.forward.portfolio_manager import reset_portfolio_manager
 from backtest.plugins import discover_plugins
 from backtest.strategy.registry import get_strategy
+from options_support import research_profile
 
 GAMMA = AlertType.PORTFOLIO_GAMMA_CRITICAL.value
 
@@ -33,6 +34,19 @@ def _plugins():
 @pytest.fixture()
 def mgr():
     m = reset_portfolio_manager(auto_start_feed=False)
+    # These fixtures trade a short strangle through the manager, which the V1
+    # execution gate refuses in production. Widen every runner this test suite
+    # spawns so the intelligence wiring stays under test.
+    original_add = m.add_runner
+
+    def _add_research_runner(*args, **kwargs):
+        instance_id = original_add(*args, **kwargs)
+        runner = m.get_runner(instance_id)
+        if runner is not None:
+            research_profile(runner)
+        return instance_id
+
+    m.add_runner = _add_research_runner
     yield m
     m.shutdown()
 

@@ -51,7 +51,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional
 
 import pandas as pd
 
-from backtest.data.base import CANONICAL_TIMEFRAMES, DataSource
+from backtest.data.base import CANONICAL_TIMEFRAMES, TIMEFRAME_MINUTES, DataSource
 from backtest.data.frame_source import FrameSource
 from backtest.data.source_tags import SOURCE_TAG_VALUES, SOURCE_TAGS, source_tag_for
 from backtest.data.sources_policy import (
@@ -64,6 +64,7 @@ from backtest.forward.options_bridge import OptionsBridge
 from backtest.simulator.engine_loop import OrderQueue, run_engine_loop
 from backtest.simulator.enums import OrderSide, OrderType, TimeInForce
 from backtest.simulator.execution import OrderExecutor, free_executor
+from backtest.simulator.fees import CommissionCalculator
 from backtest.simulator.order import Order as SimOrder
 from backtest.simulator.portfolio import Portfolio, PortfolioLimits
 from backtest.simulator.position_sizing import all_in_size
@@ -1088,15 +1089,21 @@ class StrategyRunner:
             # derived from the resolved provider, not from config.source: a
             # requested "mstock"/"dhan" that fell back to synthetic must
             # release the synthetic entry, or stop() leaks the refcount.
-            live_label = f"live:{config.source.lower()}"
+            # Live labels are ``live:<source>`` (+ ``+bidask`` when the bus
+            # handed out the spread-crossing wrapper).
             self._chain_source = (
-                str(config.source).lower() if quote_label == live_label else "synthetic"
+                str(config.source).lower() if quote_label.startswith("live:") else "synthetic"
             )
             self._chain_released = False  # one release per acquire (stop is idempotent)
             self.options_bridge = OptionsBridge(
                 capital=config.allocated_capital,
                 expression=config.instrument.get("expression"),
                 quote_provider=provider,
+                # Marks land on bar close (plus the portfolio watchdog), so the
+                # freshness SLA is sized off the bar cadence — see OptionsBridge.
+                bar_cadence_seconds=60.0
+                * TIMEFRAME_MINUTES.get(config.timeframe, 0),
+                fee_calculator=CommissionCalculator.for_broker("zerodha"),
             )
             self.options_bridge.runner_id = self.instance_id
             self.options_bridge.runner_name = self.config.name
@@ -1401,7 +1408,7 @@ class StrategyRunner:
             )
             return
 
-        if label != f"live:{src}":
+        if not label.startswith("live:"):
             # Session vanished between the pre-check and the acquire; the helper
             # already re-acquired synthetic, so release that extra ref and bail.
             try:
@@ -1523,6 +1530,9 @@ class StrategyRunner:
                     continue
                 self._emit_close(symbol, price, reason=reason)
                 count += 1
+        # Also close any open option structure (single-structure V1 model).
+        if self.options_bridge is not None:
+            count += self.options_bridge.flatten_all(reason=reason)
         return count
 
     # ------------------------------------------------------------------ #
@@ -2146,12 +2156,17 @@ class StrategyRunner:
             and self.options_bridge.mark_stale
             and not self.options_bridge._has_open_structure()
         ):
+            # Freshness SLA (PRD §4.1): a mark older than stale_after_seconds is
+            # not a price, so the entry is refused rather than simulated.
+            age = self.options_bridge.mark_age_seconds()
             self._log_signal(
                 symbol,
                 "OPTION_BLOCKED",
                 None,
                 bar["close"],
-                "entry paused while option mark is stale",
+                "entry paused: option mark "
+                f"{int(age) if age is not None else '?'}s old, "
+                f"SLA {int(self.options_bridge.stale_after_seconds)}s",
             )
             view = None
         if (

@@ -21,6 +21,7 @@ from backtest.engine.option_backtest_driver import (
     capture_equity,
     structure_to_record,
 )
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.expiry import ExpiryManager, StaticSettlementProvider
 from backtest.options.paper_trading import OptionPaperBroker
 from backtest.options.quote_providers import (
@@ -51,7 +52,7 @@ class Book:
         )
         self.provider = SyntheticQuoteProvider(self.generator)
         self.provider.register_chain(self.chain)
-        self.broker = OptionPaperBroker(capital=capital)
+        self.broker = OptionPaperBroker(capital=capital, allowed_structures=RESEARCH_STRUCTURES)
         self.expiry = next(iter(self.chain.values())).expiry
 
     def view(self, direction: Direction = Direction.BULLISH, confidence: float = 0.4):
@@ -234,7 +235,7 @@ class TestStructureTradeRecord:
 class TestBuildTradeLog:
 
     def test_empty_book(self):
-        assert build_trade_log(OptionPaperBroker()) == []
+        assert build_trade_log(OptionPaperBroker(allowed_structures=RESEARCH_STRUCTURES)) == []
 
     def test_excludes_open_when_asked(self):
         book = Book()
@@ -274,7 +275,7 @@ class TestBuildTradeLog:
 class TestEquityCapture:
 
     def test_fresh_book_equity_equals_capital(self):
-        broker = OptionPaperBroker(capital=CAPITAL)
+        broker = OptionPaperBroker(capital=CAPITAL, allowed_structures=RESEARCH_STRUCTURES)
         point = capture_equity(broker, datetime.combine(date.today(), time(9, 15)))
 
         assert point.equity == Decimal(str(CAPITAL))

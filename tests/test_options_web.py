@@ -24,6 +24,7 @@ from backtest.strategy.intent import (
     OptionLeg,
     TradeIntent,
 )
+from options_support import research_profile
 
 
 @pytest.fixture()
@@ -46,6 +47,10 @@ def client(app):
 def _seed_two_structures() -> None:
     """Seed the singleton broker with a long call and a bull call spread."""
     broker = get_option_broker()
+    # The spread is seeded deliberately: the endpoints must render whatever the
+    # book holds. The V1 execution gate refuses it in production, so this test
+    # widens the singleton only.
+    research_profile(broker)
     from backtest.options.paper_trading import FakeQuoteProvider
 
     quotes = FakeQuoteProvider(default_price=100.0)

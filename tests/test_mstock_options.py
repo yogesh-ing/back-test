@@ -129,6 +129,12 @@ class TestParseOptionContract:
         }
         assert MStockBroker._parse_option_contract(row) is None
 
+    def test_a_row_without_a_lot_size_is_skipped(self):
+        """No published lot → no contract: sizing a leg off a guessed lot would
+        size every rupee stop in the book off a number the exchange never gave."""
+        row = self._row(f"NIFTY{_TAG}24500CE", "51201", "CE", lot="")
+        assert MStockBroker._parse_option_contract(row) is None
+
     def test_parse_invalid_symbol_returns_none(self):
         row = {"tradingsymbol": "INVALID", "instrument_token": "X"}
         assert MStockBroker._parse_option_contract(row) is None

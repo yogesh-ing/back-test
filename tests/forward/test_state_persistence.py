@@ -26,11 +26,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+
 from backtest.forward.feed_registry import reset_data_bus
 from backtest.forward.portfolio_manager import PortfolioManager
 from backtest.forward.paper_runner import SIDE_BUY, RunnerConfig
 from backtest.forward.risk_supervisor import GlobalRiskConfig
 from backtest.forward.state_store import PortfolioStateStore, STATE_SCHEMA_VERSION
+from options_support import research_profile
 
 
 def _manager(state_path=None) -> PortfolioManager:
@@ -313,7 +315,7 @@ class TestOptionBookRestore:
     def test_open_structure_and_bridge_scalars_round_trip(self, tmp_path):
         state = tmp_path / "state.json"
         mgr1 = self._option_manager(state)
-        mgr1.add_runner(
+        opt_id = mgr1.add_runner(
             RunnerConfig(
                 name="OPT",
                 strategy_name="directional_options",
@@ -333,6 +335,9 @@ class TestOptionBookRestore:
                 },
             )
         )
+        # bull call spread book: the V1 gate refuses it, so widen the runner
+        # before any bar reaches it.
+        research_profile(mgr1.get_runner(opt_id))
         mgr1.feed.warmup()
         base = datetime.now(timezone.utc) + timedelta(days=1)
         for i in range(80):

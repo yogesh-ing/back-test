@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.paper_trading import (
     FakeQuoteProvider,
     OptionPaperBroker,
@@ -86,7 +87,7 @@ def _broker_with_position(
     price: float = 100.0,
 ) -> tuple[OptionPaperBroker, str]:
     """Create a broker with one open position; return (broker, structure_id)."""
-    broker = OptionPaperBroker(capital=1_000_000.0)
+    broker = OptionPaperBroker(capital=1_000_000.0, allowed_structures=RESEARCH_STRUCTURES)
     quotes = FakeQuoteProvider(default_price=price)
     intent = _make_intent(strike=strike, option_type=option_type, side=side, expiry=expiry)
     positions = broker.execute_structure(intent, quotes)
@@ -417,7 +418,7 @@ class TestIntegrationThroughExpiry:
     def test_full_expiry_pipeline(self):
         """T6.6: Open → hold past expiry → square-off window → settlement."""
         expiry = date(2026, 9, 24)
-        broker = OptionPaperBroker(capital=1_000_000.0)
+        broker = OptionPaperBroker(capital=1_000_000.0, allowed_structures=RESEARCH_STRUCTURES)
         quotes = FakeQuoteProvider(default_price=100.0)
 
         # Open a long call at strike 24800
@@ -450,7 +451,7 @@ class TestIntegrationThroughExpiry:
     def test_settlement_when_not_squared_off(self):
         """If square-off is disabled, position rides into cash settlement."""
         expiry = date(2026, 9, 24)
-        broker = OptionPaperBroker(capital=1_000_000.0)
+        broker = OptionPaperBroker(capital=1_000_000.0, allowed_structures=RESEARCH_STRUCTURES)
         quotes = FakeQuoteProvider(default_price=100.0)
 
         intent = _make_intent(strike=24800, side="BUY", expiry=expiry)
@@ -481,7 +482,7 @@ class TestIntegrationThroughExpiry:
     def test_include_today_settles_on_the_expiry_bar(self):
         """`include_today=True` settles the expiry-day close itself."""
         expiry = date(2026, 9, 24)
-        broker = OptionPaperBroker(capital=1_000_000.0)
+        broker = OptionPaperBroker(capital=1_000_000.0, allowed_structures=RESEARCH_STRUCTURES)
         quotes = FakeQuoteProvider(default_price=100.0)
         positions = broker.execute_structure(
             _make_intent(strike=24800, side="BUY", expiry=expiry), quotes
@@ -503,7 +504,7 @@ class TestIntegrationThroughExpiry:
     def test_spread_squared_off_together(self):
         """Both legs of a spread square off in the same pass."""
         expiry = date(2026, 9, 24)
-        broker = OptionPaperBroker(capital=1_000_000.0)
+        broker = OptionPaperBroker(capital=1_000_000.0, allowed_structures=RESEARCH_STRUCTURES)
         quotes = FakeQuoteProvider(default_price=100.0)
 
         long_leg = OptionLeg(

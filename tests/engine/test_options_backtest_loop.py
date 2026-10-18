@@ -27,6 +27,7 @@ from backtest.engine.option_backtest_driver import (
     OptionBacktestDriver,
     next_monthly_expiry,
 )
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.strategy.intent import Direction, MarketView
 
 
@@ -320,7 +321,7 @@ class TestInjectabilityAndDeterminism:
     def test_injected_broker_is_used(self):
         from backtest.options.paper_trading import OptionPaperBroker
 
-        broker = OptionPaperBroker(capital=500_000.0)
+        broker = OptionPaperBroker(capital=500_000.0, allowed_structures=RESEARCH_STRUCTURES)
         candles = make_candles([24000, 24100, 24200])
         driver = OptionBacktestDriver(
             candles,
