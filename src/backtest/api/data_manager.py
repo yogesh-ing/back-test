@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Data Manager API endpoints.
 
 Endpoints for fetching historical market data from mStock and storing in PostgreSQL.
@@ -11,9 +13,12 @@ Runs fetch jobs as background threads with progress tracking.
                                (PRD backTest-enhance §1.3) — the one endpoint
                                the Backtest, Compare and Optimize symbol
                                pickers read.
-"""
 
-from __future__ import annotations
+*** VERSION: from_date/to_date support added 2026-10-18 ***
+"""
+import logging
+_log = logging.getLogger(__name__)
+_log.warning("=== DATA_MANAGER MODULE LOADED - from_date/to_date version ===")
 
 import math
 import os
@@ -1582,6 +1587,7 @@ def _count_missing_sessions(last_day, target: date, holidays) -> int:
 
 def _compute_freshness() -> dict:
     """Per-timeframe staleness vs the last completed session. Never raises."""
+    log.info("[FRESHNESS] Computing freshness with from_date/to_date support")
     with _lock:
         fetching = _job["status"] == "running"
     out: dict[str, Any] = {
@@ -1617,9 +1623,19 @@ def _compute_freshness() -> dict:
         for tf, last in rows:
             last_d = _as_session_date(last)
             missing = _count_missing_sessions(last_d, target, holidays)
+            # Build list of missing session dates for pre-filling fetch form
+            missing_dates = []
+            if missing > 0 and last_d:
+                d = last_d + timedelta(days=1)
+                while d <= target:
+                    if d.weekday() < 5 and d not in holidays:  # Mon-Fri, not holiday
+                        missing_dates.append(d.isoformat())
+                    d += timedelta(days=1)
             per[str(tf)] = {
                 "last_day": last_d.isoformat() if last_d else None,
                 "missing": missing,
+                "from_date": missing_dates[0] if missing_dates else None,
+                "to_date": target.isoformat(),
             }
             worst = max(worst, missing)
         out["per_timeframe"] = per
@@ -1704,7 +1720,14 @@ def get_data_freshness() -> dict:
 @data_bp.route("/api/data/freshness", methods=["GET"])
 def api_data_freshness():
     """JSON the topbar chip re-renders from (initially it is server-rendered)."""
-    return jsonify(get_data_freshness())
+    result = get_data_freshness()
+    # DEBUG: log the payload
+    import logging
+    log = logging.getLogger(__name__)
+    log.info(f"[DEBUG] freshness payload keys: {list(result.get('per_timeframe', {}).keys())}")
+    if '1min' in result.get('per_timeframe', {}):
+        log.info(f"[DEBUG] 1min payload: {result['per_timeframe']['1min']}")
+    return jsonify(result)
 
 
 def _fetch_bars_chunked(

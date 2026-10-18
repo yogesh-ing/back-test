@@ -22,6 +22,15 @@ const $ = (id) => document.getElementById(id);
 // Set default to_date to today
 $('dm-toDate').value = new Date().toISOString().split('T')[0];
 
+// Pre-fill dates from URL params (e.g., /data?from=2026-10-03&to=2026-10-06)
+const urlParams = new URLSearchParams(window.location.search);
+if (urlParams.get('from')) {
+    $('dm-fromDate').value = urlParams.get('from');
+}
+if (urlParams.get('to')) {
+    $('dm-toDate').value = urlParams.get('to');
+}
+
 let pollTimer = null;
 
 // -----------------------------------------------------------------------

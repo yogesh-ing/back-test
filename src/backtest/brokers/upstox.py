@@ -570,7 +570,6 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
         if not _AUTH_CODE_PATTERN.fullmatch(code):
             return False, "The redirect did not carry a usable authorization code"
         self._parked_auth_code = code
-        logger.info("Upstox authorization code parked from the OAuth callback")
         return True, "ok"
 
     # ------------------------------------------------------------------
