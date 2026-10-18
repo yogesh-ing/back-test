@@ -462,6 +462,7 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
         moment the exchange succeeds (or fails permanently).
         """
         typed = (totp_code or "").strip()
+        
         if self._temp_auth_context is None:
             return {
                 "success": False,
@@ -470,28 +471,15 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
             }
 
         code = self._parked_auth_code or typed
+        
         if not code:
             return {
                 "success": False,
                 "message": (
-                    "Enter the authorization code from the Upstox redirect URL "
-                    "(a long code, not a 6-digit TOTP)"
+                    "Enter the authorization code from the Upstox redirect URL"
                 ),
                 "expires_at": "",
             }
-        if not self._parked_auth_code:
-            # Manual paste path — the callback never landed (state mismatch,
-            # app restarted, redirect URI not reachable). Upstox codes are
-            # long opaque strings; a 6-digit TOTP is never valid here.
-            if not _AUTH_CODE_PATTERN.fullmatch(code):
-                return {
-                    "success": False,
-                    "message": (
-                        "That does not look like an Upstox authorization code — "
-                        "copy the full ``code`` value from the redirect URL"
-                    ),
-                    "expires_at": "",
-                }
 
         api_key = (self._temp_api_key or "").strip()
         api_secret = self._temp_api_secret or ""
@@ -567,8 +555,8 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
         if not expected or not state or not secrets.compare_digest(expected, state):
             return False, "State mismatch — paste the authorization code into the app instead"
         code = (code or "").strip()
-        if not _AUTH_CODE_PATTERN.fullmatch(code):
-            return False, "The redirect did not carry a usable authorization code"
+        if not code:
+            return False, "No authorization code received from Upstox"
         self._parked_auth_code = code
         return True, "ok"
 

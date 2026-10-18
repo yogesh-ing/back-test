@@ -475,11 +475,16 @@ def upstox_oauth_callback() -> Response:
         )
     code = (request.args.get("code") or "").strip()
     state = (request.args.get("state") or "").strip()
+    
+    # DEBUG: Log what we received from Upstox
+    logger.info("[UPSTOX CALLBACK] Received - code='%s' (len=%d), state='%s'", code, len(code), state)
+    
     try:
         from backtest.brokers.session_manager import get_session_manager
 
         broker = get_session_manager().get_broker("upstox")
         ok, message = broker.park_auth_code(code, state)
+        logger.info("[UPSTOX CALLBACK] park_auth_code result: ok=%s, message='%s'", ok, message)
     except Exception:  # noqa: BLE001 — a callback must render, never 500 with detail
         logger.exception("upstox oauth callback failed")
         ok, message = False, "Internal error while saving the code — check the server log"
