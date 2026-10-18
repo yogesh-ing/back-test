@@ -2068,7 +2068,7 @@ def _fetch_upstox_bars_chunked(
                         on_progress(chunk_done, total_chunks)
                     
                     if breaker:
-                        breaker.record_success()
+                        breaker.record(True)
                     
                     log.debug(
                         "[data] Upstox: %s fetched %d candles for %s..%s",
@@ -2080,7 +2080,7 @@ def _fetch_upstox_bars_chunked(
                     log.error("[data] Upstox: authentication failed (expired session?)")
                     chunk_errors += 1
                     if breaker:
-                        breaker.record_failure()
+                        breaker.record(False)
                     break  # Don't retry auth errors
                     
                 elif resp.status_code == 429:
@@ -2104,7 +2104,7 @@ def _fetch_upstox_bars_chunked(
                     else:
                         chunk_errors += 1
                         if breaker:
-                            breaker.record_failure()
+                            breaker.record(False)
                         break
                         
             except requests.RequestException as exc:
@@ -2118,7 +2118,7 @@ def _fetch_upstox_bars_chunked(
                 else:
                     chunk_errors += 1
                     if breaker:
-                        breaker.record_failure()
+                        breaker.record(False)
                     break
             except (ValueError, KeyError, IndexError) as exc:
                 log.error(
@@ -2127,7 +2127,7 @@ def _fetch_upstox_bars_chunked(
                 )
                 chunk_errors += 1
                 if breaker:
-                    breaker.record_failure()
+                    breaker.record(False)
                 break
         
         if not success and chunk_errors > 0:
