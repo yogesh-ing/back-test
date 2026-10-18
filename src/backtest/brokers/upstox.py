@@ -1170,6 +1170,11 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
         except ValueError:
             payload = None
 
+        # DEBUG: Print the raw response for troubleshooting
+        import sys
+        print(f"[UPSTOX TOKEN EXCHANGE] HTTP {resp.status_code}", file=sys.stderr, flush=True)
+        print(f"[UPSTOX TOKEN EXCHANGE] Response: {str(payload)[:500] if payload else '(not JSON)'}", file=sys.stderr, flush=True)
+
         if not resp.ok:
             default = (
                 "Upstox rejected the authorization code (expired or already used)"

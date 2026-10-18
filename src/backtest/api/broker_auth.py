@@ -175,7 +175,13 @@ def verify_totp() -> tuple:
     data = request.get_json(silent=True) or {}
     code = _string_field(data, "totp_code")
     broker_name = _string_field(data, "broker")
+    
+    # DEBUG: Log what we received
+    logger.info("[VERIFY-TOTP ENDPOINT] Received - code='%s' (len=%d), broker='%s'", 
+               code, len(code) if code else 0, broker_name)
+    
     if code is None:
+        logger.info("[VERIFY-TOTP ENDPOINT] Code is None, returning error")
         return (
             jsonify({"success": False, "message": "totp_code is required", "expires_at": ""}),
             400,
@@ -185,7 +191,9 @@ def verify_totp() -> tuple:
         from backtest.brokers.session_manager import UnknownBrokerError
 
         try:
+            logger.info("[VERIFY-TOTP ENDPOINT] Calling session_manager.verify_totp...")
             result = get_session_manager().verify_totp(code, broker_name=broker_name)
+            logger.info("[VERIFY-TOTP ENDPOINT] Result: %s", result)
         except UnknownBrokerError as exc:
             return jsonify({"success": False, "message": str(exc), "expires_at": ""}), 400
         verified = bool(result.get("success"))
