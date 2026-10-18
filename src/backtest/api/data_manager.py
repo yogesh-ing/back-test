@@ -1976,10 +1976,10 @@ def _fetch_upstox_bars_chunked(
     """Fetch OHLCV bars from Upstox API, chunked by date range.
 
     Uses Upstox v2 historical candle endpoint:
-    GET /v2/historical-candle/{instrument_key}/{interval}/{from_date}/{to_date}
+    GET /v2/historical-candle/{instrument_key}/{interval}/{to_date}/{from_date}
 
     Args:
-        instrument_token: Upstox instrument key (e.g., NSE_EQ|INE002A01018)
+        instrument_token: Trading symbol or Upstox instrument key (e.g., RELIANCE or NSE_EQ|INE002A01018)
         from_date: Start date in YYYY-MM-DD format
         to_date: End date in YYYY-MM-DD format
         exchange: Exchange name (used for logging)
@@ -1994,6 +1994,7 @@ def _fetch_upstox_bars_chunked(
         Tuple of (bars_list, chunk_error_count)
     """
     from backtest.brokers.session_manager import get_session_manager
+    from backtest.brokers.upstox import resolve_instrument_key
     
     # Map our timeframes to Upstox intervals
     upstox_interval_map = {
@@ -2028,6 +2029,15 @@ def _fetch_upstox_bars_chunked(
         log.error("[data] Upstox: failed to get session token: %s", exc)
         return [], total_chunks
     
+    # Resolve instrument key: convert trading symbol to Upstox format
+    # e.g., "RELIANCE" → "NSE_EQ|INE002A01018"
+    try:
+        instrument_key = resolve_instrument_key(instrument_token, timeout=30.0)
+        log.info("[data] Upstox: resolved '%s' → '%s'", instrument_token, instrument_key)
+    except Exception as exc:
+        log.error("[data] Upstox: failed to resolve instrument key for '%s': %s", instrument_token, exc)
+        return [], total_chunks
+    
     base_url = "https://api.upstox.com/v2"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -2046,19 +2056,18 @@ def _fetch_upstox_bars_chunked(
             log.warning("[data] Upstox: circuit breaker tripped, skipping remaining chunks")
             break
         
-        # Build instrument key for this window
-        # Upstox expects exchange|symbol format or instrument_key
-        instrument_key = instrument_token
-        
         # Build URL with path parameters
         # Upstox requires dates in YYYY-MM-DD format (no time component)
         # _build_windows returns datetime objects, so format them
         from_date_str = win_from.strftime("%Y-%m-%d") if hasattr(win_from, 'strftime') else str(win_from)[:10]
         to_date_str = win_to.strftime("%Y-%m-%d") if hasattr(win_to, 'strftime') else str(win_to)[:10]
         
-        url = f"{base_url}/historical-candle/{instrument_key}/{upstox_interval}/{from_date_str}/{to_date_str}"
+        # NOTE: Upstox API path order is {to_date}/{from_date}, NOT {from_date}/{to_date}
+        url = f"{base_url}/historical-candle/{instrument_key}/{upstox_interval}/{to_date_str}/{from_date_str}"
         
-        log.debug("[data] Upstox: fetching %s for %s..%s", instrument_key, from_date_str, to_date_str)
+        import sys
+        print(f"[DEBUG] Upstox URL: {url}", file=sys.stderr, flush=True)
+        log.info("[data] Upstox: fetching %s for %s..%s", instrument_key, from_date_str, to_date_str)
         
         # Retry logic for transient failures
         max_retries = 3
@@ -2066,6 +2075,11 @@ def _fetch_upstox_bars_chunked(
         for attempt in range(max_retries + 1):
             try:
                 resp = requests.get(url, headers=headers, timeout=60)
+                
+                # Debug: print response details for 400 errors
+                if resp.status_code == 400:
+                    import sys
+                    print(f"[DEBUG] 400 Response: {resp.text[:500]}", file=sys.stderr, flush=True)
                 
                 if resp.status_code == 200:
                     payload = resp.json()
