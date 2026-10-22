@@ -44,7 +44,7 @@ import time
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
@@ -260,6 +260,17 @@ class FillEvent:
     quantity: float
     price: float
     ts: str
+
+
+#: The day fuse rolls at 00:00 IST (Asia/Kolkata) — see daily_pnl().
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _as_ist_date(moment: datetime) -> str:
+    """Any datetime → its IST calendar date (naive instants are treated as UTC)."""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(_IST).date().isoformat()
 
 
 class OrderLedger:
@@ -1132,16 +1143,17 @@ class StrategyRunner:
         self.last_option_pnl: float = 0.0
         self.signal_log: Deque[Dict[str, Any]] = deque(maxlen=MAX_SIGNAL_LOG)
         
-        # Trade persistence and tracking (FIX 2026-10-13)
-        self._closed_trades: List[Dict[str, Any]] = []  # Track all closed trades for PnL calc
-        self._trade_persist_failures: int = 0  # Count failed persistence attempts
-        
-        # Daily PnL anchors (FIX 2026-10-14): snapshot realized PnL at session start
-        # so daily_pnl() can compute "realized since open + unrealized MTM"
-        self._session_start_realized: float = float(self.portfolio.realized_pnl)
+        # Audit list of closed round trips — _record_closed_trade stamps
+        # exit_time / session_date / net_pnl at closure; daily_pnl() reads
+        # the book (portfolio.closed_positions), not this list.
+        self._closed_trades: List[Dict[str, Any]] = []
+
+        # Option-book daily anchor: option structure closes do not carry a
+        # session_date yet, so option realized stays session-anchored.
         self._option_session_start_realized: float = 0.0
         if self.options_bridge is not None:
-            self._option_session_start_realized = float(self.options_bridge.option_broker.total_realized_pnl)
+            book = self.options_bridge.option_broker
+            self._option_session_start_realized = float(book.total_realized_pnl)
         
         #: PnL-vs-spot watch series (2026-09-24): one row per closed bar while
         #: an option structure is open — feeds the end-of-day chart export
@@ -2891,43 +2903,63 @@ class StrategyRunner:
             logger.warning(f"Error tracking trade closure: {e}")
     
     def _record_closed_trade(self, closing_fill: FillEvent) -> None:
-        """Record a closed trade for persistence and PnL tracking.
-        
-        This captures the trade details at the moment of closure so we can:
-        1. Calculate daily realized PnL correctly
-        2. Persist to database
-        3. Audit strategy performance
+        """Record a closed round trip for the audit trail and daily PnL.
+
+        Stamps the fields the day-fuse arithmetic needs at write time —
+        readers must never re-derive the trading day from a UTC instant
+        (the 00:00–05:30 IST seam; 2026-10-22 recon):
+
+        * ``exit_time`` — tz-aware close instant (book truth, UTC).
+        * ``session_date`` — IST calendar date the close belongs to; the
+          daily-loss day rolls at 00:00 IST.
+        * ``net_pnl`` — **sign convention: > 0 profit, < 0 loss**, net of
+          every commission charged on the round trip (``Position.net_pnl``,
+          Decimal; serialised as str for exactness).
+
+        The append is idempotent on (symbol, exit_time, net_pnl): a
+        crash-replay that re-closes the same ticket must not double-count
+        into the loss fuse.
         """
-        from backtest.forward.trade_persistence import LiveTradePersister
-        
-        # Get the position that was just closed/reduced
-        # Note: After apply_fill, position might be gone if fully closed
-        # We need to reconstruct from fill history
-        
-        # For now, just log the fill as a trade event
+        position = None
+        for candidate in reversed(self.portfolio.closed_positions):
+            if candidate.symbol == closing_fill.symbol:
+                position = candidate
+                break
+        if position is None:
+            logger.debug(
+                "no closed position for %s — skip trade record", closing_fill.symbol
+            )
+            return
+
+        exit_time = position.closed_at or datetime.now(timezone.utc)
+        if exit_time.tzinfo is None:
+            exit_time = exit_time.replace(tzinfo=timezone.utc)
+        net_pnl = position.net_pnl
+        session_date = exit_time.astimezone(_IST).date().isoformat()
+
+        for existing in self._closed_trades:
+            if (
+                existing.get("symbol") == closing_fill.symbol
+                and existing.get("exit_time") == exit_time
+                and Decimal(str(existing.get("net_pnl") or 0)) == net_pnl
+            ):
+                return
+
         trade_record = {
-            'symbol': closing_fill.symbol,
-            'side': closing_fill.side,
-            'quantity': float(closing_fill.quantity),
-            'price': float(closing_fill.fill_price),
-            'timestamp': getattr(closing_fill, 'timestamp', None),
-            'fees': float(getattr(closing_fill, 'total_fees', 0)),
-            'strategy_name': self.config.strategy_name,
-            'portfolio_id': self.portfolio.portfolio_id,
-            'instance_id': self.instance_id,
+            "symbol": closing_fill.symbol,
+            "side": closing_fill.side,
+            "quantity": float(closing_fill.quantity),
+            "price": float(closing_fill.price),
+            "timestamp": getattr(closing_fill, "timestamp", None) or closing_fill.ts,
+            "fees": float(getattr(closing_fill, "total_fees", 0)),
+            "strategy_name": self.config.strategy_name,
+            "portfolio_id": self.portfolio.portfolio_id,
+            "instance_id": self.instance_id,
+            "exit_time": exit_time,
+            "session_date": session_date,
+            "net_pnl": str(net_pnl),
         }
-        
         self._closed_trades.append(trade_record)
-        
-        # Attempt persistence
-        try:
-            persister = LiveTradePersister(portfolio_id=self.portfolio.portfolio_id)
-            # Note: Full persistence requires entry/exit pair matching
-            # For now, we'll rely on the portfolio's built-in trade tracking
-            # which should write to DB via the normal flow
-        except Exception as e:
-            self._trade_persist_failures += 1
-            logger.warning(f"Trade persistence failed: {e}")
 
     # ------------------------------------------------------------------ #
     # Accounting / metrics
@@ -2984,26 +3016,41 @@ class StrategyRunner:
         return deployed
 
     def daily_pnl(self) -> float:
-        """Calculate daily PnL from realized trades + unrealized MTM.
-        
-        FIX 2026-10-14: Previously tried to sum _closed_trades which had no
-        net_pnl field. Now uses portfolio's realized_pnl anchored to session
-        start plus current unrealized MTM, matching the architecture where
-        Portfolio tracks all PnL correctly.
+        """Daily PnL: round trips whose IST session date is today + open MTM.
+
+        Day rolls at 00:00 IST — the 2026-10-22 anchor check found nothing
+        that rolls at 09:15 (``reset_daily_anchors()`` fires only from
+        ``stress_test``), and calendar dates were the chosen semantics.
+        Realized comes from ``portfolio.closed_positions``, not the
+        ``_closed_trades`` audit list: the book round-trips across restarts
+        and the list does not, so a runner restarted mid-day would otherwise
+        lose the day's realized losses from the fuse (guard: the 00:00–05:30
+        IST UTC/IST seam is resolved once, via ``_as_ist_date``).
+        ``Position.net_pnl`` is net of every commission on the round trip.
+
+        The option book stays session-anchored until structure closes stamp
+        a session_date too (next-sprint item).
         """
-        # Realized PnL since session start (portfolio tracks cumulative)
-        # We need to subtract what was already realized before today
-        session_realized = float(self.portfolio.realized_pnl) - self._session_start_realized
-        
-        # Add unrealized PnL on open positions (MTM)
-        unrealized = float(self.portfolio.unrealized_pnl)
-        
+        today = datetime.now(_IST).date().isoformat()
+        realized_today = sum(
+            (
+                p.net_pnl
+                for p in self.portfolio.closed_positions
+                if p.closed_at is not None and _as_ist_date(p.closed_at) == today
+            ),
+            Decimal("0"),
+        )
+
+        total = float(realized_today) + float(self.portfolio.unrealized_pnl)
+
         # Add option book contribution if present
         if self.options_bridge is not None:
-            session_realized += float(self.options_bridge.option_broker.total_realized_pnl) - self._option_session_start_realized
-            unrealized += float(self.options_bridge.unrealized_pnl)
-        
-        return session_realized + unrealized
+            total += float(
+                self.options_bridge.option_broker.total_realized_pnl
+            ) - self._option_session_start_realized
+            total += float(self.options_bridge.unrealized_pnl)
+
+        return total
 
     def win_rate(self) -> float:
         total = self.wins + self.losses
@@ -3740,17 +3787,11 @@ class PaperRunner:
         self.portfolio.mode = "paper"
         self.portfolio.source = self.source_tag
         
-        # Trade persistence and tracking (FIX 2026-10-13)
-        self._closed_trades: List[Dict[str, Any]] = []  # Track all closed trades for PnL calc
-        self._trade_persist_failures: int = 0  # Count failed persistence attempts
-        
-        # Daily PnL anchors (FIX 2026-10-14): snapshot realized PnL at session start
-        # so daily_pnl() can compute "realized since open + unrealized MTM"
-        self._session_start_realized: float = float(self.portfolio.realized_pnl)
-        self._option_session_start_realized: float = 0.0
-        if self.options_bridge is not None:
-            self._option_session_start_realized = float(self.options_bridge.option_broker.total_realized_pnl)
-        
+        # Closed-trade audit list: this class has no _record_closed_trade
+        # producer (fills are applied inside run_engine_loop), so daily_pnl()
+        # reads portfolio.closed_positions directly.
+        self._closed_trades: List[Dict[str, Any]] = []
+
         # Equity curve and metrics
         self.equity_curve: List[Dict[str, Any]] = []
         self._day_start_equity: float = float(portfolio.current_cash)
@@ -3794,52 +3835,34 @@ class PaperRunner:
         return float(self.portfolio.calculate_total_equity())
     
     def daily_pnl(self) -> float:
-        """Calculate daily PnL from realized trades + unrealized MTM.
-        
-        FIX 2026-10-13: Previously used equity - day_start_equity which could
-        include stale historical gains and didn't distinguish realized vs unrealized.
-        Now sums only today's closed trades plus current open position MTM.
+        """Daily PnL: round trips closed today (00:00 IST roll) + open MTM.
+
+        Mirrors :meth:`StrategyRunner.daily_pnl`. The old version filtered
+        ``_closed_trades`` — which this class never populates — on a
+        ``net_pnl`` key nobody wrote, so realized was structurally 0 while
+        the entire lifetime's commission was subtracted every call.
         """
-        from datetime import date
-        
-        # Sum realized PnL from trades closed TODAY
-        today = date.today()
-        realized_today = 0.0
-        
-        if hasattr(self, '_closed_trades'):
-            for trade in self._closed_trades:
-                exit_time = trade.get('exit_time')
-                if exit_time and exit_time.date() == today:
-                    realized_today += trade.get('net_pnl', 0.0)
-        
-        # Add unrealized PnL on open positions (MTM)
-        unrealized = 0.0
-        if hasattr(self, 'portfolio'):
-            for pos in self.portfolio.positions.values():
-                if pos.quantity != 0 and hasattr(pos, 'unrealized_pnl'):
-                    unrealized += float(pos.unrealized_pnl)
-        
-        # Subtract commissions paid today (fees reduce PnL)
-        fees_today = 0.0
-        if hasattr(self, 'portfolio') and hasattr(self.portfolio, 'total_commission'):
-            fees_today = float(self.portfolio.total_commission)
-        
-        return realized_today + unrealized - fees_today
-    
+        today = datetime.now(_IST).date().isoformat()
+        realized_today = sum(
+            (
+                p.net_pnl
+                for p in self.portfolio.closed_positions
+                if p.closed_at is not None and _as_ist_date(p.closed_at) == today
+            ),
+            Decimal("0"),
+        )
+        return float(realized_today) + float(self.portfolio.unrealized_pnl)
+
     @property
     def wins(self) -> int:
-        """Count of profitable closed trades."""
-        if not hasattr(self, '_closed_trades'):
-            return 0
-        return sum(1 for t in self._closed_trades if t.get('net_pnl', 0) > 0)
-    
+        """Count of closed round trips in profit (net_pnl > 0)."""
+        return sum(1 for p in self.portfolio.closed_positions if p.net_pnl > 0)
+
     @property
     def losses(self) -> int:
-        """Count of losing closed trades."""
-        if not hasattr(self, '_closed_trades'):
-            return 0
-        return sum(1 for t in self._closed_trades if t.get('net_pnl', 0) <= 0)
-    
+        """Count of closed round trips not in profit (loss or flat)."""
+        return sum(1 for p in self.portfolio.closed_positions if p.net_pnl <= 0)
+
     def win_rate(self) -> float:
         total = self.wins + self.losses
         return (self.wins / total) if total else 0.0
