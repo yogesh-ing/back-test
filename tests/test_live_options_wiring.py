@@ -459,7 +459,10 @@ def test_register_contract_binds_numeric_token_to_trading_symbol():
 
     assert "error" not in quote
     assert quote["ltp"] == pytest.approx(148.75)
-    assert broker.quote_calls == 1
+    # Two lookups are allowed now: the numeric token is tried first because it
+    # is the only key the WebSocket depth cache understands, and the symbol row
+    # answers when it has nothing (2026-10-22 one-sided-quote fix).
+    assert broker.quote_calls <= 2
 
 
 class TestQuoteProviderRegisterContractConformance:

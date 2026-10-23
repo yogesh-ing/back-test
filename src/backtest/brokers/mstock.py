@@ -304,6 +304,10 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         self._session_token = token
         self._expires_at = expires_at
         self._temp_auth_context = None
+        # Fresh logins must get the depth socket too: without it option
+        # quotes stay LTP-only (bid/ask=0) and BidAskQuoteProvider fails
+        # closed on every entry (2026-10-22: CE/PE runners blocked all day).
+        self._init_websocket_feed(token)
         logger.info("mStock session established (expires at %s)", expires_at.isoformat())
         return {
             "success": True,
@@ -373,7 +377,24 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             
             # Wrap MTicker for synchronous quote access
             self._ws_feed = MStockWebSocketWrapper(ticker)
-            
+
+            # The server closes an un-authenticated socket (clean 1000) within
+            # milliseconds of the first data frame — the login text frame must
+            # go down immediately after every handshake, before any subscribe.
+            # send_login_after_connect() shipped uncalled; the probe
+            # (tools/mticker_ws_probe.py, 2026-10-22) confirmed: without this
+            # frame the feed flaps forever and option quotes stay one-sided.
+            # MTicker._on_open resubscribes known tokens before firing this
+            # callback, so reconnects re-login and re-subscribe in order.
+            def _ws_login(tkr) -> None:
+                try:
+                    tkr.send_login_after_connect()
+                    logger.info("mStock WebSocket LOGIN sent (connection maintained)")
+                except Exception as exc:  # noqa: BLE001 — next reconnect retries
+                    logger.warning("mStock WebSocket LOGIN failed: %s", exc)
+
+            ticker.on_open = _ws_login
+
             # Start WebSocket in background thread
             ticker.connect(threaded=True)
             
@@ -1064,9 +1085,26 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         ws_quote = self._try_ws_quote(instrument_token)
         if ws_quote:
             return ws_quote
-        
+
+        # A numeric instrument token is a WebSocket key only: the HTTP quote
+        # endpoint rejects it ("Invalid symbol", verified live 2026-09-18), so
+        # falling through would burn a request that cannot ever answer. Return
+        # empty and let the caller re-ask with the trading symbol.
+        if self._is_numeric_key(instrument_token):
+            return {}
+
         # Fallback to HTTP LTP-only polling
         return self._http_option_quote(instrument_token)
+
+    @staticmethod
+    def _is_numeric_key(instrument_token: Any) -> bool:
+        """True when the key is (or carries) a numeric instrument token."""
+        token = getattr(instrument_token, "instrument_token", instrument_token)
+        try:
+            int(str(token))
+        except (TypeError, ValueError):
+            return False
+        return True
     
     def _try_ws_quote(self, instrument_token: str) -> dict[str, Any]:
         """Attempt to get quote from WebSocket cache.

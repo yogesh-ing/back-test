@@ -19,6 +19,7 @@ class MStockWebSocketWrapper:
         self._quotes: Dict[str, dict] = {}
         self._connected = threading.Event()
         self._lock = threading.Lock()
+        self._last_mode_logged: Dict[str, str] = {}
         
         # Override MTicker callbacks to capture ticks
         original_on_ticks = getattr(mticker_instance, 'on_ticks', None)
@@ -32,7 +33,18 @@ class MStockWebSocketWrapper:
                     if token:
                         normalized = self._normalize_tick(tick)
                         self._quotes[token] = normalized
-                        logger.debug("Cached tick for token %s: LTP=%s", token, normalized.get('ltp'))
+                        # Log mode/depth transitions per token (2026-10-23:
+                        # app stayed quote-mode for option tokens while a raw
+                        # harness got full depth on the same server).
+                        mode = str(normalized.get('mode'))
+                        has_depth = bool(normalized.get('depth'))
+                        sig = f"{mode}/{'depth' if has_depth else 'flat'}"
+                        if self._last_mode_logged.get(token) != sig:
+                            self._last_mode_logged[token] = sig
+                            logger.info(
+                                "tick profile token=%s mode=%s depth=%s ltp=%s",
+                                token, mode, has_depth, normalized.get('ltp'),
+                            )
             
             if original_on_ticks:
                 original_on_ticks(ws, ticks)

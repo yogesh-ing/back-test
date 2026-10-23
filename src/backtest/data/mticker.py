@@ -372,11 +372,27 @@ class MTicker(object):
     def send_login_after_connect(self):
         try:
             #Send Login:AccessToken to socket to maintain connection
-            self.ws.sendMessage(six.b(f"LOGIN:{self.access_token}"))
+            self._send_frame(f"LOGIN:{self.access_token}")
             return True
         except Exception as e:
             self._close(reason="Error while subscribe: {}".format(str(e)))
             raise
+
+    def _send_frame(self, payload):
+        """Send a text frame from any thread, safely.
+
+        Twisted's transport is not thread-safe: ``sendMessage`` called from a
+        runner/Flask thread races the reactor's own writes (ping loop, parse
+        buffers) and the frame can be corrupted or silently dropped — the
+        2026-10-23 live symptom: subscribe survived but set_mode never took
+        effect server-side, so option quotes stayed one-sided all session.
+        Marshal every send onto the reactor thread instead.
+        """
+        data = six.b(payload)
+        if reactor.running:
+            reactor.callFromThread(self.ws.sendMessage, data)
+        else:
+            self.ws.sendMessage(data)
 
     def subscribe(self, instrument_tokens):
         """
@@ -385,9 +401,7 @@ class MTicker(object):
         - `instrument_tokens` is list of instrument instrument_tokens to subscribe
         """
         try:
-            self.ws.sendMessage(
-                six.b(json.dumps({"a": self._message_subscribe, "v": instrument_tokens}))
-            )
+            self._send_frame(json.dumps({"a": self._message_subscribe, "v": instrument_tokens}))
 
             for token in instrument_tokens:
                 self.subscribed_tokens[token] = self.MODE_QUOTE
@@ -404,9 +418,7 @@ class MTicker(object):
         - `instrument_tokens` is list of instrument_tokens to unsubscribe.
         """
         try:
-            self.ws.sendMessage(
-                six.b(json.dumps({"a": self._message_unsubscribe, "v": instrument_tokens}))
-            )
+            self._send_frame(json.dumps({"a": self._message_unsubscribe, "v": instrument_tokens}))
             for token in instrument_tokens:
                 try:
                     del (self.subscribed_tokens[token])
@@ -428,9 +440,7 @@ class MTicker(object):
         - `instrument_tokens` is list of instrument tokens on which the mode should be applied
         """
         try:
-            self.ws.sendMessage(
-                six.b(json.dumps({"a": self._message_setmode, "v": [mode, instrument_tokens]}))
-            )
+            self._send_frame(json.dumps({"a": self._message_setmode, "v": [mode, instrument_tokens]}))
 
             # Update modes
             for token in instrument_tokens:
@@ -497,15 +507,19 @@ class MTicker(object):
             self._parse_text_message(payload)
 
     def _on_open(self, ws):
+        # LOGIN must precede any resubscribe: the server clean-closes (1000)
+        # a socket whose first frame is a subscribe, so resubscribing before
+        # the on_open login callback flaps the reconnect loop forever
+        # (2026-10-23 live flap). on_open fires the LOGIN frame first.
+        if self.on_open:
+            self.on_open(self)
+
         # Resubscribe if its reconnect
         if not self._is_first_connect:
             self.resubscribe()
 
         # Set first connect to false once its connected first time
         self._is_first_connect = False
-        
-        if self.on_open:
-            return self.on_open(self)
 
     def _on_reconnect(self, attempts_count):
         if self.on_reconnect:
@@ -701,9 +715,13 @@ class MTicker(object):
                             except Exception as e:
                                 d["last_traded_timestamp"] = None
 
-                            d["open_interest"]=self._unpack_int(packet,48,52)/divisor,
-                            d["open_interest_high"]=self._unpack_int(packet,52,56)/divisor,
-                            d["open_interest_low"]=self._unpack_int(packet,56,60)/divisor,
+                            # NO trailing commas here — a tuple in open_interest
+                            # crashes float() in the reactor on every full-mode
+                            # tick and kills the socket (2026-10-23 incident;
+                            # docs/MSTOCK-WS-FEED-ROOT-CAUSE-2026-10-23.md).
+                            d["open_interest"]=self._unpack_int(packet,48,52)/divisor
+                            d["open_interest_high"]=self._unpack_int(packet,52,56)/divisor
+                            d["open_interest_low"]=self._unpack_int(packet,56,60)/divisor
                             try:
                                 d["exchange_timestamp"] = self.convert_from_unix_timestamp(self._unpack_int(packet, 60, 64)).strftime("%Y-%m-%dT%I:%M:%S%p")
                             except Exception as e:

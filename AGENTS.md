@@ -39,3 +39,13 @@ Keeping it fresh: after major merges, refactors, or new services, rebuild the gr
   checkout directly unless explicitly asked.
 - Runtime artifacts (`*.log`, `src/data/portfolio_state.json`, `server_5000.log`)
   are not code — do not commit them.
+
+## Fragile code — do not touch without reading the incident doc
+
+- `src/backtest/data/mticker.py` is a **patched vendor SDK**: all frames MUST go
+  through `_send_frame()` (never `self.ws.sendMessage` directly — Twisted's
+  transport is not thread-safe); `_on_open()` order is LOGIN-then-resubscribe;
+  the parser assignments must never gain trailing commas (a tuple there kills
+  the reactor on every full-mode option tick). Before editing this file, read
+  `docs/MSTOCK-WS-FEED-ROOT-CAUSE-2026-10-23.md` and run
+  `tests/test_mticker_ws_fixes.py` before and after.

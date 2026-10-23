@@ -456,6 +456,14 @@ class OptionsBridge:
             # intent next bar if it still wants the trade; the −₹41,844
             # churn lesson stands.
             return None
+        logger.info(
+            "INTENT_RECEIVED strategy=%s structure=%s spot=%s bar=%s quantity=%s",
+            strategy_name,
+            intent.get("structure"),
+            getattr(view, "spot_price", None),
+            self._bar_dt.isoformat() if self._bar_dt is not None else None,
+            intent.get("quantity", 1),
+        )
         from backtest.strategy.execution import DirectionRule, ExecutionSpecError
 
         try:
@@ -2117,6 +2125,23 @@ class OptionsBridge:
                 REASON_NO_STRIKE,
                 f"{underlying}: no strike on the {expiry} chain within tolerance of {spot}",
             )
+        logger.info(
+            "ENTRY_SELECT strategy=%s underlying=%s spot=%s expiry=%s strikes=%s tokens=%s",
+            strategy_name,
+            underlying,
+            spot,
+            expiry,
+            [str(s) for s in strikes],
+            [
+                getattr(chain.get(s, {}), "instrument_token", None)
+                if option_type != "BOTH"
+                else {
+                    side: getattr(chain.get(s, {}).get(side, {}), "instrument_token", None)
+                    for side in ("CE", "PE")
+                }
+                for s in strikes
+            ],
+        )
         self._validate_entry_contracts(strikes, chain, option_type)
         # A declared fixed distance (strict mode: the DirectionRule the
         # strategy/spec stated) reaches builders that select their own
@@ -2150,6 +2175,16 @@ class OptionsBridge:
 
         self.open_structure_id = positions[0].structure_id if positions else None
         self.executed_count += 1
+        logger.info(
+            "ENTRY_FILLED strategy=%s structure_id=%s fills=%s",
+            strategy_name,
+            self.open_structure_id,
+            [
+                f"{getattr(p, 'trading_symbol', '')} {getattr(p, 'side', '')}"
+                f" x{getattr(p, 'quantity', 0)} @{getattr(p, 'entry_price', '0')}"
+                for p in positions
+            ],
+        )
         self._journal_intent(
             KIND_EXECUTED,
             intent,

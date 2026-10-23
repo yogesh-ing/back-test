@@ -426,9 +426,13 @@ class LiveQuoteProvider:
         if contract is not None and getattr(contract, "trading_symbol", None):
             self._cache.pop(str(contract.trading_symbol), None)
 
-    def get_quote(self, instrument_token: str) -> dict[str, Any]:
+    def get_quote(
+        self, instrument_token: str, *, numeric_token: Any = None
+    ) -> dict[str, Any]:
         key = str(instrument_token)
         contract = self._contracts.get(key)
+        if numeric_token in (None, ""):
+            numeric_token = getattr(contract, "instrument_token", None) if contract else None
         if contract is not None and getattr(contract, "trading_symbol", None):
             key = str(contract.trading_symbol)
         now = time.monotonic()
@@ -438,7 +442,7 @@ class LiveQuoteProvider:
             if now - ts < self.cache_ttl:
                 return quote
 
-        quote = self._fetch(key)
+        quote = self._fetch(key, numeric_token=numeric_token)
         # Never cache a failure (live-session lesson 2026-09-21): a transient
         # broker hiccup returns ltp=0; caching it pins the zero for the whole
         # TTL and a fill landing inside that window books a phantom ₹0 entry.
@@ -447,12 +451,34 @@ class LiveQuoteProvider:
             self._cache[key] = (quote, now)
         return quote
 
-    def _fetch(self, instrument_token: str) -> dict[str, Any]:
-        try:
-            raw = self.broker.get_option_quote(instrument_token)
-        except Exception as exc:  # noqa: BLE001 — quotes must never crash the UI
-            logger.error("LiveQuoteProvider fetch failed for %s: %s", instrument_token, exc)
-            return {"ltp": 0.0, "bid": 0.0, "ask": 0.0, "error": str(exc)}
+    def _fetch(self, instrument_token: str, *, numeric_token: Any = None) -> dict[str, Any]:
+        # mStock's WebSocket depth cache is keyed on the NUMERIC instrument
+        # token and carries real bid/ask. The HTTP quote endpoint only accepts
+        # the trading symbol and answers LTP-only — one-sided, so execution
+        # fails closed (2026-10-22: CE blocked all day on a healthy socket
+        # because the symbol was the only key ever tried). Ask the numeric
+        # token first; keep the symbol row as the LTP fallback.
+        keys: list[Any] = []
+        if numeric_token not in (None, ""):
+            keys.append(numeric_token)
+        keys.append(instrument_token)
+
+        raw: dict[str, Any] = {}
+        failure: str | None = None
+        for idx, key in enumerate(keys):
+            try:
+                row = self.broker.get_option_quote(key) or {}
+            except Exception as exc:  # noqa: BLE001 — quotes must never crash the UI
+                failure = str(exc)
+                continue
+            if row.get("bid") or row.get("ask") or idx == len(keys) - 1:
+                raw = row
+                failure = None
+                break
+            raw = raw or row
+
+        if failure is not None and not raw:
+            return {"ltp": 0.0, "bid": 0.0, "ask": 0.0, "error": failure}
 
         if not raw:
             return {"ltp": 0.0, "bid": 0.0, "ask": 0.0, "error": "empty quote row"}
@@ -475,6 +501,18 @@ class LiveQuoteProvider:
             out["error"] = str(raw["error"])
         elif ltp <= 0:
             out["error"] = "zero or missing ltp"
+        if not out["bid"] or not out["ask"]:
+            # One-sided / depth-miss visibility: every NO_EXECUTION_QUOTE
+            # upstream starts here, so name the key tried and what came back.
+            logger.info(
+                "QUOTE_ONE_SIDED key=%s numeric=%s ltp=%s bid=%s ask=%s error=%s",
+                instrument_token,
+                numeric_token,
+                out["ltp"],
+                out["bid"],
+                out["ask"],
+                out.get("error"),
+            )
         return out
 
 
@@ -781,12 +819,17 @@ class LiveChainProvider:
         token (verified live 2026-09-18: ``NFO:NIFTY26SEP23300CE`` → 200 with
         ``last_price``; ``NFO:73923`` → "Invalid symbol"). Translate through
         the registered chain contracts; unknown keys pass through unchanged.
+
+        The numeric token is passed down as well: it is the only key the
+        WebSocket depth cache understands, and that cache is the only source
+        of a two-sided quote (the symbol route is LTP-only).
         """
         key = str(instrument_token)
         contract = self._contracts.get(key)
+        numeric = key if key.isdigit() else getattr(contract, "instrument_token", None)
         if contract is not None and getattr(contract, "trading_symbol", None):
             key = str(contract.trading_symbol)
-        return self._quotes.get_quote(key)
+        return self._quotes.get_quote(key, numeric_token=numeric)
 
     def get_quotes_bulk(self, tokens: list[str]) -> dict[str, dict[str, Any]]:
         """Quotes for many tokens (each individually error-soft)."""

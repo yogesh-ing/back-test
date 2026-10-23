@@ -58,7 +58,7 @@ import random
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, ClassVar, Iterator, Mapping, Sequence
 
 from sqlalchemy import Connection, create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -209,6 +209,11 @@ class DatabaseManager:
 
     # -- construction ------------------------------------------------------
 
+    #: Process-wide manager returned by :meth:`from_env`, with the key it was built for.
+    _shared: ClassVar["DatabaseManager | None"] = None
+    _shared_key: ClassVar["DatabaseConfig | None"] = None
+    _shared_lock: ClassVar[threading.Lock] = threading.Lock()
+
     @classmethod
     def from_env(
         cls,
@@ -220,8 +225,36 @@ class DatabaseManager:
 
         Any keyword override is passed through to
         :func:`~backtest.db.config.load_config`.
+
+        One manager is reused per configuration. A manager owns a connection
+        pool, and call sites that just need a session used to build a fresh one
+        every time — on 2026-10-22 the market-status poll inside the
+        intelligence loop opened 200 Postgres connections in 8 minutes, hit
+        ``max_connections``, and wedged there while bar flow to the option
+        runners stopped behind it. A disconnected (``with``-block) or
+        differently-configured manager is never handed out again.
         """
-        return cls(load_config(path=path, profile=profile, **overrides))
+        config = load_config(path=path, profile=profile, **overrides)
+        # The key must be the RESOLVED config, not the call args and not the
+        # bare URL: tests flip the URL through environment variables
+        # (FORWARD_TEST_DB_URL), invisible to args, and differing overrides
+        # (statement timeout, pool bounds) for one URL must not be served a
+        # manager built for another (2026-10-23: an args-only key handed 162
+        # suite tests the previous test's manager; a URL-only key made
+        # test_postgres_sets_statement_timeout_and_app_name see the pool
+        # bounds of the test that ran before it). DatabaseConfig is a frozen
+        # dataclass — equality/hash cover every engine-relevant field and
+        # deliberately exclude the diagnostics-only _source map.
+        key = config
+        with cls._shared_lock:
+            shared = cls._shared
+            if shared is not None and (shared._closed or cls._shared_key != key):
+                shared = None
+            if shared is None:
+                shared = cls(config)
+                cls._shared = shared
+                cls._shared_key = key
+            return shared
 
     @property
     def config(self) -> DatabaseConfig:

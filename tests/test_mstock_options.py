@@ -245,6 +245,27 @@ class TestGetOptionQuote:
         # transient-failure retry: two attempts before giving up
         assert mock_get.call_count == 2
 
+    @patch("backtest.brokers.mstock.requests.get")
+    def test_numeric_token_never_reaches_the_http_endpoint(self, mock_get):
+        """A numeric instrument token is a WebSocket key only (2026-10-22).
+
+        The HTTP quote endpoint answers "Invalid symbol" for it, so falling
+        through would burn a request on every option quote and leave the row
+        LTP-only — which is what blocked CE all day on a healthy socket.
+        """
+        broker = _make_broker_with_session()
+        broker._ws_feed = None  # no socket: the WS lookup answers nothing, and HTTP must be skipped
+
+        assert broker.get_option_quote("51338") == {}
+        mock_get.assert_not_called()
+
+        resp = MagicMock()
+        resp.json.return_value = {"data": {"ltp": 150.5}}
+        resp.raise_for_status = MagicMock()
+        mock_get.return_value = resp
+        assert broker.get_option_quote("NFO_NIFTY26SEP24500CE")["ltp"] == 150.5
+        assert mock_get.call_count >= 1, "the trading symbol keeps the HTTP route"
+
 
 # ---------------------------------------------------------------------------
 # get_option_chain_data tests (mocked HTTP)
