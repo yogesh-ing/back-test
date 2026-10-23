@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Optional, Sequence
 
 import pandas as pd
-from sqlalchemy import bindparam, create_engine, text
+from sqlalchemy import bindparam, text
 
 from backtest.data.base import (
     CANONICAL_TIMEFRAMES,
@@ -61,6 +61,21 @@ _INTERVAL_TO_RULE = {
 #: produced a spurious "not found in database" for a timeframe it could have
 #: resampled perfectly well.
 _SOURCE_TF_PRIORITY = list(CANONICAL_TIMEFRAMES)
+
+
+def base_stored_timeframe(interval: str | None) -> str:
+    """Derive the canonical stored ``market_data_cache.timeframe`` for ``interval``.
+
+    ``market_data_cache`` stores ``1day`` for daily/weekly series and ``1min``
+    for intraday series (resampled up on read). Deriving the stored granularity
+    directly avoids any unbounded ``GROUP BY symbol, timeframe`` discovery scan
+    across the 46M-row hypertable and lets bulk warmup hit ``ix_mdc_tf_ts``
+    (migration 019) + hypertable ``ts`` chunk exclusion in a single query.
+    """
+    norm = normalize_timeframe(interval or "1day") or "1day"
+    if norm in ("1day", "1week"):
+        return "1day"
+    return "1min"
 
 
 def window_bounds(start: str, end: str) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -116,19 +131,14 @@ class DbSource:
 
     def _get_engine(self):
         if self._engine is None:
-            # Share the process-wide DatabaseManager pool (POOL-3, 2026-10-24)
-            # instead of spawning an unbounded Engine per DbSource() instance.
-            explicit_url = getattr(self, "_explicit_db_url", None)
-            try:
-                from backtest.db.manager import DatabaseManager
+            # Share the process-wide DatabaseManager pool (POOL-3, 2026-10-24).
+            # Never fall back to a private create_engine(): an unpooled engine
+            # per DbSource() silently re-opens connection leaks under load.
+            from backtest.db.manager import DatabaseManager
 
-                overrides = {"url": explicit_url} if explicit_url else {}
-                self._engine = DatabaseManager.from_env(**overrides).engine
-            except Exception as exc:  # noqa: BLE001 — fallback for exotic URLs in tests
-                db_url = getattr(self, "db_url", "")
-                masked = db_url.rsplit("@", 1)[-1] if "@" in db_url else db_url
-                log.debug("[db] DatabaseManager fallback (%s), creating engine for %s", exc, masked)
-                self._engine = create_engine(db_url)
+            explicit_url = getattr(self, "_explicit_db_url", None)
+            overrides = {"url": explicit_url} if explicit_url else {}
+            self._engine = DatabaseManager.from_env(**overrides).engine
         return self._engine
 
     def get_candles_bulk(
@@ -137,95 +147,76 @@ class DbSource:
         start: str,
         end: str,
         interval: str = "1day",
+        *,
+        source_timeframe: Optional[str] = None,
     ) -> dict[str, pd.DataFrame]:
-        """Load OHLCV frames for many symbols in a single bulk SQL query per stored granularity.
+        """Load OHLCV frames for many symbols in a SINGLE ``ts``-bounded SQL query.
 
-        Unlike :meth:`get_candles`, missing or unserviceable symbols are omitted
-        from the returned mapping rather than raising, so a 50-stock pool warmup
-        never fails because one ticker is suspended or not yet ingested.
+        Derives the stored base timeframe directly from ``interval`` (``1day``
+        for daily/weekly, ``1min`` for intraday — overrideable via
+        ``source_timeframe``) so PostgreSQL / TimescaleDB prunes hypertable
+        chunks on ``ts >= :start AND ts < :end`` and scans ``ix_mdc_tf_ts``
+        (migration 019) / ``ix_mdc_symbol_tf_ts`` in one round-trip with zero
+        unbounded discovery queries. Missing symbols are omitted rather than
+        raising so a 50-stock pool warmup degrades per-symbol cleanly.
         """
         cleaned = sorted({str(s).strip().upper() for s in symbols if str(s).strip()})
         if not cleaned:
             return {}
 
+        req_tf = normalize_timeframe(interval) or interval
+        source_tf = (
+            normalize_timeframe(source_timeframe) or source_timeframe
+            if source_timeframe
+            else base_stored_timeframe(req_tf)
+        )
+        if not _can_serve(source_tf, req_tf):
+            return {}
+
         engine = self._get_engine()
-        meta_query = text(
-            """
-            SELECT symbol, timeframe
-            FROM market_data_cache
-            WHERE symbol IN :symbols
-            GROUP BY symbol, timeframe
-            """
-        ).bindparams(bindparam("symbols", expanding=True))
-
-        available_by_symbol: dict[str, set[str]] = {}
-        with engine.connect() as conn:
-            for row in conn.execute(meta_query, {"symbols": cleaned}).mappings():
-                sym = str(row["symbol"]).strip().upper()
-                tf = str(row["timeframe"] or "").strip()
-                if sym and tf:
-                    available_by_symbol.setdefault(sym, set()).add(tf)
-
-        if not available_by_symbol:
-            return {}
-
-        symbols_by_source_tf: dict[str, list[str]] = {}
-        for sym, tfs in available_by_symbol.items():
-            chosen: Optional[str] = None
-            if interval in ("1day", "1week") and interval in tfs:
-                chosen = interval
-            else:
-                for candidate in _SOURCE_TF_PRIORITY:
-                    if candidate in tfs:
-                        chosen = candidate
-                        break
-            if chosen is None or not _can_serve(chosen, interval):
-                continue
-            symbols_by_source_tf.setdefault(chosen, []).append(sym)
-
-        if not symbols_by_source_tf:
-            return {}
-
         lo, hi_exclusive = window_bounds(start, end)
         data_query = text(
             """
             SELECT symbol, ts, open, high, low, close, volume
             FROM market_data_cache
-            WHERE symbol IN :symbols
-              AND timeframe = :timeframe
+            WHERE timeframe = :timeframe
               AND ts >= :start
               AND ts < :end
-            ORDER BY symbol ASC, ts ASC
+              AND symbol IN :symbols
+            ORDER BY ts ASC
             """
         ).bindparams(bindparam("symbols", expanding=True))
 
+        df_all = pd.read_sql(
+            data_query,
+            engine,
+            params={
+                "timeframe": source_tf,
+                "start": lo.to_pydatetime(),
+                "end": hi_exclusive.to_pydatetime(),
+                "symbols": cleaned,
+            },
+        )
+        if df_all.empty:
+            return {}
+
+        df_all["symbol"] = df_all["symbol"].astype(str).str.strip().str.upper()
+        ts_series = pd.to_datetime(df_all["ts"])
+        if getattr(ts_series.dt, "tz", None) is not None:
+            ts_series = ts_series.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+        df_all["ts"] = ts_series
+
         out: dict[str, pd.DataFrame] = {}
-        for source_tf, tf_symbols in symbols_by_source_tf.items():
-            df_all = pd.read_sql(
-                data_query,
-                engine,
-                params={
-                    "symbols": tf_symbols,
-                    "timeframe": source_tf,
-                    "start": lo.to_pydatetime(),
-                    "end": hi_exclusive.to_pydatetime(),
-                },
-            )
-            if df_all.empty:
-                continue
-            df_all["symbol"] = df_all["symbol"].astype(str).str.strip().str.upper()
-            ts_series = pd.to_datetime(df_all["ts"])
-            if getattr(ts_series.dt, "tz", None) is not None:
-                ts_series = ts_series.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
-            df_all["ts"] = ts_series
-            for sym, grp in df_all.groupby("symbol", sort=False):
-                sub = grp.drop(columns=["symbol"]).set_index("ts")
-                try:
-                    if source_tf != interval and interval in _INTERVAL_TO_RULE:
-                        sub = self._resample(sub, interval)
-                    out[str(sym)] = normalize_candles(sub)
-                except ValueError as exc:
-                    log.debug("[db] bulk skip %s (%s): %s", sym, interval, exc)
+        for sym, grp in df_all.groupby("symbol", sort=False):
+            sub = grp.drop(columns=["symbol"]).set_index("ts")
+            if not sub.index.is_monotonic_increasing:
+                sub = sub.sort_index()
+            try:
+                if source_tf != req_tf and req_tf in _INTERVAL_TO_RULE:
+                    sub = self._resample(sub, req_tf)
+                out[str(sym)] = normalize_candles(sub)
+            except ValueError as exc:
+                log.debug("[db] bulk skip %s (%s): %s", sym, req_tf, exc)
         return out
 
     def get_candles(

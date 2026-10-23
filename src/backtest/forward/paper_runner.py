@@ -1242,7 +1242,10 @@ class StrategyRunner:
         self.max_bars_per_symbol: int = MAX_BARS_PER_SYMBOL
         self.warmup_status: str = "IDLE"
         self.warmup_bars_seeded: int = 0
+        self.warmup_target_bars: int = 0
+        self.warmup_quorum_bars: int = 0
         self.warmup_degraded_symbols: List[str] = []
+        self.warmup_reason: Optional[str] = None
         self.duplicate_of: Optional[str] = None
         self._bar_sealed_since_tick_end: bool = False
 
@@ -2088,6 +2091,9 @@ class StrategyRunner:
         bars_by_symbol: Dict[str, Any],
         *,
         degraded_symbols: Optional[List[str]] = None,
+        target_bars: Optional[int] = None,
+        quorum_bars: Optional[int] = None,
+        warmup_reason: Optional[str] = None,
     ) -> int:
         """Silently populate historical + intraday warmup bars (Caveat Q-6).
 
@@ -2153,12 +2159,47 @@ class StrategyRunner:
                             logger.debug("Warmup option spot sync skipped", exc_info=True)
                 self._mark_to_market(record=False)
 
+            if target_bars is not None:
+                self.warmup_target_bars = max(0, int(target_bars))
+            if quorum_bars is not None:
+                self.warmup_quorum_bars = max(0, int(quorum_bars))
             self.warmup_bars_seeded = seeded_total
-            self.warmup_degraded_symbols = sorted(
-                {str(s).strip().upper() for s in (degraded_symbols or []) if str(s).strip()}
-            )
-            self.warmup_status = "DEGRADED" if self.warmup_degraded_symbols else "READY"
+            if degraded_symbols is not None:
+                degraded_set = {
+                    str(s).strip().upper() for s in degraded_symbols if str(s).strip()
+                }
+            elif self.warmup_quorum_bars > 0:
+                degraded_set = {
+                    sym
+                    for sym, buf in self._bars.items()
+                    if len(buf) < self.warmup_quorum_bars
+                }
+            else:
+                degraded_set = set()
+            self.warmup_degraded_symbols = sorted(degraded_set)
+            if self.warmup_degraded_symbols:
+                self.warmup_status = "DEGRADED"
+                self.warmup_reason = warmup_reason or (
+                    f"{len(self.warmup_degraded_symbols)}/{len(self._bars)} symbol(s) "
+                    f"below quorum (>={self.warmup_quorum_bars} bars)"
+                )
+            else:
+                self.warmup_status = "READY"
+                self.warmup_reason = None
         return seeded_total
+
+    def _refresh_warmup_quorum(self) -> None:
+        """Promote ``DEGRADED -> READY`` once live bars fill all symbols to quorum."""
+        if self.warmup_status != "DEGRADED" or self.warmup_quorum_bars <= 0:
+            return
+        remaining = [
+            sym for sym, buf in self._bars.items() if len(buf) < self.warmup_quorum_bars
+        ]
+        if remaining != self.warmup_degraded_symbols:
+            self.warmup_degraded_symbols = sorted(remaining)
+        if not self.warmup_degraded_symbols:
+            self.warmup_status = "READY"
+            self.warmup_reason = None
 
     def mark_live_price(self, symbol: str, price: float, ts: str = "") -> None:
         """Update intra-timeframe MTM, option marks, manual stops, and risk breakers.
@@ -2227,6 +2268,7 @@ class StrategyRunner:
                 self.last_price[symbol] = price
                 self.bars_processed += 1
                 self._bar_sealed_since_tick_end = True
+                self._refresh_warmup_quorum()
 
                 self._roll_trading_day(ts)
                 self.portfolio.update_prices({symbol: price})
@@ -2240,18 +2282,23 @@ class StrategyRunner:
 
                 if self.config.target_type == TARGET_SINGLE:
                     # Single-symbol runners act immediately on their own bar.
-                    # Option runners are exempt from the warmup gate (2026-09-18):
-                    # the bridge owns history needs (ATM strike = closest chain
-                    # strike, no lookback math), and an "immediate entry" spec
-                    # cannot wait 12 bars for a warmup designed for lookback
-                    # indicators. The strategy contract is unaffected.
-                    warmup_ok = (
-                        self.warmup_status != "WARMING_UP"
-                        and (
-                            len(self._bars[symbol]) >= MIN_WARMUP_BARS
-                            or self.options_bridge is not None
+                    # Unconditional option runners (warmup_quorum_bars == 0) stay
+                    # exempt from the 12-bar floor; lookback strategies warmed via
+                    # WarmupService require >= warmup_quorum_bars so an EMA(200)
+                    # runner degraded to 1 intraday session never fires on 25 bars.
+                    if self.warmup_quorum_bars > 0:
+                        warmup_ok = (
+                            self.warmup_status != "WARMING_UP"
+                            and len(self._bars[symbol]) >= self.warmup_quorum_bars
                         )
-                    )
+                    else:
+                        warmup_ok = (
+                            self.warmup_status != "WARMING_UP"
+                            and (
+                                len(self._bars[symbol]) >= MIN_WARMUP_BARS
+                                or self.options_bridge is not None
+                            )
+                        )
                     if warmup_ok:
                         if self.options_bridge is not None:
                             # Gap G3.2: option instrument → expression layer.
@@ -2639,8 +2686,9 @@ class StrategyRunner:
     def _process_pool(self, tick_ts: str) -> None:
         """Evaluate every basket symbol; rank candidates; enter top-K."""
         scores: List[tuple] = []  # (score, symbol, signal)
+        min_bars = max(MIN_WARMUP_BARS, self.warmup_quorum_bars)
         for symbol in self.config.symbols:
-            if len(self._bars[symbol]) < MIN_WARMUP_BARS:
+            if len(self._bars[symbol]) < min_bars:
                 continue
             signal = self._signal_for(symbol)
             if signal is None:
@@ -3468,7 +3516,13 @@ class StrategyRunner:
                 "bars_processed": self.bars_processed,
                 "warmup_status": self.warmup_status,
                 "warmup_bars_seeded": self.warmup_bars_seeded,
+                "warmup_target_bars": self.warmup_target_bars,
+                "warmup_quorum_bars": self.warmup_quorum_bars,
+                "warmup_min_symbol_bars": (
+                    min((len(buf) for buf in self._bars.values()), default=0)
+                ),
                 "warmup_degraded_symbols": list(self.warmup_degraded_symbols),
+                "warmup_reason": self.warmup_reason,
                 "duplicate_of": self.duplicate_of,
                 "last_bar_ts": max(self._last_bar_ts.values()) if self._last_bar_ts else None,
                 "created_ts": self.created_ts,

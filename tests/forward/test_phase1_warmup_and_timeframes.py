@@ -14,13 +14,15 @@ Covers:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
+import time
 from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
 
-from backtest.data.db_source import DbSource
+from backtest.data.db_source import DbSource, base_stored_timeframe
 from backtest.data.mstock_live_feed import (
     MStockLiveFeed,
     clear_scriptmaster_cache,
@@ -315,20 +317,31 @@ class TestDbSourceSharedPoolAndBulk:
         src._engine = None
         assert src._get_engine() is fake_engine
 
-    def test_get_candles_bulk_fetches_all_symbols_in_single_query(
+    def test_get_engine_never_falls_back_to_private_create_engine(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setattr(
+            "backtest.db.DatabaseManager.from_env",
+            classmethod(lambda cls, **kw: (_ for _ in ()).throw(ConnectionError("db down"))),
+        )
         src = DbSource.__new__(DbSource)
-        fake_conn = MagicMock()
-        fake_conn.execute.return_value.mappings.return_value = [
-            {"symbol": "RELIANCE", "timeframe": "1min"},
-            {"symbol": "TCS", "timeframe": "1min"},
-        ]
+        src._engine = None
+        with pytest.raises(ConnectionError, match="db down"):
+            src._get_engine()
+
+    def test_get_candles_bulk_fetches_all_symbols_in_single_ts_bounded_query(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert base_stored_timeframe("15min") == "1min"
+        assert base_stored_timeframe("1hour") == "1min"
+        assert base_stored_timeframe("1day") == "1day"
+        assert base_stored_timeframe("1week") == "1day"
+
+        src = DbSource.__new__(DbSource)
         fake_engine = MagicMock()
-        fake_engine.connect.return_value.__enter__.return_value = fake_conn
         src._engine = fake_engine
 
-        # Return interleaved UTC timestamptz rows for two symbols
+        # Return interleaved UTC timestamptz 1min rows for two symbols
         raw_df = pd.DataFrame(
             [
                 {
@@ -354,15 +367,23 @@ class TestDbSourceSharedPoolAndBulk:
         calls: List[Any] = []
 
         def _fake_read_sql(stmt: Any, conn: Any, params: Any = None) -> pd.DataFrame:
-            calls.append((stmt, params))
+            calls.append((str(stmt), params))
             return raw_df.copy()
 
         monkeypatch.setattr(pd, "read_sql", _fake_read_sql)
         res = src.get_candles_bulk(
-            ["RELIANCE", "TCS"], "2026-10-20", "2026-10-23", interval="1min"
+            ["RELIANCE", "TCS"], "2026-10-20", "2026-10-23", interval="15min"
         )
 
+        # Zero unbounded discovery queries — engine.connect() never touched!
+        fake_engine.connect.assert_not_called()
         assert len(calls) == 1
+        sql_text, params = calls[0]
+        assert "GROUP BY" not in sql_text.upper()
+        assert "WHERE timeframe = :timeframe" in sql_text
+        assert "ts >= :start" in sql_text and "ts < :end" in sql_text
+        assert "ORDER BY ts ASC" in sql_text
+        assert params["timeframe"] == "1min"
         assert set(res.keys()) == {"RELIANCE", "TCS"}
         assert str(res["RELIANCE"].index[0]) == "2026-10-23 09:15:00"
         assert float(res["TCS"]["close"].iloc[0]) == 4115.0
@@ -629,8 +650,8 @@ class TestPortfolioManagerWarmupAndAggregation:
         # Simulate spawning at 13:05 IST on 2026-10-23 (07:35 UTC)
         fixed_now = datetime(2026, 10, 23, 7, 35, 0, tzinfo=timezone.utc)
         fake_db = MagicMock()
-        # Historical 1min rows from previous day
-        db_idx = pd.date_range("2026-10-22 09:15:00", periods=180, freq="1min")
+        # Historical 15min rows across previous sessions (>= 48 quorum for target=60)
+        db_idx = pd.date_range("2026-10-20 09:15:00", periods=60, freq="15min")
         db_df = pd.DataFrame(
             {
                 "open": 2900.0,
@@ -696,7 +717,9 @@ class TestPortfolioManagerWarmupAndAggregation:
         rid = mgr.add_runner(cfg, start=True)
         runner = mgr.get_runner(rid)
         assert runner is not None
+        assert fake_db.get_candles_bulk.call_count == 1
         assert runner.warmup_status == "READY"
+        assert runner.warmup_reason is None
         # Last seeded bar is 12:45 (unsealed 13:00..13:04 held in bar_aggregator!)
         assert runner._last_bar_ts["RELIANCE"] == "2026-10-23 12:45:00"
 
@@ -722,6 +745,149 @@ class TestPortfolioManagerWarmupAndAggregation:
         assert last_bar["high"] == 2940.0
         assert last_bar["low"] == 2918.0
         assert last_bar["volume"] == 1500.0
+
+    def test_db_timeout_intraday_only_marks_ema200_degraded_and_blocks_unconverged_entry(
+        self,
+    ) -> None:
+        """Regression for live DB audit: QueryCanceled + 1 session of 1min bars (~25 15m bars)
+        must NEVER stamp READY or fire EMA(200) entries (target=600, quorum=480)."""
+        fixed_now = datetime(2026, 10, 23, 9, 55, 0, tzinfo=timezone.utc)  # 15:25 IST
+        fake_db = MagicMock()
+        fake_db.get_candles_bulk.side_effect = RuntimeError("QueryCanceled: statement timeout")
+
+        # 360 1min bars from 09:15..15:14 -> 24 sealed 15min bars (>= 12, but << 480 quorum!)
+        start_dt = pd.Timestamp("2026-10-23 09:15:00")
+        intraday_bars = [
+            {
+                "ts": (start_dt + pd.Timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:%S"),
+                "open": 51000.0,
+                "high": 51010.0,
+                "low": 50990.0,
+                "close": 51005.0,
+                "volume": 50.0,
+            }
+            for i in range(360)
+        ]
+        fake_client = MagicMock()
+        fake_client.emits_minute_bars = True
+        fake_client.fetch_intraday_bars.return_value = intraday_bars
+
+        ws = WarmupService(
+            db_source=fake_db,
+            session_recorder=SessionBarRecorder(),
+            now_fn=lambda: fixed_now,
+            sleep_fn=lambda _: None,
+        )
+        mgr = PortfolioManager(
+            auto_start_feed=False,
+            mstock_feed_client=fake_client,
+            warmup_service=ws,
+            enable_broker_warmup=True,
+        )
+        strat = _AlwaysBuyStrategy(ema_fast=50, ema_slow=200)
+        cfg = RunnerConfig(
+            name="BNF-EMA200",
+            strategy_name="sma_crossover",
+            symbols=["BANKNIFTY"],
+            timeframe="15min",
+            allocated_capital=300_000.0,
+            source="mstock",
+        )
+        rid = mgr.add_runner(cfg, start=True, strategy=strat)
+        runner = mgr.get_runner(rid)
+        assert runner is not None
+        assert fake_db.get_candles_bulk.call_count == 1
+        state = runner.get_state()
+        assert state["warmup_status"] == "DEGRADED"
+        assert state["warmup_target_bars"] == 600
+        assert state["warmup_quorum_bars"] == 480
+        assert state["warmup_min_symbol_bars"] == 24
+        assert state["warmup_degraded_symbols"] == ["BANKNIFTY"]
+        assert "QueryCanceled" in (state["warmup_reason"] or "")
+        assert "24/600" in (state["warmup_reason"] or "")
+
+        # Feed 15:15 and 15:30 to seal the 25th 15min bar: MTM marks, but EMA(200) MUST NOT fire!
+        for hm in ("15:15:00", "15:30:00"):
+            mgr._on_bar(
+                "BANKNIFTY",
+                {
+                    "ts": f"2026-10-23 {hm}",
+                    "open": 51100.0,
+                    "high": 51120.0,
+                    "low": 51090.0,
+                    "close": 51115.0,
+                    "volume": 100.0,
+                    "_source": "mstock",
+                    "_timeframe": "1min",
+                },
+            )
+        assert runner.last_price["BANKNIFTY"] == 51115.0
+        assert runner.bars_processed == 1
+        assert strat.eval_calls == 0
+
+    def test_non_auto_start_feed_async_warmup_returns_immediately(self) -> None:
+        """Ensure async_warmup runs off the request thread even when auto_start_feed=False."""
+        fake_db = MagicMock()
+
+        def _slow_bulk(*args: Any, **kwargs: Any) -> Dict[str, pd.DataFrame]:
+            time.sleep(0.18)
+            idx = pd.date_range("2026-10-20 09:15:00", periods=60, freq="15min")
+            return {
+                "RELIANCE": pd.DataFrame(
+                    {
+                        "open": 2900.0,
+                        "high": 2905.0,
+                        "low": 2895.0,
+                        "close": 2902.0,
+                        "volume": 100.0,
+                    },
+                    index=idx,
+                )
+            }
+
+        fake_db.get_candles_bulk.side_effect = _slow_bulk
+        ws = WarmupService(
+            db_source=fake_db,
+            session_recorder=SessionBarRecorder(),
+            now_fn=lambda: datetime(2026, 10, 23, 3, 30, 0, tzinfo=timezone.utc),
+            sleep_fn=lambda _: None,
+        )
+        mgr = PortfolioManager(
+            auto_start_feed=False,
+            warmup_service=ws,
+            enable_broker_warmup=True,
+            async_warmup=True,
+        )
+        cfg = RunnerConfig(
+            name="AsyncSpawnReliance",
+            strategy_name="sma_crossover",
+            symbols=["RELIANCE"],
+            timeframe="15min",
+            allocated_capital=200_000.0,
+            source="mstock",
+        )
+        t0 = time.monotonic()
+        rid = mgr.add_runner(cfg, start=True)
+        elapsed_spawn = time.monotonic() - t0
+        runner = mgr.get_runner(rid)
+        assert runner is not None
+        assert elapsed_spawn < 0.08
+        assert runner.warmup_status in ("WARMING_UP", "READY")
+
+        deadline = time.monotonic() + 1.5
+        while runner.warmup_status == "WARMING_UP" and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert runner.warmup_status == "READY"
+        assert runner.warmup_bars_seeded == 60
+
+    def test_ui_runner_card_and_deep_dive_surface_warmup_degraded(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        portfolio_js = (repo / "src/backtest/web/static/js/portfolio.js").read_text()
+        deep_dive_js = (repo / "src/backtest/web/static/js/deep_dive.js").read_text()
+        assert "warmupSubHtml" in portfolio_js
+        assert "badge-warmup-degraded" in portfolio_js
+        assert "warmup_reason" in portfolio_js
+        assert "WARMUP DEGRADED" in deep_dive_js
 
     def test_duplicate_runner_warning_and_strict_reject_mode(self) -> None:
         mgr_warn = PortfolioManager(auto_start_feed=False, enable_broker_warmup=False)

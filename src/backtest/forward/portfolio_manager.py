@@ -87,6 +87,7 @@ class PortfolioManager:
         confirm_live_orders: bool = False,
         warmup_service: Optional[WarmupService] = None,
         enable_broker_warmup: Optional[bool] = None,
+        async_warmup: Optional[bool] = None,
         reject_duplicate_runners: bool = False,
     ) -> None:
         self.ledger = OrderLedger()
@@ -204,13 +205,17 @@ class PortfolioManager:
         )
         if self.warmup_service.session_recorder is None:
             self.warmup_service.session_recorder = self.session_bar_recorder
+        in_pytest = "PYTEST_CURRENT_TEST" in os.environ
         if enable_broker_warmup is None:
             self._enable_broker_warmup = bool(
-                warmup_service is not None
-                or (auto_start_feed and "PYTEST_CURRENT_TEST" not in os.environ)
+                warmup_service is not None or not in_pytest
             )
         else:
             self._enable_broker_warmup = bool(enable_broker_warmup)
+        # Never couple background warmup to auto_start_feed: a runner-spawn POST
+        # on a non-synthetic server (auto_start_feed=False) must still warm up
+        # off the request thread during the 09:15 rush.
+        self._async_warmup = (not in_pytest) if async_warmup is None else bool(async_warmup)
         self._reject_duplicate_runners = bool(reject_duplicate_runners)
 
         # Gap #3 / V2 (P2.4): optional JSON state persistence. No path →
@@ -914,10 +919,13 @@ class PortfolioManager:
                     )
                 except Exception:
                     pass
+                self._persist_state()
                 return report
             except Exception as exc:  # noqa: BLE001 — warmup never crashes runner
                 logger.exception("Warmup failed for runner %s: %s", instance_id[:8], exc)
                 runner.warmup_status = "DEGRADED"
+                runner.warmup_reason = f"Warmup failed ({type(exc).__name__}: {exc})"
+                self._persist_state()
                 return None
 
         if background:
@@ -1052,7 +1060,7 @@ class PortfolioManager:
             rid = runner.instance_id
 
         if should_warmup:
-            self.warmup_runner(rid, background=bool(self._auto_start_feed))
+            self.warmup_runner(rid, background=self._async_warmup)
         return rid
 
     def remove_runner(self, instance_id: str) -> bool:
@@ -1156,8 +1164,8 @@ class PortfolioManager:
             state = runner.get_state()
 
         if should_warmup:
-            self.warmup_runner(instance_id, background=bool(self._auto_start_feed))
-            if not self._auto_start_feed:
+            self.warmup_runner(instance_id, background=self._async_warmup)
+            if not self._async_warmup:
                 with self._lock:
                     r = self._runners.get(instance_id)
                     if r is not None:

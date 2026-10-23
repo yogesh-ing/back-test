@@ -441,15 +441,22 @@ class _RatePacer:
             self._sleep(delay)
 
 
+DEFAULT_WARMUP_QUORUM_RATIO = 0.80
+
+
 @dataclass
 class WarmupReport:
     """Outcome summary returned by :meth:`WarmupService.warmup_runner`."""
 
     instance_id: str
     target_bars: int
+    quorum_bars: int = 0
     seeded_symbols: Dict[str, int] = field(default_factory=dict)
     degraded_symbols: List[str] = field(default_factory=list)
+    db_queries: int = 0
     db_symbols_hit: int = 0
+    db_error: Optional[str] = None
+    warmup_reason: Optional[str] = None
     recorder_symbols_hit: int = 0
     intraday_http_calls: int = 0
     elapsed_ms: float = 0.0
@@ -469,12 +476,14 @@ class WarmupService:
         session_recorder: Optional[SessionBarRecorder] = None,
         intraday_workers: int = 4,
         min_request_interval_s: float = 0.45,
+        quorum_ratio: float = DEFAULT_WARMUP_QUORUM_RATIO,
         now_fn: Optional[Callable[[], datetime]] = None,
         sleep_fn: Callable[[float], None] = time.sleep,
     ) -> None:
         self._db_source = db_source
         self.session_recorder = session_recorder
         self.intraday_workers = max(1, int(intraday_workers))
+        self.quorum_ratio = min(1.0, max(0.05, float(quorum_ratio)))
         self._pacer = _RatePacer(min_interval_s=min_request_interval_s, sleep_fn=sleep_fn)
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
 
@@ -507,9 +516,22 @@ class WarmupService:
             if str(s).strip()
         ]
 
-        report = WarmupReport(instance_id=runner.instance_id, target_bars=target)
+        quorum_bars = (
+            0 if target <= 0 else max(12, min(target, math.ceil(target * self.quorum_ratio)))
+        )
+        report = WarmupReport(
+            instance_id=runner.instance_id,
+            target_bars=target,
+            quorum_bars=quorum_bars,
+        )
         if target <= 0 or not target_symbols:
-            runner.seed_history({}, degraded_symbols=[])
+            runner.seed_history(
+                {},
+                degraded_symbols=[],
+                target_bars=0,
+                quorum_bars=0,
+                warmup_reason=None,
+            )
             report.elapsed_ms = round((time.monotonic() - started) * 1000.0, 2)
             return report
 
@@ -524,31 +546,25 @@ class WarmupService:
         )
         current_bucket_floor = bucket_start_ts(current_minute_floor, tf)
 
-        # 1. Layer 1 — Single bulk query against market_data_cache
+        # 1. Layer 1 — Strictly ONE ts-bounded bulk query against market_data_cache
         per_day = max(1.0, float(BARS_PER_TRADING_DAY.get(tf, 1.0)))
         trading_days_needed = math.ceil(target / per_day)
         # Multiply by 2x + 14 calendar days to span weekends & NSE holidays safely.
         calendar_days = max(10, int(trading_days_needed * 2.0) + 14)
         start_str = (now_ist.date() - timedelta(days=calendar_days)).isoformat()
 
-        base_tf = tf if tf in ("1day", "1week") else "1min"
         db_frames: Dict[str, pd.DataFrame] = {}
         db_src = self._get_db_source()
         if db_src is not None:
+            report.db_queries = 1
             try:
                 db_frames = db_src.get_candles_bulk(
-                    target_symbols, start_str, today_str, interval=base_tf
+                    target_symbols, start_str, today_str, interval=tf
                 )
-                # Fallback for symbols stored only at coarser intraday granularity (e.g. 5min/1hour)
-                missing_db = [s for s in target_symbols if s not in db_frames]
-                if missing_db and base_tf != tf:
-                    coarser = db_src.get_candles_bulk(
-                        missing_db, start_str, today_str, interval=tf
-                    )
-                    db_frames.update(coarser)
                 report.db_symbols_hit = len(db_frames)
-            except Exception as exc:  # noqa: BLE001 — DB hiccup degrades to intraday/cold
-                logger.warning("WarmupService: bulk DB read failed (%s)", exc)
+            except Exception as exc:  # noqa: BLE001 — surface DB failure in quorum reason
+                report.db_error = f"{type(exc).__name__}: {exc}"
+                logger.warning("WarmupService: bulk DB read failed (%s)", report.db_error)
 
         # 2. Layer 2 — Today's session gap-fill (intraday timeframes only)
         intraday_rows: Dict[str, List[Dict[str, Any]]] = {}
@@ -587,7 +603,6 @@ class WarmupService:
         # 3. Stitch Layer 1 + Layer 2, resample to runner timeframe, trim & seed
         bars_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
         degraded: List[str] = []
-        min_gate = 12 if getattr(runner, "options_bridge", None) is None else 1
 
         is_market_hours = "09:15" <= now_ist.strftime("%H:%M") < "15:30"
         for sym in target_symbols:
@@ -605,7 +620,7 @@ class WarmupService:
             if merged:
                 bars_by_symbol[sym] = merged
                 report.seeded_symbols[sym] = len(merged)
-            if len(merged) < min_gate:
+            if len(merged) < quorum_bars:
                 degraded.append(sym)
             # Prime partial current bucket in TimeframeBarAggregator so the very
             # next sealed timeframe candle includes earlier minutes of its bucket.
@@ -622,19 +637,45 @@ class WarmupService:
                         )
 
         report.degraded_symbols = degraded
-        runner.seed_history(bars_by_symbol, degraded_symbols=degraded)
+        reason_parts: List[str] = []
+        if report.db_error:
+            reason_parts.append(f"DB warmup error ({report.db_error})")
+        if degraded:
+            min_cnt = min(
+                (report.seeded_symbols.get(s, 0) for s in target_symbols),
+                default=0,
+            )
+            sample = ", ".join(degraded[:5])
+            if len(degraded) > 5:
+                sample += f" (+{len(degraded) - 5} more)"
+            reason_parts.append(
+                f"{len(degraded)}/{len(target_symbols)} symbol(s) below quorum "
+                f"(min {min_cnt}/{target} bars, need >={quorum_bars}: {sample})"
+            )
+        report.warmup_reason = "; ".join(reason_parts) if degraded else None
+
+        runner.seed_history(
+            bars_by_symbol,
+            degraded_symbols=degraded,
+            target_bars=target,
+            quorum_bars=quorum_bars,
+            warmup_reason=report.warmup_reason,
+        )
         report.elapsed_ms = round((time.monotonic() - started) * 1000.0, 2)
         logger.info(
-            "WARMUP_COMPLETE runner=%s (%s) tf=%s target=%d seeded_symbols=%d/%d "
-            "total_bars=%d degraded=%d db_hits=%d http_calls=%d elapsed=%.1fms",
+            "WARMUP_COMPLETE runner=%s (%s) tf=%s target=%d quorum=%d "
+            "seeded_symbols=%d/%d total_bars=%d degraded=%d db_queries=%d "
+            "db_hits=%d http_calls=%d elapsed=%.1fms",
             getattr(runner.config, "name", runner.instance_id[:8]),
             runner.instance_id[:8],
             tf,
             target,
+            quorum_bars,
             len(bars_by_symbol),
             len(target_symbols),
             report.total_bars_seeded,
             len(degraded),
+            report.db_queries,
             report.db_symbols_hit,
             report.intraday_http_calls,
             report.elapsed_ms,
