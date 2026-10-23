@@ -5,10 +5,10 @@ Supports on-the-fly resampling: stores 1min data, queries resample to any interv
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 
 from backtest.data.base import (
     CANONICAL_TIMEFRAMES,
@@ -110,15 +110,123 @@ class DbSource:
         """
         # Single DB-URL authority (ticket P4.3): explicit arg >
         # FORWARD_TEST_DB_URL env > config/database.yaml profile.
+        self._explicit_db_url = db_url
         self.db_url = get_db_url(db_url)
         self._engine = None
 
     def _get_engine(self):
         if self._engine is None:
-            masked = self.db_url.rsplit("@", 1)[-1] if "@" in self.db_url else self.db_url
-            log.debug("[db] creating engine for %s", masked)
-            self._engine = create_engine(self.db_url)
+            # Share the process-wide DatabaseManager pool (POOL-3, 2026-10-24)
+            # instead of spawning an unbounded Engine per DbSource() instance.
+            explicit_url = getattr(self, "_explicit_db_url", None)
+            try:
+                from backtest.db.manager import DatabaseManager
+
+                overrides = {"url": explicit_url} if explicit_url else {}
+                self._engine = DatabaseManager.from_env(**overrides).engine
+            except Exception as exc:  # noqa: BLE001 — fallback for exotic URLs in tests
+                db_url = getattr(self, "db_url", "")
+                masked = db_url.rsplit("@", 1)[-1] if "@" in db_url else db_url
+                log.debug("[db] DatabaseManager fallback (%s), creating engine for %s", exc, masked)
+                self._engine = create_engine(db_url)
         return self._engine
+
+    def get_candles_bulk(
+        self,
+        symbols: Sequence[str],
+        start: str,
+        end: str,
+        interval: str = "1day",
+    ) -> dict[str, pd.DataFrame]:
+        """Load OHLCV frames for many symbols in a single bulk SQL query per stored granularity.
+
+        Unlike :meth:`get_candles`, missing or unserviceable symbols are omitted
+        from the returned mapping rather than raising, so a 50-stock pool warmup
+        never fails because one ticker is suspended or not yet ingested.
+        """
+        cleaned = sorted({str(s).strip().upper() for s in symbols if str(s).strip()})
+        if not cleaned:
+            return {}
+
+        engine = self._get_engine()
+        meta_query = text(
+            """
+            SELECT symbol, timeframe
+            FROM market_data_cache
+            WHERE symbol IN :symbols
+            GROUP BY symbol, timeframe
+            """
+        ).bindparams(bindparam("symbols", expanding=True))
+
+        available_by_symbol: dict[str, set[str]] = {}
+        with engine.connect() as conn:
+            for row in conn.execute(meta_query, {"symbols": cleaned}).mappings():
+                sym = str(row["symbol"]).strip().upper()
+                tf = str(row["timeframe"] or "").strip()
+                if sym and tf:
+                    available_by_symbol.setdefault(sym, set()).add(tf)
+
+        if not available_by_symbol:
+            return {}
+
+        symbols_by_source_tf: dict[str, list[str]] = {}
+        for sym, tfs in available_by_symbol.items():
+            chosen: Optional[str] = None
+            if interval in ("1day", "1week") and interval in tfs:
+                chosen = interval
+            else:
+                for candidate in _SOURCE_TF_PRIORITY:
+                    if candidate in tfs:
+                        chosen = candidate
+                        break
+            if chosen is None or not _can_serve(chosen, interval):
+                continue
+            symbols_by_source_tf.setdefault(chosen, []).append(sym)
+
+        if not symbols_by_source_tf:
+            return {}
+
+        lo, hi_exclusive = window_bounds(start, end)
+        data_query = text(
+            """
+            SELECT symbol, ts, open, high, low, close, volume
+            FROM market_data_cache
+            WHERE symbol IN :symbols
+              AND timeframe = :timeframe
+              AND ts >= :start
+              AND ts < :end
+            ORDER BY symbol ASC, ts ASC
+            """
+        ).bindparams(bindparam("symbols", expanding=True))
+
+        out: dict[str, pd.DataFrame] = {}
+        for source_tf, tf_symbols in symbols_by_source_tf.items():
+            df_all = pd.read_sql(
+                data_query,
+                engine,
+                params={
+                    "symbols": tf_symbols,
+                    "timeframe": source_tf,
+                    "start": lo.to_pydatetime(),
+                    "end": hi_exclusive.to_pydatetime(),
+                },
+            )
+            if df_all.empty:
+                continue
+            df_all["symbol"] = df_all["symbol"].astype(str).str.strip().str.upper()
+            ts_series = pd.to_datetime(df_all["ts"])
+            if getattr(ts_series.dt, "tz", None) is not None:
+                ts_series = ts_series.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+            df_all["ts"] = ts_series
+            for sym, grp in df_all.groupby("symbol", sort=False):
+                sub = grp.drop(columns=["symbol"]).set_index("ts")
+                try:
+                    if source_tf != interval and interval in _INTERVAL_TO_RULE:
+                        sub = self._resample(sub, interval)
+                    out[str(sym)] = normalize_candles(sub)
+                except ValueError as exc:
+                    log.debug("[db] bulk skip %s (%s): %s", sym, interval, exc)
+        return out
 
     def get_candles(
         self,

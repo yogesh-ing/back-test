@@ -28,8 +28,10 @@ without credentials is therefore safe (the registry does exactly that).
 
 from __future__ import annotations
 
+import io
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator
@@ -43,6 +45,8 @@ logger = logging.getLogger("backtest.data.mstock_live_feed")
 
 __all__ = [
     "MStockLiveFeed",
+    "ScriptMasterCache",
+    "clear_scriptmaster_cache",
     "MARKET_OPEN_HOUR",
     "MARKET_OPEN_MINUTE",
     "MARKET_CLOSE_HOUR",
@@ -253,32 +257,100 @@ INTRADAY_SEGMENT_IDS: dict[str, str] = {
 }
 
 
+class ScriptMasterCache:
+    """Process-wide daily cache for mStock's ``instruments/scriptmaster`` CSV.
+
+    Without caching, warming up or subscribing a 50-stock pool downloads and
+    parses the ~140k-row CSV 50 times in succession (POOL-4). Cached per
+    ``(base_url, ist_date)`` with ``O(1)`` symbol lookup, one session download
+    serves every pool symbol for the rest of the trading day.
+    """
+
+    _lock = threading.Lock()
+    _entries: dict[tuple[str, str], dict[str, Any]] = {}
+
+    @classmethod
+    def clear(cls) -> None:
+        """Clear all cached scriptmaster snapshots (test isolation / refresh)."""
+        with cls._lock:
+            cls._entries.clear()
+
+    @classmethod
+    def get_snapshot(cls, base_url: str, api_key: str, token: str) -> dict[str, Any]:
+        ist_day = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime(
+            "%Y-%m-%d"
+        )
+        cache_key = (str(base_url).rstrip("/"), ist_day, str(token))
+        with cls._lock:
+            cached = cls._entries.get(cache_key)
+            if cached is not None:
+                return cached
+
+        resp = requests.get(
+            f"{str(base_url).rstrip('/')}/openapi/typea/instruments/scriptmaster",
+            headers=_typea_headers(api_key, token),
+            timeout=30,
+        )
+        resp.raise_for_status()
+        frame = pd.read_csv(io.StringIO(resp.text), low_memory=False)
+        if frame.empty:
+            return {"empty": True, "columns": [], "symbol_key": None, "token_key": None, "rows": {}}
+
+        lower = frame.rename(columns=lambda c: str(c).strip().lower())
+        cols = list(lower.columns)
+        symbol_key = next(
+            (c for c in ("tradingsymbol", "symbol", "name") if c in lower.columns), None
+        )
+        token_key = next(
+            (c for c in ("instrument_token", "token", "securitytoken") if c in lower.columns),
+            None,
+        )
+        rows_by_symbol: dict[str, dict[str, Any]] = {}
+        if symbol_key:
+            # Preserve first-match semantics (iloc[0]), preferring NSE EQ when
+            # present earlier in the catalogue.
+            records = lower.to_dict("records")
+            for rec in records:
+                raw_sym = rec.get(symbol_key)
+                if raw_sym is None:
+                    continue
+                norm = str(raw_sym).strip().lower()
+                if norm and norm not in rows_by_symbol:
+                    rows_by_symbol[norm] = rec
+                if norm.endswith("-eq"):
+                    bare = norm[:-3]
+                    exch = str(rec.get("exchange") or "").strip().upper()
+                    if bare and (bare not in rows_by_symbol or exch == "NSE"):
+                        rows_by_symbol[bare] = rec
+
+        snapshot = {
+            "empty": False,
+            "columns": cols,
+            "symbol_key": symbol_key,
+            "token_key": token_key,
+            "rows": rows_by_symbol,
+        }
+        with cls._lock:
+            cls._entries[cache_key] = snapshot
+        return snapshot
+
+
+def clear_scriptmaster_cache() -> None:
+    """Clear the process-wide :class:`ScriptMasterCache`."""
+    ScriptMasterCache.clear()
+
+
 def _resolve_security_token(base_url: str, api_key: str, token: str, symbol: str) -> str:
-    """Resolve a symbol to its mStock security token via scriptmaster."""
-    resp = requests.get(
-        f"{base_url}/openapi/typea/instruments/scriptmaster",
-        headers=_typea_headers(api_key, token),
-        timeout=30,
-    )
-    resp.raise_for_status()
-    import io
-
-    frame = pd.read_csv(io.StringIO(resp.text), low_memory=False)
-    if frame.empty:
+    """Resolve a symbol to its mStock security token via cached scriptmaster."""
+    snap = ScriptMasterCache.get_snapshot(base_url, api_key, token)
+    if snap["empty"]:
         raise ValueError("scriptmaster is empty")
-
-    lower = frame.rename(columns=lambda c: str(c).strip().lower())
-    symbol_key = next((c for c in ("tradingsymbol", "symbol", "name") if c in lower.columns), None)
-    token_key = next(
-        (c for c in ("instrument_token", "token", "securitytoken") if c in lower.columns), None
-    )
-    if not symbol_key or not token_key:
-        raise ValueError(f"scriptmaster missing columns: {list(lower.columns)[:10]}")
-
-    matches = lower[lower[symbol_key].astype(str).str.lower() == str(symbol).lower()]
-    if matches.empty:
+    if not snap["symbol_key"] or not snap["token_key"]:
+        raise ValueError(f"scriptmaster missing columns: {snap['columns'][:10]}")
+    row = snap["rows"].get(str(symbol).strip().lower())
+    if row is None:
         raise ValueError(f"symbol {symbol} not in scriptmaster")
-    return str(matches.iloc[0][token_key])
+    return str(row[snap["token_key"]])
 
 
 def _resolve_scriptmaster_row(
@@ -292,27 +364,11 @@ def _resolve_scriptmaster_row(
     the quote path degrades to an ``NSE:<SYMBOL>`` convention instead of
     killing the poll thread.
     """
-    resp = requests.get(
-        f"{base_url}/openapi/typea/instruments/scriptmaster",
-        headers=_typea_headers(api_key, token),
-        timeout=30,
-    )
-    resp.raise_for_status()
-    import io
-
-    frame = pd.read_csv(io.StringIO(resp.text), low_memory=False)
-    if frame.empty:
+    snap = ScriptMasterCache.get_snapshot(base_url, api_key, token)
+    if snap["empty"] or not snap["symbol_key"]:
         return {}
-    lower = frame.rename(columns=lambda c: str(c).strip().lower())
-    symbol_key = next(
-        (c for c in ("tradingsymbol", "symbol", "name") if c in lower.columns), None
-    )
-    if not symbol_key:
-        return {}
-    matches = lower[lower[symbol_key].astype(str).str.lower() == str(symbol).lower()]
-    if matches.empty:
-        return {}
-    return matches.iloc[0].to_dict()
+    row = snap["rows"].get(str(symbol).strip().lower())
+    return dict(row) if row is not None else {}
 
 
 class MStockLiveFeed:
@@ -352,6 +408,17 @@ class MStockLiveFeed:
         self._config: dict[str, Any] = dict(kwargs)
         self._security_tokens: dict[str, str] = {}
         self._intraday_keys: dict[str, tuple[str, str]] = {}
+
+    @property
+    def emits_minute_bars(self) -> bool:
+        """True when :meth:`latest_bar` produces 1-minute live bars (Recon F1).
+
+        Real HTTP mStock polling always returns 1-minute resolution bars; test
+        doubles only opt in if they explicitly declare ``emits_minute_bars``.
+        """
+        if self.client is not None:
+            return bool(getattr(self.client, "emits_minute_bars", False))
+        return True
 
     # -- credentials (lazy) ------------------------------------------------
 
@@ -482,6 +549,65 @@ class MStockLiveFeed:
         self._intraday_keys[symbol] = key
         return key
 
+    def _fetch_intraday_session_rows(
+        self, seg_id: str, script: str
+    ) -> list[dict]:
+        """Fetch all today-session 1-minute bars from ``instruments/intraday``."""
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                token, api_key = self._credentials()
+                resp = requests.get(
+                    f"{self._base_url()}/openapi/typea/instruments/intraday"
+                    f"/{seg_id}/{script}/minute",
+                    headers=_typea_headers(api_key, token),
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                rows = _extract_candles(resp.json())
+                return [b for b in (_candle_row_to_bar(row) for row in rows) if b]
+            except Exception as exc:  # noqa: BLE001 — transient: back off, retry once
+                last_exc = exc
+                if attempt == 0:
+                    time.sleep(1.0)
+        logger.warning(
+            "mstock feed: intraday bars for %s/%s failed after retry: %s",
+            seg_id,
+            script,
+            last_exc,
+        )
+        return []
+
+    def fetch_intraday_bars(self, symbol: str) -> list[dict]:
+        """Return today's full session of 1-minute bars (oldest-first) for warmup.
+
+        Indexes resolve directly via :data:`INDEX_SECURITY_TOKENS` (never
+        touching ``scriptmaster``); equities/ETFs resolve via
+        :meth:`_intraday_key_for` backed by :class:`ScriptMasterCache`.
+        """
+        sym = str(symbol).strip().upper()
+        if sym in INDEX_SECURITY_TOKENS:
+            sec_tok = INDEX_SECURITY_TOKENS[sym]
+            seg_id = "4" if sym in ("SENSEX", "S&P BSE SENSEX") else "1"
+            key: tuple[str, str] | None = (seg_id, sec_tok)
+        else:
+            key = self._intraday_key_for(sym)
+        if key is None:
+            return []
+        from backtest.forward.warmup import normalize_ist_bar_ts
+
+        raw_bars = self._fetch_intraday_session_rows(key[0], key[1])
+        bars: list[dict] = []
+        for b in raw_bars:
+            try:
+                nb = dict(b)
+                nb["ts"] = normalize_ist_bar_ts(nb["ts"])
+                bars.append(nb)
+            except Exception:  # noqa: BLE001 — skip malformed candle rows
+                continue
+        bars.sort(key=lambda b: str(b.get("ts") or ""))
+        return bars
+
     def _fetch_intraday_bar(self, symbol: str) -> dict | None:
         """The running minute bar for a NON-INDEX symbol (equities/ETFs/F&O).
 
@@ -495,31 +621,10 @@ class MStockLiveFeed:
         key = self._intraday_key_for(str(symbol).strip().upper())
         if key is None:
             return None
-        seg_id, script = key
-        last_exc: Exception | None = None
-        for attempt in range(2):
-            try:
-                token, api_key = self._credentials()
-                resp = requests.get(
-                    f"{self._base_url()}/openapi/typea/instruments/intraday"
-                    f"/{seg_id}/{script}/minute",
-                    headers=_typea_headers(api_key, token),
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                rows = _extract_candles(resp.json())
-                bars = [b for b in (_candle_row_to_bar(row) for row in rows) if b]
-                if not bars:
-                    return None
-                return max(bars, key=lambda b: str(b["ts"]))
-            except Exception as exc:  # noqa: BLE001 — transient: back off, retry once
-                last_exc = exc
-                if attempt == 0:
-                    time.sleep(1.0)
-        logger.warning(
-            "mstock feed: intraday bar for %s failed after retry: %s", symbol, last_exc
-        )
-        return None
+        bars = self._fetch_intraday_session_rows(key[0], key[1])
+        if not bars:
+            return None
+        return max(bars, key=lambda b: str(b["ts"]))
 
     # -- bar access ----------------------------------------------------------
 

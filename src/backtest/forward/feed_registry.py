@@ -565,6 +565,8 @@ class _BrokerBarFeedBase:
             # broker (2026-09-30) — keeps synthetic bars out of mstock/dhan
             # runners and vice versa.
             bar["_source"] = self.broker_name
+            if getattr(self._client, "emits_minute_bars", False):
+                bar["_timeframe"] = "1min"
             monitor.observe_bar(bar["ts"])
         return bar
 

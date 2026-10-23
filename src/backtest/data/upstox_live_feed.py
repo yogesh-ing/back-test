@@ -76,6 +76,12 @@ class UpstoxLiveFeed:
         self.client = client
         self._base_url_override = base_url
 
+    @property
+    def emits_minute_bars(self) -> bool:
+        if self.client is not None:
+            return bool(getattr(self.client, "emits_minute_bars", False))
+        return True
+
     # -- credentials (lazy) --------------------------------------------------
 
     def _credentials(self) -> str:

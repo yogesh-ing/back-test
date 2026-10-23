@@ -878,7 +878,7 @@ STATUS_PAUSED = "PAUSED"
 STATUS_STOPPED = "STOPPED"
 STATUS_ERROR = "ERROR"
 
-MAX_BARS_PER_SYMBOL = 500  # Task 5: light rolling buffers
+MAX_BARS_PER_SYMBOL = 600  # Sized for EMA(200) 3x IIR convergence + 2yr 1day VCP/RS
 MAX_SIGNAL_LOG = 200
 MAX_TRADE_LOG = 200
 MAX_EQUITY_POINTS = 500
@@ -1239,6 +1239,12 @@ class StrategyRunner:
         self.error: Optional[str] = None
         self.bars_processed: int = 0
         self.created_ts: str = datetime.now(timezone.utc).isoformat()
+        self.max_bars_per_symbol: int = MAX_BARS_PER_SYMBOL
+        self.warmup_status: str = "IDLE"
+        self.warmup_bars_seeded: int = 0
+        self.warmup_degraded_symbols: List[str] = []
+        self.duplicate_of: Optional[str] = None
+        self._bar_sealed_since_tick_end: bool = False
 
         # -- operator-set levels (Live Order Management) --------------------
         # ``{position_key: {"stop_loss": float|None, "target": float|None}}``
@@ -2074,8 +2080,119 @@ class StrategyRunner:
             }
 
     # ------------------------------------------------------------------ #
-    # Candle event processing
+    # Candle event processing & silent warmup seeding
     # ------------------------------------------------------------------ #
+
+    def seed_history(
+        self,
+        bars_by_symbol: Dict[str, Any],
+        *,
+        degraded_symbols: Optional[List[str]] = None,
+    ) -> int:
+        """Silently populate historical + intraday warmup bars (Caveat Q-6).
+
+        Populates ``_bars``, ``_last_bar_ts``, ``last_price``, portfolio marks,
+        and option-chain spot **without** evaluating signals or submitting any
+        orders (eliminating phantom fills on historical warmup candles). Any
+        newer live bars that arrived while warmup ran in the background are
+        merged and preserved in chronological order.
+        """
+        seeded_total = 0
+        price_updates: Dict[str, float] = {}
+        with self._lock:
+            for raw_sym, rows in (bars_by_symbol or {}).items():
+                sym = str(raw_sym).strip().upper()
+                if sym not in self._bars or not rows:
+                    continue
+                by_ts: Dict[str, Dict[str, Any]] = {}
+                for candle in rows:
+                    ts = str(candle.get("ts") or candle.get("timestamp") or "")
+                    if not ts:
+                        continue
+                    price = float(candle["close"])
+                    by_ts[ts] = {
+                        "ts": ts,
+                        "open": float(candle.get("open", price)),
+                        "high": float(candle.get("high", price)),
+                        "low": float(candle.get("low", price)),
+                        "close": price,
+                        "volume": float(candle.get("volume", 0) or 0),
+                    }
+                # Preserve any newer live bars already buffered during async warmup
+                for existing in self._bars[sym]:
+                    ex_ts = str(existing.get("ts") or "")
+                    if ex_ts:
+                        by_ts[ex_ts] = existing
+
+                if not by_ts:
+                    continue
+                ordered = [by_ts[k] for k in sorted(by_ts)][-MAX_BARS_PER_SYMBOL:]
+                self._bars[sym].clear()
+                self._bars[sym].extend(ordered)
+                latest = ordered[-1]
+                self._last_bar_ts[sym] = latest["ts"]
+                self.last_price[sym] = float(latest["close"])
+                price_updates[sym] = float(latest["close"])
+                seeded_total += len(ordered)
+
+            if price_updates:
+                self.portfolio.update_prices(price_updates)
+                if self.options_bridge is not None:
+                    und = getattr(self, "_chain_underlying", None) or (
+                        self.config.symbols[0] if self.config.symbols else "NIFTY"
+                    )
+                    und_up = str(und).upper()
+                    if und_up in price_updates:
+                        try:
+                            self.options_bridge._sync_market(
+                                und_up,
+                                price_updates[und_up],
+                                self._last_bar_ts.get(und_up),
+                            )
+                        except Exception:  # noqa: BLE001 — spot sync never fails seed
+                            logger.debug("Warmup option spot sync skipped", exc_info=True)
+                self._mark_to_market(record=False)
+
+            self.warmup_bars_seeded = seeded_total
+            self.warmup_degraded_symbols = sorted(
+                {str(s).strip().upper() for s in (degraded_symbols or []) if str(s).strip()}
+            )
+            self.warmup_status = "DEGRADED" if self.warmup_degraded_symbols else "READY"
+        return seeded_total
+
+    def mark_live_price(self, symbol: str, price: float, ts: str = "") -> None:
+        """Update intra-timeframe MTM, option marks, manual stops, and risk breakers.
+
+        Used while :class:`TimeframeBarAggregator` accumulates an unsealed
+        ``5min`` / ``15min`` / ``1hour`` / ``1day`` candle so open positions and
+        option structures stay freshly marked every minute without triggering
+        premature indicator signals (Recon Finding F1).
+        """
+        symbol = str(symbol).upper()
+        if symbol not in self._bars:
+            return
+        with self._lock:
+            if self.status in (STATUS_STOPPED, STATUS_ERROR):
+                return
+            try:
+                px = float(price)
+                if ts:
+                    self._roll_trading_day(ts)
+                self.last_price[symbol] = px
+                self.portfolio.update_prices({symbol: px})
+                if self.options_bridge is not None:
+                    self._mark_option_book(symbol, px, ts)
+                self._mark_to_market(record=True)
+                self._check_position_rules(symbol, px)
+                self._check_instance_risk()
+                self._apply_strategy_requests()
+            except Exception as exc:  # noqa: BLE001 — never kill runner on mark
+                logger.exception(
+                    "Runner %s live mark error on %s: %s",
+                    self.instance_id[:8],
+                    symbol,
+                    exc,
+                )
 
     def process_candle_event(self, symbol: str, candle: Dict[str, Any]) -> None:
         """Feed one closed bar. Main entry point from the portfolio feed."""
@@ -2109,6 +2226,7 @@ class StrategyRunner:
                     self._last_bar_ts[symbol] = ts
                 self.last_price[symbol] = price
                 self.bars_processed += 1
+                self._bar_sealed_since_tick_end = True
 
                 self._roll_trading_day(ts)
                 self.portfolio.update_prices({symbol: price})
@@ -2128,8 +2246,11 @@ class StrategyRunner:
                     # cannot wait 12 bars for a warmup designed for lookback
                     # indicators. The strategy contract is unaffected.
                     warmup_ok = (
-                        len(self._bars[symbol]) >= MIN_WARMUP_BARS
-                        or self.options_bridge is not None
+                        self.warmup_status != "WARMING_UP"
+                        and (
+                            len(self._bars[symbol]) >= MIN_WARMUP_BARS
+                            or self.options_bridge is not None
+                        )
                     )
                     if warmup_ok:
                         if self.options_bridge is not None:
@@ -2196,13 +2317,18 @@ class StrategyRunner:
     def on_tick_end(self, tick_ts: str) -> None:
         """Hook fired by the feed after every symbol's bar for this tick.
 
-        Pool runners run the basket scan exactly once here.
+        Pool runners run the basket scan strictly when at least one symbol
+        sealed a completed timeframe bar during the sweep and warmup is ready.
         """
         with self._lock:
             if self.status in (STATUS_STOPPED, STATUS_ERROR):
                 return
             if self.config.target_type != TARGET_POOL:
+                self._bar_sealed_since_tick_end = False
                 return
+            if not self._bar_sealed_since_tick_end or self.warmup_status == "WARMING_UP":
+                return
+            self._bar_sealed_since_tick_end = False
             try:
                 self._process_pool(tick_ts)
                 self._check_instance_risk()
@@ -3340,6 +3466,10 @@ class StrategyRunner:
                 ),
                 "error": self.error,
                 "bars_processed": self.bars_processed,
+                "warmup_status": self.warmup_status,
+                "warmup_bars_seeded": self.warmup_bars_seeded,
+                "warmup_degraded_symbols": list(self.warmup_degraded_symbols),
+                "duplicate_of": self.duplicate_of,
                 "last_bar_ts": max(self._last_bar_ts.values()) if self._last_bar_ts else None,
                 "created_ts": self.created_ts,
                 "instrument": dict(self.config.instrument or {"type": "equity"}),
