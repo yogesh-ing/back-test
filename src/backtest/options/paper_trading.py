@@ -514,6 +514,7 @@ class OptionPaperBroker:
         fee_calculator: Any | None = None,
         on_structure_opened: Any | None = None,
         on_structure_closed: Any | None = None,
+        on_leg_fill: Any | None = None,
         allowed_structures: Any | None = None,
     ) -> None:
         self.capital = Decimal(str(capital))
@@ -535,6 +536,10 @@ class OptionPaperBroker:
         self.on_structure_opened = on_structure_opened
         #: ``fn(structure, realized_pnl: Decimal)`` after close/settlement.
         self.on_structure_closed = on_structure_closed
+        #: ``fn(record: dict)`` once per leg, on entry and on exit. This is how
+        #: an option fill reaches the shared :class:`OrderLedger` (the Orders
+        #: tab) without going through the equity fill router.
+        self.on_leg_fill = on_leg_fill
 
         # Position tracking
         self._positions: dict[str, OptionPosition] = {}  # position_id -> position
@@ -592,13 +597,12 @@ class OptionPaperBroker:
             self._validate_lot_size(leg)
 
         # Get fill prices for all legs
-        fills = []
+        fills: list[tuple] = []
         net_cost = ZERO
         for leg in intent.legs:
             quote = _execution_quote(quote_provider, leg.instrument_token, leg.side)
-            fill_price = self._apply_slippage(
-                Decimal(str(quote.get("ltp", 0))), leg.side
-            )
+            quoted_price = Decimal(str(quote.get("ltp", 0)))
+            fill_price = self._apply_slippage(quoted_price, leg.side)
             # Unpriceable leg guard (live-session lesson 2026-09-21): a
             # transient broker failure surfaces as ltp=0. Filling at 0
             # books a phantom ₹0 entry and the exit then books the WHOLE
@@ -617,7 +621,7 @@ class OptionPaperBroker:
             else:
                 net_cost -= leg_cost - commission
 
-            fills.append((leg, fill_price, commission))
+            fills.append((leg, fill_price, commission, quoted_price))
 
         # Full statutory fee stack (Phase 8) — computed per leg when a fee
         # calculator is attached. Cash-bearing (Gap G4.1): the total is
@@ -636,7 +640,7 @@ class OptionPaperBroker:
                             "quantity": leg.total_quantity,
                             "price": fill_price,
                         }
-                        for leg, fill_price, _ in fills
+                        for leg, fill_price, _, _ in fills
                     ],
                     when=ts,
                 )
@@ -669,7 +673,7 @@ class OptionPaperBroker:
         strikes_map = intent.metadata.get("strikes", {})
         default_strike = intent.metadata.get("strike", "0")
 
-        for leg, fill_price, commission in fills:
+        for leg, fill_price, commission, quoted_price in fills:
             self._position_seq += 1
             position = OptionPosition(
                 position_id=f"pos_{ts:%Y%m%d%H%M%S}_{self._position_seq:04d}",
@@ -695,6 +699,25 @@ class OptionPaperBroker:
             )
             self._positions[position.position_id] = position
             positions.append(position)
+            self._fire_leg_fill(
+                {
+                    "phase": "entry",
+                    "structure_id": structure_id,
+                    "position_id": position.position_id,
+                    "structure_type": intent.structure_type,
+                    "underlying": intent.view.underlying,
+                    "symbol": leg.trading_symbol or leg.instrument_token,
+                    "instrument_token": leg.instrument_token,
+                    "side": leg.side,
+                    "lots": int(leg.quantity),
+                    "lot_size": int(leg.lot_size),
+                    "quantity": int(leg.total_quantity),
+                    "price": fill_price,
+                    "requested_price": quoted_price,
+                    "commission": commission,
+                    "ts": ts,
+                }
+            )
 
         # Create structure
         structure = StructurePosition(
@@ -773,14 +796,15 @@ class OptionPaperBroker:
                 # Fail-closed exit: if the quote provider fails during a close,
                 # settle at the last known mark (or entry price) rather than
                 # booking a fake ₹0.00 fill.
-                exit_price = (
+                quoted_price = (
                     position.current_price
                     if position.current_price > 0
                     else position.entry_price
                 )
             else:
-                exit_price = Decimal(str(quote.get("ltp", 0) or 0))
-            exit_price = self._apply_slippage(exit_price, "SELL" if position.is_long else "BUY")
+                quoted_price = Decimal(str(quote.get("ltp", 0) or 0))
+            exit_side = "SELL" if position.is_long else "BUY"
+            exit_price = self._apply_slippage(quoted_price, exit_side)
 
             pnl = position.close(exit_price, ts)
             total_pnl += pnl
@@ -795,9 +819,28 @@ class OptionPaperBroker:
 
             closing_fills.append(
                 {
-                    "side": "SELL" if position.is_long else "BUY",
+                    "side": exit_side,
                     "quantity": position.total_quantity,
                     "price": exit_price,
+                }
+            )
+            self._fire_leg_fill(
+                {
+                    "phase": "exit",
+                    "structure_id": structure.structure_id,
+                    "position_id": position.position_id,
+                    "structure_type": structure.structure_type,
+                    "underlying": structure.underlying,
+                    "symbol": position.trading_symbol or position.instrument_token,
+                    "instrument_token": position.instrument_token,
+                    "side": exit_side,
+                    "lots": int(position.quantity),
+                    "lot_size": int(position.lot_size),
+                    "quantity": int(position.total_quantity),
+                    "price": exit_price,
+                    "requested_price": quoted_price,
+                    "commission": position.commission,
+                    "ts": ts,
                 }
             )
 
@@ -936,6 +979,18 @@ class OptionPaperBroker:
             logger.exception(
                 "[option-paper] on_structure_opened observer failed for %s",
                 structure.structure_id[:8],
+            )
+
+    def _fire_leg_fill(self, record: dict[str, Any]) -> None:
+        if self.on_leg_fill is None:
+            return
+        try:
+            self.on_leg_fill(record)
+        except Exception:  # noqa: BLE001 — the order ledger never blocks a fill
+            logger.exception(
+                "[option-paper] on_leg_fill observer failed for %s leg %s",
+                str(record.get("structure_id", "?"))[:8],
+                record.get("position_id", "?"),
             )
 
     def _fire_structure_closed(self, structure: StructurePosition, realized_pnl: Decimal) -> None:
@@ -1152,7 +1207,7 @@ class OptionPaperBroker:
                     "fill_price": str(fill_price),
                     "commission": str(commission),
                 }
-                for leg, fill_price, commission in fills
+                for leg, fill_price, commission, _ in fills
             ],
             "cash_after": str(self.available_cash),
             "statutory_fees": str(self._statutory_fees_paid),

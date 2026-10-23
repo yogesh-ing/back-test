@@ -352,3 +352,50 @@ class TestEquityRunnersUnchanged:
         assert state["options"] is None
         assert state["option_pnl"] == 0.0
         assert state["deployed_capital"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Option fills in the order ledger (Orders tab)
+# ---------------------------------------------------------------------------
+
+
+class TestOptionFillsReachTheOrderLedger:
+    """An option leg fill writes a ledger row — and nothing else.
+
+    The Orders tab is the audit of "did it fill, at what price", so the option
+    book mirrors every leg into the shared ledger. It must do that WITHOUT
+    routing a FillEvent: the equity handler would open a share position from an
+    option fill and double-book the trade.
+    """
+
+    def test_each_entry_leg_is_a_filled_order_row(self, holding_runner):
+        runner = holding_runner
+        structure = runner.options_bridge.option_broker.get_open_structures()[0]
+
+        rows = runner.ledger.snapshot(instance_id=runner.instance_id)
+        assert len(rows) == len(structure.legs)
+        assert {r["status"] for r in rows} == {"FILLED"}
+        assert {r["tag"]["kind"] for r in rows} == {"option"}
+        assert {r["tag"]["structure_id"] for r in rows} == {structure.structure_id}
+        assert {r["tag"]["lots"] for r in rows} == {1}
+        assert all(r["avg_fill_price"] and r["quantity"] for r in rows)
+
+    def test_the_equity_book_stays_empty(self, holding_runner):
+        runner = holding_runner
+        assert runner.positions == {}
+        assert float(runner.portfolio.realized_pnl) == 0.0
+        assert runner.ledger.summary()["filled"] == len(
+            runner.options_bridge.option_broker.get_open_structures()[0].legs
+        )
+
+    def test_exit_legs_are_recorded_too(self, holding_runner):
+        runner = holding_runner
+        bridge = runner.options_bridge
+        structure_id = bridge.open_structure_id
+        legs = len(bridge.option_broker.get_positions_by_structure(structure_id))
+
+        bridge.option_broker.close_structure(structure_id, bridge.quote_provider, reason="manual")
+
+        rows = runner.ledger.snapshot(instance_id=runner.instance_id)
+        assert len(rows) == legs * 2  # entry + exit, one row per leg
+        assert {r["tag"]["phase"] for r in rows} == {"entry", "exit"}

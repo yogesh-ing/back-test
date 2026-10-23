@@ -132,6 +132,51 @@ class TestOrderLedger:
         with pytest.raises(ValueError):
             ledger.submit("r", OrderRequest(symbol="X", side=SIDE_BUY, quantity=0))
 
+    def test_record_filled_writes_a_terminal_row_without_routing(self, ledger):
+        """Option legs reach the Orders tab through ``record_filled``, not a fill.
+
+        The row must be visible in the snapshot, and the registered equity
+        handler must never see it — routing an option fill there would open a
+        share position in the simulation portfolio.
+        """
+        received = []
+        ledger.register_handler("opt-runner", received.append)
+
+        order = ledger.record_filled(
+            "opt-runner",
+            symbol="NIFTY26OCT25000CE",
+            side=SIDE_BUY,
+            quantity=75,
+            price=101.0,
+            requested_price=100.0,
+            tag={"kind": "option", "lots": 1, "lot_size": 75, "structure_id": "struct_1"},
+        )
+
+        assert order.status == "FILLED"
+        assert order.filled_qty == 75 and order.avg_fill_price == 101.0
+        assert received == []
+        assert ledger.summary()["filled"] == 1
+        rows = ledger.snapshot(instance_id="opt-runner")
+        assert rows[0]["client_order_id"] == order.client_order_id
+        assert rows[0]["tag"]["kind"] == "option" and rows[0]["tag"]["lots"] == 1
+
+    def test_record_filled_slippage_is_adverse_positive_both_sides(self, ledger):
+        buy = ledger.record_filled(
+            "r1", symbol="CE", side=SIDE_BUY, quantity=75, price=101.0, requested_price=100.0
+        )
+        sell = ledger.record_filled(
+            "r1", symbol="CE", side=SIDE_SELL, quantity=75, price=99.0, requested_price=100.0
+        )
+        flat = ledger.record_filled(
+            "r1", symbol="CE", side=SIDE_BUY, quantity=75, price=100.0, requested_price=100.0
+        )
+        no_request = ledger.record_filled("r1", symbol="CE", side=SIDE_BUY, quantity=75, price=100.0)
+
+        assert buy.slippage == pytest.approx(1.0)
+        assert sell.slippage == pytest.approx(1.0)  # a SELL filled low costs the same
+        assert flat.slippage == 0.0 and flat.slippage_pct == 0.0
+        assert no_request.slippage is None and no_request.slippage_pct is None
+
 
 # ---------------------------------------------------------------------------
 # Phase 2 — Universe registry

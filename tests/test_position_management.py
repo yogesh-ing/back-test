@@ -361,6 +361,25 @@ class TestEquityManualLevels:
         exit_order = runner.ledger.snapshot(statuses=[ORDER_FILLED])[0]
         assert exit_order["tag"]["reason"] == "manual_stop_loss"
 
+    def test_a_closed_equity_trade_keeps_its_size_and_direction(self):
+        """A closed position's ``quantity`` is zero, so the trade row cannot read it.
+
+        The deep-dive Trades tab used to show qty 0 / side LONG for every
+        round trip; the size and direction come from the stamp taken at the
+        final fill.
+        """
+        runner = _long_equity_runner(entry_price=100.0)
+        held_qty = runner.positions["RELIANCE"]["qty"]
+        assert held_qty > 0
+
+        runner.set_position_rule("RELIANCE", RULE_TARGET, 120.0)
+        _feed(runner, "RELIANCE", [121.0], start_day=20)
+
+        trade = runner.closed_trades[-1]
+        assert trade["kind"] == "equity"
+        assert trade["qty"] == pytest.approx(held_qty)
+        assert trade["side"] == "LONG"
+
     def test_the_target_fires_too(self):
         runner = _long_equity_runner(entry_price=100.0)
         runner.set_position_rule("RELIANCE", RULE_TARGET, 120.0)

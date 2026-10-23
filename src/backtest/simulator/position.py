@@ -136,6 +136,13 @@ class Position:
     commission_total: Decimal = ZERO
     opened_at: datetime = field(default_factory=_utcnow)
     closed_at: datetime | None = None
+    closed_quantity: Decimal | None = None
+    """Signed quantity at the moment the position fully closed.
+
+    ``quantity`` is zero for a closed position, which makes the round trip's
+    size and direction unreadable in history (both ``qty`` and ``side`` came
+    out as 0/LONG). Stamped by :meth:`reduce_shares` on the final fill.
+    """
     last_updated: datetime = field(default_factory=_utcnow)
     strategy_name: str | None = None
     cost_basis_method: str = CostBasisMethod.AVERAGE
@@ -415,6 +422,7 @@ class Position:
         if fully_closed:
             self.quantity = ZERO
             self.closed_at = self.last_updated
+            self.closed_quantity = qty if was_long else -qty
 
         # Long: receive proceeds. Short: pay to buy back.
         cash_delta = quantize_money((qty * px if was_long else -qty * px) - fee)
@@ -672,6 +680,8 @@ class Position:
             "commission_total": str(self.commission_total),
             "opened_at": self.opened_at.isoformat(),
             "closed_at": self.closed_at.isoformat() if self.closed_at else None,
+            "closed_quantity": str(self.closed_quantity)
+            if self.closed_quantity is not None else None,
             "last_updated": self.last_updated.isoformat(),
             "status": self.status,
             "strategy_name": self.strategy_name,
@@ -708,6 +718,9 @@ class Position:
         )
         if is_zero(raw_qty):
             pos.quantity = ZERO
+        raw_closed = payload.get("closed_quantity")
+        if raw_closed is not None:
+            pos.closed_quantity = to_decimal(raw_closed, "closed_quantity")
         for key in ("opened_at", "closed_at", "last_updated"):
             value = payload.get(key)
             if value:

@@ -524,6 +524,46 @@ class TestSerialisation:
         assert restored.quantity == D("10.00000000")
 
 
+class TestClosedQuantityStamp:
+    """A fully closed position must still report its own size and direction.
+
+    ``quantity`` is zero by definition once closed, so history readers used to
+    show qty 0 and always LONG. ``reduce_shares`` stamps the signed size at the
+    final fill instead.
+    """
+
+    def test_full_close_stamps_signed_quantity_long(self):
+        p = make(qty=10, px=100)
+        p.reduce_shares(10, 130)
+        assert p.quantity == D("0")
+        assert p.closed_quantity == D("10.00000000")
+
+    def test_full_close_stamps_signed_quantity_short(self):
+        p = make(qty=-10, px=100)
+        p.reduce_shares(10, 90)
+        assert p.closed_quantity == D("-10.00000000")
+
+    def test_partial_close_leaves_it_unset(self):
+        p = make(qty=10, px=100)
+        p.reduce_shares(4, 130)
+        assert p.closed_quantity is None
+
+    def test_the_stamp_survives_json_round_trip(self):
+        p = make(qty=-10, px=100)
+        p.reduce_shares(10, 90)
+        restored = Position.from_dict(json.loads(json.dumps(p.to_dict())))
+        assert restored.quantity == D("0")
+        assert restored.closed_quantity == D("-10.00000000")
+
+    def test_a_payload_without_the_field_loads(self):
+        """Rows written before the stamp exist and must still read."""
+        payload = make(qty=10, px=100).to_dict()
+        payload["quantity"] = "0"
+        payload.pop("closed_quantity")
+        restored = Position.from_dict(payload)
+        assert restored.closed_quantity is None
+
+
 # ===========================================================================
 # Persistence
 # ===========================================================================

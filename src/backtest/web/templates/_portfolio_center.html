@@ -247,6 +247,7 @@
                         <th>Symbol</th>
                         <th>Side</th>
                         <th class="num">Qty</th>
+                        <th class="num" title="Option legs: lots filled (Qty is then contracts = lots × lot size). Equity orders are shares — no lots.">Lots</th>
                         <th class="num">Ordered @</th>
                         <th class="num">Filled @</th>
                         <th class="num">Slippage</th>
@@ -256,15 +257,17 @@
                         <th>Action</th>
                     </tr></thead>
                     <tbody id="orders-body">
-                        <tr><td colspan="12" class="muted" style="padding:16px">Open the tab or press
+                        <tr><td colspan="14" class="muted" style="padding:16px">Open the tab or press
                             Refresh to load the order ledger.</td></tr>
                     </tbody>
                 </table>
             </div>
             <div class="muted pos-footnote">
-                Orders are the execution ledger (equity + paper routing). Option structures execute as a
-                unit on the strategy's own option book — their entries, exits and blocks are on the runner
-                signals and the <strong>Aggregated Trades</strong> tab.<br>
+                Orders are the execution ledger: every equity fill routed through the paper/live gateway
+                <em>and</em> every option structure leg (entry and exit) recorded by the option book. An
+                option row is one <strong>leg</strong> of a structure — several rows share one
+                <strong>structure</strong>; the whole structure's P&amp;L, legs and exit reason stay on the
+                runner signals and the <strong>Trade history</strong> tab.<br>
                 <strong>⏰ Order aging:</strong> a working order past
                 <span class="muted">60s</span> is flagged <em>warn</em>, past
                 <span class="muted">5min</span> <em>alert</em> — the engine writes one audit entry per

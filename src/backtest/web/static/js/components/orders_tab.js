@@ -156,6 +156,33 @@ const OrdersTab = (function () {
       "</td>";
   }
 
+  /**
+   * Lots cell — option legs only.
+   *
+   * An option order is sized in contracts (``Qty`` = lots × lot size), so the
+   * lot count is the number a desk actually thinks in. Equity orders are
+   * shares and have no lots, so they read as an em dash rather than a 0 that
+   * would look like an unfilled order.
+   */
+  function lotsCell(order) {
+    const tag = order.tag || {};
+    if (tag.kind !== "option") return '<td class="num muted">—</td>';
+    const lots = Number(tag.lots || 0);
+    const lotSize = Number(tag.lot_size || 0);
+    const phase = tag.phase ? tag.phase + " · " : "";
+    return '<td class="num" title="' +
+      esc(phase + lots + " lot" + (lots === 1 ? "" : "s") +
+          (lotSize ? " × " + lotSize : "") + (tag.structure_id ? " · " + tag.structure_id : "")) +
+      '">' + num(lots, 0) + "</td>";
+  }
+
+  /** Which structure an option leg belongs to — legs of one trade share it. */
+  function structureText(order) {
+    const tag = order.tag || {};
+    if (tag.kind !== "option" || !tag.structure_id) return "";
+    return "⛓ " + String(tag.structure_id);
+  }
+
   function rowHtml(order) {
     const meta = STATUS_META[order.status] || { dot: "•", cls: "", label: order.status };
     const detail = order.status === "REJECTED"
@@ -165,7 +192,7 @@ const OrdersTab = (function () {
         : order.status === "PENDING"
           ? esc((order.tag && order.tag.reason) || (order.tag && order.tag.kind) || "working")
           : esc((order.tag && order.tag.reason) || (order.tag && order.tag.kind) || "filled");
-    const notes = [lineageText(order), amendText(order)].filter(Boolean).join(" · ");
+    const notes = [structureText(order), lineageText(order), amendText(order)].filter(Boolean).join(" · ");
     return (
       '<tr class="order-row ' + meta.cls + (order.aging ? " order-row-" + order.aging : "") + '">' +
       "<td>" + clock(order.updated_ts || order.created_ts) + "</td>" +
@@ -176,6 +203,7 @@ const OrdersTab = (function () {
       '<td class="cell-name">' + esc(order.symbol) + "</td>" +
       "<td>" + esc(order.side) + "</td>" +
       '<td class="num">' + num(order.quantity, 0) + "</td>" +
+      lotsCell(order) +
       '<td class="num">' + num(order.requested_price) + "</td>" +
       '<td class="num">' + num(order.avg_fill_price) + "</td>" +
       slippageCell(order) +
@@ -249,7 +277,7 @@ const OrdersTab = (function () {
             ? "Nothing is aging — every working order is inside the normal window."
             : "No orders match the current filter.")
         : "No orders in this scope yet — nothing has been routed through the ledger.";
-      body.innerHTML = '<tr><td colspan="12" class="muted" style="padding:16px">' + why + "</td></tr>";
+      body.innerHTML = '<tr><td colspan="14" class="muted" style="padding:16px">' + why + "</td></tr>";
       return;
     }
     body.innerHTML = rows.map(rowHtml).join("");

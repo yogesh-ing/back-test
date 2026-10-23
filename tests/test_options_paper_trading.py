@@ -564,3 +564,67 @@ class TestFakeQuoteProvider:
         qp.set_price("T24800", 200.0)
         quote = qp.get_quote("T24800")
         assert quote["ltp"] == 200.0
+
+
+# ---------------------------------------------------------------------------
+# Leg-fill observer (the Orders tab's option rows)
+# ---------------------------------------------------------------------------
+
+class TestLegFillObserver:
+    """``on_leg_fill`` is how an option leg reaches the shared order ledger.
+
+    The observer records ONE row per leg on entry and one per leg on exit, with
+    the lot count the desk thinks in, the price it was asked at and the price it
+    actually got.
+    """
+
+    def _broker(self, records, **kwargs):
+        kwargs.setdefault("capital", 1_000_000.0)
+        kwargs.setdefault("allowed_structures", RESEARCH_STRUCTURES)
+        kwargs["on_leg_fill"] = records.append
+        return OptionPaperBroker(**kwargs)
+
+    def test_entry_and_exit_each_fire_one_record_per_leg(self):
+        records = []
+        broker = self._broker(records)
+        quotes = FakeQuoteProvider(default_price=100.0)
+
+        positions = broker.execute_structure(_make_bull_call_spread_intent(), quotes)
+        assert [(r["phase"], r["side"]) for r in records] == [
+            ("entry", "BUY"),
+            ("entry", "SELL"),
+        ]
+
+        quotes.set_price("T24700", 120.0)
+        quotes.set_price("T25000", 80.0)
+        records.clear()
+        broker.close_structure(positions[0].structure_id, quotes, reason="manual")
+        assert [(r["phase"], r["side"]) for r in records] == [("exit", "SELL"), ("exit", "BUY")]
+
+    def test_record_carries_lots_units_and_the_two_prices(self):
+        records = []
+        broker = self._broker(records)
+        quotes = FakeQuoteProvider(default_price=100.0)
+
+        broker.execute_structure(_make_long_call_intent(), quotes)
+        rec = records[0]
+        structure_id = broker.get_open_structures()[0].structure_id
+
+        assert rec["lots"] == 1 and rec["lot_size"] == 25
+        assert rec["quantity"] == 25  # contracts, not lots
+        assert rec["structure_id"] == structure_id
+        assert rec["structure_type"] == "long_call"
+        assert rec["underlying"] == "NIFTY"
+        assert rec["symbol"] == "NIFTY26SEP24800CE"
+        # Asked at the quote, filled after slippage — the ledger's slippage pair.
+        assert Decimal(str(rec["requested_price"])) == Decimal("100.0")
+        assert Decimal(str(rec["price"])) > Decimal("100.0")
+
+    def test_a_failing_observer_never_blocks_the_fill(self):
+        def explode(_record):
+            raise RuntimeError("observer is broken")
+
+        broker = self._broker([], on_leg_fill=explode)
+        positions = broker.execute_structure(_make_long_call_intent(), FakeQuoteProvider())
+        assert len(positions) == 1
+        assert broker.get_open_structures()[0].structure_id == positions[0].structure_id

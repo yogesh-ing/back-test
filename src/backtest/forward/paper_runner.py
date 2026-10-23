@@ -452,17 +452,9 @@ class OrderLedger:
             order.filled_ts = fill.ts
             order.updated_ts = fill.ts
             # Slippage is measured against the price the order was SENT at.
-            # Recorded adverse-positive so "+₹2.50/unit" always means "cost me
-            # money" regardless of side (a SELL filled low is as bad as a BUY
-            # filled high).
-            if order.requested_price:
-                diff = fill.price - float(order.requested_price)
-                adverse = diff if order.side == SIDE_BUY else -diff
-                # Collapse -0.0 (and float dust) to a clean 0.0 — "-₹0.00
-                # slippage" is noise in a table, not information.
-                adverse = 0.0 if abs(adverse) < 1e-12 else adverse
-                order.slippage = round(adverse, 6)
-                order.slippage_pct = round(adverse / float(order.requested_price), 8)
+            order.slippage, order.slippage_pct = self._slippage(
+                order.side, fill.price, order.requested_price
+            )
 
             self._fill_count += 1
             self._pending_fills[instance_id].append(fill)
@@ -472,6 +464,83 @@ class OrderLedger:
         if handler is not None:
             handler(fill)
         return fill
+
+    @staticmethod
+    def _slippage(
+        side: str, fill_price: float, requested_price: Optional[float]
+    ) -> "tuple[Optional[float], Optional[float]]":
+        """Adverse-positive per-unit slippage plus its fractional form.
+
+        ``+₹2.50`` always means "cost me money" regardless of side (a SELL
+        filled low is as bad as a BUY filled high). ``-0.0`` (and float dust)
+        collapses to a clean 0.0 — "-₹0.00 slippage" is noise in a table, not
+        information.
+        """
+        if not requested_price:
+            return None, None
+        diff = float(fill_price) - float(requested_price)
+        adverse = diff if side == SIDE_BUY else -diff
+        adverse = 0.0 if abs(adverse) < 1e-12 else adverse
+        return round(adverse, 6), round(adverse / float(requested_price), 8)
+
+    def record_filled(
+        self,
+        instance_id: str,
+        *,
+        symbol: str,
+        side: str,
+        quantity: float,
+        price: float,
+        requested_price: Optional[float] = None,
+        ts: Optional[str] = None,
+        tag: Optional[Dict[str, Any]] = None,
+    ) -> Order:
+        """Write a **terminal FILLED row** for a fill that never was a routed order.
+
+        Option structure legs are the case: ``OptionPaperBroker`` fills a leg
+        against the live depth inside one call, so there is no PENDING order to
+        advance — yet the execution still belongs in the ledger, because the
+        Orders tab is the audit of "did it fill, and at what price?".
+
+        Deliberately **not** :meth:`apply_fill`: that routes a FillEvent to the
+        owning runner's equity handler, which would open a share-simulation
+        position from an option fill. This method only writes the row; the
+        option book stays the single owner of option accounting.
+        """
+        if quantity <= 0:
+            raise ValueError(f"filled quantity must be positive, got {quantity!r}")
+        if side not in (SIDE_BUY, SIDE_SELL):
+            raise ValueError(f"order side must be BUY or SELL, got {side!r}")
+
+        stamp = ts or datetime.now(timezone.utc).isoformat()
+        coid = self._make_client_order_id(instance_id)
+        order = Order(
+            client_order_id=coid,
+            instance_id=instance_id,
+            symbol=str(symbol).strip().upper(),
+            side=side,
+            quantity=float(quantity),
+            order_type="MARKET",
+            limit_price=None,
+            status=ORDER_FILLED,
+            created_ts=stamp,
+            filled_qty=float(quantity),
+            avg_fill_price=float(price),
+            filled_ts=stamp,
+            updated_ts=stamp,
+            tag=dict(tag or {}),
+            requested_price=float(requested_price) if requested_price else None,
+        )
+        order.slippage, order.slippage_pct = self._slippage(
+            side, float(price), order.requested_price
+        )
+        with self._lock:
+            self._routing[coid] = instance_id
+            self._orders[coid] = order
+            self._order_history.append(coid)
+            self._fill_count += 1
+            self._trim_locked()
+        return order
 
     def drain_pending_fills(self, instance_id: str) -> List[FillEvent]:
         with self._lock:
@@ -1125,6 +1194,9 @@ class StrategyRunner:
             self.options_bridge.runner_id = self.instance_id
             self.options_bridge.runner_name = self.config.name
             self.options_bridge.runner_running = False
+            # Orders tab: every option leg fill (entry and exit) mirrors into
+            # the shared ledger as a terminal FILLED row.
+            self.options_bridge.option_broker.on_leg_fill = self._record_option_leg_fill
 
         # -- rolling candle buffers ----------------------------------------
         self._bars: Dict[str, Deque[Dict[str, Any]]] = {
@@ -1303,12 +1375,18 @@ class StrategyRunner:
         trades: List[Dict[str, Any]] = []
         for pos in self.portfolio.closed_positions:
             pnl = float(pos.realized_pnl)
+            # A closed position's own ``quantity`` is zero by definition, so the
+            # round trip's size/direction come from the stamp taken at the final
+            # fill (rows written before that stamp keep the old reading).
+            closed_qty = pos.closed_quantity
+            if closed_qty is None:
+                closed_qty = pos.quantity
             trades.append(
                 {
                     "symbol": pos.symbol,
                     "kind": "equity",
-                    "side": "LONG" if pos.quantity >= 0 else "SHORT",
-                    "qty": abs(float(pos.quantity)),
+                    "side": "LONG" if closed_qty >= 0 else "SHORT",
+                    "qty": abs(float(closed_qty)),
                     "entry_price": float(pos.average_entry_price),
                     "exit_price": float(
                         pos.current_price
@@ -1326,6 +1404,39 @@ class StrategyRunner:
         trades.extend(self.closed_option_trades)
         trades.sort(key=lambda t: (t.get("exit_ts") or "", t.get("symbol") or ""))
         return trades[-MAX_TRADE_LOG:]
+
+    def _record_option_leg_fill(self, record: Dict[str, Any]) -> None:
+        """Mirror one option leg fill into the order ledger (Orders tab).
+
+        An option leg fills inside ``OptionPaperBroker``, so there is no
+        PENDING order to advance and no reason to route a FillEvent — this
+        writes the terminal row only. The option book stays the single owner
+        of option accounting.
+        """
+        ts = record.get("ts")
+        phase = str(record.get("phase") or "fill")
+        structure_type = str(record.get("structure_type") or "")
+        self.ledger.record_filled(
+            self.instance_id,
+            symbol=str(record.get("symbol") or record.get("instrument_token") or ""),
+            side=str(record.get("side") or ""),
+            quantity=float(record.get("quantity") or 0),
+            price=float(record.get("price") or 0),
+            requested_price=float(record["requested_price"])
+            if record.get("requested_price") is not None else None,
+            ts=ts.isoformat() if isinstance(ts, datetime) else (str(ts) if ts else None),
+            tag={
+                "kind": "option",
+                "phase": phase,
+                "lots": int(record.get("lots") or 0),
+                "lot_size": int(record.get("lot_size") or 0),
+                "structure_id": record.get("structure_id"),
+                "structure_type": structure_type,
+                "underlying": record.get("underlying"),
+                "position_id": record.get("position_id"),
+                "reason": f"{phase} {structure_type}".strip(),
+            },
+        )
 
     @property
     def wins(self) -> int:
