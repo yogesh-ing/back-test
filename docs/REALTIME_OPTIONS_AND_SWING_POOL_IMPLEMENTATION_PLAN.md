@@ -154,7 +154,8 @@ From the 2026-10-23 live paper reconciliation (`29/29` depth fills, `0` one-side
 
 ## 5. Pillar 3: After-Hours Swing Screener Tab & Hot-Swappable Dynamic Pools
 
-### 5.1 Dual-Tier Data Retention Policy
+### 5.1 Dual-Tier Data Retention Policy & Phase 5.0 Daily-Bar Ingest Slice
+* **Live-DB Audit Prerequisite (Phase 5.0 — Daily-Bar Ingest Slice)**: Production `market_data_cache` currently stores NSE equities as `1min` candles only (`0/50` symbols present at `timeframe = '1day'`). Before enabling the EOD Swing Screener and `1day` VCP / Relative Strength pool runners, Phase 5 begins with a dedicated `1day` historical ingest + nightly rollup slice (`fetch_nifty500_historical.py` / continuous rollup into `timeframe = '1day'`) so `1day` warmups hit pre-materialized daily bars directly without scanning multi-year `1min` chunks.
 * **`1day` Candles (`2–3+ years` for `NIFTY_200` / `NIFTY_500` + `NIFTY`)**: `<50 MB` total in PostgreSQL. Powers VCP stage analysis (`SMA150`/`SMA200`), contraction detection, 52-week high proximity, Relative Strength vs `NIFTY`, and Daily RSI.
 * **`1min` Candles (`60–90 rolling days` for active watchlist/universe + indices)**: Powers `5min` EMA strategies, intraday warmup, and intraday backtests with tiny storage (~0.4–1.5 GB/yr).
 

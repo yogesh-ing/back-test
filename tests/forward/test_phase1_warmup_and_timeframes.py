@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-import time
+import threading
 from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
@@ -827,10 +827,13 @@ class TestPortfolioManagerWarmupAndAggregation:
 
     def test_non_auto_start_feed_async_warmup_returns_immediately(self) -> None:
         """Ensure async_warmup runs off the request thread even when auto_start_feed=False."""
+        entered_db = threading.Event()
+        release_db = threading.Event()
         fake_db = MagicMock()
 
-        def _slow_bulk(*args: Any, **kwargs: Any) -> Dict[str, pd.DataFrame]:
-            time.sleep(0.18)
+        def _gated_bulk(*args: Any, **kwargs: Any) -> Dict[str, pd.DataFrame]:
+            entered_db.set()
+            release_db.wait(timeout=5.0)
             idx = pd.date_range("2026-10-20 09:15:00", periods=60, freq="15min")
             return {
                 "RELIANCE": pd.DataFrame(
@@ -845,15 +848,19 @@ class TestPortfolioManagerWarmupAndAggregation:
                 )
             }
 
-        fake_db.get_candles_bulk.side_effect = _slow_bulk
+        fake_db.get_candles_bulk.side_effect = _gated_bulk
         ws = WarmupService(
             db_source=fake_db,
             session_recorder=SessionBarRecorder(),
             now_fn=lambda: datetime(2026, 10, 23, 3, 30, 0, tzinfo=timezone.utc),
             sleep_fn=lambda _: None,
         )
+        # Inject an isolated inert feed client so local .env credentials never
+        # trigger real ScriptMaster / HTTP downloads during unit tests.
+        inert_feed_client = MagicMock(spec=[])
         mgr = PortfolioManager(
             auto_start_feed=False,
+            mstock_feed_client=inert_feed_client,
             warmup_service=ws,
             enable_broker_warmup=True,
             async_warmup=True,
@@ -866,24 +873,67 @@ class TestPortfolioManagerWarmupAndAggregation:
             allocated_capital=200_000.0,
             source="mstock",
         )
-        t0 = time.monotonic()
         rid = mgr.add_runner(cfg, start=True)
-        elapsed_spawn = time.monotonic() - t0
         runner = mgr.get_runner(rid)
         assert runner is not None
-        assert elapsed_spawn < 0.08
-        assert runner.warmup_status in ("WARMING_UP", "READY")
+        # add_runner returned while background thread is parked on release_db!
+        assert entered_db.wait(timeout=2.0)
+        assert runner.warmup_status == "WARMING_UP"
 
-        deadline = time.monotonic() + 1.5
-        while runner.warmup_status == "WARMING_UP" and time.monotonic() < deadline:
-            time.sleep(0.02)
+        release_db.set()
+        assert mgr.wait_for_warmup(rid, timeout=5.0)
         assert runner.warmup_status == "READY"
         assert runner.warmup_bars_seeded == 60
 
+    def test_pre_open_warmup_skips_intraday_http(self) -> None:
+        """Before 09:16 IST today has 0 closed minute bars — never hit intraday HTTP."""
+        fake_db = MagicMock()
+        idx = pd.date_range("2026-10-20 09:15:00", periods=60, freq="15min")
+        fake_db.get_candles_bulk.return_value = {
+            "RELIANCE": pd.DataFrame(
+                {
+                    "open": 2900.0,
+                    "high": 2905.0,
+                    "low": 2895.0,
+                    "close": 2902.0,
+                    "volume": 100.0,
+                },
+                index=idx,
+            )
+        }
+        http_fetcher = MagicMock(return_value=[])
+        ws = WarmupService(
+            db_source=fake_db,
+            session_recorder=SessionBarRecorder(),
+            now_fn=lambda: datetime(2026, 10, 23, 3, 35, 0, tzinfo=timezone.utc),  # 09:05 IST
+            sleep_fn=lambda _: None,
+        )
+        ledger = OrderLedger()
+        runner = StrategyRunner(
+            RunnerConfig(
+                name="PreOpenReliance",
+                strategy_name="sma_crossover",
+                symbols=["RELIANCE"],
+                timeframe="15min",
+                allocated_capital=200_000.0,
+                source="mstock",
+            ),
+            ledger=ledger,
+            broker=PaperBroker(ledger),
+        )
+        report = ws.warmup_runner(runner, intraday_fetcher=http_fetcher)
+        assert http_fetcher.call_count == 0
+        assert report.intraday_http_calls == 0
+        assert runner.warmup_status == "READY"
+
     def test_ui_runner_card_and_deep_dive_surface_warmup_degraded(self) -> None:
         repo = Path(__file__).resolve().parents[2]
-        portfolio_js = (repo / "src/backtest/web/static/js/portfolio.js").read_text()
-        deep_dive_js = (repo / "src/backtest/web/static/js/deep_dive.js").read_text()
+        portfolio_js = (repo / "src/backtest/web/static/js/portfolio.js").read_text(
+            encoding="utf-8"
+        )
+        deep_dive_js = (repo / "src/backtest/web/static/js/deep_dive.js").read_text(
+            encoding="utf-8"
+        )
         assert "warmupSubHtml" in portfolio_js
         assert "badge-warmup-degraded" in portfolio_js
         assert "warmup_reason" in portfolio_js

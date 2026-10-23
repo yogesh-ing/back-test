@@ -216,6 +216,7 @@ class PortfolioManager:
         # on a non-synthetic server (auto_start_feed=False) must still warm up
         # off the request thread during the 09:15 rush.
         self._async_warmup = (not in_pytest) if async_warmup is None else bool(async_warmup)
+        self._warmup_threads: Dict[str, threading.Thread] = {}
         self._reject_duplicate_runners = bool(reject_duplicate_runners)
 
         # Gap #3 / V2 (P2.4): optional JSON state persistence. No path →
@@ -927,6 +928,11 @@ class PortfolioManager:
                 runner.warmup_reason = f"Warmup failed ({type(exc).__name__}: {exc})"
                 self._persist_state()
                 return None
+            finally:
+                with self._lock:
+                    cur = self._warmup_threads.get(instance_id)
+                    if cur is threading.current_thread():
+                        self._warmup_threads.pop(instance_id, None)
 
         if background:
             t = threading.Thread(
@@ -934,9 +940,20 @@ class PortfolioManager:
                 name=f"warmup-{instance_id[:8]}",
                 daemon=True,
             )
+            with self._lock:
+                self._warmup_threads[instance_id] = t
             t.start()
             return None
         return _execute()
+
+    def wait_for_warmup(self, instance_id: str, timeout: float = 5.0) -> bool:
+        """Join any active background warmup thread for ``instance_id``."""
+        with self._lock:
+            t = self._warmup_threads.get(instance_id)
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=timeout)
+            return not t.is_alive()
+        return True
 
     def add_runner(
         self,

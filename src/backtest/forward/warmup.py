@@ -566,8 +566,13 @@ class WarmupService:
                 report.db_error = f"{type(exc).__name__}: {exc}"
                 logger.warning("WarmupService: bulk DB read failed (%s)", report.db_error)
 
-        # 2. Layer 2 — Today's session gap-fill (intraday timeframes only)
+        # 2. Layer 2 — Today's session gap-fill (intraday timeframes only).
+        # Before 09:16 IST today has zero closed 1-minute candles, so skip HTTP
+        # intraday fetches during the 09:00-09:15 pre-open rush.
         intraday_rows: Dict[str, List[Dict[str, Any]]] = {}
+        can_fetch_today_http = (
+            intraday_fetcher is not None and now_ist.strftime("%H:%M") >= "09:16"
+        )
         if tf not in ("1day", "1week"):
             source_name = str(getattr(runner.config, "source", "") or "").lower()
             need_http: List[str] = []
@@ -585,10 +590,10 @@ class WarmupService:
                 else:
                     if rec_closed:
                         intraday_rows[sym] = rec_closed
-                    if intraday_fetcher is not None:
+                    if can_fetch_today_http:
                         need_http.append(sym)
 
-            if need_http and intraday_fetcher is not None:
+            if need_http and can_fetch_today_http and intraday_fetcher is not None:
                 fetched = self._fetch_intraday_paced(
                     need_http, intraday_fetcher, current_minute_floor
                 )
