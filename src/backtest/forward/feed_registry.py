@@ -67,6 +67,7 @@ from backtest.options.quote_providers import (
     SyntheticChainGenerator,
     SyntheticQuoteProvider,
 )
+from backtest.options.quote_providers import HotStrikeRing  # noqa: F401
 
 logger = logging.getLogger("backtest.forward.feed_registry")
 
@@ -194,6 +195,9 @@ class ChainBus:
         underlying: str,
         source: str = "",
         broker: Any = None,
+        *,
+        wing_distance_pct: Optional[float] = None,
+        warm_ring: bool = True,
     ) -> Any:
         """Return the shared feed for ``underlying``, +1 subscriber.
 
@@ -207,6 +211,8 @@ class ChainBus:
         """
         key = str(underlying).upper()
         source_key = self._resolve_source(source)
+        live_inner: Any = None
+        should_warm = False
         with self._lock:
             if source_key == "synthetic":
                 return self._acquire_synthetic(key)
@@ -224,14 +230,32 @@ class ChainBus:
                 # one-object-per-underlying contract (identity + refcount), and
                 # wrapping only on the runner path would make the first acquirer
                 # decide whether the dashboard's unwrapped entry ever crosses.
+                live_inner = LiveChainProvider(broker)
                 entry = _FeedEntry(
-                    feed=BidAskQuoteProvider(LiveChainProvider(broker)),
+                    feed=BidAskQuoteProvider(live_inner),
                     key=(key, source_key, ""),
                 )
                 self._live[key] = entry
+                should_warm = bool(warm_ring and live_inner.has_ws_ring_support())
                 logger.info("live chain provider registered: %s (%s)", key, source_key)
+            else:
+                live_inner = getattr(entry.feed, "inner", entry.feed)
             entry.subscribers += 1
-            return entry.feed
+            feed_out = entry.feed
+
+        if wing_distance_pct is not None and wing_distance_pct > 0 and live_inner is not None:
+            reg_wing = getattr(live_inner, "register_wing_distance", None)
+            if callable(reg_wing):
+                reg_wing(key, float(wing_distance_pct))
+        if should_warm and live_inner is not None:
+            warm_fn = getattr(live_inner, "warm_chain_and_ring", None)
+            if callable(warm_fn):
+                warm_fn(
+                    key,
+                    wing_distance_pct=wing_distance_pct,
+                    async_warm=True,
+                )
+        return feed_out
 
     @staticmethod
     def _resolve_source(source: str) -> str:
@@ -265,21 +289,31 @@ class ChainBus:
     def release(self, underlying: str, source: str = "") -> int:
         """Drop one subscriber; evict the generator at zero."""
         key = str(underlying).upper()
+        is_synthetic = self._resolve_source(source) == "synthetic"
+        evicted_feed: Any = None
         with self._lock:
-            store = (
-                self._generators
-                if self._resolve_source(source) == "synthetic"
-                else self._live
-            )
+            store = self._generators if is_synthetic else self._live
             entry = store.get(key)
             if entry is None:
                 return 0
             entry.subscribers = max(0, entry.subscribers - 1)
             if entry.subscribers == 0:
                 store.pop(key, None)
+                if not is_synthetic:
+                    evicted_feed = entry.feed
                 logger.info("chain generator released: %s (%s)", key, source)
-                return 0
-            return entry.subscribers
+                remaining = 0
+            else:
+                remaining = entry.subscribers
+
+        if evicted_feed is not None:
+            rel_ring = getattr(evicted_feed, "release_hot_ring", None)
+            if callable(rel_ring):
+                try:
+                    rel_ring(key)
+                except Exception:  # noqa: BLE001
+                    logger.debug("release_hot_ring(%s) failed", key, exc_info=True)
+        return remaining
 
     def subscriber_count(self, underlying: str, source: str = "") -> int:
         with self._lock:
@@ -336,6 +370,8 @@ def option_quote_provider_for(
     source: str,
     underlying: str,
     quote_broker: Any | None = None,
+    *,
+    wing_distance_pct: Optional[float] = None,
 ) -> tuple[Any, str]:
     """``(quote_provider, label)`` for an option runner's bridge — P1.1.
 
@@ -375,7 +411,12 @@ def option_quote_provider_for(
         # source only (an explicit quote_broker is a deliberate override).
         name = getattr(broker, "broker_name", None)
         if broker is not None and (name is None or name == source_key):
-            provider = get_chain_bus().acquire(underlying, source=source_key, broker=broker)
+            provider = get_chain_bus().acquire(
+                underlying,
+                source=source_key,
+                broker=broker,
+                wing_distance_pct=wing_distance_pct,
+            )
             return provider, provider.source_name
         if not synthetic_enabled():
             raise SourceDisabledError(
@@ -531,6 +572,41 @@ class _BrokerBarFeedBase:
         if delivered and self.on_tick_end is not None:
             self.on_tick_end(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
         return delivered
+
+    def ingest_ws_bar(
+        self,
+        symbol: str,
+        raw_bar: Dict[str, Any],
+        *,
+        timeframe: str = "1min",
+        emit_tick_end: bool = True,
+    ) -> bool:
+        """Deliver a WebSocket-aggregated bar with shared ``_last_ts`` dedupe.
+
+        Shares ``self._last_ts`` with the REST fallback poller so a 60s REST
+        failover sweep never re-emits a minute bar already pushed from WS.
+        """
+        sym = str(symbol).upper()
+        bar = self._normalize_bar(raw_bar)
+        if bar is None:
+            return False
+        bar["_source"] = self.broker_name
+        if timeframe:
+            bar["_timeframe"] = str(timeframe)
+
+        with self._lock:
+            if sym not in self._symbols:
+                return False
+            if bar["ts"] <= self._last_ts.get(sym, ""):
+                return False
+            self._last_ts[sym] = bar["ts"]
+
+        get_quality_monitor(self.broker_name, sym).observe_bar(bar["ts"])
+        if self.on_bar is not None:
+            self.on_bar(sym, bar)
+        if emit_tick_end and self.on_tick_end is not None:
+            self.on_tick_end(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+        return True
 
     @classmethod
     def _market_day_state(cls) -> tuple[str, str]:
