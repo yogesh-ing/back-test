@@ -49,7 +49,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -444,6 +444,152 @@ def option_quote_provider_for(
     return option_quote_provider(generator), "synthetic:bs"
 
 
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+class LiveMinuteBarBuilder:
+    """Thread-safe 1-minute OHLCV bar accumulator from WebSocket ticks (Caveat Q-5).
+
+    Builds genuine per-minute Open/High/Low/Close/Volume candles from streaming
+    ticks so strategies never consume ``quote/ohlc``'s full-day session OHL as a
+    1-minute candle body. Keeps the unsealed ``forming`` candle isolated until a
+    tick crosses into a strictly later minute.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._forming: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _parse_ist_dt(ts: Any) -> datetime:
+        if isinstance(ts, datetime):
+            return ts.astimezone(_IST) if ts.tzinfo is not None else ts.replace(tzinfo=_IST)
+        if ts is not None:
+            text = str(ts).strip()
+            if text:
+                try:
+                    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                    return (
+                        parsed.astimezone(_IST)
+                        if parsed.tzinfo is not None
+                        else parsed.replace(tzinfo=_IST)
+                    )
+                except ValueError:
+                    pass
+                for fmt in ("%I:%M:%S%p", "%I:%M:%S %p", "%H:%M:%S"):
+                    try:
+                        parsed_t = datetime.strptime(text.upper(), fmt).time()
+                        today_ist = datetime.now(_IST).date()
+                        return datetime.combine(today_ist, parsed_t, tzinfo=_IST)
+                    except ValueError:
+                        continue
+        return datetime.now(_IST)
+
+    @staticmethod
+    def _public_bar(entry: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "ts": entry["ts"],
+            "open": float(entry["open"]),
+            "high": float(entry["high"]),
+            "low": float(entry["low"]),
+            "close": float(entry["close"]),
+            "volume": float(entry["volume"]),
+        }
+
+    def get_forming_bar(self, symbol: str) -> Optional[Dict[str, Any]]:
+        sym = str(symbol).strip().upper()
+        with self._lock:
+            cur = self._forming.get(sym)
+            return self._public_bar(cur) if cur is not None else None
+
+    def ingest_tick(
+        self,
+        symbol: str,
+        price: float,
+        ts: Any = None,
+        *,
+        cumulative_volume: Optional[float] = None,
+        tick_volume: Optional[float] = None,
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Fold one tick into ``symbol``'s minute candle.
+
+        Returns ``(sealed_bars, forming_bar)`` where ``sealed_bars`` contains at
+        most the completed prior minute candle when a minute boundary crosses.
+        """
+        px = float(price)
+        if px <= 0.0:
+            return [], self.get_forming_bar(symbol)
+        sym = str(symbol).strip().upper()
+        ist_dt = self._parse_ist_dt(ts)
+        minute_ts = ist_dt.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:00")
+        cum_vol = (
+            max(0.0, float(cumulative_volume))
+            if cumulative_volume is not None
+            else None
+        )
+        inc_vol = max(0.0, float(tick_volume)) if tick_volume is not None else 0.0
+
+        sealed: List[Dict[str, Any]] = []
+        with self._lock:
+            cur = self._forming.get(sym)
+            if cur is None:
+                entry = {
+                    "ts": minute_ts,
+                    "open": px,
+                    "high": px,
+                    "low": px,
+                    "close": px,
+                    "volume": inc_vol,
+                    "_base_cum_vol": cum_vol,
+                    "_last_cum_vol": cum_vol,
+                }
+                self._forming[sym] = entry
+                return [], self._public_bar(entry)
+
+            if minute_ts < cur["ts"]:
+                return [], self._public_bar(cur)
+
+            if minute_ts == cur["ts"]:
+                cur["high"] = max(float(cur["high"]), px)
+                cur["low"] = min(float(cur["low"]), px)
+                cur["close"] = px
+                if cum_vol is not None:
+                    base = cur.get("_base_cum_vol")
+                    if base is None:
+                        cur["_base_cum_vol"] = cum_vol
+                    else:
+                        cur["volume"] = max(float(cur["volume"]), max(0.0, cum_vol - float(base)))
+                    cur["_last_cum_vol"] = cum_vol
+                elif inc_vol > 0.0:
+                    cur["volume"] = float(cur["volume"]) + inc_vol
+                return [], self._public_bar(cur)
+
+            # Minute boundary crossed: seal previous minute and open new minute
+            sealed.append(self._public_bar(cur))
+            prev_last_cum = cur.get("_last_cum_vol")
+            first_tick_vol = inc_vol
+            base_for_new = cum_vol
+            if (
+                cum_vol is not None
+                and prev_last_cum is not None
+                and cum_vol >= float(prev_last_cum)
+            ):
+                first_tick_vol = cum_vol - float(prev_last_cum)
+                base_for_new = float(prev_last_cum)
+            new_entry = {
+                "ts": minute_ts,
+                "open": px,
+                "high": px,
+                "low": px,
+                "close": px,
+                "volume": first_tick_vol,
+                "_base_cum_vol": base_for_new,
+                "_last_cum_vol": cum_vol,
+            }
+            self._forming[sym] = new_entry
+            return sealed, self._public_bar(new_entry)
+
+
 class _BrokerBarFeedBase:
     """Shared plumbing for broker poll threads (mStock/Dhan/...).
 
@@ -477,6 +623,7 @@ class _BrokerBarFeedBase:
         self._thread: Optional[threading.Thread] = None
         self._last_ts: Dict[str, str] = {}  # symbol → last pushed bar ts
         self._last_rest_logged_day: Optional[str] = None
+        self.bar_builder = LiveMinuteBarBuilder()
 
     def add_symbols(self, symbols: List[str]) -> None:
         with self._lock:
@@ -607,6 +754,36 @@ class _BrokerBarFeedBase:
         if emit_tick_end and self.on_tick_end is not None:
             self.on_tick_end(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
         return True
+
+    def ingest_ws_tick(
+        self,
+        symbol: str,
+        tick: Dict[str, Any],
+        *,
+        emit_tick_end: bool = True,
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Update live 1-minute bar builder from a WS tick and emit any sealed minute."""
+        if not isinstance(tick, dict):
+            return [], None
+        ltp = float(tick.get("ltp") or tick.get("last_price") or 0.0)
+        if ltp <= 0.0:
+            return [], self.bar_builder.get_forming_bar(symbol)
+        ts = tick.get("recv_utc") or tick.get("ts") or tick.get("timestamp")
+        raw_vol = tick.get("volume")
+        cum_vol = float(raw_vol) if raw_vol is not None else None
+        sealed, forming = self.bar_builder.ingest_tick(
+            symbol,
+            ltp,
+            ts,
+            cumulative_volume=cum_vol,
+        )
+        emitted: List[Dict[str, Any]] = []
+        for bar in sealed:
+            if self.ingest_ws_bar(
+                symbol, bar, timeframe="1min", emit_tick_end=emit_tick_end
+            ):
+                emitted.append(bar)
+        return emitted, forming
 
     @classmethod
     def _market_day_state(cls) -> tuple[str, str]:

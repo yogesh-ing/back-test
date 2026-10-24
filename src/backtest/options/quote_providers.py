@@ -900,6 +900,14 @@ class HotStrikeRing:
                 logger.debug("Could not attach ws reinit listener", exc_info=True)
 
     def _broker_subscribed_snapshot(self) -> set[int] | None:
+        accessor = getattr(self.broker, "ws_subscribed_tokens", None)
+        if callable(accessor):
+            try:
+                snap = accessor()
+            except Exception:  # noqa: BLE001
+                snap = None
+            if isinstance(snap, (set, frozenset)):
+                return set(snap)
         raw = getattr(self.broker, "__dict__", {}).get("_ws_subscribed_tokens")
         if isinstance(raw, (set, frozenset)):
             return set(raw)

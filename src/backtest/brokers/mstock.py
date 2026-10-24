@@ -212,6 +212,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         self._ws_desired_modes: dict[int, str] = {}
         self._ws_token_pins: dict[int, int] = {}
         self._ws_reinit_listeners: list[Callable[[], None]] = []
+        self._ws_tick_listeners: list[Callable[[dict[str, dict]], None]] = []
         self._ws_lock = threading.RLock()
         self._ws_cold_subscribe_wait_s: float = 0.0
 
@@ -397,6 +398,13 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             
             # Wrap MTicker for synchronous quote access
             self._ws_feed = MStockWebSocketWrapper(ticker)
+            with self._ws_lock:
+                tick_listeners = list(self._ws_tick_listeners)
+            for tick_cb in tick_listeners:
+                try:
+                    self._ws_feed.add_tick_listener(tick_cb)
+                except Exception:  # noqa: BLE001
+                    logger.debug("Could not re-attach WS tick listener", exc_info=True)
 
             # The server closes an un-authenticated socket (clean 1000) within
             # milliseconds of the first data frame — the login text frame must
@@ -458,6 +466,11 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         "FINNIFTY": 26037,
     }
 
+    def ws_subscribed_tokens(self) -> set[int]:
+        """Return a snapshot copy of currently subscribed WS numeric tokens."""
+        with self._ws_lock:
+            return set(self._ws_subscribed_tokens)
+
     def add_ws_reinit_listener(self, callback: Callable[[], None]) -> None:
         """Register a callback fired whenever TOTP re-auth creates a new WS feed."""
         if not callable(callback):
@@ -471,6 +484,32 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         with self._ws_lock:
             if callback in self._ws_reinit_listeners:
                 self._ws_reinit_listeners.remove(callback)
+
+    def add_tick_listener(self, callback: Callable[[dict[str, dict]], None]) -> None:
+        """Register a coalesced WS tick listener preserved across TOTP re-auth."""
+        if not callable(callback):
+            raise TypeError("tick listener must be callable")
+        with self._ws_lock:
+            if callback not in self._ws_tick_listeners:
+                self._ws_tick_listeners.append(callback)
+            ws_feed = self._ws_feed
+        if ws_feed is not None:
+            add_fn = getattr(ws_feed, "add_tick_listener", None)
+            if callable(add_fn):
+                add_fn(callback)
+
+    def remove_tick_listener(
+        self, callback: Callable[[dict[str, dict]], None]
+    ) -> None:
+        """Unregister a coalesced WS tick listener."""
+        with self._ws_lock:
+            if callback in self._ws_tick_listeners:
+                self._ws_tick_listeners.remove(callback)
+            ws_feed = self._ws_feed
+        if ws_feed is not None:
+            rem_fn = getattr(ws_feed, "remove_tick_listener", None)
+            if callable(rem_fn):
+                rem_fn(callback)
 
     def _resubscribe_session_tokens_ws(
         self,

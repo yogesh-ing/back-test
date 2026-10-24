@@ -218,6 +218,13 @@ class PortfolioManager:
         self._async_warmup = (not in_pytest) if async_warmup is None else bool(async_warmup)
         self._warmup_threads: Dict[str, threading.Thread] = {}
         self._reject_duplicate_runners = bool(reject_duplicate_runners)
+        self._attached_ws_broker: Optional[Any] = None
+        self._ws_token_symbols: Dict[str, str] = {
+            "26000": "NIFTY",
+            "26009": "BANKNIFTY",
+            "26013": "MIDCPNIFTY",
+            "26037": "FINNIFTY",
+        }
 
         # Gap #3 / V2 (P2.4): optional JSON state persistence. No path →
         # byte-for-byte the old in-memory behaviour. With a path, every
@@ -1038,6 +1045,8 @@ class PortfolioManager:
                 ):
                     runner.warmup_status = "WARMING_UP"
                     should_warmup = True
+                if str(runner.config.source or "").lower() == "mstock":
+                    self._ensure_ws_tick_subscription()
                 if self._auto_start_feed:
                     feed.start(warmup=True)
                     # Gap #1: keep the live poll thread in step with the
@@ -2085,6 +2094,145 @@ class PortfolioManager:
                 feed.start()
             elif not has_live and feed.running:
                 feed.stop()
+            if source == "mstock":
+                if has_live:
+                    self._ensure_ws_tick_subscription()
+                else:
+                    self.detach_ws_broker()
+
+    def register_ws_symbol_token(self, symbol: str, token: int | str) -> None:
+        """Map a numeric MTicker instrument token to its canonical symbol."""
+        tok_str = str(token).strip()
+        sym_up = str(symbol).strip().upper()
+        if tok_str and sym_up:
+            self._ws_token_symbols[tok_str] = sym_up
+
+    def attach_ws_broker(self, broker: Any) -> bool:
+        """Subscribe ``_on_ws_tick_batch`` to an ``MStockBroker`` coalesced tick bus."""
+        if broker is None or type(broker).__module__ == "unittest.mock":
+            return False
+        add_fn = getattr(broker, "add_tick_listener", None)
+        if not callable(add_fn):
+            return False
+        if self._attached_ws_broker is broker:
+            return True
+        self.detach_ws_broker()
+        try:
+            add_fn(self._on_ws_tick_batch)
+            self._attached_ws_broker = broker
+            return True
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not attach WS tick listener to broker", exc_info=True)
+            return False
+
+    def detach_ws_broker(self) -> None:
+        """Remove ``_on_ws_tick_batch`` from the currently attached WS broker."""
+        broker = self._attached_ws_broker
+        self._attached_ws_broker = None
+        if broker is None:
+            return
+        rem_fn = getattr(broker, "remove_tick_listener", None)
+        if callable(rem_fn):
+            try:
+                rem_fn(self._on_ws_tick_batch)
+            except Exception:  # noqa: BLE001
+                logger.debug("Could not detach WS tick listener", exc_info=True)
+
+    def _ensure_ws_tick_subscription(self) -> bool:
+        if self._attached_ws_broker is not None:
+            return True
+        candidate = self._injected_live_broker
+        if candidate is not None and getattr(candidate, "broker_name", "mstock") == "mstock":
+            if self.attach_ws_broker(candidate):
+                return True
+        try:
+            from backtest.brokers.session_manager import get_session_manager
+
+            broker = get_session_manager().get_authenticated_broker("mstock")
+            if broker is not None:
+                return self.attach_ws_broker(broker)
+        except Exception:  # noqa: BLE001
+            logger.debug("WS broker auto-discovery skipped", exc_info=True)
+        return False
+
+    def _on_ws_tick_batch(self, quotes_by_token: Dict[str, dict]) -> None:
+        """Dispatch coalesced 150ms MTicker batches to ``LiveMinuteBarBuilder`` and runners."""
+        if not quotes_by_token:
+            return
+
+        spot_updates: Dict[str, tuple[float, str, Optional[Dict[str, Any]]]] = {}
+        for tok_str, quote in quotes_by_token.items():
+            if not isinstance(quote, dict):
+                continue
+            sym = self._ws_token_symbols.get(str(tok_str))
+            if not sym:
+                continue
+            ltp = float(quote.get("ltp") or quote.get("last_price") or 0.0)
+            if ltp <= 0.0:
+                continue
+            ts = str(quote.get("recv_utc") or quote.get("timestamp") or "")
+            _, forming = self.mstock_feed.ingest_ws_tick(sym, quote)
+            spot_updates[sym] = (ltp, ts, forming)
+
+        with self._lock:
+            running_mstock = [
+                r
+                for r in self._runners.values()
+                if r.status == STATUS_RUNNING
+                and str(r.config.source or "").lower() == "mstock"
+            ]
+
+        if not running_mstock:
+            return
+
+        tick_tokens = set(str(k) for k in quotes_by_token.keys())
+        exited_runners: List[StrategyRunner] = []
+        entered_any = False
+
+        for runner in running_mstock:
+            matched_spot = False
+            for sym in runner.config.symbols:
+                sym_up = sym.upper()
+                if sym_up not in spot_updates:
+                    continue
+                matched_spot = True
+                ltp, ts, forming = spot_updates[sym_up]
+                res = runner.on_tick(sym_up, price=ltp, ts=ts, forming_bar=forming)
+                if isinstance(res, dict):
+                    if res.get("exited"):
+                        exited_runners.append(runner)
+                    elif res.get("structure_id"):
+                        entered_any = True
+
+            if not matched_spot and runner.options_bridge is not None and runner.config.symbols:
+                held_hits = runner.open_option_tokens().intersection(tick_tokens)
+                if held_hits:
+                    sample_tok = next(iter(held_hits))
+                    sample_q = quotes_by_token.get(sample_tok) or {}
+                    leg_ts = str(
+                        sample_q.get("recv_utc") or sample_q.get("timestamp") or ""
+                    )
+                    res = runner.on_tick(
+                        runner.config.symbols[0].upper(),
+                        price=None,
+                        ts=leg_ts,
+                    )
+                    if isinstance(res, dict) and res.get("exited"):
+                        exited_runners.append(runner)
+
+        if exited_runners or entered_any:
+            with self._lock:
+                if exited_runners:
+                    self._evaluate_risk()
+                self._persist_state()
+            if self._trade_persister is not None and not self._restoring:
+                for runner in exited_runners:
+                    try:
+                        self._trade_persister.flush_runner(runner)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "tick trade flush failed for %s", runner.instance_id
+                        )
 
     # ------------------------------------------------------------------ #
     # State persistence (Gap #3 / V2 — P2.4). No-op unless a state path is
@@ -3121,6 +3269,7 @@ class PortfolioManager:
                 logger.debug("intelligence shutdown failed", exc_info=True)
         if self.feed is not None:
             self.feed.stop()
+        self.detach_ws_broker()
         self.mstock_feed.stop()
         self._watchdog_stop.set()
         with self._lock:

@@ -521,9 +521,15 @@ class MStockLiveFeed:
         failure degrades to ``("1", <security token>)`` — the NSE default
         the order path already assumes — so the poll thread never dies.
         """
-        cached = self._intraday_keys.get(symbol)
+        sym = str(symbol).strip().upper()
+        cached = self._intraday_keys.get(sym)
         if cached is not None:
             return cached
+        if sym in INDEX_SECURITY_TOKENS:
+            seg_id = "4" if sym in ("SENSEX", "S&P BSE SENSEX") else "1"
+            key = (seg_id, INDEX_SECURITY_TOKENS[sym])
+            self._intraday_keys[sym] = key
+            return key
         exchange, script = "NSE", None
         try:
             token, api_key = self._credentials()
@@ -546,7 +552,7 @@ class MStockLiveFeed:
                 return None
         seg_id = INTRADAY_SEGMENT_IDS.get(exchange, "1")
         key = (seg_id, script)
-        self._intraday_keys[symbol] = key
+        self._intraday_keys[sym] = key
         return key
 
     def _fetch_intraday_session_rows(
@@ -643,17 +649,25 @@ class MStockLiveFeed:
         if self.client is not None:
             return self.client.get_latest_bar(symbol)
 
-        quote_bar = self._fetch_quote_bar(symbol)
-        if quote_bar is not None:
-            return quote_bar
-
-        # Non-index symbols (equities/ETFs/F&O) have no quote/ohlc entry and
-        # the historical endpoint is T+1 — the intraday-chart endpoint is the
-        # only source that carries the running session (2026-10-01 RELIANCE
-        # runners froze at the prior close until this path landed).
+        # Prefer genuine 1-minute OHLCV candles from instruments/intraday for
+        # BOTH indices (via INDEX_SECURITY_TOKENS) and equities (via scriptmaster)
+        # so full-day session OHL from quote/ohlc never corrupts 1-min candle
+        # bodies (Caveat Q-5).
         intraday_bar = self._fetch_intraday_bar(symbol)
         if intraday_bar is not None:
             return intraday_bar
+
+        quote_bar = self._fetch_quote_bar(symbol)
+        if quote_bar is not None:
+            px = float(quote_bar["close"])
+            return {
+                "ts": quote_bar["ts"],
+                "open": px,
+                "high": px,
+                "low": px,
+                "close": px,
+                "volume": 0,
+            }
 
         token, api_key = self._credentials()
         # API window rules (all verified live 2026-09-18):
