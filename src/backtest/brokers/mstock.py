@@ -34,7 +34,7 @@ import os
 import re
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -209,7 +209,9 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         self._ws_feed: Any = None
         self._ws_subscribed_tokens: set[int] = set()
         self._ws_token_modes: dict[int, str] = {}
+        self._ws_desired_modes: dict[int, str] = {}
         self._ws_token_pins: dict[int, int] = {}
+        self._ws_reinit_listeners: list[Callable[[], None]] = []
         self._ws_lock = threading.RLock()
         self._ws_cold_subscribe_wait_s: float = 0.0
 
@@ -375,6 +377,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                 if callable(close_old):
                     close_old()
             with self._ws_lock:
+                desired_snapshot = dict(self._ws_desired_modes)
                 self._ws_subscribed_tokens.clear()
                 self._ws_token_modes.clear()
                 pinned_snapshot = sorted(
@@ -403,10 +406,19 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             # frame the feed flaps forever and option quotes stay one-sided.
             # MTicker._on_open resubscribes known tokens before firing this
             # callback, so reconnects re-login and re-subscribe in order.
+            login_ready = threading.Event()
+            seeded_once = threading.Event()
+
             def _ws_login(tkr) -> None:
                 try:
                     tkr.send_login_after_connect()
+                    login_ready.set()
                     logger.info("mStock WebSocket LOGIN sent (connection maintained)")
+                    if not seeded_once.is_set():
+                        seeded_once.set()
+                        self._resubscribe_session_tokens_ws(
+                            desired_snapshot, pinned_snapshot
+                        )
                 except Exception as exc:  # noqa: BLE001 — next reconnect retries
                     logger.warning("mStock WebSocket LOGIN failed: %s", exc)
 
@@ -414,15 +426,16 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
 
             # Start WebSocket in background thread
             ticker.connect(threaded=True)
-            
-            # Wait for connection to establish (up to 5 seconds)
+
+            # Wait for connection + LOGIN frame (up to 5 seconds)
             if self._ws_feed.wait_for_connection(timeout=5.0):
+                login_ready.wait(timeout=1.0)
                 logger.info("mStock WebSocket feed connected and ready")
-                
-                # Auto-subscribe to major indices and any pinned open legs on login
-                self._subscribe_default_indices()
-                if pinned_snapshot:
-                    self.subscribe_tokens_ws(pinned_snapshot, mode="full", wait_timeout=1.0)
+                if not seeded_once.is_set():
+                    seeded_once.set()
+                    self._resubscribe_session_tokens_ws(
+                        desired_snapshot, pinned_snapshot
+                    )
             else:
                 logger.warning("WebSocket connection timeout after 5 seconds")
             
@@ -444,6 +457,55 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         "MIDCPNIFTY": 26013,
         "FINNIFTY": 26037,
     }
+
+    def add_ws_reinit_listener(self, callback: Callable[[], None]) -> None:
+        """Register a callback fired whenever TOTP re-auth creates a new WS feed."""
+        if not callable(callback):
+            raise TypeError("ws reinit listener must be callable")
+        with self._ws_lock:
+            if callback not in self._ws_reinit_listeners:
+                self._ws_reinit_listeners.append(callback)
+
+    def remove_ws_reinit_listener(self, callback: Callable[[], None]) -> None:
+        """Unregister a previously registered WS re-init callback."""
+        with self._ws_lock:
+            if callback in self._ws_reinit_listeners:
+                self._ws_reinit_listeners.remove(callback)
+
+    def _resubscribe_session_tokens_ws(
+        self,
+        desired_modes: dict[int, str],
+        pinned_tokens: list[int],
+    ) -> None:
+        """Restore indices, HotStrikeRing tokens, and pinned legs after WS re-init."""
+        self._subscribe_default_indices()
+
+        mode_rank = {"ltp": 1, "quote": 2, "full": 3}
+        merged: dict[int, str] = {}
+        for tok, mode_str in desired_modes.items():
+            if tok in self.DEFAULT_INDEX_TOKENS:
+                continue
+            norm = (mode_str or "full").strip().lower()
+            merged[tok] = norm
+        for tok in pinned_tokens:
+            merged[tok] = "full"
+
+        by_mode: dict[str, list[int]] = {"ltp": [], "quote": [], "full": []}
+        for tok, mode_str in sorted(merged.items()):
+            bucket = mode_str if mode_str in mode_rank else "full"
+            by_mode[bucket].append(tok)
+
+        for bucket in ("ltp", "quote", "full"):
+            if by_mode[bucket]:
+                self.subscribe_tokens_ws(by_mode[bucket], mode=bucket, wait_timeout=1.0)
+
+        with self._ws_lock:
+            listeners = list(self._ws_reinit_listeners)
+        for listener in listeners:
+            try:
+                listener()
+            except Exception:  # noqa: BLE001
+                logger.debug("WS re-init listener failed", exc_info=True)
 
     def _subscribe_default_indices(self) -> None:
         """Auto-subscribe to major indices on WebSocket connect."""
@@ -470,9 +532,6 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         on a disconnected socket. Sends one ``subscribe`` + ``set_mode`` frame
         for all newly added or mode-upgraded tokens.
         """
-        if not self._ws_feed:
-            return []
-
         norm_mode = (mode or "full").strip().lower()
         mode_rank = {"ltp": 1, "quote": 2, "full": 3}
         requested_rank = mode_rank.get(norm_mode, 3)
@@ -491,6 +550,17 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             return []
 
         with self._ws_lock:
+            for tok in parsed:
+                prev_desired = self._ws_desired_modes.get(tok)
+                if (
+                    prev_desired is None
+                    or mode_rank.get(prev_desired, 1) < requested_rank
+                ):
+                    self._ws_desired_modes[tok] = norm_mode
+
+            if not self._ws_feed:
+                return []
+
             to_send = [
                 tok
                 for tok in parsed
@@ -545,9 +615,6 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
 
     def unsubscribe_tokens_ws(self, instrument_tokens: Iterable[int | str]) -> list[int]:
         """Batch-unsubscribe tokens from MTicker while protecting indices & pinned legs."""
-        if not self._ws_feed:
-            return []
-
         candidates: list[int] = []
         seen: set[int] = set()
         for raw_tok in instrument_tokens:
@@ -562,12 +629,20 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             return []
 
         with self._ws_lock:
-            removable = [
+            allowed = [
                 tok
                 for tok in candidates
-                if tok in self._ws_subscribed_tokens
-                and tok not in self.DEFAULT_INDEX_TOKENS
+                if tok not in self.DEFAULT_INDEX_TOKENS
                 and self._ws_token_pins.get(tok, 0) <= 0
+            ]
+            for tok in allowed:
+                self._ws_desired_modes.pop(tok, None)
+
+            if not self._ws_feed:
+                return []
+
+            removable = [
+                tok for tok in allowed if tok in self._ws_subscribed_tokens
             ]
             if not removable:
                 return []
@@ -684,20 +759,22 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         instrument_token: int,
         max_age_seconds: float = 10.0,
         *,
-        socket_liveness_seconds: float = 5.0,
+        socket_liveness_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Get latest validated quote from WebSocket cache.
 
         Distinguishes two regimes using ``recv_mono`` + ``last_any_tick_mono()``:
         1. **Live socket + quiet OTM strike**: ``is_connected()`` is True and
            the socket received any index/option frame within
-           ``min(socket_liveness_seconds, max_age_seconds)`` — a subscribed OTM
-           leg whose book has not printed in >10s stays valid (preserving live
-           2-sided Bid/Ask instead of falsely degrading to one-sided HTTP LTP).
+           ``socket_liveness_seconds`` (defaults to ``max_age_seconds``) — a
+           subscribed OTM leg whose book has not printed in >10s stays valid
+           (preserving live 2-sided Bid/Ask instead of falsely degrading to
+           one-sided HTTP LTP).
         2. **Disconnected/zombie socket or post-15:30 market close**: socket is
            closed OR neither the token nor the socket has received frames within
-           their freshness window — rejected immediately (``return {}``),
-           eliminating Finding F5 post-close frozen option marks.
+           their freshness window, OR the cached row carries neither
+           ``recv_mono`` nor a valid ``timestamp`` — rejected immediately
+           (``return {}``), eliminating Finding F5 post-close frozen marks.
         """
         if not self._ws_feed:
             return {}
@@ -725,8 +802,10 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                         last_any = (
                             float(last_any_fn()) if callable(last_any_fn) else 0.0
                         )
-                        liveness_limit = min(
-                            float(socket_liveness_seconds), float(max_age_seconds)
+                        liveness_limit = (
+                            float(max_age_seconds)
+                            if socket_liveness_seconds is None
+                            else float(socket_liveness_seconds)
                         )
                         socket_alive = (
                             last_any > 0.0 and (now_mono - last_any) <= liveness_limit
@@ -747,17 +826,22 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                             return {}
                 else:
                     # Legacy/injected dict without recv_mono: fail closed if
-                    # timestamp is present-but-unparseable or exceeds max_age.
+                    # timestamp is missing, unparseable, future-skewed, or stale.
                     ts = quote.get("timestamp")
-                    if ts is not None:
-                        age = self._parse_legacy_ws_timestamp_age(ts)
-                        if age is None or age > max_age_seconds:
-                            logger.debug(
-                                "Stale or unparseable WS timestamp for token %d (%r); rejecting",
-                                instrument_token,
-                                ts,
-                            )
-                            return {}
+                    if ts is None:
+                        logger.debug(
+                            "WS quote for token %d lacks recv_mono and timestamp; rejecting",
+                            instrument_token,
+                        )
+                        return {}
+                    age = self._parse_legacy_ws_timestamp_age(ts)
+                    if age is None or age < -5.0 or age > max_age_seconds:
+                        logger.debug(
+                            "Stale or unparseable WS timestamp for token %d (%r); rejecting",
+                            instrument_token,
+                            ts,
+                        )
+                        return {}
 
             out = dict(quote)
             out.setdefault("source", "ws")
@@ -812,11 +896,21 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         logger.info("mStock session restored from remembered token (expires %s)", expires_at)
 
     def logout(self) -> None:
-        """Clear all in-memory session state (token, expiry, temp context)."""
+        """Clear all in-memory session state and tear down the WebSocket feed."""
         had_session = self._session_token is not None
         self._session_token = None
         self._expires_at = None
         self._temp_auth_context = None
+        ws_feed = self._ws_feed
+        self._ws_feed = None
+        if ws_feed is not None:
+            close_fn = getattr(ws_feed, "close", None)
+            if callable(close_fn):
+                close_fn()
+        with self._ws_lock:
+            self._ws_subscribed_tokens.clear()
+            self._ws_token_modes.clear()
+            self._ws_desired_modes.clear()
         if had_session:
             logger.info("mStock session cleared (logout)")
 

@@ -25,6 +25,7 @@ from collections.abc import Iterable, Sequence
 import inspect
 import logging
 import math
+import os
 import threading
 import time
 from datetime import date, datetime, timedelta
@@ -846,23 +847,84 @@ class HotStrikeRing:
         self,
         broker: Any,
         *,
-        half_width: int = 6,
-        evict_half_width: int = 8,
+        half_width: int | None = None,
+        evict_half_width: int | None = None,
+        ring_mode: str | None = None,
+        max_ring_tokens: int | None = None,
         on_contract: Callable[[Any], None] | None = None,
     ) -> None:
-        if evict_half_width < half_width:
+        resolved_half = (
+            int(os.getenv("MSTOCK_HOT_RING_HALF_WIDTH", "6"))
+            if half_width is None
+            else int(half_width)
+        )
+        resolved_evict = (
+            max(resolved_half, int(os.getenv("MSTOCK_HOT_RING_EVICT_HALF_WIDTH", "8")))
+            if evict_half_width is None
+            else int(evict_half_width)
+        )
+        if resolved_evict < resolved_half:
             raise ValueError("evict_half_width must be >= half_width")
+        resolved_mode = (
+            os.getenv("MSTOCK_HOT_RING_MODE", "full")
+            if ring_mode is None
+            else str(ring_mode)
+        ).strip().lower() or "full"
+        resolved_max = (
+            int(os.getenv("MSTOCK_HOT_RING_MAX_TOKENS", "64"))
+            if max_ring_tokens is None
+            else int(max_ring_tokens)
+        )
+
         self.broker = broker
-        self.half_width = int(half_width)
-        self.evict_half_width = int(evict_half_width)
+        self.half_width = resolved_half
+        self.evict_half_width = resolved_evict
+        self.ring_mode = resolved_mode
+        self.max_ring_tokens = max(0, resolved_max)
         self._on_contract = on_contract
         self._lock = threading.RLock()
         self._center_strike: dict[str, float] = {}
+        self._step_by_underlying: dict[str, float] = {}
         self._expiry_by_underlying: dict[str, date] = {}
         self._ring_tokens: dict[str, dict[int, float]] = {}  # underlying -> {token: strike}
+        self._wing_tokens_by_underlying: dict[str, set[int]] = {}
         self._wing_distances_pct: dict[str, set[float]] = {}
         self._dirty_wings: set[str] = set()
         self._pinned_tokens: dict[int, int] = {}
+
+        add_reinit = getattr(broker, "add_ws_reinit_listener", None)
+        if callable(add_reinit):
+            try:
+                add_reinit(self._on_broker_ws_reinit)
+            except Exception:  # noqa: BLE001
+                logger.debug("Could not attach ws reinit listener", exc_info=True)
+
+    def _broker_subscribed_snapshot(self) -> set[int] | None:
+        raw = getattr(self.broker, "__dict__", {}).get("_ws_subscribed_tokens")
+        if isinstance(raw, (set, frozenset)):
+            return set(raw)
+        return None
+
+    def _on_broker_ws_reinit(self) -> None:
+        """Re-apply active ring and pinned subscriptions after a TOTP WS re-init."""
+        with self._lock:
+            ring_all: list[int] = sorted(
+                {tok for m in self._ring_tokens.values() for tok in m}
+            )
+            pinned_all: list[int] = sorted(
+                tok for tok, cnt in self._pinned_tokens.items() if cnt > 0
+            )
+        broker_sub = self._broker_subscribed_snapshot()
+        if broker_sub is not None:
+            missing_ring = [t for t in ring_all if t not in broker_sub]
+            missing_pinned = [t for t in pinned_all if t not in broker_sub]
+        else:
+            missing_ring = ring_all
+            missing_pinned = pinned_all
+        if missing_ring:
+            self._subscribe_ws(missing_ring, mode=self.ring_mode)
+        if missing_pinned:
+            self._subscribe_ws(missing_pinned, mode="full")
 
     def register_wing_distance(self, underlying: str, distance_pct: float) -> None:
         """Include ``±distance_pct`` OTM strangle strikes in the pre-subscribed ring."""
@@ -893,12 +955,14 @@ class HotStrikeRing:
         if pinned and callable(pin_fn):
             pin_fn(pinned, mode="full")
         elif pinned:
-            self._subscribe_ws(pinned)
+            self._subscribe_ws(sorted(set(pinned)), mode="full")
         return pinned
 
     def unpin_tokens(self, tokens: Iterable[int | str]) -> list[int]:
-        """Release pin refcount for closed option leg tokens."""
-        released: list[int] = []
+        """Release pin refcount 1-for-1 on both ring and broker; evict stale OOTM legs."""
+        decremented: list[int] = []
+        zeroed: list[int] = []
+        stale_evict: list[int] = []
         with self._lock:
             for raw in tokens:
                 try:
@@ -906,16 +970,45 @@ class HotStrikeRing:
                 except (TypeError, ValueError):
                     continue
                 cur = self._pinned_tokens.get(tok, 0)
-                if cur <= 1:
-                    if tok in self._pinned_tokens:
-                        self._pinned_tokens.pop(tok, None)
-                        released.append(tok)
+                if cur <= 0:
+                    continue
+                decremented.append(tok)
+                if cur == 1:
+                    self._pinned_tokens.pop(tok, None)
+                    zeroed.append(tok)
                 else:
                     self._pinned_tokens[tok] = cur - 1
+
+            # Any ring token whose pin hit 0 after spot already moved outside
+            # ATM ± evict_half_width is evicted and unsubscribed immediately.
+            for tok in zeroed:
+                evicted_from_ring = False
+                still_needed = False
+                for u_key, tok_map in self._ring_tokens.items():
+                    if tok not in tok_map:
+                        continue
+                    center = self._center_strike.get(u_key)
+                    step = self._step_by_underlying.get(u_key, 50.0)
+                    wings = self._wing_tokens_by_underlying.get(u_key, set())
+                    outer_r = self.evict_half_width * step + 1e-6
+                    if (
+                        center is not None
+                        and abs(tok_map[tok] - center) > outer_r
+                        and tok not in wings
+                    ):
+                        tok_map.pop(tok, None)
+                        evicted_from_ring = True
+                    else:
+                        still_needed = True
+                if evicted_from_ring and not still_needed:
+                    stale_evict.append(tok)
+
         unpin_fn = getattr(self.broker, "unpin_ws_tokens", None)
-        if released and callable(unpin_fn):
-            unpin_fn(released)
-        return released
+        if decremented and callable(unpin_fn):
+            unpin_fn(decremented)
+        if stale_evict:
+            self._unsubscribe_ws(sorted(set(stale_evict)))
+        return zeroed
 
     def subscribed_tokens(self, underlying: str | None = None) -> set[int]:
         """Return currently tracked HotStrikeRing numeric tokens."""
@@ -944,15 +1037,16 @@ class HotStrikeRing:
         ]
         return float(min(diffs)) if diffs else 50.0
 
-    def _subscribe_ws(self, tokens: list[int]) -> list[int]:
+    def _subscribe_ws(self, tokens: list[int], *, mode: str | None = None) -> list[int]:
         if not tokens:
             return []
+        use_mode = self.ring_mode if mode is None else mode
         batch_fn = getattr(self.broker, "subscribe_tokens_ws", None)
         if callable(batch_fn):
-            return list(batch_fn(tokens, mode="full"))
+            return list(batch_fn(tokens, mode=use_mode))
         single_fn = getattr(self.broker, "subscribe_to_instrument", None)
         if callable(single_fn):
-            ok = [tok for tok in tokens if single_fn(tok, mode="full")]
+            ok = [tok for tok in tokens if single_fn(tok, mode=use_mode)]
             return ok
         return []
 
@@ -997,14 +1091,22 @@ class HotStrikeRing:
 
         step = self._infer_step(key, [float(c.strike) for c in expiry_contracts])
         new_atm = round(spot_val / step) * step
+        broker_sub = self._broker_subscribed_snapshot()
 
         with self._lock:
             prev_atm = self._center_strike.get(key)
             prev_expiry = self._expiry_by_underlying.get(key)
             wings_dirty = key in self._dirty_wings
+            current_existing = self._ring_tokens.get(key, {})
+            missing_on_socket = bool(
+                broker_sub is not None
+                and current_existing
+                and any(tok not in broker_sub for tok in current_existing)
+            )
             if (
                 not force
                 and not wings_dirty
+                and not missing_on_socket
                 and prev_atm is not None
                 and prev_expiry == nearest_expiry
                 and abs(new_atm - prev_atm) < (step - 1e-6)
@@ -1053,9 +1155,36 @@ class HotStrikeRing:
                 self._on_contract(c)
 
         with self._lock:
+            # Enforce global non-pinned ring token budget across underlyings
+            # (closest strikes to new_atm take priority if capped).
+            if self.max_ring_tokens > 0:
+                other_count = sum(
+                    1
+                    for u_k, m in self._ring_tokens.items()
+                    if u_k != key
+                    for tok in m
+                    if self._pinned_tokens.get(tok, 0) <= 0
+                )
+                budget = max(0, self.max_ring_tokens - other_count)
+                if len(desired_tokens) > budget:
+                    prioritized = sorted(
+                        desired_tokens,
+                        key=lambda t: (abs(desired_tokens[t] - new_atm), t),
+                    )[:budget]
+                    keep_set = set(prioritized)
+                    desired_tokens = {
+                        t: s for t, s in desired_tokens.items() if t in keep_set
+                    }
+                    wing_tokens &= keep_set
+
             current_map = dict(self._ring_tokens.get(key, {}))
             expiry_changed = prev_expiry is not None and prev_expiry != nearest_expiry
-            to_subscribe = sorted(tok for tok in desired_tokens if tok not in current_map)
+            to_subscribe = sorted(
+                tok
+                for tok in desired_tokens
+                if tok not in current_map
+                or (broker_sub is not None and tok not in broker_sub)
+            )
 
             to_evict: list[int] = []
             next_map: dict[int, float] = {}
@@ -1072,15 +1201,20 @@ class HotStrikeRing:
                 else:
                     # Inside hysteresis band (ATM ± 8) or pinned: retain!
                     next_map[tok] = old_strike
+                    if broker_sub is not None and tok not in broker_sub:
+                        to_subscribe.append(tok)
 
             for tok, strike in desired_tokens.items():
                 next_map[tok] = strike
 
+            to_subscribe = sorted(set(to_subscribe))
             self._ring_tokens[key] = next_map
+            self._wing_tokens_by_underlying[key] = wing_tokens
             self._center_strike[key] = new_atm
+            self._step_by_underlying[key] = step
             self._expiry_by_underlying[key] = nearest_expiry
 
-        subscribed = self._subscribe_ws(to_subscribe)
+        subscribed = self._subscribe_ws(to_subscribe, mode=self.ring_mode)
         unsubscribed = self._unsubscribe_ws(sorted(to_evict))
         return {"subscribed": subscribed, "unsubscribed": unsubscribed}
 
@@ -1089,13 +1223,23 @@ class HotStrikeRing:
         key = str(underlying).upper()
         with self._lock:
             current_map = self._ring_tokens.pop(key, {})
+            self._wing_tokens_by_underlying.pop(key, None)
             self._center_strike.pop(key, None)
+            self._step_by_underlying.pop(key, None)
             self._expiry_by_underlying.pop(key, None)
             self._wing_distances_pct.pop(key, None)
             self._dirty_wings.discard(key)
             removable = sorted(
                 tok for tok in current_map if self._pinned_tokens.get(tok, 0) <= 0
             )
+            no_rings_left = not self._ring_tokens and not self._pinned_tokens
+        if no_rings_left:
+            rem_reinit = getattr(self.broker, "remove_ws_reinit_listener", None)
+            if callable(rem_reinit):
+                try:
+                    rem_reinit(self._on_broker_ws_reinit)
+                except Exception:  # noqa: BLE001
+                    pass
         return self._unsubscribe_ws(removable)
 
 

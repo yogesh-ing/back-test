@@ -523,3 +523,198 @@ class TestHotStrikeRingAndBus:
         assert feed._poll_once() == 0
         assert fake_client.latest_bar.call_count == 1
         assert len(delivered) == 1
+
+
+# ---------------------------------------------------------------------------
+# 5. Live-Path Review Hardening (TOTP Re-Auth, Pin Drift, Fail-Closed & Cap)
+# ---------------------------------------------------------------------------
+
+
+class _ConnectableFakeMTicker(_FakeMTicker):
+    """Simulates real MTicker handshake order: connect -> on_connect -> on_open."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__()
+        self.events: list[str] = []
+
+    def send_login_after_connect(self) -> None:
+        self.events.append("LOGIN")
+
+    def subscribe(self, tokens: list[int]) -> bool:
+        self.events.append(f"SUB:{len(tokens)}")
+        return super().subscribe(tokens)
+
+    def set_mode(self, mode: str, tokens: list[int]) -> bool:
+        self.events.append(f"MODE:{mode}:{len(tokens)}")
+        return super().set_mode(mode, tokens)
+
+    def connect(self, threaded: bool = True) -> None:
+        if self.on_connect:
+            self.on_connect(self, {"status": "101"})
+        if getattr(self, "on_open", None):
+            self.on_open(self)
+
+
+class TestPhase2LiveReviewHardening:
+    def test_totp_reauth_init_websocket_feed_resubscribes_all_26_ring_tokens_after_login(
+        self,
+        monkeypatch: Any,
+    ) -> None:
+        """Defect 1 regression: mid-session TOTP re-auth must re-subscribe all
+        26 non-pinned HotStrikeRing tokens (after LOGIN), never leaving them cold."""
+        created_tickers: list[_ConnectableFakeMTicker] = []
+
+        def _factory(**kwargs: Any) -> _ConnectableFakeMTicker:
+            t = _ConnectableFakeMTicker(**kwargs)
+            created_tickers.append(t)
+            return t
+
+        import backtest.data.mticker as mticker_mod
+
+        monkeypatch.setattr(mticker_mod, "MTicker", _factory)
+        monkeypatch.setenv("MSTOCK_API_KEY", "test-api-key")
+
+        broker = MStockBroker()
+        nifty_chain = _build_chain("NIFTY", center=25000, step=50, strikes_each_side=12)
+        ring = HotStrikeRing(broker)
+        try:
+            # Initial login #1
+            broker._init_websocket_feed("access-token-1")
+            assert len(created_tickers) == 1
+            res1 = ring.recenter("NIFTY", 25010.0, nifty_chain)
+            assert len(res1["subscribed"]) == 26
+            expected_ring = set(res1["subscribed"])
+            assert expected_ring.issubset(broker._ws_subscribed_tokens)
+
+            # Mid-session TOTP re-auth #2 (0 pinned positions!)
+            broker._init_websocket_feed("access-token-2")
+            assert len(created_tickers) == 2
+            assert created_tickers[0].closed is True
+
+            t2 = created_tickers[1]
+            assert t2.events[0] == "LOGIN", "LOGIN must precede any resubscribe on re-auth"
+            assert expected_ring.issubset(broker._ws_subscribed_tokens)
+            assert broker.DEFAULT_INDEX_TOKENS.issubset(broker._ws_subscribed_tokens)
+            resubscribed_flat = {tok for call in t2.subscribe_calls for tok in call}
+            assert expected_ring.issubset(resubscribed_flat)
+
+            # Belt & suspenders: if socket state ever loses a token without ATM moving,
+            # recenter() detects the missing broker subscription instead of skipping.
+            dropped_tok = next(iter(expected_ring))
+            broker._ws_subscribed_tokens.discard(dropped_tok)
+            repair = ring.recenter("NIFTY", 25012.0, nifty_chain)
+            assert repair["subscribed"] == [dropped_tok]
+            assert dropped_tok in broker._ws_subscribed_tokens
+        finally:
+            broker.logout()
+            assert broker._ws_feed is None
+            assert broker._ws_subscribed_tokens == set()
+
+    def test_double_pin_double_unpin_keeps_broker_refcount_zero_and_evicts_drifted_ootm(
+        self,
+    ) -> None:
+        """Defect 2 regression: pin twice / unpin twice must leave _ws_token_pins
+        at 0 (no drift) and immediately unsubscribe drifted OOTM ring legs."""
+        broker = MStockBroker()
+        ticker = _FakeMTicker()
+        wrapper = MStockWebSocketWrapper(ticker, coalesce_ms=20)
+        ticker.on_connect(ticker, {})
+        broker._ws_feed = wrapper
+
+        nifty_chain = _build_chain("NIFTY", center=25000, step=50, strikes_each_side=15)
+        ring = HotStrikeRing(broker)
+        try:
+            ring.recenter("NIFTY", 25000.0, nifty_chain)
+            tok_24700_ce = next(
+                int(c.instrument_token)
+                for c in nifty_chain
+                if int(c.strike) == 24700 and c.option_type is OptionType.CE
+            )
+
+            # Pin twice (e.g., two runners holding the same strike)
+            ring.pin_tokens([tok_24700_ce])
+            ring.pin_tokens([tok_24700_ce])
+            assert broker._ws_token_pins[tok_24700_ce] == 2
+
+            # Spot rallies 10 steps to 25,500 (24,700 is 16 steps away > ATM +/- 8)
+            ring.recenter("NIFTY", 25500.0, nifty_chain)
+            assert tok_24700_ce in broker._ws_subscribed_tokens
+
+            # First unpin (2 -> 1): broker pin MUST decrement to 1, leg stays subscribed
+            z1 = ring.unpin_tokens([tok_24700_ce])
+            assert z1 == []
+            assert broker._ws_token_pins[tok_24700_ce] == 1
+            assert broker.unsubscribe_tokens_ws([tok_24700_ce]) == []
+
+            # Second unpin (1 -> 0): broker pin hits 0 AND drifted OOTM leg is evicted!
+            z2 = ring.unpin_tokens([tok_24700_ce])
+            assert z2 == [tok_24700_ce]
+            assert broker._ws_token_pins.get(tok_24700_ce, 0) == 0
+            assert tok_24700_ce not in broker._ws_subscribed_tokens
+            assert tok_24700_ce not in ring.subscribed_tokens("NIFTY")
+        finally:
+            wrapper.close()
+
+    def test_missing_both_recv_mono_and_timestamp_fails_closed_and_liveness_matches_max_age(
+        self,
+    ) -> None:
+        """Defect 3 regression: quote lacking both recv_mono and timestamp must
+        fail closed ({}), and default socket liveness matches max_age_seconds."""
+        broker = MStockBroker()
+        ticker = _FakeMTicker()
+        wrapper = MStockWebSocketWrapper(ticker, coalesce_ms=20)
+        ticker.on_connect(ticker, {})
+        broker._ws_feed = wrapper
+        broker.subscribe_tokens_ws([51338, 26000], mode="full")
+        try:
+            # 1. Row with neither recv_mono nor timestamp -> fail closed!
+            with wrapper._lock:
+                wrapper._quotes["51338"] = {"ltp": 120.0, "bid": 119.5, "ask": 120.5}
+            assert broker.get_ws_quote(51338, max_age_seconds=10.0) == {}
+
+            # 2. Midday 7.5s lull (inside max_age_seconds=10.0): quiet OTM leg stays valid!
+            now_m = time.monotonic()
+            with wrapper._lock:
+                wrapper._quotes["51338"] = MStockWebSocketWrapper._normalize_tick(
+                    _full_tick(51338, 22.0, 21.5, 22.5),
+                    recv_mono=now_m - 30.0,
+                )
+                wrapper._last_any_tick_mono = now_m - 7.5
+            q_midday = broker.get_ws_quote(51338, max_age_seconds=10.0)
+            assert q_midday != {} and q_midday["bid"] == 21.5
+
+            # 3. Silence exceeds max_age_seconds (11.5s > 10.0s) -> rejected!
+            with wrapper._lock:
+                wrapper._last_any_tick_mono = now_m - 11.5
+            assert broker.get_ws_quote(51338, max_age_seconds=10.0) == {}
+        finally:
+            wrapper.close()
+
+    def test_hot_strike_ring_respects_max_ring_tokens_cap_and_ring_mode_override(
+        self,
+    ) -> None:
+        """Operational safety: ring_mode='quote' + max_ring_tokens cap bounds load
+        while pinned legs still upgrade to mode='full'."""
+        broker = MStockBroker()
+        ticker = _FakeMTicker()
+        wrapper = MStockWebSocketWrapper(ticker, coalesce_ms=20)
+        ticker.on_connect(ticker, {})
+        broker._ws_feed = wrapper
+
+        nifty_chain = _build_chain("NIFTY", center=25000, step=50, strikes_each_side=10)
+        bn_chain = _build_chain("BANKNIFTY", center=52000, step=100, strikes_each_side=10)
+        ring = HotStrikeRing(broker, ring_mode="quote", max_ring_tokens=30)
+        try:
+            r1 = ring.recenter("NIFTY", 25000.0, nifty_chain)
+            r2 = ring.recenter("BANKNIFTY", 52000.0, bn_chain)
+            assert len(r1["subscribed"]) == 26
+            assert len(r2["subscribed"]) == 4  # capped at 30 total across underlyings!
+            assert len(ring.subscribed_tokens()) == 30
+            assert all(m == "quote" for m, _ in ticker.mode_calls)
+
+            # Pinning an active position leg upgrades that leg to full depth!
+            held_tok = r1["subscribed"][0]
+            ring.pin_tokens([held_tok])
+            assert ticker.mode_calls[-1] == ("full", [held_tok])
+        finally:
+            wrapper.close()
