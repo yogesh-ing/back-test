@@ -96,6 +96,7 @@ from backtest.options.intent_journal import (
 from backtest.options.greeks import BlackScholes
 from backtest.options.expiry import EXIT_REASON_SETTLEMENT, ExpiryManager
 from backtest.options.expiry_policy import NearestExpiryPolicy, create_expiry_policy
+from backtest.options.live_trading import LiveExecutionHaltedError
 from backtest.options.paper_trading import (
     STALE_AFTER_SECONDS,
     OptionPaperBroker,
@@ -111,6 +112,8 @@ from backtest.options.structures import (
     BullCallSpread,
     LongCall,
     LongPut,
+    LongStraddle,
+    ShortStraddle,
     ShortStrangle,
 )
 from backtest.strategy.intent import Direction, MarketView
@@ -151,9 +154,10 @@ STRUCTURES: dict[str, tuple[Any, str]] = {
     "long_put": (LongPut(), "PE"),
     "bull_call_spread": (BullCallSpread(), "CE"),
     "bear_put_spread": (BearPutSpread(), "PE"),
-    # Strangles need BOTH sides — the bridge materialises a two-sided
-    # nested chain {strike: {"CE": c, "PE": c}} at execution time (the flat
-    # V1 shape cannot hold two contracts at one strike).
+    # Straddles & strangles need BOTH sides — the bridge materialises a
+    # two-sided nested chain {strike: {"CE": c, "PE": c}} at execution time.
+    "long_straddle": (LongStraddle(), "BOTH"),
+    "short_straddle": (ShortStraddle(), "BOTH"),
     "strangle": (ShortStrangle(), "BOTH"),
 }
 
@@ -161,6 +165,8 @@ STRUCTURES: dict[str, tuple[Any, str]] = {
 _STRICKES_NEEDED = {
     "long_call": 1,
     "long_put": 1,
+    "long_straddle": 1,
+    "short_straddle": 1,
     "bull_call_spread": 2,
     "bear_put_spread": 2,
     "short_strangle": 2,
@@ -213,6 +219,7 @@ class OptionsBridge:
         fee_calculator: Any | None = None,
         mode: str = "paper",
         risk_gate: Optional[PreTradeRiskGate] = None,
+        on_halt: Optional[Any] = None,
     ) -> None:
         # Phase 4 (Plan v2.1 Phase 4): strict mode is unconditional. The
         # legacy v1 path (default-expression merge, cross-direction and
@@ -222,6 +229,7 @@ class OptionsBridge:
         # as a constant True for callers that probe it.
         self.strict: bool = True
         self.mode: str = str(mode or "paper").strip().lower()
+        self.on_halt = on_halt
         self.risk_gate: Optional[PreTradeRiskGate] = None
         self._strict_rules: dict[Direction, Any] = {}
         self._active_rule: Any = None
@@ -1888,6 +1896,14 @@ class OptionsBridge:
             logger.warning("[options-bridge] exit evaluation failed: %s", exc)
             return None
 
+    def _notify_halt(self, reason: str) -> None:
+        """Invoke the runner halt callback when a live execution outcome is uncertain."""
+        if callable(self.on_halt):
+            try:
+                self.on_halt(reason)
+            except Exception:  # noqa: BLE001 — halt callback must never mask journal
+                logger.exception("[options-bridge] on_halt callback failed")
+
     def _exit_structure(
         self,
         decision: Any,
@@ -1917,6 +1933,24 @@ class OptionsBridge:
                 timestamp=self._bar_datetime(ts),
                 reason=decision.reason,
             )
+        except LiveExecutionHaltedError as exc:
+            logger.error(
+                "[options-bridge] LIVE CLOSE HALTED for %s: %s — pausing runner for reconciliation",
+                structure_id[:8],
+                exc,
+            )
+            self._journal(
+                KIND_HALTED,
+                intent_id=decision_key(
+                    "halt", f"close {structure_id}", code="close_halted", clock=self._bar_dt
+                ),
+                structure_id=structure_id,
+                detail={"code": "close_halted", "reason": str(exc)},
+                structure_type=structure.structure_type,
+                underlying=structure.underlying,
+            )
+            self._notify_halt(f"close_halted ({structure_id[:8]}): {exc}")
+            return None
         except Exception as exc:  # noqa: BLE001 — a failed close must not kill the runner
             logger.warning("[options-bridge] close failed for %s: %s", structure_id[:8], exc)
             self._journal(
@@ -1931,6 +1965,7 @@ class OptionsBridge:
             )
             return None
 
+        is_simulated = not bool(getattr(self.option_broker, "is_live_adapter", False))
         self._journal(
             KIND_EXECUTED,
             intent_id=decision_key(
@@ -1938,7 +1973,7 @@ class OptionsBridge:
             ),
             structure_id=structure_id,
             detail={
-                "simulated": True,
+                "simulated": is_simulated,
                 "action": "close",
                 "reason": decision.reason,
                 "pnl": float(realized),
@@ -2310,7 +2345,7 @@ class OptionsBridge:
                 for s in strikes
             ],
         )
-        self._validate_entry_contracts(strikes, chain, option_type)
+        self._validate_entry_contracts(strikes, chain, option_type, structure_type)
         # A declared fixed distance (strict mode: the DirectionRule the
         # strategy/spec stated) reaches builders that select their own
         # strikes (ShortStrangle); the rest ignore it. Legacy v1 passes
@@ -2335,6 +2370,17 @@ class OptionsBridge:
 
         try:
             positions = self.option_broker.execute_structure(intent, self.quote_provider)
+        except LiveExecutionHaltedError as exc:
+            logger.error(
+                "[options-bridge] LIVE ENTRY HALTED for %s: %s — pausing runner for reconciliation",
+                strategy_name,
+                exc,
+            )
+            self._journal_intent(
+                KIND_HALTED, intent, detail={"reason": str(exc)}
+            )
+            self._notify_halt(f"entry_halted: {exc}")
+            return {"halted": True, "rejected": True, "reason": str(exc)}
         except InsufficientMarginError as exc:
             self._journal_intent(
                 KIND_REJECTED, intent, detail={"reason": str(exc)}
@@ -2353,12 +2399,13 @@ class OptionsBridge:
                 for p in positions
             ],
         )
+        is_simulated = not bool(getattr(self.option_broker, "is_live_adapter", False))
         self._journal_intent(
             KIND_EXECUTED,
             intent,
             structure_id=self.open_structure_id,
             detail={
-                "simulated": True,
+                "simulated": is_simulated,
                 "fills": [
                     {
                         "symbol": getattr(p, "trading_symbol", ""),
@@ -2401,7 +2448,11 @@ class OptionsBridge:
         }
 
     def _validate_entry_contracts(
-        self, strikes: list[Any], chain: Any, option_type: str
+        self,
+        strikes: list[Any],
+        chain: Any,
+        option_type: str,
+        structure_type: str = "",
     ) -> None:
         """The strikes the selector picked must name chain contracts with real terms.
 
@@ -2409,21 +2460,39 @@ class OptionsBridge:
         constructed, and a guessed lot would size the premium outlay and every
         rupee stop in the book off a number the exchange never published.
         """
+        require_both = structure_type in ("long_straddle", "short_straddle")
         for strike in strikes:
-            contract = chain.get(strike)
+            entry = chain.get(strike)
             if option_type == "BOTH":
-                contract = (contract or {}).get("CE") or (contract or {}).get("PE")
-            if contract is None:
+                if require_both:
+                    sides = [
+                        (entry or {}).get("CE") if isinstance(entry, dict) else None,
+                        (entry or {}).get("PE") if isinstance(entry, dict) else None,
+                    ]
+                    if any(c is None for c in sides):
+                        raise ContractValidityError(
+                            REASON_NO_CONTRACT,
+                            f"{self.underlying} {strike}: straddle requires both CE and PE "
+                            "contracts at this strike",
+                        )
+                    contracts_to_check = sides
+                else:
+                    contract = (entry or {}).get("CE") or (entry or {}).get("PE")
+                    contracts_to_check = [contract] if contract is not None else []
+            else:
+                contracts_to_check = [entry] if entry is not None else []
+            if not contracts_to_check:
                 raise ContractValidityError(
                     REASON_NO_CONTRACT,
                     f"{self.underlying} {strike}: the chain has no contract at this strike",
                 )
-            if int(getattr(contract, "lot_size", 0) or 0) <= 0:
-                raise ContractValidityError(
-                    REASON_NO_LOT_SIZE,
-                    f"{getattr(contract, 'trading_symbol', strike)}: the chain row "
-                    "carries no lot size — refusing to guess one",
-                )
+            for contract in contracts_to_check:
+                if int(getattr(contract, "lot_size", 0) or 0) <= 0:
+                    raise ContractValidityError(
+                        REASON_NO_LOT_SIZE,
+                        f"{getattr(contract, 'trading_symbol', strike)}: the chain row "
+                        "carries no lot size — refusing to guess one",
+                    )
 
     def _gate_check_at_entry(self, intent: Any, structure_type: str) -> None:
         """Wire the dormant Layer-1 ceilings at entry (Phase 1 flag disposition).
@@ -2443,7 +2512,7 @@ class OptionsBridge:
         has_sell = False
         for leg in intent.legs:
             quote = self.quote_provider.get_quote(leg.instrument_token) or {}
-            price = Decimal(str(quote.get("ltp") or quote.get("ask") or "0"))
+            price = Decimal(str(quote.get("ltp") or quote.get("ask") or quote.get("bid") or "0"))
             units = Decimal(str(int(leg.quantity) * int(leg.lot_size)))
             if str(leg.side).upper() == "BUY":
                 gross_buy += price * units
@@ -2453,14 +2522,15 @@ class OptionsBridge:
                 net -= price * units
         if has_sell:
             # A short structure's stateable worst case is its declared risk
-            # cap: max_loss_inr if set, else the hard stop itself (the
-            # ExitPlan's stop_loss_points is the loss the trade is managed
-            # to; gap-through-stop risk is why short premium additionally
-            # needs the per-trade ceiling to be set with headroom).
+            # cap: max_loss_inr if set, else stop_loss_points, else
+            # stop_loss_pct × net credit collected (only when net < 0, i.e. a
+            # genuinely priced credit structure).
             if self._strict_exit_plan.max_loss_inr is not None:
                 worst: float | None = float(self._strict_exit_plan.max_loss_inr)
             elif self._strict_exit_plan.stop_loss_points is not None:
                 worst = float(self._strict_exit_plan.stop_loss_points)
+            elif self._strict_exit_plan.stop_loss_pct is not None and net < Decimal("0"):
+                worst = float(self._strict_exit_plan.stop_loss_pct) * abs(float(net))
             else:
                 worst = None
             if worst is None:

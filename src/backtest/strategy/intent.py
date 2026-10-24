@@ -197,13 +197,15 @@ class TradeIntent:
         return self.estimated_premium >= Decimal("0")
 
 
-# Valid structure types (V1 scope)
+# Valid structure types (V1 + Phase 4 straddles)
 _VALID_STRUCTURES: frozenset[str] = frozenset({
     "long_call",
     "long_put",
     "bull_call_spread",
     "bear_put_spread",
     "straddle",
+    "long_straddle",
+    "short_straddle",
     "strangle",
     "iron_condor",
     "calendar_spread",

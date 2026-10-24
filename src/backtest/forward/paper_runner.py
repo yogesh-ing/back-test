@@ -530,13 +530,17 @@ class OrderLedger:
         requested_price: Optional[float] = None,
         ts: Optional[str] = None,
         tag: Optional[Dict[str, Any]] = None,
+        broker_order_id: Optional[str] = None,
+        order_type: str = "MARKET",
+        limit_price: Optional[float] = None,
     ) -> Order:
         """Write a **terminal FILLED row** for a fill that never was a routed order.
 
-        Option structure legs are the case: ``OptionPaperBroker`` fills a leg
-        against the live depth inside one call, so there is no PENDING order to
-        advance — yet the execution still belongs in the ledger, because the
-        Orders tab is the audit of "did it fill, and at what price?".
+        Option structure legs are the case: ``OptionPaperBroker`` (or
+        ``LiveOptionBrokerAdapter``) fills a leg synchronously, so there is no
+        PENDING order to advance — yet the execution still belongs in the
+        ledger, because the Orders tab is the audit of "did it fill, and at
+        what price?".
 
         Deliberately **not** :meth:`apply_fill`: that routes a FillEvent to the
         owning runner's equity handler, which would open a share-simulation
@@ -550,14 +554,15 @@ class OrderLedger:
 
         stamp = ts or datetime.now(timezone.utc).isoformat()
         coid = self._make_client_order_id(instance_id)
+        norm_type = str(order_type or "MARKET").strip().upper() or "MARKET"
         order = Order(
             client_order_id=coid,
             instance_id=instance_id,
             symbol=str(symbol).strip().upper(),
             side=side,
             quantity=float(quantity),
-            order_type="MARKET",
-            limit_price=None,
+            order_type=norm_type,
+            limit_price=float(limit_price) if limit_price is not None else None,
             status=ORDER_FILLED,
             created_ts=stamp,
             filled_qty=float(quantity),
@@ -565,6 +570,7 @@ class OrderLedger:
             filled_ts=stamp,
             updated_ts=stamp,
             tag=dict(tag or {}),
+            broker_order_id=str(broker_order_id) if broker_order_id else None,
             requested_price=float(requested_price) if requested_price else None,
         )
         order.slippage, order.slippage_pct = self._slippage(
@@ -1118,6 +1124,7 @@ class StrategyRunner:
         ledger: OrderLedger,
         broker: Optional[PaperBroker] = None,
         strategy: Optional[Any] = None,
+        option_broker: Optional[Any] = None,
     ) -> None:
         self.config = config
         self.instance_id: str = config.instance_id or uuid.uuid4().hex
@@ -1218,17 +1225,71 @@ class StrategyRunner:
                 str(config.source).lower() if quote_label.startswith("live:") else "synthetic"
             )
             self._chain_released = False  # one release per acquire (stop is idempotent)
-            self.options_bridge = OptionsBridge(
-                capital=config.allocated_capital,
-                expression=config.instrument.get("expression"),
-                mode=config.mode,
-                quote_provider=provider,
-                # Marks land on bar close (plus the portfolio watchdog), so the
-                # freshness SLA is sized off the bar cadence — see OptionsBridge.
-                bar_cadence_seconds=60.0
-                * TIMEFRAME_MINUTES.get(config.timeframe, 0),
-                fee_calculator=CommissionCalculator.for_broker("zerodha"),
-            )
+            try:
+                resolved_opt_broker = option_broker
+                fee_calc = CommissionCalculator.for_broker("zerodha")
+                if config.mode == "live" and policy_key(config.source) != "synthetic":
+                    from backtest.options.live_trading import (
+                        LiveOptionBrokerAdapter,
+                        LiveOptionTrader,
+                    )
+
+                    if resolved_opt_broker is not None:
+                        if not bool(getattr(resolved_opt_broker, "is_live_adapter", False)):
+                            raise ValueError(
+                                "live option runner refused: option_broker must be a "
+                                "LiveOptionBrokerAdapter when mode='live'"
+                            )
+                    else:
+                        if self._chain_source == "synthetic":
+                            raise ValueError(
+                                f"live option runner {config.name!r} refused: live option "
+                                f"chain for {config.source!r} is unavailable (refusing "
+                                "synthetic chain fallback in mode='live')"
+                            )
+                        raw_live_broker = getattr(self.broker, "broker", None)
+                        if raw_live_broker is None:
+                            raise ValueError(
+                                f"live option runner {config.name!r} refused: live broker "
+                                "gateway is not armed (confirm_live=True and "
+                                "ALLOW_LIVE_ORDERS=1 required)"
+                            )
+                        live_trader = LiveOptionTrader(
+                            broker=raw_live_broker,
+                            dry_run=False,
+                            confirm_live=True,
+                            quote_provider=provider,
+                        )
+                        resolved_opt_broker = LiveOptionBrokerAdapter(
+                            trader=live_trader,
+                            capital=config.allocated_capital,
+                            fee_calculator=fee_calc,
+                        )
+
+                self.options_bridge = OptionsBridge(
+                    capital=config.allocated_capital,
+                    expression=config.instrument.get("expression"),
+                    option_broker=resolved_opt_broker,
+                    mode=config.mode,
+                    quote_provider=provider,
+                    # Marks land on bar close (plus the portfolio watchdog), so the
+                    # freshness SLA is sized off the bar cadence — see OptionsBridge.
+                    bar_cadence_seconds=60.0
+                    * TIMEFRAME_MINUTES.get(config.timeframe, 0),
+                    fee_calculator=fee_calc,
+                    on_halt=self._on_option_execution_halt,
+                )
+            except Exception:
+                try:
+                    from backtest.forward.feed_registry import get_chain_bus
+
+                    get_chain_bus().release(
+                        self._chain_underlying, source=self._chain_source
+                    )
+                    self._chain_released = True
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
             self.options_bridge.runner_id = self.instance_id
             self.options_bridge.runner_name = self.config.name
             self.options_bridge.runner_running = False
@@ -1477,14 +1538,31 @@ class StrategyRunner:
     def _record_option_leg_fill(self, record: Dict[str, Any]) -> None:
         """Mirror one option leg fill into the order ledger (Orders tab).
 
-        An option leg fills inside ``OptionPaperBroker``, so there is no
-        PENDING order to advance and no reason to route a FillEvent — this
-        writes the terminal row only. The option book stays the single owner
-        of option accounting.
+        An option leg fills inside ``OptionPaperBroker`` (or
+        ``LiveOptionBrokerAdapter``), so there is no PENDING order to advance
+        and no reason to route a FillEvent — this writes the terminal row only.
+        The option book stays the single owner of option accounting.
         """
         ts = record.get("ts")
         phase = str(record.get("phase") or "fill")
         structure_type = str(record.get("structure_type") or "")
+        broker_order_id = record.get("broker_order_id")
+        order_type = str(record.get("order_type") or "MARKET")
+        limit_price = record.get("limit_price")
+        tag_payload: Dict[str, Any] = {
+            "kind": "option",
+            "phase": phase,
+            "lots": int(record.get("lots") or 0),
+            "lot_size": int(record.get("lot_size") or 0),
+            "structure_id": record.get("structure_id"),
+            "structure_type": structure_type,
+            "underlying": record.get("underlying"),
+            "position_id": record.get("position_id"),
+            "reason": f"{phase} {structure_type}".strip(),
+        }
+        if broker_order_id:
+            tag_payload["broker_order_id"] = str(broker_order_id)
+            tag_payload["order_type"] = order_type
         self.ledger.record_filled(
             self.instance_id,
             symbol=str(record.get("symbol") or record.get("instrument_token") or ""),
@@ -1494,17 +1572,22 @@ class StrategyRunner:
             requested_price=float(record["requested_price"])
             if record.get("requested_price") is not None else None,
             ts=ts.isoformat() if isinstance(ts, datetime) else (str(ts) if ts else None),
-            tag={
-                "kind": "option",
-                "phase": phase,
-                "lots": int(record.get("lots") or 0),
-                "lot_size": int(record.get("lot_size") or 0),
-                "structure_id": record.get("structure_id"),
-                "structure_type": structure_type,
-                "underlying": record.get("underlying"),
-                "position_id": record.get("position_id"),
-                "reason": f"{phase} {structure_type}".strip(),
-            },
+            tag=tag_payload,
+            broker_order_id=str(broker_order_id) if broker_order_id else None,
+            order_type=order_type,
+            limit_price=float(limit_price) if limit_price is not None else None,
+        )
+
+    def _on_option_execution_halt(self, reason: str) -> None:
+        """Pause the runner immediately when live option execution halts (OPT-3)."""
+        with self._lock:
+            self.error = f"LIVE_EXECUTION_HALTED: {reason}"
+        self.pause()
+        logger.error(
+            "Runner %s (%s) PAUSED due to live option execution halt: %s",
+            self.instance_id[:8],
+            self.config.name,
+            reason,
         )
 
     @property
@@ -1630,6 +1713,9 @@ class StrategyRunner:
             logger.exception("synthetic chain release failed for %s", self.instance_id[:8])
 
         bridge.quote_provider = provider
+        trader_obj = getattr(bridge.option_broker, "trader", None)
+        if trader_obj is not None:
+            trader_obj.quote_provider = provider
         self._chain_source = src
         self._chain_released = False  # we now hold the live entry; stop() releases it
         logger.info(
@@ -1735,6 +1821,14 @@ class StrategyRunner:
                     except Exception:  # noqa: BLE001 — release must never block stop
                         logger.exception("chain bus release failed for %s", self.instance_id[:8])
                 self._chain_released = True
+            if self.options_bridge is not None:
+                trader_obj = getattr(self.options_bridge.option_broker, "trader", None)
+                close_fn = getattr(trader_obj, "close", None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception:  # noqa: BLE001
+                        pass
             self.status = STATUS_STOPPED
             self._sync_bridge_runner_state()
             logger.info("Runner %s stopped", self.instance_id[:8])

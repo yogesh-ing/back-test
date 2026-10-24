@@ -35,6 +35,8 @@ RESEARCH_STRUCTURES: frozenset[str] = frozenset(
         "bull_call_spread",
         "bear_put_spread",
         "straddle",
+        "long_straddle",
+        "short_straddle",
         "strangle",
         "iron_condor",
         "calendar_spread",

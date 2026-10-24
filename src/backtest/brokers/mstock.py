@@ -213,6 +213,8 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         self._ws_token_pins: dict[int, int] = {}
         self._ws_reinit_listeners: list[Callable[[], None]] = []
         self._ws_tick_listeners: list[Callable[[dict[str, dict]], None]] = []
+        self._ws_order_listeners: list[Callable[[dict[str, Any]], None]] = []
+        self._ws_order_cache: dict[str, dict[str, Any]] = {}
         self._ws_lock = threading.RLock()
         self._ws_cold_subscribe_wait_s: float = 0.0
 
@@ -431,6 +433,12 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                     logger.warning("mStock WebSocket LOGIN failed: %s", exc)
 
             ticker.on_open = _ws_login
+            ticker.on_order_update = (
+                lambda _ws, payload: self._ingest_ws_order_payload(payload, "order")
+            )
+            ticker.on_trade_update = (
+                lambda _ws, payload: self._ingest_ws_order_payload(payload, "trade")
+            )
 
             # Start WebSocket in background thread
             ticker.connect(threaded=True)
@@ -510,6 +518,230 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             rem_fn = getattr(ws_feed, "remove_tick_listener", None)
             if callable(rem_fn):
                 rem_fn(callback)
+
+    def add_order_listener(
+        self, callback: Callable[[dict[str, Any]], None]
+    ) -> None:
+        """Register a WS order/trade push listener preserved across TOTP re-auth."""
+        if not callable(callback):
+            raise TypeError("order listener must be callable")
+        with self._ws_lock:
+            if callback not in self._ws_order_listeners:
+                self._ws_order_listeners.append(callback)
+
+    def remove_order_listener(
+        self, callback: Callable[[dict[str, Any]], None]
+    ) -> None:
+        """Unregister a WS order/trade push listener."""
+        with self._ws_lock:
+            if callback in self._ws_order_listeners:
+                self._ws_order_listeners.remove(callback)
+
+    def get_ws_order_update(self, broker_order_id: Any) -> dict[str, Any] | None:
+        """Return latest normalized WS push row for ``broker_order_id`` if cached."""
+        oid = str(broker_order_id or "").strip()
+        if not oid:
+            return None
+        with self._ws_lock:
+            row = self._ws_order_cache.get(oid)
+            return dict(row) if row is not None else None
+
+    def find_ws_order_update(
+        self,
+        *,
+        client_order_id: str | None = None,
+        symbol: str | None = None,
+        side: str | None = None,
+        quantity: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Match a cached WS push row by ``client_order_id`` or packet signature."""
+        wanted_coid = (client_order_id or "").strip()
+        wanted_sym = (symbol or "").strip().upper()
+        wanted_side = (side or "").strip().upper()
+        with self._ws_lock:
+            rows = list(self._ws_order_cache.values())
+        for row in reversed(rows):
+            row_coid = str(row.get("client_order_id") or "").strip()
+            if wanted_coid and row_coid and row_coid == wanted_coid:
+                return dict(row)
+            if (
+                wanted_sym
+                and str(row.get("symbol") or "").upper() == wanted_sym
+                and (not wanted_side or str(row.get("side") or "").upper() == wanted_side)
+                and (quantity is None or int(row.get("quantity") or 0) == int(quantity))
+            ):
+                return dict(row)
+        return None
+
+    def _ingest_ws_order_payload(
+        self, payload: Any, event_type: str = "order"
+    ) -> None:
+        """Normalize MTicker text order/trade push frames and fan out to listeners."""
+        raw_items = payload if isinstance(payload, list) else [payload]
+        items: list[dict[str, Any]] = []
+        for entry in raw_items:
+            if not isinstance(entry, dict):
+                continue
+            nested = entry.get("data")
+            if isinstance(nested, dict):
+                items.append(nested)
+            elif isinstance(nested, list):
+                items.extend(d for d in nested if isinstance(d, dict))
+            else:
+                items.append(entry)
+
+        normalized_rows: list[dict[str, Any]] = []
+        with self._ws_lock:
+            listeners = list(self._ws_order_listeners)
+            for raw in items:
+                oid = str(
+                    raw.get("order_id")
+                    or raw.get("orderId")
+                    or raw.get("broker_order_id")
+                    or raw.get("nOrdNo")
+                    or raw.get("norenordno")
+                    or ""
+                ).strip()
+                if not oid:
+                    continue
+                prev = dict(self._ws_order_cache.get(oid) or {})
+                status_raw = (
+                    raw.get("status")
+                    or raw.get("order_status")
+                    or raw.get("orderStatus")
+                    or raw.get("ordSt")
+                    or ""
+                )
+                status = str(status_raw).strip().upper()
+                filled_raw = next(
+                    (
+                        raw.get(k)
+                        for k in (
+                            "filled_quantity",
+                            "filled_shares",
+                            "filledShares",
+                            "fill_quantity",
+                            "trade_quantity",
+                            "fldQty",
+                        )
+                        if raw.get(k) is not None
+                    ),
+                    None,
+                )
+                try:
+                    filled_qty = (
+                        int(float(filled_raw))
+                        if filled_raw is not None
+                        else int(prev.get("filled_quantity") or 0)
+                    )
+                except (TypeError, ValueError):
+                    filled_qty = int(prev.get("filled_quantity") or 0)
+
+                qty_raw = next(
+                    (
+                        raw.get(k)
+                        for k in ("quantity", "order_quantity", "orderQuantity", "qty")
+                        if raw.get(k) is not None
+                    ),
+                    None,
+                )
+                try:
+                    total_qty = (
+                        int(float(qty_raw))
+                        if qty_raw is not None
+                        else int(prev.get("quantity") or 0)
+                    )
+                except (TypeError, ValueError):
+                    total_qty = int(prev.get("quantity") or 0)
+
+                px_raw = next(
+                    (
+                        raw.get(k)
+                        for k in (
+                            "average_price",
+                            "averagePrice",
+                            "average_fill_price",
+                            "avgPrc",
+                            "trade_price",
+                            "tradePrice",
+                            "fill_price",
+                            "price",
+                        )
+                        if raw.get(k) not in (None, "", 0, "0")
+                    ),
+                    None,
+                )
+                try:
+                    avg_px = (
+                        float(px_raw)
+                        if px_raw not in (None, "")
+                        else float(prev.get("average_price") or 0.0)
+                    )
+                except (TypeError, ValueError):
+                    avg_px = float(prev.get("average_price") or 0.0)
+
+                if not status:
+                    if event_type == "trade" and filled_qty > 0 and (
+                        total_qty <= 0 or filled_qty >= total_qty
+                    ):
+                        status = "COMPLETE"
+                    else:
+                        status = str(prev.get("status") or "")
+
+                symbol = str(
+                    raw.get("tradingsymbol")
+                    or raw.get("trading_symbol")
+                    or raw.get("tradingSymbol")
+                    or raw.get("trdSym")
+                    or raw.get("symbol")
+                    or prev.get("symbol")
+                    or ""
+                ).strip()
+                side_raw = str(
+                    raw.get("transaction_type")
+                    or raw.get("transactionType")
+                    or raw.get("trnsTp")
+                    or raw.get("side")
+                    or prev.get("side")
+                    or ""
+                ).strip().upper()
+                side = {"B": "BUY", "S": "SELL"}.get(side_raw, side_raw)
+                coid = str(
+                    raw.get("client_order_id")
+                    or raw.get("clientOrderId")
+                    or raw.get("guiOrderId")
+                    or raw.get("tag")
+                    or raw.get("remarks")
+                    or prev.get("client_order_id")
+                    or ""
+                ).strip()
+
+                merged = {
+                    "order_id": oid,
+                    "status": status,
+                    "filled_quantity": filled_qty,
+                    "quantity": total_qty,
+                    "average_price": avg_px,
+                    "symbol": symbol,
+                    "side": side,
+                    "client_order_id": coid,
+                    "event_type": event_type,
+                    "updated_mono": time.monotonic(),
+                }
+                if oid in self._ws_order_cache:
+                    self._ws_order_cache.pop(oid, None)
+                self._ws_order_cache[oid] = merged
+                while len(self._ws_order_cache) > 512:
+                    oldest_key = next(iter(self._ws_order_cache))
+                    self._ws_order_cache.pop(oldest_key, None)
+                normalized_rows.append(dict(merged))
+
+        for row in normalized_rows:
+            for listener in listeners:
+                try:
+                    listener(dict(row))
+                except Exception:  # noqa: BLE001 — isolate listener errors
+                    logger.debug("WS order listener error", exc_info=True)
 
     def _resubscribe_session_tokens_ws(
         self,
@@ -950,6 +1182,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             self._ws_subscribed_tokens.clear()
             self._ws_token_modes.clear()
             self._ws_desired_modes.clear()
+            self._ws_order_cache.clear()
         if had_session:
             logger.info("mStock session cleared (logout)")
 
