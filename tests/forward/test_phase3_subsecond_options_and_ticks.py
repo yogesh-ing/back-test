@@ -1053,3 +1053,72 @@ class TestOptionSessionDateRollAndCommissionAccounting:
         assert summary["gross_realized_pnl"] == pytest.approx(float(closed.gross_pnl), abs=0.01)
         assert summary["net_realized_pnl"] == pytest.approx(float(closed.net_pnl), abs=0.01)
         assert summary["commission_paid"] == pytest.approx(float(closed.total_commission), abs=0.01)
+
+    def test_open_option_daily_pnl_nets_entry_costs_and_reconciles_with_equity(self):
+        """While a structure is open, daily_pnl() must net entry brokerage + statutory fees."""
+        runner = StrategyRunner(
+            RunnerConfig(
+                name="OPT-OPEN-NET",
+                strategy_name="CE_instant_buy",
+                allocated_capital=500_000,
+                symbols=["NIFTY"],
+                timeframe="1min",
+                mode="paper",
+                source="synthetic",
+                instrument={
+                    "type": "option",
+                    "expression": get_strategy("CE_instant_buy").execution_spec().to_expression(),
+                },
+            ),
+            ledger=OrderLedger(),
+        )
+        runner.start()
+        baseline = runner._day_start_equity
+        ist_now = datetime.now(IST)
+        runner.process_candle_event(
+            "NIFTY",
+            {
+                "ts": ist_now.strftime("%Y-%m-%d %H:%M:%S"),
+                "open": 24500.0,
+                "high": 24510.0,
+                "low": 24490.0,
+                "close": 24500.0,
+                "volume": 1000,
+            },
+        )
+        open_structures = runner.options_bridge.option_broker.get_open_structures()
+        assert len(open_structures) == 1
+        entry_costs = float(
+            open_structures[0].total_commission + open_structures[0].statutory_fees
+        )
+        assert entry_costs > 0.0
+        assert runner.daily_pnl() == pytest.approx(runner.equity() - baseline, abs=1e-6)
+
+    def test_normalize_bar_rejects_missing_or_nat_ts_across_pandas_versions(
+        self, monkeypatch
+    ):
+        """Pandas 2.x NaT.strftime returns 'NaT' — _normalize_bar must return None."""
+        import backtest.forward.feed_registry as fr_mod
+
+        assert MStockBarFeed._normalize_bar({"close": 10.0}) is None
+        assert MStockBarFeed._normalize_bar({"ts": "", "close": 10.0}) is None
+        assert MStockBarFeed._normalize_bar({"ts": "   ", "close": 10.0}) is None
+        assert MStockBarFeed._normalize_bar({"ts": None, "close": 10.0}) is None
+
+        # Simulate Pandas 2.x NaT where strftime() returns literal "NaT" instead of raising
+        class _FakePandas2NaT:
+            def strftime(self, _fmt: str) -> str:
+                return "NaT"
+
+        orig_isna = fr_mod.pd.isna
+        monkeypatch.setattr(
+            fr_mod.pd,
+            "to_datetime",
+            lambda *_a, **_kw: _FakePandas2NaT(),
+        )
+        monkeypatch.setattr(
+            fr_mod.pd,
+            "isna",
+            lambda v: True if isinstance(v, _FakePandas2NaT) else orig_isna(v),
+        )
+        assert MStockBarFeed._normalize_bar({"ts": "2026-10-24 10:00:00", "close": 10.0}) is None

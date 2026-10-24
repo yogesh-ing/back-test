@@ -838,10 +838,14 @@ class _BrokerBarFeedBase:
             return None
         try:
             raw_ts = raw.get("ts") or raw.get("timestamp")
+            if raw_ts is None or (isinstance(raw_ts, str) and not raw_ts.strip()):
+                return None
             if isinstance(raw_ts, (int, float)) and raw_ts > 1_000_000_000_000:
                 ts = pd.to_datetime(raw_ts, unit="ms")
             else:
                 ts = pd.to_datetime(raw_ts)
+            if pd.isna(ts):
+                return None
             close = float(raw["close"])
             return {
                 "ts": ts.strftime("%Y-%m-%d %H:%M:%S"),

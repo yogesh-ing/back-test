@@ -3631,8 +3631,9 @@ class StrategyRunner:
         IST UTC/IST seam is resolved once, via ``_as_ist_date``).
         ``Position.net_pnl`` is net of every commission on the round trip.
 
-        The option book stays session-anchored until structure closes stamp
-        a session_date too (next-sprint item).
+        Both closed and open option structures stamp IST ``session_date`` and
+        net out brokerage + statutory fees so ``daily_pnl()`` reconciles with
+        ``equity() - _day_start_equity`` and rolls cleanly at 00:00 IST.
         """
         today = datetime.now(_IST).date().isoformat()
         realized_today = sum(
@@ -3648,7 +3649,9 @@ class StrategyRunner:
 
         # Add option book contribution if present (OPT-6: closed structures
         # stamp IST session_date so options roll at 00:00 IST and survive
-        # mid-day restarts identically to equities, net of commissions/fees).
+        # mid-day restarts identically to equities, net of commissions/fees;
+        # open structures also net entry brokerage + statutory fees so open MTM
+        # reconciles with OptionPaperBroker.total_equity).
         if self.options_bridge is not None:
             book = self.options_bridge.option_broker
             option_realized_today = Decimal("0")
@@ -3662,8 +3665,16 @@ class StrategyRunner:
                         "net_pnl",
                         structure.total_realized_pnl - structure.total_commission,
                     )
+            open_option_costs = sum(
+                (
+                    getattr(s, "total_commission", Decimal("0"))
+                    + getattr(s, "statutory_fees", Decimal("0"))
+                    for s in book.get_open_structures()
+                ),
+                Decimal("0"),
+            )
             total += float(option_realized_today)
-            total += float(self.options_bridge.unrealized_pnl)
+            total += float(self.options_bridge.unrealized_pnl - open_option_costs)
 
         return total
 
