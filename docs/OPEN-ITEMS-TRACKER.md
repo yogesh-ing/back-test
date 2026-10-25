@@ -1,96 +1,129 @@
 # Open Items Tracker
 
-**How to use:** tick `[x]` when done. "Who: You" = needs your action (credentials/money/account). "Who: Agent" = I can do it on request. Everything stays on this page — nothing held in your head.
+**How to use:** tick `[x]` when done. "Who: You" = needs your action (credentials/money/account/live box). "Who: Agent" = I can do it on request. Everything stays on this page — nothing held in your head.
 
-**Last updated:** 2026-10-06 · full suite 4,849 collected · multi-broker Phases A–D shipped (`docs/MULTI-BROKER-PRD.md`) · date-rot test repairs landed (pricing-clock pins + replay-anchored expiry) · doc sweep: item 7 marked done, item 12 half-done note · **Consolidated P&L & Tax Reporting (PRD-002) merged and pushed to remote**
+**Last updated:** 2026-10-25 (`arena/ab59b7e5-back-test` @ `258366a`) · Strategy-Owned Execution v2 Phases 0–4 + strategy cards (`PR #45`) · mStock WS 6-cause depth fix (`e06c003`, 29/29 live paper fills reconciled to the paisa) · IST `00:00` daily-loss roll (`8074fca`) · Realtime Options & Swing Pool **Phases 1–4 + Phase 5.0 shipped** (`97430a8` → `258366a`)
 
-> **2026-10-06 update — shipped since the last sweep:**
-> - Backtest run-ledger persistence merged 2026-10-03 (migration 018, `api/backtest_run_store.py`) — every completed run/compare persists payload + provenance.
-> - Data tab rework + instrument-list availability slice (PRs #39/#40/#42): names-only picker, curated NIFTY 200 + NSE index universes, dedupe + 502-retry + holiday-aware fetch; timeframes derived by resampling.
-> - Broker session-expiry alerts (PR #41): in-app widget + Telegram + re-login popup.
-> - `market_data_cache` UTC→IST clock repair (writer fixes + 45.6M-row migration, commit f2eb7e3).
-> - NSE holiday table seeded 2022–2026 (`tools/seed_market_holidays.py`, migration 017); fetches skip closures.
-> - Swing battery (2026-10): **all 8 strategy combos failed their gates — nothing was deployed** (`plugins/strategies/swing_*` stay as unadopted plugins).
->
-> **2026-10-06 open items — verified against code / observed on the live box:**
-> - [ ] **13. DB connection exhaustion** — Flask `:5000` hoards ~99/100 PostgreSQL connections over ~9h. Known, untraced — needs a pool-leak hunt (`FORWARD_TEST_DB_POOL_*`, per-request session handling). *Who: Agent*
-> - [ ] **14. Equity 1-min backfill interrupted at 77/200 symbols** (2026-10-04 broker 502 storm) — resume the remaining symbols. *Who: Agent*
-> - [ ] **15. Index 1-min backfill** — NIFTY done; BANKNIFTY + FINNIFTY + MIDCPNIFTY **paused awaiting go-ahead**; SENSEX + INDIAVIX **deferred**. *Who: You*
-> - [ ] **16. Daily-loss breaker UTC-window blind spot** — the day anchor is keyed on the UTC date, so 00:00–05:30 IST can be blind to the IST trading day's losses. *Who: Agent*
-> - [ ] **17. `/reporting` 500 on paper trades** — timezone mix between paper-trade stamps and the consolidation path. *Who: Agent*
-> - [ ] **18. Live page leaks paper positions** — `/portfolio/live` rows are not fully filtered to the live bucket. *Who: Agent*
-> - [ ] **19. Data-refresh chip built but not live until restart** — the topbar freshness chip (`components/freshness_chip.js`, `GET /api/data/freshness`) only appears after the next server restart. *Who: Agent*
-
-> **Expiry-day pricing fix (2026-09-24):** `SyntheticChainGenerator.MIN_PRICING_YEARS`
-> (half a trading day) in `price_contract` — near/post-expiry synthetic options keep a
-> real premium smile instead of collapsing to ₹0, which used to trip the fail-closed
-> ltp=0 guard and block all entries on monthly expiry days. 31+12 date-brittle test
-> failures fixed, 0 introduced.
+> **2026-10-25 update — shipped since the 2026-10-06 sweep:**
+> - **Strategy-Owned Execution v2 (`PR #45`, `f49e89a`)**: unified `EquityStrategy` / `DirectionalOptionStrategy` / `StructureStrategy` templates, single Risk Gate, selections-only spawn UI, and structured strategy cards.
+> - **Daily-loss fuse IST session-date anchor (`d7c3adb`, `8074fca`, `9cfdf0a`, `7b48448`)**: stamps `session_date` in IST, rolls realized P&L cleanly at `00:00 IST` across equity and option structures, and deducts open-option entry fees in `daily_pnl()`.
+> - **Orders tab & closed-trade size fix (`599be5d`)**: records option leg fills, adds `Lots` column, preserves equity `closed_quantity` on close, and adds `tools/repair_closed_quantity.py` for historic DB rows.
+> - **mStock WebSocket depth root-cause fixes (`e06c003`)**: reactor-thread `_send_frame`, `LOGIN`-before-`resubscribe` ordering, binary full-mode OI float fix, and numeric-token depth routing — live-verified on 2026-10-23 (`29/29` fills, `QUOTE_ONE_SIDED=0`, `docs/TRADE-RECONCILIATION-2026-10-23.md`).
+> - **Phase 1 (`97430a8` → `c778b7a`)**: shared `DatabaseManager` pool reuse across `PortfolioManager`/`DbSource` (fixes DB pool leak), `ScriptMasterCache`, 1-query `ts`-bounded `WarmupService` (`DEGRADED` badge on partial quorum), and `TimeframeBarAggregator` (`1min` → `5min`/`15min`/`30min`/`1hour` closed session bars).
+> - **Phase 2 (`2a22cf2`, `6b002d1`)**: `MStockTickBus` (`FULL`/`LTP`/`QUOTE`), `HotStrikeRing` (±10 strikes auto-recentered on ATM shift + TOTP re-auth resubscribe + pin refcounting), and zero-TTL WS depth quotes with fail-closed staleness guard.
+> - **Phase 3 (`9cfdf0a`, `7b48448`)**: sub-second MTM & SL/TP/trailing exit checks on WS ticks (`OptionsBridge.on_tick()`), tick-cadence option evaluation, WS `BarBuilder`, option commission netting (`net_pnl` + open entry fees), and `OPTIONS_INTRADAY_SQUAREOFF_MINUTES` EOD auto-square-off.
+> - **Phase 4 (`85ebf0a`)**: `LongStraddle` & `ShortStraddle` (`StructureKind.STRADDLE`, paper-entitled), external WS order/trade push `<50 ms` fill wakeup, marketable `LIMIT` option pricing (`OPTIONS_LIVE_ORDER_TYPE=LIMIT`), and `LiveOptionBrokerAdapter` (`mode="live"` runner routing via `LiveOptionTrader` + `OptionExecutionGate`).
+> - **Phase 5.0 (`258366a`)**: TimescaleDB-safe insert-only `1day` equity ingest (`ON CONFLICT DO NOTHING`, canonical `03:45Z` / `09:15 IST`), `1min -> 1day` completeness-quorum (`>=338/375`) rollup, pilot ceiling (`<=10` symbols, `<=120d`), 502 circuit breaker + checkpointing, and mandatory day-by-day NSE session verifier (`tools/daily_equity_ingest.py`).
 
 ---
 
-## 🔥 Do today (market is open)
+## 🚨 Immediate: Pre-Monday & Monday 09:15 IST Gate
 
-- [ ] **1. Real-session smoke test (T9.5)** — *~30 min — Who: You + Agent*
-  Start app → mStock login + TOTP → spawn ONE option runner `source: mstock, mode: paper` → confirm quote label is NOT `synthetic:bs`.
-  Command: `cd src && python -m backtest.web.app --port 5000`
+- [ ] **20. Set intraday EOD auto-square-off in `.env`** — *2 min — Who: You*
+  Add `OPTIONS_INTRADAY_SQUAREOFF_MINUTES=20` to `.env` so intraday option runners auto-flatten 20 minutes before the 15:30 IST close instead of carrying frozen post-close marks (`TRADE-RECONCILIATION` F5).
 
+- [ ] **21. Repair historic `closed_quantity=0` equity rows in DB** — *5 min (with `:5000` stopped) — Who: You*
+  Stop the Flask server on `:5000`, preview, then apply:
+  - `python tools/repair_closed_quantity.py`
+  - `python tools/repair_closed_quantity.py --apply`
+
+- [ ] **22. Runner roster hygiene before Monday open** — *5 min — Who: You*
+  Confirm no duplicate same-strategy + same-underlying runners are left active by accident (`TRADE-RECONCILIATION` F1; note Phase 1's `TimeframeBarAggregator` now keeps `15min` vs `1min` bar cadences distinct).
+
+- [ ] **23. Phase 5.0 `1day` small pilot & day-by-day verification** — *~5 min (safe pre-Monday: `<=10` symbols, `<=120d`) — Who: You*
+  Populate real `1day` rows for a 5-stock pilot and confirm `0` missing NSE sessions before unblocking Phase 5.1/5.2:
+  - `PYTHONPATH=src python tools/daily_equity_ingest.py rollup --symbols RELIANCE,TCS,HDFCBANK,INFY,ICICIBANK --days 30 --apply`
+  - `PYTHONPATH=src python tools/daily_equity_ingest.py fetch --symbols RELIANCE,TCS,HDFCBANK,INFY,ICICIBANK --days 60 --apply`
+  - `PYTHONPATH=src python tools/daily_equity_ingest.py verify --symbols RELIANCE,TCS,HDFCBANK,INFY,ICICIBANK --days 60`
+
+- [ ] **24. Monday 09:15 IST 180-second live `MTicker` soak gate** — *3 min at market open (with `:5000` stopped) — Who: You*
+  Keep `:5000` stopped so only one WS session uses the mStock login, then run:
+  - `PYTHONPATH=src python tools/mticker_ws_probe.py --from-store --mticker-soak --auto-ring NIFTY,BANKNIFTY --duration 180`
+  Pass criteria: zero reactor tracebacks, clean `HotStrikeRing` subscriptions, live two-sided bid/ask ladders, and non-zero OI floats.
+
+- [ ] **25. Merge decision (`arena/ab59b7e5-back-test` → `feature/options-trading-dev`)** — *Who: You*
+  Fast-forward / merge call once item **24**'s 180s Monday soak readout is green.
+
+---
+
+## 📈 Phase 5: Swing Pool & Screener Roadmap (Sequenced)
+
+- [x] **26. Phase 5.0 — `1day` equity ingest, `1min → 1day` rollup & day-by-day session verifier** — ✅ DONE (`258366a`): `src/backtest/data/daily_bar_ingest.py` + `tools/daily_equity_ingest.py` + 10-test suite (`ON CONFLICT DO NOTHING`, zero cross-chunk `UPDATE`s, canonical `03:45Z` / `09:15 IST`, pilot gate, 502 circuit breaker).
+
+- [ ] **27. Post-Monday bulk `1day` NIFTY 200 / 500 backfill (`--allow-bulk`) + nightly job** — *Held until after Monday soak/demo — Who: You + Agent*
+  Keep DB pool and mStock rate budget uncontended through Monday; afterwards run multi-year backfill + day-by-day verification (`0` missing sessions) and schedule post-15:35 IST `nightly --universe nifty_200 --allow-bulk --apply`:
+  - `PYTHONPATH=src python tools/daily_equity_ingest.py fetch --universe nifty_200 --days 1095 --allow-bulk --apply`
+  - `PYTHONPATH=src python tools/daily_equity_ingest.py verify --universe nifty_200 --days 1095`
+
+- [ ] **28. Phase 5.1 — `/screener` tab (`< 2 s` VCP & RSI + Relative Strength vs NIFTY scanners)** — *Held until item **23**/**27** populates verified `1day` rows in Postgres — Who: Agent*
+  Single bulk SQL read over `market_data_cache (timeframe='1day')` → vectorized VCP contraction + RSI(14) + RS vs NIFTY 50 ranking → Top-N table + one-click "Send to Swing Pool".
+
+- [ ] **29. Phase 5.2 — `PortfolioManager.sync_runner_pool()` (`TARGET_POOL` rotation without orphaning open trades)** — *Held until Phase 5.1 — Who: Agent*
+  Rotates `SYMBOL_UNIVERSE` swing runners onto the new Top-N symbols while placing deselected symbols that still hold open positions into **exit-only drain mode** until closed.
+
+---
+
+## 🛡️ Live Options Promotion & Branch Convergence (Post-Monday)
+
+- [ ] **30. Live straddle / strangle risk sign-off (~2026-10-31)** — *Who: You + Agent*
+  `LiveOptionBrokerAdapter` and `LongStraddle`/`ShortStraddle` shipped in `85ebf0a`, with `config/risk_limits.yaml` `entitlement.live` intentionally locked to `[long_call, long_put]`. Unlock live multi-leg structures only after Monday soak + ~1 week of clean paper straddle/strangle fills and margin/slippage review.
+
+- [ ] **31. Branch convergence (`feature/options-trading-dev` ↔ `feature/trades-db-fallback` & `main`)** — *Who: You + Agent*
+  Per `docs/BRANCH-SOURCE-MATRIX-2026-10-20.md`, port `feature/trades-db-fallback` (`_db_closed_trades`, commit `a82dec2`) and `main`'s 18 data-era commits (Upstox historical fetcher, migration `020` coverage summary table) onto the v2 `Strategy-Owned Execution` line without regressing v2 strategies or `mticker.py`.
+
+---
+
+## 🗂️ 2026-10-06 Sweep Items — Updated Status
+
+- [x] **13. DB connection exhaustion (`:5000` hoarding ~99/100 PG connections)** — ✅ FIXED in code (`97430a8`, Phase 1): `PortfolioManager` and `DbSource` now reuse the shared `DatabaseManager` engine (`POOL-3` guard prevents ad-hoc `create_engine()` leaks; `daily_equity_ingest.py` uses bounded `pool_size=1, max_overflow=0`). Monitor `pg_stat_activity` during Monday's full-session run to confirm steady-state count.
+- [ ] **14. Equity 1-min backfill interrupted at 77/200 symbols** (2026-10-04 broker 502 storm) — *Held until after Monday — Who: You + Agent*. Keep bulk historical fetches gated until after Monday's demo; note swing pools now use `1day` bars via Phase 5.0 (`tools/daily_equity_ingest.py`) rather than 3 years of `1min` bars.
+- [ ] **15. Index 1-min backfill** — NIFTY done; BANKNIFTY + FINNIFTY + MIDCPNIFTY **paused awaiting go-ahead** (post-Monday); SENSEX + INDIAVIX **deferred**. *Who: You*
+- [x] **16. Daily-loss breaker UTC-window blind spot** — ✅ DONE (`d7c3adb`, `8074fca`, `9cfdf0a`): `session_date` is stamped in IST at close and rolls at `00:00 IST` across equity trades and option structures; verified live on 2026-10-23 (`docs/TRADE-RECONCILIATION-2026-10-23.md`).
+- [x] **17. `/reporting` 500 on paper trades (timezone mix)** — ✅ FIXED in code (`src/backtest/reporting/records.py` `_normalize_aware_dt`, `sources.py`, `consolidator.py`): `TradeRecord.__post_init__` normalizes mixed naive/aware paper and DB timestamps to UTC-aware datetimes before sorting, dedupe, and holding-period math.
+- [x] **18. Live page leaks paper positions (`/portfolio/live`)** — ✅ FIXED in code (`portfolio_manager.py:list_positions(mode)`, `api/portfolio.py`, `portfolio.js:755-759`, verified in `docs/AFTERMARKET_VALIDATION_2026-10-14.md`): REST reads and SSE `render(p)` scope `runners`, `positions`, `orders_summary`, and `bucketMetrics` to `PAGE_MODE`.
+- [x] **19. Data-refresh chip (`components/freshness_chip.js`, `GET /api/data/freshness`)** — ✅ LIVE across post-2026-10-06 server restarts (`base.html:224`).
+
+---
+
+## 🔥 Earlier Operational & Smoke-Test Items
+
+- [x] **1. Real-session smoke test (T9.5)** — ✅ DONE (2026-10-23): mStock login + TOTP + live WS depth verified across 7 paper runners and 29/29 two-sided option fills (`QUOTE_ONE_SIDED=0`, zero `synthetic:bs` fallbacks; see `docs/MSTOCK-WS-FEED-ROOT-CAUSE-2026-10-23.md`).
 - [ ] **2. Start chain snapshot capture** — *~5 min to start, runs all day — Who: You*
   Command: `PYTHONPATH=src python scripts/snapshot_option_chains.py --interval-seconds 300`
-  Win: today's option chain data starts accruing for future backtests.
-
-- [ ] **3. Intraday strategy paper run** — *~1 hr of market time — Who: Agent (on request)*
-  Spawn runner on the new strategy, watch it trade real 1-hour bars until close.
-
-- [ ] **4. Record findings** — *~10 min after close — Who: Agent*
-  Log what worked/broke in `docs/OPTIONS-FORWARD-TEST-EXPERIMENT.md`.
+  Win: option chain snapshots accrue for historical chain replay/backtests.
+- [x] **3. Intraday strategy paper run** — ✅ DONE (2026-10-23): full-session paper run completed across `immediate_strangle`, `banknifty_ema_momentum`, `CE/PE_instant_buy`, and `ema_pullback`.
+- [x] **4. Record findings** — ✅ DONE (2026-10-23): logged in `docs/MSTOCK-WS-FEED-ROOT-CAUSE-2026-10-23.md` and `docs/TRADE-RECONCILIATION-2026-10-23.md` (with reconciliation findings F1, F3, F4, F5, F6 addressed in `599be5d` and Phases 1–3).
 
 ---
 
-## 🧠 HFT strategy — what's real (opinion)
+## 🧠 Sub-Second Tick Feed vs True HFT — Architecture Reality
 
-**True HFT is not possible here.** No tick feed, no sub-second latency, no colocation.
-**What IS possible: high-turnover intraday on 1-hour bars** (shortest real feed).
-Plan: new strategy in `plugins/strategies/` from the option template + tighter
-exit knobs (`reenter: true`, `max_reentries_per_day: 4`). Est: half a day of
-agent work. Blocked only by item 1 passing.
+**True colocation HFT (microsecond order-book queue jumping) is out of scope** for a retail Python + REST/WS stack.
+**What IS now live (`97430a8` → `85ebf0a`):**
+- **Sub-second option monitoring & exits**: `MTicker` binary WebSocket frames → `MStockTickBus` → `HotStrikeRing` (±10 ATM strikes in `MODE_FULL` 5-level depth) → `OptionsBridge.on_tick()` sub-second MTM + SL/TP/trailing exits + `<50 ms` WS order/trade fill wakeup.
+- **Multi-timeframe intraday & swing bars**: `TimeframeBarAggregator` builds genuine `1min`, `5min`, `15min`, `30min`, and `1hour` closed session bars from live ticks/bars, plus Phase 5.0 `1day` bars for swing pools.
 
 ---
 
-## 🟠 This week
+## 🟠 Repo, Governance & Tax Follow-ups
 
-- [x] **5. HFT-style strategy built + conformance-tested** — ✅ DONE (owner confirmed 2026-09-28): the high-turnover intraday family shipped in `plugins/strategies/` — `momentum_burst` (draft #1 adapted 2026-09-18), `atm_instant_buy`, `immediate_entry`, `immediate_strangle`, `time_alternator`, `ema_reversion_pob` (reenter knobs) — all pass the conformance battery (`tests/test_strategy_conformance.py`) and register at boot.
-- [ ] **6. CI workflow push** (`.github/workflows/ci.yml` needs your account — I can't push workflows) — *15 min — Who: You*
-- [x] **7. Portfolio-page option trade rows (UI polish)** — ✅ DONE (verified in code 2026-09-28): `portfolio.js` renders per-structure rows via `OptionView.openStructures` (matrix + deep-dive); API side covered by `tests/engine/test_portfolio_options_rows.py`, JS by `tests/js/test_option_view.mjs` + `render_option_views.mjs`.
+- [x] **5. High-turnover intraday strategy family + conformance battery** — ✅ DONE (2026-09-28, migrated to v2 templates in `PR #45`).
+- [ ] **6. CI workflow push** (`.github/workflows/ci.yml` needs your account — workflow scope) — *15 min — Who: You*
+- [x] **7. Portfolio-page option trade rows (UI polish)** — ✅ DONE (2026-09-28).
 - [ ] **8. Consultant answers on 6 open questions** — `CONSULTANT_RESPONSE.md` §0.4 — *Who: You*
 
-### Consolidated P&L / tax report (PRD-002) — shipped ✅
+### Consolidated P&L / tax report (PRD-002) — code shipped ✅, user sign-offs open
 
-**Merged 2026-09-29:** Complete reporting system with correct Indian tax classification, exports, reconciliation, and monthly email reports. All 7 follow-up items from the original PRD are now live:
-
-- ✅ Tax engine with correct FY 2026-27 rates (STCG 20%, LTCG 12.5% above ₹1,25,000, business slab default 30%)
-- ✅ Consolidated P&L across all brokers/books with itemised fees
-- ✅ Exports: PDF statement, ITR annexures (xlsx/csv/json), trade ledger CSV
-- ✅ Contract-note reconciliation per broker with PASS/WARNING/FAIL tolerance bands
-- ✅ Monthly email reports (dry-run to outbox by default)
-- ✅ Settings panel with broker catalogue grouped by adoption
-- ✅ Comprehensive test suite (93% coverage, every module ≥88%)
-
-**Remaining follow-ups (user action required):**
-- [ ] **Tax config sign-off** — *Who: You (+ your CA)*. Verify `config/reporting.yaml` rates match your actual marginal rate before treating "estimated tax" as your number.
+- [ ] **Tax config sign-off** — *Who: You (+ your CA)*. Verify `config/reporting.yaml` rates match your actual marginal slab before treating "estimated tax" as authoritative.
 - [ ] **Validate dhan broker profile** — *Who: You (one contract note)*. `/settings` → dhan card → Edit/validate with real contract note amounts.
 - [ ] **Turn monthly email on** — *Who: You*. Set `monthly_email.enabled: true` and SMTP host in `config/reporting.yaml`; export `REPORTING_SMTP_PASSWORD`.
 - [ ] **Reconciliation against real contract notes** — *Who: You + Agent*. `/reporting` → paste each broker's note net P&L → verify PASS/WARNING/FAIL.
 
-## 🟢 Later (no date)
-
-- [x] 9. Options-tab hard delete — ✅ DONE early (2026-09-22): GAP-3 resolved as REMOVE — /options page, options.js, Manual Options Book tab/banner deleted; JSON endpoints + book singleton kept (portfolio merge + emergency flatten). Review date no longer needed.
-- [ ] 10. Risk envelope V2 (BS+IV+SPAN) — after consultant answers
-- [ ] 11. Multi-leg structures (straddles/condors) — Phase B, don't bundle
-- [ ] 12. Sizing presets + richer metrics (Sortino, profit factor) — vectorized path
-      — *metrics half is DONE (2026-09-21: `engine/metrics.py` has Sortino, profit
-      factor, expectancy, VaR/ES); sizing presets on the vectorized path remain.*
-
 ---
 
-**Wins today so far:** ✅ Gap validation done — P1.1 live chain wiring, F-12 equity fills, P2.4 persistence, fail-closed trader all verified in code + tests. One date-brittle test fixed.
+## 🟢 Later (Backlog)
+
+- [x] **9. Options-tab hard delete** — ✅ DONE (2026-09-22).
+- [ ] **10. Risk envelope V2 (BS+IV+SPAN)** — after consultant answers (`#8`). *Who: Agent*
+- [ ] **11. Multi-leg structures (straddles/condors)** — *straddles half is DONE (`85ebf0a`: `LongStraddle` + `ShortStraddle` shipped on `StructureKind.STRADDLE`, paper-entitled; live entitlement gated under `#30`); 4-leg iron condors / butterflies remain.* *Who: Agent*
+- [ ] **12. Sizing presets + richer metrics (Sortino, profit factor) — vectorized path** — *metrics half is DONE (`engine/metrics.py` has Sortino, profit factor, expectancy, VaR/ES); sizing presets on the vectorized path remain.* *Who: Agent*
