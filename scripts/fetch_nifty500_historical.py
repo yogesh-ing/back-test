@@ -77,7 +77,7 @@ def authenticate() -> str:
     # If a token is already provided, skip auth
     existing = os.getenv("MSTOCK_ACCESS_TOKEN", "").strip()
     if existing and len(existing) >= 16:
-        print(f"[AUTH] Using existing token from MSTOCK_ACCESS_TOKEN: {existing[:20]}...")
+        print("[AUTH] Using existing token from MSTOCK_ACCESS_TOKEN")
         return existing
 
     print("[AUTH] Logging in with username/password...")
@@ -93,7 +93,7 @@ def authenticate() -> str:
     print("[AUTH] Verifying TOTP...")
     session = verify_totp(code)
     token = session["token"]
-    print(f"  Token: {token[:20]}...{token[-10:]}")
+    print("  Token verified")
 
     # Cache token for reuse
     with open(".mstock_session_token", "w") as f:
@@ -246,14 +246,16 @@ def persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timeframe
     skipped_bad = 0
     for bar in bars:
         if isinstance(bar, dict):
-            ts = bar_timestamp(bar.get("t", bar.get("time", bar.get("timestamp"))))
+            ts = bar_timestamp(
+                bar.get("t", bar.get("time", bar.get("timestamp"))), timeframe
+            )
             o = float(bar.get("o", bar.get("open", 0)))
             h = float(bar.get("h", bar.get("high", 0)))
             l = float(bar.get("l", bar.get("low", 0)))
             c = float(bar.get("c", bar.get("close", 0)))
             v = int(bar.get("v", bar.get("volume", 0)))
         elif isinstance(bar, (list, tuple)) and len(bar) >= 6:
-            ts = bar_timestamp(bar[0])
+            ts = bar_timestamp(bar[0], timeframe)
             o = float(bar[1])
             h = float(bar[2])
             l = float(bar[3])
