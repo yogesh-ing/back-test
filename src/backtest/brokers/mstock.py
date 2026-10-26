@@ -378,6 +378,15 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             # Wrap MTicker for synchronous quote access
             self._ws_feed = MStockWebSocketWrapper(ticker)
 
+            # A brand-new socket holds no server-side subscriptions, so the
+            # registry that survives from the previous socket must be dropped
+            # with it. Left standing, subscribe_to_instrument() answers "already
+            # subscribed" for the indices and every option token, no subscribe
+            # frame is ever sent, and quotes fall back to HTTP LTP-only — the
+            # 2026-10-26 failure: a mid-session re-login silenced the depth
+            # feed for the rest of the day while the socket looked healthy.
+            self._ws_subscribed_tokens = set()
+
             # The server closes an un-authenticated socket (clean 1000) within
             # milliseconds of the first data frame — the login text frame must
             # go down immediately after every handshake, before any subscribe.
