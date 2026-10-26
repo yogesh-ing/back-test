@@ -44,7 +44,10 @@ NIFTY_50: List[str] = [
     "NTPC",
     "POWERGRID",
     "M&M",
-    "TATAMOTORS",
+    # Was "TATAMOTORS": the Oct-2025 demerger left no such symbol in mStock's
+    # catalogue. TMPV (passenger vehicles) holds the Nifty 50 seat; TMCV
+    # (commercial vehicles) was excluded from the indices.
+    "TMPV",
     "TATASTEEL",
     "WIPRO",
     "HCLTECH",

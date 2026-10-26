@@ -111,3 +111,44 @@ def test_plan_keeps_one_bar_when_two_off_anchor_rows_share_a_date():
     assert moved_id == b["data_id"]  # the latest stamp survives
     assert deletes == [(a["data_id"], a["ts"])]
     assert moved_to == repair.anchor_of(b["ts"]) != b["ts"]
+
+
+class _FakeSession:
+    """Answers ``snapshot()``'s probes by SQL shape and records what it was asked."""
+
+    def __init__(self, table_exists=False, rows_held=0, rows_counted=0):
+        self.table_exists = table_exists
+        self.rows_held = rows_held
+        self.rows_counted = rows_counted
+        self.statements = []
+
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        self.statements.append(sql)
+        if "pg_class" in sql:
+            value = 1 if self.table_exists else 0
+        elif "count(*)" in sql:
+            value = self.rows_held if self.table_exists else self.rows_counted
+        else:
+            value = None
+
+        class _Result:
+            def scalar_one(self):
+                return value
+
+        return _Result()
+
+
+def test_snapshot_refuses_to_reuse_a_non_empty_bak_table():
+    # A second ingest followed by a re-run would otherwise DROP the first run's
+    # only undo data.
+    session = _FakeSession(table_exists=True, rows_held=28458)
+    assert repair.snapshot(session, "bak_mdc_daily_ts_20261026", [(1, None)]) == -1
+    assert not any("CREATE TABLE" in s or "INSERT INTO" in s for s in session.statements)
+
+
+def test_snapshot_creates_the_bak_table_when_absent():
+    session = _FakeSession(table_exists=False, rows_counted=1)
+    assert repair.snapshot(session, "bak_new", [(1, None)]) == 1
+    assert any("CREATE TABLE" in s for s in session.statements)
+    assert any("INSERT INTO" in s for s in session.statements)

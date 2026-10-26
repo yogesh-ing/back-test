@@ -121,11 +121,29 @@ def snapshot(session, bak: str, pairs: list[tuple], batch: int = 500) -> int:
     Matches on ``(ts, data_id)`` — the primary key leads on ``ts``, and a bare
     ``data_id`` predicate is a scan of 46M rows that the 30 s statement timeout
     cancels.
+
+    Refuses a ``bak`` table that already holds rows: re-running this repair after
+    a fresh ingest would otherwise drop the previous run's only undo data.
     """
-    session.execute(text(f"DROP TABLE IF EXISTS {bak}"))
-    session.execute(
-        text(f"CREATE TABLE {bak} AS SELECT m.* FROM market_data_cache m WHERE FALSE")
-    )
+    exists = session.execute(
+        text(
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relname = :bak AND c.relkind IN ('r', 'p')"
+        ),
+        {"bak": bak},
+    ).scalar_one()
+    if exists:
+        held = session.execute(text(f"SELECT count(*) FROM {bak}")).scalar_one()
+        if held:
+            print(
+                f"refusing {bak}: it holds {held} rows from an earlier run, "
+                "pass a fresh --bak-table"
+            )
+            return -1
+    else:
+        session.execute(
+            text(f"CREATE TABLE {bak} AS SELECT m.* FROM market_data_cache m WHERE FALSE")
+        )
     for i in range(0, len(pairs), batch):
         values, params = [], {}
         for j, (data_id, old_ts) in enumerate(pairs[i : i + batch]):
@@ -281,6 +299,8 @@ def main() -> int:
     # disk before any row moves.
     with engine.begin() as session:
         count = snapshot(session, bak, pairs)
+    if count < 0:
+        return 1
     if count < len(pairs):
         print(f"snapshot held {count} of {len(pairs)} rows — refusing to change data")
         return 1
