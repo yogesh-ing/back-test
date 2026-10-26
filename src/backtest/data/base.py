@@ -35,6 +35,10 @@ TRADING_MINUTES_PER_DAY = 375
 #: declare this zone instead of letting the server pick one.
 EXCHANGE_TZ = "Asia/Kolkata"
 
+#: Wall-clock anchor for stored daily/weekly bars — the NSE session open.
+DAILY_BAR_ANCHOR_HOUR = 9
+DAILY_BAR_ANCHOR_MINUTE = 15
+
 #: Trading days per year (NSE). The annualisation base for every daily-derived
 #: number: Sharpe, CAGR, Sortino, volatility.
 TRADING_DAYS_PER_YEAR = 252
@@ -211,7 +215,7 @@ def derive_serviceable_timeframes(
     return out
 
 
-def bar_timestamp(value) -> datetime:
+def bar_timestamp(value, timeframe: str | None = None) -> datetime:
     """Resolve one bar's timestamp to an **aware UTC** datetime.
 
     ``market_data_cache.ts`` is ``timestamptz``. Binding a naive value hands
@@ -222,10 +226,27 @@ def bar_timestamp(value) -> datetime:
 
     A naive stamp is taken as the exchange wall clock (what the brokers send);
     an offset-bearing stamp keeps the instant it already declares.
+
+    ``timeframe`` is optional so intraday callers keep their old behaviour
+    byte-for-byte. For a daily/weekly bar the payload's time-of-day is not
+    information — mStock has been seen to return both the session open
+    (09:15 IST) and midnight UTC (05:30 IST) for candles in one symbol's own
+    series — so the bar is re-anchored to the session open of its exchange
+    wall-clock date. Keeping every daily row at or after 09:15 is also what
+    lets a date bucket read identically in UTC and in Asia/Kolkata.
     """
     ts = pd.Timestamp(value)
     if ts.tzinfo is None:
         ts = ts.tz_localize(EXCHANGE_TZ)
+    else:
+        ts = ts.tz_convert(EXCHANGE_TZ)
+    if normalize_timeframe(timeframe) in ("1day", "1week"):
+        ts = ts.replace(
+            hour=DAILY_BAR_ANCHOR_HOUR,
+            minute=DAILY_BAR_ANCHOR_MINUTE,
+            second=0,
+            microsecond=0,
+        )
     return ts.tz_convert("UTC").to_pydatetime()
 
 
