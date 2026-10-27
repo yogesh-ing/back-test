@@ -486,3 +486,152 @@ class TestRestoreIsolation:
         assert dst.tick_count == 7  # manager scalars after the loop applied
         src.shutdown()
         dst.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# A restore refusal must not erase the snapshot (2026-10-27)
+# ---------------------------------------------------------------------------
+
+
+class TestRefusedRestoreKeepsSnapshot:
+    """Five option runners were lost on 2026-10-27 this way: an overnight
+    session expiry made restore refuse them (fail-closed, correct), only the
+    equity runner came back, and the operator's 10:52 resume — a control-plane
+    mutation — rewrote the state file from ``self._runners``, which no longer
+    held the refused five. Configs, bridge books and day anchors lived nowhere
+    else, so a temporary refusal became permanent deletion.
+    """
+
+    @staticmethod
+    def _refuse_named(monkeypatch, name: str):
+        original = PortfolioManager.add_runner
+
+        def guarded(self, config, *args, **kwargs):
+            if config.name == name:
+                raise ValueError(
+                    f"option runner on {config.symbols[0]} asked for "
+                    "source=mstock but there is no authenticated mstock session"
+                )
+            return original(self, config, *args, **kwargs)
+
+        monkeypatch.setattr(PortfolioManager, "add_runner", guarded)
+        return original
+
+    def test_refused_runner_survives_saves_and_the_next_boot(
+        self, tmp_path, monkeypatch
+    ):
+        state = tmp_path / "state.json"
+
+        # session one: two runners on the record
+        mgr1 = _manager(state)
+        mgr1.add_runner(_runner_config("GOOD"))
+        mgr1.add_runner(_runner_config("REFUSED-ME", symbol="NIFTY"))
+        before = json.loads(state.read_text())
+        assert [r["config"]["name"] for r in before["runners"]] == [
+            "GOOD",
+            "REFUSED-ME",
+        ]
+        refused_before = [
+            r for r in before["runners"] if r["config"]["name"] == "REFUSED-ME"
+        ][0]
+        mgr1.shutdown()
+
+        # session two: the second one is refused at restore …
+        self._refuse_named(monkeypatch, "REFUSED-ME")
+        mgr2 = _manager(state)
+        assert [r.config.name for r in mgr2._runners.values()] == ["GOOD"]
+
+        # … and every save afterwards still carries it
+        assert mgr2.save_state() is True
+        after = json.loads(state.read_text())
+        assert sorted(r["config"]["name"] for r in after["runners"]) == [
+            "GOOD",
+            "REFUSED-ME",
+        ]
+        parked = [r for r in after["runners"] if r["config"]["name"] == "REFUSED-ME"][0]
+        assert parked == refused_before, "the parked snapshot is byte-for-byte intact"
+        mgr2.shutdown()
+
+        # session three: the blocker is gone → it comes back, exactly once
+        monkeypatch.undo()
+        mgr3 = _manager(state)
+        assert sorted(r.config.name for r in mgr3._runners.values()) == [
+            "GOOD",
+            "REFUSED-ME",
+        ]
+        assert mgr3._parked_snapshots == {}, "a restored runner leaves the parked set"
+        mgr3.save_state()
+        names = [r["config"]["name"] for r in json.loads(state.read_text())["runners"]]
+        assert sorted(names) == ["GOOD", "REFUSED-ME"] and len(names) == 2
+        mgr3.shutdown()
+
+    def test_parked_runner_is_really_recoverable_by_identity(
+        self, tmp_path, monkeypatch
+    ):
+        """The park key is the stored instance_id, so a later boot must reuse
+        the same identity — not mint a new one and orphan the parked twin."""
+        state = tmp_path / "state.json"
+        mgr1 = _manager(state)
+        instance_id = mgr1.add_runner(_runner_config("REFUSED-ME", symbol="NIFTY"))
+        mgr1.shutdown()
+
+        self._refuse_named(monkeypatch, "REFUSED-ME")
+        mgr2 = _manager(state)
+        assert instance_id in mgr2._parked_snapshots
+        mgr2.save_state()
+        mgr2.shutdown()
+
+        monkeypatch.undo()
+        mgr3 = _manager(state)
+        assert list(mgr3._runners) == [instance_id]
+        mgr3.shutdown()
+
+    def test_operator_can_delete_a_parked_runner(self, tmp_path, monkeypatch):
+        state = tmp_path / "state.json"
+        mgr1 = _manager(state)
+        instance_id = mgr1.add_runner(_runner_config("REFUSED-ME", symbol="NIFTY"))
+        mgr1.shutdown()
+
+        self._refuse_named(monkeypatch, "REFUSED-ME")
+        mgr2 = _manager(state)
+        assert mgr2.remove_runner(instance_id) is True
+        names = [r["config"]["name"] for r in json.loads(state.read_text())["runners"]]
+        assert names == []
+        mgr2.shutdown()
+
+    def test_unknown_instance_still_returns_false(self, tmp_path):
+        mgr = _manager(tmp_path / "state.json")
+        assert mgr.remove_runner("no-such-instance") is False
+        mgr.shutdown()
+
+    def test_boot_freezes_the_file_before_any_save(self, tmp_path, monkeypatch):
+        """Second net: if the restore itself blows up, the boot logs 'starting
+        clean' — and the first save would then overwrite the file from an
+        emptier memory. The pre-restore copy keeps that recoverable."""
+        state = tmp_path / "state.json"
+        mgr1 = _manager(state)
+        mgr1.add_runner(_runner_config("BOOT-BACKUP"))
+        mgr1.shutdown()
+
+        def explode(self, payload):
+            raise RuntimeError("simulated restore failure")
+
+        monkeypatch.setattr(PortfolioManager, "_apply_state_payload", explode)
+        mgr2 = _manager(state)  # boots clean after the caught failure
+        backups = list(tmp_path.glob("state.json.boot_*"))
+        assert len(backups) == 1, "one copy per boot"
+        assert "BOOT-BACKUP" in backups[0].read_text()
+        assert mgr2.save_state() is True
+        saved = json.loads(backups[0].read_text())
+        assert [r["config"]["name"] for r in saved["runners"]] == ["BOOT-BACKUP"]
+        mgr2.shutdown()
+
+    def test_boot_backups_are_bounded(self, tmp_path, monkeypatch):
+        store = PortfolioStateStore(tmp_path / "state.json")
+        store.save({"runners": [], "manager": {}, "buckets": {}})
+        keep = PortfolioStateStore.KEEP_BOOT_BACKUPS
+        for i in range(keep + 5):
+            (tmp_path / f"state.json.boot_2026010{i:02d}000000").write_text("{}")
+        assert store.boot_backup() is not None
+        remaining = list(tmp_path.glob("state.json.boot_*"))
+        assert len(remaining) == keep, "oldest pruned, newest kept"

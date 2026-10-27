@@ -127,6 +127,38 @@ class PortfolioStateStore:
         except OSError:  # pragma: no cover
             logger.warning("could not remove state file %s", self.path)
 
+    #: Boot backups kept before the oldest is pruned (bounded cruft).
+    KEEP_BOOT_BACKUPS = 10
+
+    def boot_backup(self) -> Optional[Path]:
+        """Copy the file aside before this process gets a chance to rewrite it.
+
+        Every save rebuilds the runner list from live memory, so a boot that
+        restores less than the file held would otherwise overwrite history —
+        the 2026-10-27 loss of five option runners. Parked snapshots cover the
+        refusal case; this covers the rest (a restore that raised and booted
+        clean, a runner that cannot be re-created at all). One call per boot.
+        """
+        if not self.path.exists():
+            return None
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        target = self.path.with_name(f"{self.path.name}.boot_{stamp}")
+        try:
+            target.write_bytes(self.path.read_bytes())
+        except OSError as exc:  # pragma: no cover — a backup must not block boot
+            logger.warning("boot backup of %s failed: %s", self.path, exc)
+            return None
+        backups = sorted(
+            self.path.parent.glob(f"{self.path.name}.boot_*"),
+            key=lambda p: p.name,
+        )
+        for stale in backups[: max(0, len(backups) - self.KEEP_BOOT_BACKUPS)]:
+            try:
+                stale.unlink()
+            except OSError:  # pragma: no cover
+                pass
+        return target
+
 
 # ---------------------------------------------------------------------------
 # Config round-trip

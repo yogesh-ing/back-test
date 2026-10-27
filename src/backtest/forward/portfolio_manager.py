@@ -95,6 +95,10 @@ class PortfolioManager:
         }
 
         self._runners: Dict[str, StrategyRunner] = {}
+        # Snapshots read at boot whose runner could not be constructed (see
+        # _apply_state_payload). They hold no live state — they exist so the
+        # next save can hand them back to the file instead of forgetting them.
+        self._parked_snapshots: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
 
         # Aggregate anchors (manager-level — used for combined views)
@@ -892,7 +896,15 @@ class PortfolioManager:
     def remove_runner(self, instance_id: str) -> bool:
         with self._lock:
             runner = self._runners.pop(instance_id, None)
+            was_parked = self._parked_snapshots.pop(instance_id, None) is not None
             if runner is None:
+                # A snapshot parked at restore (construction refused) has no
+                # live runner — the operator can still delete it, which is how
+                # a permanently-unconstructable entry leaves the state file.
+                if was_parked:
+                    logger.info("Parked runner removed: %s", instance_id)
+                    self._persist_state()
+                    return True
                 return False
             bucket = self._runner_bucket(runner)
             if self.intelligence is not None:
@@ -1886,7 +1898,18 @@ class PortfolioManager:
     def _snapshot_payload(self) -> Dict[str, Any]:
         """Everything needed to rehydrate a manager: anchors, breaker
         latches, and each runner's config + full book."""
-        runners = [capture_runner(r) for r in self._runners.values()]
+        live = list(self._runners.values())
+        runners = [capture_runner(r) for r in live]
+        # A runner refused at restore is not in ``self._runners``, but it is
+        # still the operator's work: its config, book and history exist only
+        # in this file. Re-emitting the parked snapshot keeps a refusal
+        # temporary. Without this, the first save after boot rewrote the file
+        # from the shrunken set and five option runners vanished for good
+        # (2026-10-27, right after a mid-session login + resume).
+        live_ids = {r.instance_id for r in live}
+        for key, snapshot in self._parked_snapshots.items():
+            if key not in live_ids:
+                runners.append(snapshot)
         return {
             "manager": {
                 "total_capital": self.total_capital,
@@ -1988,6 +2011,9 @@ class PortfolioManager:
         payload = self._state_store.load()
         if not payload:
             return
+        # Freeze what the file held before this process can rewrite it — the
+        # safety net under "a save rebuilds the runner list from memory".
+        self._state_store.boot_backup()
         try:
             self._restoring = True
             try:
@@ -1995,10 +2021,12 @@ class PortfolioManager:
             finally:
                 self._restoring = False
             logger.warning(
-                "[state] restored %d of %d runner(s) + breaker latches from %s — "
-                "restored runners are PAUSED; resume explicitly",
+                "[state] restored %d of %d runner(s) (%d parked, still saved) "
+                "+ breaker latches from %s — restored runners are PAUSED; "
+                "resume explicitly",
                 restored,
                 len(payload.get("runners", [])),
+                len(self._parked_snapshots),
                 self._state_store.path,
             )
         except Exception:  # noqa: BLE001 — a bad restore must not block boot
@@ -2012,8 +2040,15 @@ class PortfolioManager:
         # breaker latches override whatever add_runner initialised.
         # Returns the number of runners actually restored.
         restored = 0
-        for runner_snap in payload.get("runners", []):
+        self._parked_snapshots.clear()
+        for index, runner_snap in enumerate(payload.get("runners", [])):
             from backtest.forward.state_store import _config_from_dict
+
+            snap_config = runner_snap.get("config", {}) or {}
+            park_key = str(
+                snap_config.get("instance_id")
+                or f"{snap_config.get('name', '?')}#{index}"
+            )
 
             # Per-runner isolation: a runner that cannot be re-created —
             # a 'live' runner with no armed broker session (ValueError), or
@@ -2028,19 +2063,24 @@ class PortfolioManager:
                 self.add_runner(config, start=False)
             except (ValueError, KeyError) as exc:
                 logger.warning(
-                    "[state] runner (%s) refused on restore: %s — skipped",
-                    runner_snap.get("config", {}).get("name", "?"),
+                    "[state] runner (%s) refused on restore: %s — parked, "
+                    "kept in the state file for the next boot",
+                    snap_config.get("name", "?"),
                     exc,
                 )
+                self._parked_snapshots[park_key] = runner_snap
                 continue
             runner = self._runners.get(config.instance_id)
             if runner is None:
                 logger.warning(
-                    "[state] runner %s could not be re-created — skipped",
+                    "[state] runner %s could not be re-created — parked, "
+                    "kept in the state file for the next boot",
                     config.instance_id,
                 )
+                self._parked_snapshots[park_key] = runner_snap
                 continue
             restore_runner(runner, runner_snap)
+            self._parked_snapshots.pop(park_key, None)
             restored += 1
 
         manager = payload.get("manager", {})
