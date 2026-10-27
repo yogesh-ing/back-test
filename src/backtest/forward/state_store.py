@@ -41,6 +41,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from backtest.timekeeping import from_stored_utc, now_utc
+
 logger = logging.getLogger("backtest.forward.state_store")
 
 __all__ = [
@@ -213,24 +215,18 @@ def _opt_position_to_snapshot(p: Any) -> Dict[str, Any]:
     }
 
 
+def _restore_ts(raw: Any) -> Optional[datetime]:
+    """State-file timestamp → aware UTC (see
+    :func:`backtest.timekeeping.from_stored_utc` for the rule)."""
+    return from_stored_utc(raw)
+
+
 def _opt_position_from_snapshot(payload: Dict[str, Any]) -> Any:
     from backtest.options.paper_trading import OptionPosition, PositionStatus
 
-    opened_at = (
-        datetime.fromisoformat(payload["opened_at"])
-        if payload.get("opened_at")
-        else datetime.utcnow()
-    )
-    closed_at = (
-        datetime.fromisoformat(payload["closed_at"])
-        if payload.get("closed_at")
-        else None
-    )
-    last_updated = (
-        datetime.fromisoformat(payload["last_updated"])
-        if payload.get("last_updated")
-        else opened_at
-    )
+    opened_at = _restore_ts(payload.get("opened_at")) or now_utc()
+    closed_at = _restore_ts(payload.get("closed_at"))
+    last_updated = _restore_ts(payload.get("last_updated")) or opened_at
     return OptionPosition(
         position_id=payload["position_id"],
         structure_id=payload.get("structure_id", ""),
@@ -286,16 +282,8 @@ def _structure_from_snapshot(payload: Dict[str, Any]) -> Any:
             date.fromisoformat(payload["expiry"]) if payload.get("expiry") else date.today()
         ),
         legs=[_opt_position_from_snapshot(leg) for leg in payload.get("legs", [])],
-        opened_at=(
-            datetime.fromisoformat(payload["opened_at"])
-            if payload.get("opened_at")
-            else datetime.utcnow()
-        ),
-        closed_at=(
-            datetime.fromisoformat(payload["closed_at"])
-            if payload.get("closed_at")
-            else None
-        ),
+        opened_at=_restore_ts(payload.get("opened_at")) or now_utc(),
+        closed_at=_restore_ts(payload.get("closed_at")),
         exit_reason=payload.get("exit_reason"),
     )
 
@@ -538,4 +526,5 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat()
+    """``saved_at`` — aware UTC, so a state file states its own clock."""
+    return now_utc().isoformat()

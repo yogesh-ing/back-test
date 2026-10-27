@@ -74,6 +74,7 @@ from backtest.brokers.mstock import (
     OrderOutcomeUnknown,
 )
 from backtest.options.execution_gate import V1_ALLOWED_STRUCTURES, check_intent
+from backtest.timekeeping import ensure_utc, now_utc
 from backtest.options.intent_journal import (
     KIND_DECIDED,
     KIND_FILLED,
@@ -297,7 +298,7 @@ class LiveOptionTrader:
         """
         check_intent(intent, self.allowed_structures)
 
-        ts = timestamp or datetime.utcnow()
+        ts = ensure_utc(timestamp) or now_utc()
         structure_id = str(uuid.uuid4())
 
         # The journal key comes from the decision, not from ``structure_id``:
@@ -368,7 +369,7 @@ class LiveOptionTrader:
                 )
                 result.status = StructureExecStatus.HALTED
                 result.error = f"Leg {i + 1} outcome unknown: {leg_result.error}"
-                result.completed_at = datetime.utcnow()
+                result.completed_at = now_utc()
                 self._results[structure_id] = result
                 return result
 
@@ -382,13 +383,13 @@ class LiveOptionTrader:
             self._rollback(filled_legs, intent)
             result.status = StructureExecStatus.ROLLED_BACK
             result.error = f"Leg {i+1} failed: {leg_result.error}"
-            result.completed_at = datetime.utcnow()
+            result.completed_at = now_utc()
             self._results[structure_id] = result
             return result
 
         # All legs filled
         result.status = StructureExecStatus.FILLED
-        result.completed_at = datetime.utcnow()
+        result.completed_at = now_utc()
         self._results[structure_id] = result
 
         logger.info(
@@ -415,7 +416,7 @@ class LiveOptionTrader:
         decision; a call that ended without an answer is reconciled against the
         broker's own book (see :meth:`_reconcile`), never re-sent.
         """
-        result = LegResult(leg=leg, submitted_at=datetime.utcnow())
+        result = LegResult(leg=leg, submitted_at=now_utc())
 
         if self.dry_run:
             result.status = LegStatus.FILLED
@@ -493,7 +494,7 @@ class LiveOptionTrader:
             result.status = LegStatus.FILLED
             result.fill_price = fill.get("fill_price", 0.0)
             result.fill_quantity = fill.get("fill_quantity", 0)
-            result.filled_at = datetime.utcnow()
+            result.filled_at = now_utc()
             self.journal.append(
                 intent_id=intent_id,
                 kind=KIND_FILLED,
@@ -578,7 +579,7 @@ class LiveOptionTrader:
             result.uncertain = False
             result.fill_price = found["fill_price"]
             result.fill_quantity = found["fill_quantity"]
-            result.filled_at = datetime.utcnow()
+            result.filled_at = now_utc()
         return result
 
     def _reconcile(self, broker_order: BrokerOrder) -> dict[str, Any] | None:

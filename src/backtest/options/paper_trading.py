@@ -27,6 +27,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from backtest.live.market_status import IST, MARKET_CLOSE_TIME, MARKET_OPEN_TIME
+from backtest.timekeeping import from_market_clock, from_stored_utc, now_utc
 from backtest.options.execution_gate import V1_ALLOWED_STRUCTURES, check_intent
 from backtest.strategy.intent import (
     OptionLeg,
@@ -60,12 +61,13 @@ def _now_utc() -> datetime:
 
 
 def _utc(dt: datetime | None) -> datetime | None:
-    """Normalise a possibly-naive timestamp to aware UTC (marks are naive UTC)."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    """Normalise a timestamp to aware UTC for the freshness comparison.
+
+    Marks are written aware UTC now; a naive value reaching here is a legacy
+    row or a pre-fix in-memory object, and is read as UTC because that is what
+    ``utcnow()``/``isoformat()`` produced before the 2026-10-27 clock fix.
+    """
+    return from_stored_utc(dt)
 
 
 def _session_seconds_between(mark: datetime, reference: datetime) -> float:
@@ -184,9 +186,9 @@ class OptionPosition:
     commission: Decimal = ZERO
 
     # Timestamps
-    opened_at: datetime = field(default_factory=datetime.utcnow)
+    opened_at: datetime = field(default_factory=_now_utc)
     closed_at: datetime | None = None
-    last_updated: datetime = field(default_factory=datetime.utcnow)
+    last_updated: datetime = field(default_factory=_now_utc)
 
     # Mark freshness observability (MTM Staleness PRD R1)
     mtm_failures: int = 0
@@ -278,14 +280,14 @@ class OptionPosition:
             )
 
         self.status = PositionStatus.CLOSED
-        self.closed_at = timestamp or datetime.utcnow()
+        self.closed_at = from_market_clock(timestamp) or now_utc()
         self.last_updated = self.closed_at
         return self.realized_pnl
 
     def update_mtm(self, price: Decimal) -> Decimal:
         """Update current price and recalculate unrealized P&L."""
         self.current_price = price
-        self.last_updated = datetime.utcnow()
+        self.last_updated = now_utc()
         self.mtm_failures = 0
         self.last_quote_error = None
         return self.calculate_unrealized_pnl()
@@ -318,7 +320,7 @@ class StructurePosition:
     underlying: str
     expiry: date
     legs: list[OptionPosition] = field(default_factory=list)
-    opened_at: datetime = field(default_factory=datetime.utcnow)
+    opened_at: datetime = field(default_factory=_now_utc)
     closed_at: datetime | None = None
     #: Why the structure closed (T0.2). One of ``"manual"``,
     #: ``"auto_square_off"``, ``"expiry_settlement"`` — or ``None`` while
@@ -590,7 +592,11 @@ class OptionPaperBroker:
         """
         check_intent(intent, self.allowed_structures)
 
-        ts = timestamp or datetime.utcnow()
+        # ``timestamp`` is the caller's clock: the live bridge hands over its
+        # bar clock (aware UTC), the backtest driver and the tests hand over bar
+        # times (naive IST). from_market_clock declares that second form instead
+        # of refusing it, which is what made 27 tests die on 2026-10-27.
+        ts = from_market_clock(timestamp) or _now_utc()
 
         # Validate lot sizes
         for leg in intent.legs:
@@ -771,7 +777,7 @@ class OptionPaperBroker:
         if structure is None:
             raise ValueError(f"Structure {structure_id} not found")
 
-        ts = timestamp or datetime.utcnow()
+        ts = from_market_clock(timestamp) or _now_utc()
         total_pnl = ZERO
 
         open_legs = [
@@ -1015,7 +1021,7 @@ class OptionPaperBroker:
         if structure is None or structure.is_open:
             return
         if structure.closed_at is None:
-            structure.closed_at = datetime.utcnow()
+            structure.closed_at = _now_utc()
         self._fire_structure_closed(structure, structure.total_realized_pnl)
 
     def restore_structure(self, structure: StructurePosition, fees_paid: Decimal = ZERO) -> None:

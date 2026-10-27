@@ -15,7 +15,7 @@ Usage::
 
     manager = ExpiryManager(broker=option_paper_broker)
     report = manager.process_expiries(
-        as_of=datetime(2026, 9, 24, 14, 30),
+        as_of=datetime(2026, 9, 24, 14, 30, tzinfo=EXCHANGE_TZ),  # exchange time
         settlement_provider=provider,
     )
 """
@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import hashlib
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Protocol
@@ -34,6 +34,13 @@ from backtest.options.paper_trading import (
     OptionPaperBroker,
     OptionPosition,
     PositionStatus,
+)
+from backtest.timekeeping import (
+    EXCHANGE_TZ,
+    MARKET_CLOSE_TIME,
+    from_market_clock,
+    now_utc,
+    session_date,
 )
 
 logger = logging.getLogger("backtest.options.expiry")
@@ -66,7 +73,7 @@ class ExpiryAlert:
     position_ids: list[str] = field(default_factory=list)
     structure_ids: list[str] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=now_utc)
     alert_id: str = ""
 
     def __post_init__(self) -> None:
@@ -218,7 +225,7 @@ class ExpiryManager:
         include_stale:
             Also return positions whose expiry date has passed.
         """
-        now = as_of or datetime.utcnow()
+        now = from_market_clock(as_of) or now_utc()
         threshold = (
             minutes_threshold
             if minutes_threshold is not None
@@ -240,13 +247,20 @@ class ExpiryManager:
         threshold_minutes: int,
         include_stale: bool = False,
     ) -> bool:
-        """True when the position's expiry is today within the square-off window."""
-        today = now.date()
+        """True when the position's expiry is today within the square-off window.
+
+        Both sides are aware: the cutoff is 15:30 on the expiry date in
+        EXCHANGE time. Comparing it against a UTC ``now`` — which is what the
+        naive version did — put the square-off 5h30 in the future, so the live
+        gate could never fire inside a session and structures rode to the close
+        (the missing EOD square-off of 2026-10-27).
+        """
+        today = session_date(now)
         if expiry < today:
             return include_stale  # stale — cash settlement territory
         if expiry == today:
             # Market closes at 15:30 IST; square off N minutes before
-            market_close = datetime.combine(expiry, time(15, 30))
+            market_close = datetime.combine(expiry, MARKET_CLOSE_TIME, tzinfo=EXCHANGE_TZ)
             cutoff = market_close - _timedelta_minutes(threshold_minutes)
             return now >= cutoff
         return False
@@ -265,7 +279,7 @@ class ExpiryManager:
         Uses the quote provider's LTP as the exit price (market order
         simulation).  Emits ``AUTO_SQUARED_OFF`` alerts.
         """
-        now = as_of or datetime.utcnow()
+        now = from_market_clock(as_of) or now_utc()
         results: list[SettlementResult] = []
 
         expiring = self.detect_expiring(as_of=now)
@@ -367,7 +381,7 @@ class ExpiryManager:
 
         Emits ``EXPIRED_ITM`` / ``EXPIRED_OTM`` / ``SETTLED`` alerts.
         """
-        now = as_of or datetime.utcnow()
+        now = from_market_clock(as_of) or now_utc()
         results: list[SettlementResult] = []
         settled_structure_ids: set[str] = set()
 
@@ -376,9 +390,10 @@ class ExpiryManager:
                 continue
             if pos.expiry is None:
                 continue
-            if pos.expiry > now.date():
+            reference = session_date(now)
+            if pos.expiry > reference:
                 continue  # not expired yet
-            if pos.expiry == now.date() and not include_today:
+            if pos.expiry == reference and not include_today:
                 continue  # expiry day, but this caller rides to settlement
 
             spot = settlement_provider.get_settlement_price(pos.underlying)

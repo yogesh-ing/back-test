@@ -25,6 +25,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from backtest.db.models import Base, TradeStructure, TradeStructureStatus
+from backtest.timekeeping import from_stored_utc, now_utc
 from backtest.options.paper_trading import (
     OptionPosition,
     PositionStatus,
@@ -40,10 +41,14 @@ ZERO = Decimal("0")
 
 
 def _aware(ts: datetime | None) -> datetime | None:
-    """Stamp naive datetimes as UTC (the ORM contract requires tz-aware)."""
-    if ts is None:
-        return None
-    return ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+    """Legacy read door for naive values this module wrote with ``utcnow()``.
+
+    ``trade_structures.opened_at/closed_at`` are ``TIMESTAMPTZ``; handing them a
+    naive value lets the server session timezone (Asia/Calcutta here) decide
+    what instant was meant. New values arrive aware, so this only ever relabels
+    a pre-2026-10-27 stamp — as UTC, which is what produced it.
+    """
+    return from_stored_utc(ts)
 
 
 def _leg_to_dict(leg: OptionPosition) -> dict[str, Any]:
@@ -66,9 +71,7 @@ def _leg_to_dict(leg: OptionPosition) -> dict[str, Any]:
 def _dict_to_leg(structure_id: str, strategy_name: str, underlying: str,
                  expiry: date | None, raw: dict[str, Any]) -> OptionPosition:
     opened_raw = raw.get("opened_at")
-    opened_at = (
-        datetime.fromisoformat(opened_raw) if opened_raw else datetime.utcnow()
-    )
+    opened_at = from_stored_utc(opened_raw) or now_utc()
     return OptionPosition(
         position_id=str(raw["position_id"]),
         structure_id=structure_id,
@@ -197,16 +200,17 @@ class StructurePersistence:
 
     @staticmethod
     def _to_structure(row: TradeStructure) -> StructurePosition:
-        opened_at = row.opened_at
-        if opened_at is not None and opened_at.tzinfo is not None:
-            opened_at = opened_at.replace(tzinfo=None)  # broker uses naive UTC
+        # Postgres hands ``TIMESTAMPTZ`` back aware; SQLite has no offset column
+        # and returns the naive UTC this app wrote. ``from_stored_utc`` is the
+        # door for exactly that pair — ``ensure_utc`` would refuse the second.
+        opened_at = from_stored_utc(row.opened_at)
         structure = StructurePosition(
             structure_id=row.structure_id,
             structure_type=row.structure_type,
             strategy_name=row.strategy_name,
             underlying=row.underlying,
             expiry=row.expiry,
-            opened_at=opened_at or datetime.utcnow(),
+            opened_at=opened_at or now_utc(),
         )
         items = (row.legs or {}).get("items", [])
         structure.legs = [

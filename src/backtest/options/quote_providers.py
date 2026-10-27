@@ -30,6 +30,7 @@ from typing import Any
 
 from backtest.instruments.option import OptionContract
 from backtest.instruments.base import OptionType
+from backtest.timekeeping import EXCHANGE_TZ, now_utc, session_date
 
 logger = logging.getLogger("backtest.options.quotes")
 
@@ -139,14 +140,14 @@ class SyntheticChainGenerator:
             return reference
         if self._reference is not None:
             return self._reference
-        return datetime.now()
+        return now_utc()
 
     def _reference_date(self, reference: date | None = None) -> date:
         """Date twin of :meth:`_reference_datetime` (same precedence)."""
         if reference is not None:
             return reference
         if self._reference is not None:
-            return self._reference.date()
+            return session_date(self._reference)
         return date.today()
 
     def set_spot(self, underlying: str, spot: float) -> None:
@@ -278,8 +279,23 @@ class SyntheticChainGenerator:
         spot = self.get_spot(contract.underlying)
         vol = float(contract.metadata.get("vol", 0.13))
         ref = self._reference_datetime(reference)
-        expiry_dt = datetime.combine(contract.expiry or ref.date(), datetime.min.time())
-        years = (expiry_dt - ref).total_seconds() / (365.0 * 24 * 3600)
+        # One clock family inside the pricer. Callers hand in either a naive
+        # wall clock or — since the 2026-10-27 clock fix — an aware UTC bar
+        # instant, and subtracting either from a naive midnight raises
+        # "can't subtract offset-naive and offset-aware datetimes". Exchange
+        # time is the common ground, and it is what a NSE expiry midnight
+        # actually means.
+        exchange_ref = (
+            ref.astimezone(EXCHANGE_TZ)
+            if ref.tzinfo is not None
+            else ref.replace(tzinfo=EXCHANGE_TZ)
+        )
+        expiry_dt = datetime.combine(
+            contract.expiry or exchange_ref.date(),
+            datetime.min.time(),
+            tzinfo=EXCHANGE_TZ,
+        )
+        years = (expiry_dt - exchange_ref).total_seconds() / (365.0 * 24 * 3600)
         return bs_price(
             spot,
             float(contract.strike),

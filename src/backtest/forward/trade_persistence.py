@@ -23,6 +23,7 @@ from decimal import Decimal
 from typing import Any
 
 from backtest.data.sources_policy import default_broker_source
+from backtest.timekeeping import from_stored_utc, now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +149,7 @@ class LiveTradePersister:
         from backtest.db.models import Trade as TradeRow
 
         entry_ts = _parse_ts(t.get("entry_ts"))
-        exit_ts = _parse_ts(t.get("exit_ts")) or datetime.utcnow()
+        exit_ts = _parse_ts(t.get("exit_ts")) or now_utc()
         if entry_ts is None:
             entry_ts = exit_ts
         pnl = Decimal(str(t.get("pnl") or 0))
@@ -180,15 +181,22 @@ class LiveTradePersister:
 
 
 def _parse_ts(value: Any) -> datetime | None:
-    """ISO string / datetime → naive datetime (DB column is tz-aware-capable)."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.replace(tzinfo=None)
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "")).replace(tzinfo=None)
-    except ValueError:
-        return None
+    """Trade-record timestamp → aware UTC.
+
+    The previous version parsed any ISO string and then *deleted* its offset
+    with ``replace(tzinfo=None)``. The ``trades`` columns are ``TIMESTAMPTZ``
+    and this deployment's session timezone is ``Asia/Calcutta``, so Postgres
+    reinterpreted every naive value as IST: a UTC entry silently lost 5h30
+    while an IST bar exit stayed put. That is what wrote the 330-minute
+    "holding periods" of 2026-10-27.
+
+    Aware values pass through as the instants they are. A naive one is read as
+    UTC via :func:`from_stored_utc` — the door for stamps this application wrote
+    with ``utcnow()`` — rather than refused, because losing a closed trade from
+    the permanent history is worse for a trader than having its clock labelled;
+    ``tests/test_timekeeping_policy.py`` is what keeps new writers aware.
+    """
+    return from_stored_utc(value)
 
 
 def _map_exit_reason(raw: Any) -> str | None:

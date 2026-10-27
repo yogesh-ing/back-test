@@ -38,6 +38,7 @@ from backtest.options.quote_providers import (
     SyntheticQuoteProvider,
 )
 from backtest.strategy.intent import Direction, MarketView
+from backtest.timekeeping import EXCHANGE_TZ
 from options_support import (  # noqa: F401 — market_closed is a pytest fixture
     market_closed,
     research_profile,
@@ -345,14 +346,21 @@ class TestBarClockTheta:
         bridge.on_bar("NIFTY", 24_800.0, f"{bar_day.isoformat()}T09:15:00")
         provider = bridge.quote_provider
         assert provider._reference is not None
-        assert provider._reference.date() == bar_day
-        assert provider._reference.tzinfo is None  # naive → price_contract is happy
+        # A naive bar stamp means EXCHANGE time, so the pinned reference is the
+        # same instant in aware UTC — 09:15 IST on the bar's date (clock policy
+        # 2026-10-27; the pricer no longer needs a naive reference to be happy).
+        assert provider._reference.astimezone(EXCHANGE_TZ).date() == bar_day
+        assert provider._reference.tzinfo is not None
 
     def test_timezone_aware_stamps_are_normalised(self):
         bridge, structure = self._long_call_bridge()
         day = structure.expiry - timedelta(days=5)
         assert bridge.on_bar("NIFTY", 24_800.0, f"{day.isoformat()}T03:45:00Z") is not None
-        assert bridge.quote_provider._reference.tzinfo is None
+        reference = bridge.quote_provider._reference
+        assert reference.tzinfo is not None
+        # "03:45Z" and the naive "09:15" two tests above are the same instant,
+        # so both spellings must normalize to one value.
+        assert reference.astimezone(EXCHANGE_TZ).hour == 9
 
 
 # ---------------------------------------------------------------------------

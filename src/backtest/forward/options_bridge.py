@@ -59,6 +59,7 @@ from decimal import Decimal
 from typing import Any, Deque, Iterable, Optional
 
 from backtest.data.sources_policy import SourceDisabledError, synthetic_chain_generator
+from backtest.timekeeping import from_market_clock, now_utc, session_date
 from backtest.options.execution_gate import (
     PreTradeRiskGate,
     REASON_EXPIRY_TOO_NEAR,
@@ -1630,12 +1631,18 @@ class OptionsBridge:
 
     @staticmethod
     def _bar_datetime(ts: Any) -> Optional[datetime]:
-        """Parse a bar timestamp into a **naive UTC** datetime.
+        """Parse a bar timestamp into an **aware UTC** instant.
 
-        Naive because ``SyntheticChainGenerator.price_contract`` builds its
-        expiry as ``datetime.combine(expiry_date, midnight)`` — mixing a
-        tz-aware reference with that would raise. ``None`` (unparseable or
-        missing) tells the provider to fall back to the wall clock.
+        The bar clock is the feed's exchange clock: mStock formats the forming
+        bar as a naive `"%Y-%m-%d %H:%M:%S"` string in IST, so reading that as
+        UTC — which the previous version of this method did — put 5h30 between
+        an entry stamped from it and one stamped from ``utcnow()``. Every
+        consumer now gets one unambiguous instant from
+        :func:`backtest.timekeeping.from_market_clock`, whose declared rule is
+        "naive means exchange time".
+
+        ``None`` (unparseable or missing) tells the provider to fall back to the
+        wall clock.
         """
         if not ts:
             return None
@@ -1643,13 +1650,20 @@ class OptionsBridge:
         if not text:
             return None
         try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return from_market_clock(text)
         except ValueError:
             logger.debug("[options-bridge] unparseable bar timestamp %r", ts)
             return None
-        if parsed.tzinfo is not None:
-            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-        return parsed
+
+    @property
+    def _bar_date(self) -> Optional[date]:
+        """The bar clock's trading-calendar date, in exchange time.
+
+        Never ``_bar_dt.date()``: the bridge's bar clock is UTC, and a session
+        date read off a UTC date is a different day for anything the feed
+        stamps between 00:00 and 05:30 IST.
+        """
+        return session_date(self._bar_dt)
 
     # ------------------------------------------------------------------ #
     # Internals
@@ -1704,7 +1718,7 @@ class OptionsBridge:
                 basis=self._entry_premium,
                 bars_held=self.bars_in_trade,
                 bars_without_view=self._bars_without_view,
-                bar_date=self._bar_dt.date() if self._bar_dt else None,
+                bar_date=self._bar_date,
                 expiry=structure.expiry,
             )
             if (
@@ -1834,7 +1848,7 @@ class OptionsBridge:
         the relevant expiry is the one then-current, and once the replay clock
         rolls past it the next month's expiry takes over automatically.
         """
-        reference = self._bar_dt.date() if self._bar_dt is not None else None
+        reference = self._bar_date
         try:
             expiries = generator.available_expiries(underlying, reference=reference)
         except TypeError:
@@ -1899,7 +1913,7 @@ class OptionsBridge:
             return None
         if expiry is None:
             return None
-        days = (expiry - self._bar_dt.date()).days
+        days = (expiry - self._bar_date).days
         if days > min_dte:
             return None
         return {
@@ -1971,7 +1985,7 @@ class OptionsBridge:
         vol = self._leg_vol(leg)
         if not spot or not expiry or not vol:
             return None
-        reference = self._bar_dt.date() if self._bar_dt else datetime.now(timezone.utc).date()
+        reference = self._bar_date or session_date(now_utc())
         try:
             years = (expiry - reference).days / 365.0
         except TypeError:  # mixed date/datetime expiry — not worth guessing
@@ -2018,7 +2032,7 @@ class OptionsBridge:
             "spot": float(self.last_spot) if self.last_spot else None,
             "iv": self._leg_vol(leg),
             "expiry": getattr(leg, "expiry", None) or self._structure_expiry,
-            "reference_date": self._bar_dt.date() if self._bar_dt else None,
+            "reference_date": self._bar_date,
         }
 
     def _leg_vol(self, leg: Any) -> Optional[float]:
@@ -2090,7 +2104,7 @@ class OptionsBridge:
             raise ContractValidityError(
                 REASON_NO_EXPIRY,
                 f"{underlying}: the chain exposes no expiry as of "
-                f"{self._bar_dt.date() if self._bar_dt else 'today'}",
+                f"{self._bar_date or 'today'}",
             )
         if option_type == "BOTH":
             # Two-sided structure (e.g. short strangle): build a nested
@@ -2166,7 +2180,13 @@ class OptionsBridge:
         self._journal_intent(KIND_DECIDED, intent)
 
         try:
-            positions = self.option_broker.execute_structure(intent, self.quote_provider)
+            # The bar clock stamps BOTH sides of the trade. Passing it only to
+            # close_structure left execute_structure falling back to the wall
+            # clock, so a one-bar scalp was booked as a 5h30 holding period —
+            # the exact offset between the feed's IST bar time and utcnow().
+            positions = self.option_broker.execute_structure(
+                intent, self.quote_provider, timestamp=self._bar_dt
+            )
         except InsufficientMarginError as exc:
             self._journal_intent(
                 KIND_REJECTED, intent, detail={"reason": str(exc)}

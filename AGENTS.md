@@ -40,6 +40,23 @@ Keeping it fresh: after major merges, refactors, or new services, rebuild the gr
 - Runtime artifacts (`*.log`, `src/data/portfolio_state.json`, `server_5000.log`)
   are not code — do not commit them.
 
+## Timestamps — the 2026-10-27 clock policy
+
+`src/backtest/timekeeping.py` is the only place a clock gets decided. Don't add
+`datetime.utcnow()`, a bare `datetime.now()`, or `replace(tzinfo=None)` to a
+module that trades, prices, or persists a timestamp:
+
+- Store **aware UTC** at every durability boundary (DB, JSON, JSONL): write with
+  `now_utc()`, serialize with `iso_utc()` so the value states its own clock.
+- Read a naive value only through a declared door — `from_market_clock` for
+  feed/bar stamps (naive means exchange time) or `from_stored_utc` for stamps
+  this app wrote with `utcnow()` before the fix. Guessing with
+  `replace(tzinfo=...)` is what booked 60-second scalps as 330-minute holds.
+- IST (`EXCHANGE_TZ`) is for presentation and calendar day only (`session_date`).
+- `tests/test_timekeeping_policy.py` enforces all of this, including an AST
+  ratchet with frozen baselines for the remaining legacy call sites. It fails on
+  increases: lower a baseline by fixing the site, never by editing the test.
+
 ## Fragile code — do not touch without reading the incident doc
 
 - `src/backtest/data/mticker.py` is a **patched vendor SDK**: all frames MUST go
