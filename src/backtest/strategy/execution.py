@@ -340,11 +340,16 @@ class ExitPlan:
             "take_profit_points",
             "max_loss_inr",
             "max_bars",
-            "min_days_to_expiry",
         ):
             value = getattr(self, key)
             if value is not None:
                 out[key] = value
+        # ``min_days_to_expiry`` is emitted even when None: unlike the numbers
+        # above, null is a declared *value* — ride to settlement (plan §4.3).
+        # Omitting it made the spec→expression→strict-parse round trip re-apply
+        # the dataclass default of 1, so a 0DTE strategy declared "ride" and the
+        # bridge gated it as "square off 1d early": entry blocked on every bar.
+        out["min_days_to_expiry"] = self.min_days_to_expiry
         out["structure_capped"] = bool(self.structure_capped)
         out["signal_flip"] = bool(self.signal_flip)
         out["neutral_bars"] = int(self.neutral_bars)

@@ -220,6 +220,32 @@ def test_expression_round_trip_preserves_data():
     assert again.to_expression() == expr
 
 
+def test_ride_to_settlement_survives_the_expression_round_trip():
+    """``min_days_to_expiry: None`` is a value, not an absent field.
+
+    ``ExitPlan.to_dict`` used to omit None, so a 0DTE strategy ("ride to
+    settlement") came back out of the expression as the dataclass default 1 —
+    and the bridge's entry gate (``_entry_dte_block``) then refused every bar
+    of an expiry-day session.
+    """
+    raw = copy.deepcopy(GOOD_DICT)
+    raw["exit"] = {"stop_loss_points": 100.0, "min_days_to_expiry": None}
+    spec = _spec(raw)
+    assert spec.exit_plan.min_days_to_expiry is None
+
+    resolved, _provenance = resolve_expression(spec=spec)
+    assert resolved["exit"]["min_days_to_expiry"] is None
+    assert parse_exit_plan_strict(resolved["exit"]).min_days_to_expiry is None
+
+
+def test_omitted_min_days_to_expiry_keeps_the_one_day_default():
+    """The house default is unchanged for strategies that say nothing."""
+    spec = _spec()  # GOOD_DICT declares no min_days_to_expiry
+    assert spec.exit_plan.min_days_to_expiry == 1
+    resolved, _provenance = resolve_expression(spec=spec)
+    assert resolved["exit"]["min_days_to_expiry"] == 1
+
+
 def test_resolve_expression_precedence_order():
     spec = _spec()
     resolved, provenance = resolve_expression(
