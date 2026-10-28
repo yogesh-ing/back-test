@@ -158,7 +158,13 @@ def test_strangle_intent_is_explicit_and_opens_via_bridge():
     intent = strategy.build_opening_intent(view)
     assert intent["structure"] == "strangle"
     assert intent["distance_pct"] == 2.0
-    assert intent["exit"]["stop_loss_points"] == 100
+    # BUG-02 (QA 2026-10-28): the old ±₹100 bracket sat inside the ₹193
+    # round-trip fee this 2-leg structure is charged, so every target was a
+    # net loss and every stop fired on quote bounce. Widened to a fee-aware
+    # ₹2,000 SL / ₹1,000 TP; the pre-trade bridge gate refuses anything
+    # with a TP ≤ 1.2× its own round-trip fees.
+    assert intent["exit"]["stop_loss_points"] == 2000
+    assert intent["exit"]["take_profit_points"] == 1000
 
     # Silence alone still opens nothing — the intent, by name, does.
     bridge = OptionsBridge(

@@ -429,8 +429,10 @@ class TestBridgeExits:
         (U2.2; the −₹41,844 churn lesson). That machinery is deleted: the
         flip closes the trade, a bare opposite view afterwards is silence,
         and the strategy re-enters — if it wants to — by emitting a fresh
-        intent on a later bar. ``reenter``/``max_reentries_per_day`` remain
-        declared ExitPlan fields but no longer move the bridge.
+        intent on a later bar. ``reenter`` no longer moves the bridge; since
+        Ticket 1.2 ``max_reentries_per_day`` does, as a per-session-date entry
+        budget (BUG-02), which is a refusal of new entries and never an
+        auto-reversal.
         """
         bridge = _bridge(
             {

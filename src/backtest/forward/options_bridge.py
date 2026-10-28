@@ -85,6 +85,7 @@ from backtest.options.exit_policy import (
     ExitDecision,
     ExitPolicy,
     _label,
+    take_profit_fee_floor_violation,
 )
 from backtest.options.intent_journal import (
     KIND_DECIDED,
@@ -137,6 +138,31 @@ EXIT_INTRADAY_SQUAREOFF = "intraday_squareoff"
 TICK_PROTECTIVE_REASONS = frozenset(
     {EXIT_RISK_CAP, EXIT_STOP_LOSS, EXIT_TAKE_PROFIT}
 )
+
+#: BUG-15 (QA 2026-10-28): deterministic pre-trade refusals. When the same one
+#: fires 3× in a row on the same contract, the runner is not "trading and
+#: losing" — it is stuck, and 205 identical log lines per hour is noise that
+#: hides real failures. We promote the bridge to ``trade_health=BLOCKED_BY_RISK``
+#: and throttle the operator-visible log line.
+_DETERMINISTIC_ENTRY_REJECTIONS = frozenset(
+    {
+        "MAX_LOSS_EXCEEDED",
+        "QUANTITY_ABOVE_CEILING",
+        "ORDER_VALUE_EXCEEDED",
+        # Not a gate code, but the same shape of stuck: a strike/expire the
+        # chain no longer offers will keep coming back the same way every tick.
+        "NO_STRIKE_IN_TOLERANCE",
+        "NO_CHAIN_CONTRACT",
+        "NO_EXPIRY_ON_CALENDAR",
+        "EXPIRY_BELOW_MIN_DAYS",
+        "WORST_CASE_UNPRICEABLE",
+        # Declared TP inside the round-trip fee — refuse and mark blocked,
+        # because a runner configured this way can never produce a net win.
+        "TAKE_PROFIT_BELOW_FEE_FLOOR",
+    }
+)
+_BLOCKED_BY_RISK_THRESHOLD = 3
+_REJECTION_LOG_THROTTLE_SECONDS = 900.0
 
 
 def _market_is_open(now_utc: Optional[datetime] = None) -> bool:
@@ -420,6 +446,11 @@ class OptionsBridge:
         self._exit_bar_index: Optional[int] = None
         self._bars_without_view: int = 0
         self._bar_dt: Optional[datetime] = None
+        #: The latest market instant seen on ANY path — bars and sub-second
+        #: ticks. ``_bar_dt`` is the *bar* clock and only advances with a bar;
+        #: day/bucket/cooldown rules evaluated on a tick cadence need the tick's
+        #: own stamp, or they fall back to the wall clock and mis-read a replay.
+        self._market_dt: Optional[datetime] = None
         #: BUG-01 (QA 2026-10-28): tick-cadence entries are latched to the
         #: runner's declared ``timeframe``. One entry per bucket, whatever the
         #: tick stream does. ``None`` disables the gate (bar-close cadence, where
@@ -427,6 +458,29 @@ class OptionsBridge:
         self.entry_bucket_timeframe: Optional[str] = None
         self._last_entry_bucket: Optional[str] = None
         self._bucket_block_logged: Optional[str] = None
+        # -- BUG-02 day-count re-entry cap ---------------------------------
+        # ``max_reentries_per_day`` used to be counted only against signal-
+        # flip re-entries, so a 1-hour session made 205 stop-loss re-entries
+        # with nobody counting. Track every structure closed on the CURRENT
+        # IST session date; the day's entry budget is
+        # ``max_reentries_per_day + 1`` (the first one plus its re-entries).
+        self._entry_day: Optional[date] = None
+        self._closes_today: int = 0
+        #: Last close as measured on the *market* clock, so the cooldown means
+        #: the same thing on the bar path as on the tick path.
+        self._last_exit_bar_dt: Optional[datetime] = None
+        # -- BUG-15 deterministic-rejection health -------------------------
+        # A same-code refusal repeating on the same contract is a stuck
+        # runner, not a trading one. After ``_BLOCKED_BY_RISK_THRESHOLD``
+        # identical refusals, publish ``trade_health=BLOCKED_BY_RISK`` +
+        # ``block_reason`` and throttle the log line so a 205-line-per-hour
+        # wall of noise cannot hide a real failure.
+        self.trade_health: str = "OK"
+        self.block_reason: Optional[str] = None
+        self._rejection_key: Optional[tuple] = None
+        self._rejection_streak: int = 0
+        self._last_rejection_log_mono: Optional[float] = None
+        self._last_attempted_contract: str = ""
         self._structure_direction: Optional[Any] = None
         self._structure_expiry: Optional[Any] = None
         self._entry_premium: Decimal = Decimal("0")
@@ -513,8 +567,13 @@ class OptionsBridge:
             return None if from_tick else self.on_market_view(view, strategy_name)
         tick_entry_dt: Optional[datetime] = None
         entry_bucket: Optional[str] = None
+        # The market instant this entry is being judged on. Every entry gate
+        # below — bucket latch, cooldown, day budget — is a market-time rule, so
+        # each reads this stamp rather than ``self._bar_dt``, which only advances
+        # when a bar is processed.
+        probe_ts = tick_ts or getattr(view, "bar_timestamp", None)
+        self._touch_market_clock(probe_ts)
         if from_tick:
-            probe_ts = tick_ts or getattr(view, "bar_timestamp", None)
             if self._in_opening_stabilization_window(probe_ts):
                 return None
             if self._blocked_tick_reentry():
@@ -545,6 +604,26 @@ class OptionsBridge:
             # is not replaced on the same bar. The strategy re-emits its
             # intent next bar if it still wants the trade; the −₹41,844
             # churn lesson stands.
+            return None
+        elif not from_tick and self._bar_cooldown_active(probe_ts):
+            # BUG-02: ``reentry_cooldown_seconds`` was only consulted on the
+            # tick path, so a 1-min runner could re-open on the very next bar
+            # after a stop-out. Measured on the BAR clock, not monotonic time:
+            # a replay feeds bars seconds apart on the wall clock but a day
+            # apart in market time, and the cooldown is a market-time rule.
+            return None
+        # BUG-02: entry budget is per session day, not per signal. Count every
+        # structural close (stop, target, flip, settlement, square-off) against
+        # ``max_reentries_per_day + 1``. Refuse the entry BEFORE the intent is
+        # logged / parsed / priced, so a capped day cannot generate the 205
+        # ``OPTION_BLOCKED`` rows the QA session saw.
+        if self._reentry_cap_reached(probe_ts):
+            self._journal_halt_once(
+                "REENTRY_CAP_REACHED",
+                f"closes today {self._closes_today} >= max entries/day "
+                f"{self._max_entries_per_day()} (max_reentries_per_day="
+                f"{self._strict_exit_plan.max_reentries_per_day})",
+            )
             return None
         logger.info(
             "INTENT_RECEIVED strategy=%s structure=%s spot=%s bar=%s quantity=%s",
@@ -594,8 +673,14 @@ class OptionsBridge:
             return result
         except Exception as exc:  # noqa: BLE001 — coded refusal, no trade
             code = str(getattr(exc, "reason", "") or type(exc).__name__)
+            flags: dict[str, Any] = {}
+            if code in _DETERMINISTIC_ENTRY_REJECTIONS:
+                flags = self._register_entry_rejection(code, str(exc))
+            else:
+                self._rejection_key = None
+                self._rejection_streak = 0
             self._journal_halt_once(code, str(exc))
-            return {"rejected": True, "reason": str(exc), "code": code}
+            return {"rejected": True, "reason": str(exc), "code": code, **flags}
 
     def pop_exit_event(self) -> Optional[dict[str, Any]]:
         """Drain one exit produced by the per-bar risk rules.
@@ -857,6 +942,12 @@ class OptionsBridge:
             "quote_source": str(getattr(self.quote_provider, "source_name", "unknown")),
             "last_exit": dict(self.last_exit) if self.last_exit else None,
             "settled_count": self._settlement_count,
+            # -- BUG-02 day-count budget + BUG-15 health --------------------
+            "structures_today": self._closes_today,
+            "max_entries_per_day": self._max_entries_per_day(),
+            "trade_health": self.trade_health,
+            "block_reason": self.block_reason,
+            "rejection_streak": self._rejection_streak,
             # -- closed-structure metrics (task B3) -------------------------
             "closed_structures": len(closed),
             "wins": wins,
@@ -1182,6 +1273,8 @@ class OptionsBridge:
         bar_dt = self._bar_datetime(ts)
         if bar_dt is not None or self._bar_dt is None:
             self._bar_dt = bar_dt
+        if bar_dt is not None:
+            self._market_dt = bar_dt
         if not self._has_open_structure():
             return None
 
@@ -1235,6 +1328,7 @@ class OptionsBridge:
         """
         underlying = str(symbol or self.underlying or "NIFTY").upper()
         self.underlying = underlying
+        self._touch_market_clock(ts)
         if price is not None and float(price) > 0:
             self.last_spot = float(price)
             try:
@@ -1350,6 +1444,9 @@ class OptionsBridge:
         self.open_structure_id = None
         self.closed_count += 1
         self._settlement_count += 1
+        # BUG-02: settlement is a structural close too — same day, same entry
+        # budget. Skipping it here is what let the DTE-roll churn run.
+        self._register_close()
         self.last_exit = event
         self._exit_bar_index = self._bar_index
         self._last_exit_mono = time.monotonic()
@@ -1832,6 +1929,12 @@ class OptionsBridge:
         if set_reference is not None:
             set_reference(self._bar_datetime(ts))
 
+    def _touch_market_clock(self, ts: Any) -> None:
+        """Remember the latest market instant seen on any path (bar or tick)."""
+        market_dt = self._bar_datetime(ts)
+        if market_dt is not None:
+            self._market_dt = market_dt
+
     @staticmethod
     def _bar_ts(bar_dt: Optional[datetime]) -> Optional[str]:
         """ISO timestamp for the bar clock (``None`` → provider wall clock)."""
@@ -2048,6 +2151,11 @@ class OptionsBridge:
         self._unpin_structure_legs(structure)
         self.open_structure_id = None
         self.closed_count += 1
+        # BUG-02: stop / target / flip / square-off / manual — every structural
+        # close spends one entry from the day's budget. This is the counter
+        # ``max_reentries_per_day`` was *supposed* to gate before only the
+        # signal-flip re-entry path incremented it.
+        self._register_close()
         self.last_exit = event
         self._exit_bar_index = self._bar_index
         self._last_exit_mono = time.monotonic()
@@ -2454,6 +2562,11 @@ class OptionsBridge:
 
         self.open_structure_id = positions[0].structure_id if positions else None
         self.executed_count += 1
+        # BUG-15: a fill clears the deterministic-rejection streak — the
+        # runner is not stuck. Also drop the attempted-contract label so the
+        # NEXT rejection starts its own count.
+        self._reset_blocked_state()
+        self._last_attempted_contract = ""
         logger.info(
             "ENTRY_FILLED strategy=%s structure_id=%s fills=%s",
             strategy_name,
@@ -2570,15 +2683,29 @@ class OptionsBridge:
         cannot state its worst case, it cannot trade (plan §4.3).
         Raises StructureNotAllowedError (coded) on any ceiling breach;
         the caller journals it as a halt and books nothing.
+
+        BUG-02 fee floor: after the ceiling check, the bridge ALSO refuses an
+        entry whose declared take-profit sits inside 1.2× its own round-trip
+        fee — the ±₹100 strangle bracket against ₹193 of brokerage/STT/exchange
+        charges was mathematically incapable of a net win, and the pre-trade
+        gate (not the API create path) is the only layer that has real leg
+        quotes AND the same fee calculator the engine uses to charge. No quote
+        provider, no fabricated fee — the check is skipped when either number
+        cannot be honestly derived.
         """
         assert self.risk_gate is not None
+        # Remember the contract being attempted so a same-contract repeat of a
+        # deterministic refusal can be counted as a streak (BUG-15).
+        self._last_attempted_contract = self._contract_key_from_intent(intent)
         gross_buy = Decimal("0")
         net = Decimal("0")
         has_sell = False
+        leg_quotes: list[tuple[Any, Decimal]] = []
         for leg in intent.legs:
             quote = self.quote_provider.get_quote(leg.instrument_token) or {}
             price = Decimal(str(quote.get("ltp") or quote.get("ask") or quote.get("bid") or "0"))
             units = Decimal(str(int(leg.quantity) * int(leg.lot_size)))
+            leg_quotes.append((leg, price))
             if str(leg.side).upper() == "BUY":
                 gross_buy += price * units
                 net += price * units
@@ -2615,6 +2742,88 @@ class OptionsBridge:
             worst_case_loss_inr=worst,
             order_value_inr=float(gross_buy),
         )
+        self._check_take_profit_fee_floor(intent, leg_quotes, net)
+
+    def _check_take_profit_fee_floor(
+        self,
+        intent: Any,
+        leg_quotes: list[tuple[Any, Decimal]],
+        net_premium: Decimal,
+    ) -> None:
+        """BUG-02: refuse an entry whose declared TP is inside 1.2× its own fees.
+
+        Only the bridge knows BOTH sides of the fee — the API create path has
+        no leg quotes and no premium yet, so pricing the floor there would
+        require fabricating market data. Everything here is real: leg quotes
+        the injected provider already returned, the same
+        :class:`CommissionCalculator` the broker will use to charge, and the
+        ExitPlan the strategy declared.
+
+        Silence is safe: no fee calculator, no declared TP, or a fee stack the
+        calculator cannot price → skip the check rather than block a trade on
+        an unknown. Only a *provable* economic violation raises.
+        """
+        if not leg_quotes:
+            return
+        plan = self._strict_exit_plan
+        tp_inr: Optional[float] = None
+        if plan.take_profit_points is not None:
+            tp_inr = float(plan.take_profit_points)
+        elif plan.take_profit_pct is not None and net_premium != 0:
+            # Percent is measured against the premium base — the credit for a
+            # short structure, the debit for a long one. abs() keeps the sign
+            # out of the ₹ comparison.
+            tp_inr = float(plan.take_profit_pct) * abs(float(net_premium))
+        if tp_inr is None:
+            return
+        fee_calc = getattr(self.option_broker, "fee_calculator", None)
+        if fee_calc is None:
+            return
+        entry_legs: list[dict[str, Any]] = []
+        exit_legs: list[dict[str, Any]] = []
+        for leg, price in leg_quotes:
+            if price <= 0:
+                # A leg the provider cannot price is not a fee estimate — bail
+                # out rather than refuse on a phantom fee stack.
+                return
+            side = str(getattr(leg, "side", "BUY") or "BUY").upper()
+            qty = int(getattr(leg, "total_quantity", 0) or 0)
+            if qty <= 0:
+                qty = int(getattr(leg, "quantity", 0) or 0) * int(
+                    getattr(leg, "lot_size", 1) or 1
+                )
+            if qty <= 0:
+                return
+            entry_legs.append({"side": side, "quantity": qty, "price": price})
+            exit_legs.append(
+                {
+                    "side": "SELL" if side == "BUY" else "BUY",
+                    "quantity": qty,
+                    "price": price,  # same-quote estimate; conservative
+                }
+            )
+        try:
+            entry_fees = fee_calc.calculate_structure(
+                entry_legs, track_volume=False
+            )
+            exit_fees = fee_calc.calculate_structure(
+                exit_legs, track_volume=False
+            )
+            round_trip = Decimal(str(entry_fees.total)) + Decimal(str(exit_fees.total))
+        except Exception:  # noqa: BLE001 — a fee model that cannot answer skips the gate
+            logger.debug(
+                "[options-bridge] fee-floor estimate failed; skipping BUG-02 gate",
+                exc_info=True,
+            )
+            return
+        violation = take_profit_fee_floor_violation(
+            tp_inr, float(round_trip) if round_trip > 0 else None
+        )
+        if violation is None:
+            return
+        from backtest.options.execution_gate import StructureNotAllowedError
+
+        raise StructureNotAllowedError("TAKE_PROFIT_BELOW_FEE_FLOOR", violation)
 
     def _validate_entry_intent(self, intent: Any) -> None:
         """Ask the market, right now, whether every leg is still quotable.
@@ -2785,10 +2994,163 @@ class OptionsBridge:
             and self._exit_bar_index == self._bar_index
         ):
             return True
+        return self._reentry_cooldown_active()
+
+    def _reentry_cooldown_active(self) -> bool:
+        """True while ``reentry_cooldown_seconds`` has not elapsed since the
+        last close. Extracted from :meth:`_blocked_tick_reentry` for the tick
+        path, which lives on the wall clock: sub-second ticks arrive faster
+        than any bar, so monotonic time is the only honest measure there.
+        """
         if self._last_exit_mono is not None and self.reentry_cooldown_seconds > 0.0:
             if (time.monotonic() - self._last_exit_mono) < self.reentry_cooldown_seconds:
                 return True
         return False
+
+    def _bar_cooldown_active(self, ts: Any = None) -> bool:
+        """The same cooldown measured on the **bar clock** for bar-cadence entries.
+
+        ``_last_exit_mono`` is monotonic wall time, which a replay advances an
+        instant at a time: gating a bar path on it refused every re-entry after
+        the first exit in any backfill or replay, and said nothing about the
+        market gap the knob is meant to express. Bar timestamps are the feed's
+        own clock, so a 1-min runner sits out exactly the declared seconds of
+        *market* time. Falls back to no guard when either stamp is missing
+        (the first entry, or a bridge restored mid-structure).
+        """
+        if self.reentry_cooldown_seconds <= 0.0:
+            return False
+        bar_dt = self._bar_datetime(ts) or self._market_dt or self._bar_dt
+        if self._last_exit_bar_dt is None or bar_dt is None:
+            return False
+        elapsed = (bar_dt - self._last_exit_bar_dt).total_seconds()
+        return elapsed < self.reentry_cooldown_seconds
+
+    # ------------------------------------------------------------------ #
+    # BUG-02 — day-count re-entry cap
+    # ------------------------------------------------------------------ #
+
+    def _session_today(self, ts: Any = None) -> Optional[date]:
+        """The IST calendar date the bridge is trading on.
+
+        Prefers the timestamp of the entry being attempted, then the bar clock,
+        then the wall clock — a live bridge's ``_bar_dt`` only advances when a
+        bar is processed, so gating a day roll on it alone spends yesterday's
+        budget for one extra bar. Uses the project timekeeper's
+        :func:`session_date`, never ``datetime.utcnow()`` or ``.date()`` on a
+        UTC value.
+        """
+        try:
+            return session_date(
+                self._bar_datetime(ts) or self._market_dt or self._bar_dt or now_utc()
+            )
+        except Exception:  # noqa: BLE001 — a bad clock must not open a trade
+            return None
+
+    def _max_entries_per_day(self) -> int:
+        """First entry + ``max_reentries_per_day`` re-entries (``0`` = never)."""
+        try:
+            reentries = max(0, int(self._strict_exit_plan.max_reentries_per_day))
+        except (TypeError, ValueError):
+            reentries = 2
+        return 1 + reentries
+
+    def _roll_entry_day(self, ts: Any = None) -> None:
+        """Reset the day's close counter when the IST date advances."""
+        today = self._session_today(ts)
+        if today is None:
+            return
+        if self._entry_day is None or today != self._entry_day:
+            self._entry_day = today
+            self._closes_today = 0
+
+    def _register_close(self) -> None:
+        """Called from every structural close path so the day's budget is real.
+
+        Settlement, stop, target, flip, square-off, manual — BUG-02's lesson is
+        that a counter fed by only ONE of these (the signal-flip re-entry) is
+        the same as no counter at all.
+        """
+        self._roll_entry_day()
+        self._closes_today += 1
+        self._last_exit_bar_dt = self._market_dt or self._bar_dt
+
+    def _reentry_cap_reached(self, ts: Any = None) -> bool:
+        self._roll_entry_day(ts)
+        return self._closes_today >= self._max_entries_per_day()
+
+    # ------------------------------------------------------------------ #
+    # BUG-15 — deterministic-rejection health tracking
+    # ------------------------------------------------------------------ #
+
+    def _contract_key_from_intent(self, intent: Any) -> str:
+        """A stable identifier for the SAME rejection contract across retries.
+
+        Joined leg symbols are the smallest label that distinguishes "the same
+        refusal" from "one the strategy is trying to move past" — when the
+        strike changes, the streak resets. Falls back to the structure type
+        when symbols have not resolved yet, which is fine because a pre-chain
+        refusal repeats identically anyway.
+        """
+        try:
+            legs = list(getattr(intent, "legs", []) or [])
+        except TypeError:
+            legs = []
+        labels = [str(getattr(leg, "trading_symbol", "") or "").strip() for leg in legs]
+        labels = [label for label in labels if label]
+        if labels:
+            return "|".join(sorted(labels))
+        return str(getattr(intent, "structure_type", "") or "")
+
+    def _register_entry_rejection(
+        self, code: str, reason: str, contract_key: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Update blocked-state after a deterministic refusal; return flags for the payload.
+
+        ``suppress_log`` tells the runner-side logger this repetition is already
+        counted here, so a 205-rejection hour cannot spam the signal log; the
+        bridge emits one warning per :data:`_REJECTION_LOG_THROTTLE_SECONDS`
+        instead.
+        """
+        key = (str(code), str(contract_key or self._last_attempted_contract or ""))
+        if key == self._rejection_key:
+            self._rejection_streak += 1
+        else:
+            self._rejection_key = key
+            self._rejection_streak = 1
+        blocked = self._rejection_streak >= _BLOCKED_BY_RISK_THRESHOLD
+        if blocked:
+            self.trade_health = "BLOCKED_BY_RISK"
+            self.block_reason = (
+                f"{code}×{self._rejection_streak} @ {key[1]}"
+                if key[1]
+                else f"{code}×{self._rejection_streak}"
+            )
+        now_mono = time.monotonic()
+        last = self._last_rejection_log_mono
+        throttle_hit = last is not None and (now_mono - last) < _REJECTION_LOG_THROTTLE_SECONDS
+        if throttle_hit:
+            return {
+                "blocked": blocked,
+                "block_reason": self.block_reason,
+                "suppress_log": True,
+            }
+        self._last_rejection_log_mono = now_mono
+        return {
+            "blocked": blocked,
+            "block_reason": self.block_reason,
+            "suppress_log": False,
+        }
+
+    def _reset_blocked_state(self) -> None:
+        """A successful entry proves the pipeline is not stuck — clear streak + health."""
+        if self._rejection_streak or self._rejection_key is not None:
+            self._rejection_streak = 0
+            self._rejection_key = None
+            self._last_rejection_log_mono = None
+        if self.trade_health == "BLOCKED_BY_RISK":
+            self.trade_health = "OK"
+            self.block_reason = None
 
     def _pin_structure_legs(self, structure: Any) -> None:
         sid = getattr(structure, "structure_id", None)

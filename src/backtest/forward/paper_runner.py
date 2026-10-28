@@ -2873,9 +2873,12 @@ class StrategyRunner:
             self._log_option_exit(symbol, result, bar["close"])
             return
         if result.get("rejected"):
-            self._log_signal(
-                symbol, "OPTION_BLOCKED", None, bar["close"], str(result.get("reason"))
-            )
+            # BUG-15: a same-code repeat on the same contract is throttled by
+            # the bridge (15-minute window) — do not spam the signal log.
+            if not result.get("suppress_log"):
+                self._log_signal(
+                    symbol, "OPTION_BLOCKED", None, bar["close"], str(result.get("reason"))
+                )
             return
         self._record_option_entry_signal(symbol, result, bar["close"])
 
@@ -2941,9 +2944,12 @@ class StrategyRunner:
             if not result:
                 return None
             if result.get("rejected"):
-                self._log_signal(
-                    symbol, "OPTION_BLOCKED", None, price, str(result.get("reason"))
-                )
+                # BUG-15: same-code, same-contract repeat already counted by
+                # the bridge — stay quiet on the log for its throttle window.
+                if not result.get("suppress_log"):
+                    self._log_signal(
+                        symbol, "OPTION_BLOCKED", None, price, str(result.get("reason"))
+                    )
                 return result
             if not result.get("exited"):
                 self._record_option_entry_signal(symbol, result, price)
@@ -3980,6 +3986,11 @@ class StrategyRunner:
                 "mark_stale": bool((options_summary or {}).get("mark_stale")),
                 "quote_error": (options_summary or {}).get("quote_error"),
                 "stale_positions": int((options_summary or {}).get("stale_positions") or 0),
+                # BUG-15: same-contract, same-code refusals are a stuck runner,
+                # not a trading one. Mirror the bridge's health so a UI/list row
+                # can flag it without reaching into nested options state.
+                "trade_health": (options_summary or {}).get("trade_health", "OK"),
+                "block_reason": (options_summary or {}).get("block_reason"),
                 # A1: the book's most recent MTM, mirrored onto the row so a
                 # card can show option P&L before it is folded into equity (A2).
                 "option_pnl": round(self.last_option_pnl, 2),

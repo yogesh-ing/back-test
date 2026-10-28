@@ -4,8 +4,10 @@ Spec (user request, 2026-09-18)
 -------------------------------
 Enter IMMEDIATELY on deployment/market open — no signal needed:
 sell OTM call (+2%..3% above spot) + sell OTM put (2%..3% below spot),
-same weekly expiry, 1 lot each. Exits: ₹100 take-profit / ₹100 stop-loss
-(configured in the runner expression, not here).
+same weekly expiry, 1 lot each. Exits: a fee-aware bracket (₹1,000 take-profit /
+₹2,000 stop-loss of structure P&L, configured in the runner expression / ExitPlan,
+not here) — widened off the old ±₹100 because ±₹100 sat inside the ₹193
+round-trip fee the engine itself charges, so every "win" was a net loss (BUG-02).
 
 Contract adaptation
 -------------------
@@ -79,10 +81,14 @@ class ImmediateStrangle(StructureStrategy):
             'theoretically uncapped risk on the call side.'
         ),
         'exits_risk': (
-            'Declared plan: combined stop at 100 points adverse, target at 100 points favourable.'
-            "IMPORTANT: a short strangle's true worst case is far larger than the stop if price"
-            'gaps through it — the pre-trade risk gate requires a declared worst case and the'
-            'strangle entitlement before it will fill, and this strategy should only run where'
+            'Fee-aware declared plan: combined stop at 2000 points adverse, target '
+            'at 1000 points favourable (₹ of structure P&L). The old ±100 bracket was '
+            'inside the ₹193 round-trip fee this 2-leg structure is charged, so every '
+            'target was a net loss (BUG-02); the new bracket clears the spread bounce '
+            'and the fee floor the bridge gate enforces. IMPORTANT: a short strangle\'s '
+            'true worst case is far larger than the stop if price gaps through it — the '
+            'pre-trade risk gate requires a declared worst case and the strangle '
+            'entitlement before it will fill, and this strategy should only run where '
             'that entitlement is granted.'
         ),
         'parameters': (
@@ -97,8 +103,8 @@ class ImmediateStrangle(StructureStrategy):
     # here — a short strangle ~2% OTM each side — instead of being smuggled
     # through an unconditional NEUTRAL view + expression mapping. NEUTRAL
     # remains the strategy's (non-)opinion; this intent, by name, is what
-    # opens. The ₹100 stop/target that used to live in the runner
-    # expression now lives in the strategy's ExitPlan.
+    # opens. The stop/target live in the strategy's ExitPlan below (widened
+    # off the old ±₹100 to a fee-aware bracket — see BUG-02 note there).
     opening_structure = {
         "structure": "strangle",
         "strike_selection": "fixed_distance",
@@ -109,8 +115,22 @@ class ImmediateStrangle(StructureStrategy):
         "emits": [],
         "structures": {},
         "exit": {
-            "stop_loss_points": 100,
-            "take_profit_points": 100,
+            # BUG-02 (QA 2026-10-28): the old ±₹100 bracket was *inside* the
+            # ₹193 round-trip fee the engine charges this structure, so every
+            # "target" hit was a net loss and every stop fired on quote bounce.
+            # A short strangle is a net-CREDIT structure: its net premium is
+            # negative, and ``ExitPolicy`` deliberately skips percentage
+            # stops/targets when the premium base is not positive (a percent of
+            # a negative credit has no meaning). The plan's
+            # ``stop_loss_pct 0.35 / take_profit_pct 0.50`` is therefore inert
+            # for THIS structure — the only form that fires is an absolute ₹
+            # bracket, so the resize is expressed in points (≥ ₹1,000 on a
+            # 65-lot NIFTY leg ≈ 15 pts, which clears the ~₹9/leg 5-minute
+            # spread bounce and the ₹193 round trip). The take-profit also has
+            # to clear the bridge fee-floor gate (≤ 1.2× round-trip fees is
+            # refused at entry), so the target sits well above ₹231.
+            "stop_loss_points": 2000,
+            "take_profit_points": 1000,
             "signal_flip": False,
             "min_days_to_expiry": None,
         },

@@ -327,7 +327,14 @@ class TestSubSecondOptionsBridgeOnTick:
         return bridge, stub, provider
 
     def test_f3_strangle_stop_triggers_subsecond_on_tick_without_bar_close(self):
-        """Reproduces 2026-10-23 Trade #9: -₹100 stop exits intra-bar without 5.5x overshoot."""
+        """Reproduces 2026-10-23 Trade #9: the declared stop exits intra-bar, not at bar close.
+
+        BUG-02 (QA 2026-10-28) moved the strangle bracket from ±₹100 to
+        ₹2,000 stop / ₹1,000 target, because ₹100 sat inside the ₹193 round-trip
+        fee — so this test now proves BOTH halves of the fix: a ₹117 quote bounce
+        rides through instead of stopping out, and the tick path still catches the
+        real move (₹2,067) long before the bar-close blowout.
+        """
         contracts = _make_chain_contracts(center=24500, half_steps=20, lot_size=65)
         bridge, stub, _ = self._build_live_strangle_bridge(contracts)
         strat = get_strategy("immediate_strangle")()
@@ -350,7 +357,8 @@ class TestSubSecondOptionsBridgeOnTick:
 
         structure = bridge.option_broker.get_open_structures()[0]
         ce_leg = [leg for leg in structure.legs if leg.option_type == "CE"][0]
-        # Tighten spread near flat first, then widen CE ask by +1.8 pts (~ -₹117 < -₹100 stop)
+        # Tighten spread near flat first, then widen CE ask by +1.8 pts
+        # (65 units * 1.80 = ₹117) — inside the fee-aware stop, so it rides.
         for leg in structure.legs:
             entry_px = float(leg.entry_price)
             stub._quotes[leg.instrument_token].update(
@@ -359,11 +367,12 @@ class TestSubSecondOptionsBridgeOnTick:
         bridge.on_tick("NIFTY", 24505.0, "2026-10-24T08:03:10+00:00")
         assert bridge._has_open_structure()
 
-        # Intra-bar spike: CE ask rises +1.80 pts (65 units * 1.80 = ₹117 loss > ₹100 stop),
-        # catching the move BEFORE a +73pt bar-close (-₹546) blowout!
+        # Intra-bar spike: CE ask rises +31.80 pts (65 units * 31.80 = ₹2,067
+        # loss > the ₹2,000 stop), catching the move BEFORE the bar close, where
+        # a +73 pt spot move would have booked a far larger loss.
         ce_entry = float(ce_leg.entry_price)
         stub._quotes[ce_leg.instrument_token].update(
-            {"bid": ce_entry + 1.6, "ask": ce_entry + 1.8, "ltp": ce_entry + 1.7}
+            {"bid": ce_entry + 31.6, "ask": ce_entry + 31.8, "ltp": ce_entry + 31.7}
         )
         t0 = time.perf_counter()
         bridge.on_tick("NIFTY", 24520.0, "2026-10-24T08:03:12+00:00")
@@ -375,7 +384,7 @@ class TestSubSecondOptionsBridgeOnTick:
         exit_ev = bridge.pop_exit_event()
         assert exit_ev is not None
         assert exit_ev["reason"] == "stop_loss"
-        assert -200.0 < exit_ev["pnl"] <= -100.0  # bounded near -₹117, never -₹546!
+        assert -2400.0 < exit_ev["pnl"] <= -2000.0  # bounded near -₹2,067, not the blowout
 
     def test_on_tick_never_advances_bars_in_trade_or_triggers_time_stop(self):
         """Caveat Q-3: 25 intra-bar ticks must not advance bars_in_trade or trip max_bars."""
@@ -939,11 +948,12 @@ class TestLiveMinuteBarBuilderAndPortfolioTickFanout:
                 )
 
             # 2) Option-leg-only tick (NO "26000" index tick in batch!) spikes CE ask -> stops out!
+            # +32 pts on 65 units = ₹2,080 clears the fee-aware ₹2,000 stop (BUG-02).
             ce_px = float(ce_leg.entry_price)
             widened_quote = {
-                "ltp": ce_px + 1.9,
-                "bid": ce_px + 1.7,
-                "ask": ce_px + 2.0,
+                "ltp": ce_px + 31.9,
+                "bid": ce_px + 31.7,
+                "ask": ce_px + 32.0,
                 "recv_mono": time.monotonic(),
                 "recv_utc": "2026-10-24T04:45:12+00:00",
                 "source": "ws",

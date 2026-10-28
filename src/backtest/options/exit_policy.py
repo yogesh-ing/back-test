@@ -147,6 +147,53 @@ _KNOWN_KEYS = frozenset(
 )
 
 
+#: Fee-floor multiplier (BUG-02, QA 2026-10-28). A declared take-profit that
+#: clears fewer than ``multiplier`` round-trip fees makes every "win" a net
+#: loss — the ±₹100 short-strangle bracket against the ₹193 fee the engine
+#: itself charges is the case that motivated this. The bridge refuses such an
+#: entry at the pre-trade gate; the multiplier and the wording live here so the
+#: economics sit with the exit rules and the check is unit-testable without a
+#: broker or a quote feed.
+FEE_FLOOR_MULTIPLIER: float = 1.2
+
+
+def take_profit_fee_floor_violation(
+    take_profit_inr: Optional[float],
+    round_trip_fees_inr: Optional[float],
+    *,
+    multiplier: float = FEE_FLOOR_MULTIPLIER,
+) -> Optional[str]:
+    """Return a refusal reason when the take-profit is inside the round-trip fee.
+
+    ``take_profit_inr`` is the structure's declared favourable bracket in ₹ of
+    P&L (``take_profit_points``, or ``take_profit_pct`` × the premium base);
+    ``round_trip_fees_inr`` is the engine's own entry + exit fee estimate for
+    the same structure. Returns ``None`` when either number is unknown/
+    non-positive — the caller must not refuse on a number it cannot state — and
+    a human-readable reason when ``take_profit_inr <= multiplier × fees``.
+
+    This is pure: it prices nothing and fabricates no market data. The caller
+    passes a fee estimate it derived from real quotes and the fee calculator.
+    """
+    if take_profit_inr is None or round_trip_fees_inr is None:
+        return None
+    try:
+        target = float(take_profit_inr)
+        fees = float(round_trip_fees_inr)
+    except (TypeError, ValueError):
+        return None
+    if target <= 0 or fees <= 0:
+        return None
+    floor = fees * float(multiplier)
+    if target <= floor:
+        return (
+            f"take-profit ₹{target:,.2f} clears only ≤ 1.2× the round-trip fee "
+            f"₹{fees:,.2f} (floor ₹{floor:,.2f}) — every target would be a net "
+            f"loss (BUG-02)"
+        )
+    return None
+
+
 def _positive(value: Any, key: str) -> Optional[float]:
     """Coerce to a strictly positive float, warning (not raising) on junk.
 
