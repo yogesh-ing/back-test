@@ -49,7 +49,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -67,6 +67,8 @@ from backtest.options.quote_providers import (
     SyntheticChainGenerator,
     SyntheticQuoteProvider,
 )
+from backtest.options.quote_providers import HotStrikeRing  # noqa: F401
+from backtest.timekeeping import EXCHANGE_TZ
 
 logger = logging.getLogger("backtest.forward.feed_registry")
 
@@ -194,6 +196,9 @@ class ChainBus:
         underlying: str,
         source: str = "",
         broker: Any = None,
+        *,
+        wing_distance_pct: Optional[float] = None,
+        warm_ring: bool = True,
     ) -> Any:
         """Return the shared feed for ``underlying``, +1 subscriber.
 
@@ -207,6 +212,8 @@ class ChainBus:
         """
         key = str(underlying).upper()
         source_key = self._resolve_source(source)
+        live_inner: Any = None
+        should_warm = False
         with self._lock:
             if source_key == "synthetic":
                 return self._acquire_synthetic(key)
@@ -224,14 +231,32 @@ class ChainBus:
                 # one-object-per-underlying contract (identity + refcount), and
                 # wrapping only on the runner path would make the first acquirer
                 # decide whether the dashboard's unwrapped entry ever crosses.
+                live_inner = LiveChainProvider(broker)
                 entry = _FeedEntry(
-                    feed=BidAskQuoteProvider(LiveChainProvider(broker)),
+                    feed=BidAskQuoteProvider(live_inner),
                     key=(key, source_key, ""),
                 )
                 self._live[key] = entry
+                should_warm = bool(warm_ring and live_inner.has_ws_ring_support())
                 logger.info("live chain provider registered: %s (%s)", key, source_key)
+            else:
+                live_inner = getattr(entry.feed, "inner", entry.feed)
             entry.subscribers += 1
-            return entry.feed
+            feed_out = entry.feed
+
+        if wing_distance_pct is not None and wing_distance_pct > 0 and live_inner is not None:
+            reg_wing = getattr(live_inner, "register_wing_distance", None)
+            if callable(reg_wing):
+                reg_wing(key, float(wing_distance_pct))
+        if should_warm and live_inner is not None:
+            warm_fn = getattr(live_inner, "warm_chain_and_ring", None)
+            if callable(warm_fn):
+                warm_fn(
+                    key,
+                    wing_distance_pct=wing_distance_pct,
+                    async_warm=True,
+                )
+        return feed_out
 
     @staticmethod
     def _resolve_source(source: str) -> str:
@@ -265,21 +290,31 @@ class ChainBus:
     def release(self, underlying: str, source: str = "") -> int:
         """Drop one subscriber; evict the generator at zero."""
         key = str(underlying).upper()
+        is_synthetic = self._resolve_source(source) == "synthetic"
+        evicted_feed: Any = None
         with self._lock:
-            store = (
-                self._generators
-                if self._resolve_source(source) == "synthetic"
-                else self._live
-            )
+            store = self._generators if is_synthetic else self._live
             entry = store.get(key)
             if entry is None:
                 return 0
             entry.subscribers = max(0, entry.subscribers - 1)
             if entry.subscribers == 0:
                 store.pop(key, None)
+                if not is_synthetic:
+                    evicted_feed = entry.feed
                 logger.info("chain generator released: %s (%s)", key, source)
-                return 0
-            return entry.subscribers
+                remaining = 0
+            else:
+                remaining = entry.subscribers
+
+        if evicted_feed is not None:
+            rel_ring = getattr(evicted_feed, "release_hot_ring", None)
+            if callable(rel_ring):
+                try:
+                    rel_ring(key)
+                except Exception:  # noqa: BLE001
+                    logger.debug("release_hot_ring(%s) failed", key, exc_info=True)
+        return remaining
 
     def subscriber_count(self, underlying: str, source: str = "") -> int:
         with self._lock:
@@ -336,6 +371,8 @@ def option_quote_provider_for(
     source: str,
     underlying: str,
     quote_broker: Any | None = None,
+    *,
+    wing_distance_pct: Optional[float] = None,
 ) -> tuple[Any, str]:
     """``(quote_provider, label)`` for an option runner's bridge — P1.1.
 
@@ -375,7 +412,12 @@ def option_quote_provider_for(
         # source only (an explicit quote_broker is a deliberate override).
         name = getattr(broker, "broker_name", None)
         if broker is not None and (name is None or name == source_key):
-            provider = get_chain_bus().acquire(underlying, source=source_key, broker=broker)
+            provider = get_chain_bus().acquire(
+                underlying,
+                source=source_key,
+                broker=broker,
+                wing_distance_pct=wing_distance_pct,
+            )
             return provider, provider.source_name
         if not synthetic_enabled():
             raise SourceDisabledError(
@@ -401,6 +443,149 @@ def option_quote_provider_for(
         )
     generator = get_chain_bus().acquire(underlying)
     return option_quote_provider(generator), "synthetic:bs"
+
+
+class LiveMinuteBarBuilder:
+    """Thread-safe 1-minute OHLCV bar accumulator from WebSocket ticks (Caveat Q-5).
+
+    Builds genuine per-minute Open/High/Low/Close/Volume candles from streaming
+    ticks so strategies never consume ``quote/ohlc``'s full-day session OHL as a
+    1-minute candle body. Keeps the unsealed ``forming`` candle isolated until a
+    tick crosses into a strictly later minute.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._forming: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _parse_ist_dt(ts: Any) -> datetime:
+        if isinstance(ts, datetime):
+            return ts.astimezone(EXCHANGE_TZ) if ts.tzinfo is not None else ts.replace(tzinfo=EXCHANGE_TZ)
+        if ts is not None:
+            text = str(ts).strip()
+            if text:
+                try:
+                    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                    return (
+                        parsed.astimezone(EXCHANGE_TZ)
+                        if parsed.tzinfo is not None
+                        else parsed.replace(tzinfo=EXCHANGE_TZ)
+                    )
+                except ValueError:
+                    pass
+                for fmt in ("%I:%M:%S%p", "%I:%M:%S %p", "%H:%M:%S"):
+                    try:
+                        parsed_t = datetime.strptime(text.upper(), fmt).time()
+                        today_ist = datetime.now(EXCHANGE_TZ).date()
+                        return datetime.combine(today_ist, parsed_t, tzinfo=EXCHANGE_TZ)
+                    except ValueError:
+                        continue
+        return datetime.now(EXCHANGE_TZ)
+
+    @staticmethod
+    def _public_bar(entry: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "ts": entry["ts"],
+            "open": float(entry["open"]),
+            "high": float(entry["high"]),
+            "low": float(entry["low"]),
+            "close": float(entry["close"]),
+            "volume": float(entry["volume"]),
+        }
+
+    def get_forming_bar(self, symbol: str) -> Optional[Dict[str, Any]]:
+        sym = str(symbol).strip().upper()
+        with self._lock:
+            cur = self._forming.get(sym)
+            return self._public_bar(cur) if cur is not None else None
+
+    def ingest_tick(
+        self,
+        symbol: str,
+        price: float,
+        ts: Any = None,
+        *,
+        cumulative_volume: Optional[float] = None,
+        tick_volume: Optional[float] = None,
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Fold one tick into ``symbol``'s minute candle.
+
+        Returns ``(sealed_bars, forming_bar)`` where ``sealed_bars`` contains at
+        most the completed prior minute candle when a minute boundary crosses.
+        """
+        px = float(price)
+        if px <= 0.0:
+            return [], self.get_forming_bar(symbol)
+        sym = str(symbol).strip().upper()
+        ist_dt = self._parse_ist_dt(ts)
+        minute_ts = ist_dt.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:00")
+        cum_vol = (
+            max(0.0, float(cumulative_volume))
+            if cumulative_volume is not None
+            else None
+        )
+        inc_vol = max(0.0, float(tick_volume)) if tick_volume is not None else 0.0
+
+        sealed: List[Dict[str, Any]] = []
+        with self._lock:
+            cur = self._forming.get(sym)
+            if cur is None:
+                entry = {
+                    "ts": minute_ts,
+                    "open": px,
+                    "high": px,
+                    "low": px,
+                    "close": px,
+                    "volume": inc_vol,
+                    "_base_cum_vol": cum_vol,
+                    "_last_cum_vol": cum_vol,
+                }
+                self._forming[sym] = entry
+                return [], self._public_bar(entry)
+
+            if minute_ts < cur["ts"]:
+                return [], self._public_bar(cur)
+
+            if minute_ts == cur["ts"]:
+                cur["high"] = max(float(cur["high"]), px)
+                cur["low"] = min(float(cur["low"]), px)
+                cur["close"] = px
+                if cum_vol is not None:
+                    base = cur.get("_base_cum_vol")
+                    if base is None:
+                        cur["_base_cum_vol"] = cum_vol
+                    else:
+                        cur["volume"] = max(float(cur["volume"]), max(0.0, cum_vol - float(base)))
+                    cur["_last_cum_vol"] = cum_vol
+                elif inc_vol > 0.0:
+                    cur["volume"] = float(cur["volume"]) + inc_vol
+                return [], self._public_bar(cur)
+
+            # Minute boundary crossed: seal previous minute and open new minute
+            sealed.append(self._public_bar(cur))
+            prev_last_cum = cur.get("_last_cum_vol")
+            first_tick_vol = inc_vol
+            base_for_new = cum_vol
+            if (
+                cum_vol is not None
+                and prev_last_cum is not None
+                and cum_vol >= float(prev_last_cum)
+            ):
+                first_tick_vol = cum_vol - float(prev_last_cum)
+                base_for_new = float(prev_last_cum)
+            new_entry = {
+                "ts": minute_ts,
+                "open": px,
+                "high": px,
+                "low": px,
+                "close": px,
+                "volume": first_tick_vol,
+                "_base_cum_vol": base_for_new,
+                "_last_cum_vol": cum_vol,
+            }
+            self._forming[sym] = new_entry
+            return sealed, self._public_bar(new_entry)
 
 
 class _BrokerBarFeedBase:
@@ -436,6 +621,7 @@ class _BrokerBarFeedBase:
         self._thread: Optional[threading.Thread] = None
         self._last_ts: Dict[str, str] = {}  # symbol → last pushed bar ts
         self._last_rest_logged_day: Optional[str] = None
+        self.bar_builder = LiveMinuteBarBuilder()
 
     def add_symbols(self, symbols: List[str]) -> None:
         with self._lock:
@@ -532,6 +718,71 @@ class _BrokerBarFeedBase:
             self.on_tick_end(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
         return delivered
 
+    def ingest_ws_bar(
+        self,
+        symbol: str,
+        raw_bar: Dict[str, Any],
+        *,
+        timeframe: str = "1min",
+        emit_tick_end: bool = True,
+    ) -> bool:
+        """Deliver a WebSocket-aggregated bar with shared ``_last_ts`` dedupe.
+
+        Shares ``self._last_ts`` with the REST fallback poller so a 60s REST
+        failover sweep never re-emits a minute bar already pushed from WS.
+        """
+        sym = str(symbol).upper()
+        bar = self._normalize_bar(raw_bar)
+        if bar is None:
+            return False
+        bar["_source"] = self.broker_name
+        if timeframe:
+            bar["_timeframe"] = str(timeframe)
+
+        with self._lock:
+            if sym not in self._symbols:
+                return False
+            if bar["ts"] <= self._last_ts.get(sym, ""):
+                return False
+            self._last_ts[sym] = bar["ts"]
+
+        get_quality_monitor(self.broker_name, sym).observe_bar(bar["ts"])
+        if self.on_bar is not None:
+            self.on_bar(sym, bar)
+        if emit_tick_end and self.on_tick_end is not None:
+            self.on_tick_end(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+        return True
+
+    def ingest_ws_tick(
+        self,
+        symbol: str,
+        tick: Dict[str, Any],
+        *,
+        emit_tick_end: bool = True,
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Update live 1-minute bar builder from a WS tick and emit any sealed minute."""
+        if not isinstance(tick, dict):
+            return [], None
+        ltp = float(tick.get("ltp") or tick.get("last_price") or 0.0)
+        if ltp <= 0.0:
+            return [], self.bar_builder.get_forming_bar(symbol)
+        ts = tick.get("recv_utc") or tick.get("ts") or tick.get("timestamp")
+        raw_vol = tick.get("volume")
+        cum_vol = float(raw_vol) if raw_vol is not None else None
+        sealed, forming = self.bar_builder.ingest_tick(
+            symbol,
+            ltp,
+            ts,
+            cumulative_volume=cum_vol,
+        )
+        emitted: List[Dict[str, Any]] = []
+        for bar in sealed:
+            if self.ingest_ws_bar(
+                symbol, bar, timeframe="1min", emit_tick_end=emit_tick_end
+            ):
+                emitted.append(bar)
+        return emitted, forming
+
     @classmethod
     def _market_day_state(cls) -> tuple[str, str]:
         """Resolve current market day state and reason (fail-open to TRADING_DAY)."""
@@ -565,6 +816,8 @@ class _BrokerBarFeedBase:
             # broker (2026-09-30) — keeps synthetic bars out of mstock/dhan
             # runners and vice versa.
             bar["_source"] = self.broker_name
+            if getattr(self._client, "emits_minute_bars", False):
+                bar["_timeframe"] = "1min"
             monitor.observe_bar(bar["ts"])
         return bar
 
@@ -583,10 +836,14 @@ class _BrokerBarFeedBase:
             return None
         try:
             raw_ts = raw.get("ts") or raw.get("timestamp")
+            if raw_ts is None or (isinstance(raw_ts, str) and not raw_ts.strip()):
+                return None
             if isinstance(raw_ts, (int, float)) and raw_ts > 1_000_000_000_000:
                 ts = pd.to_datetime(raw_ts, unit="ms")
             else:
                 ts = pd.to_datetime(raw_ts)
+            if pd.isna(ts):
+                return None
             close = float(raw["close"])
             return {
                 "ts": ts.strftime("%Y-%m-%d %H:%M:%S"),

@@ -80,8 +80,21 @@ STRATEGY_CODE_CHANGED = "STRATEGY_CODE_CHANGED"
 #: cycle (the bridge imports from this package); Phase 1 makes the Risk
 #: Gate the single source and this set becomes gate-derived.
 KNOWN_STRUCTURES: frozenset[str] = frozenset(
-    {"long_call", "long_put", "bull_call_spread", "bear_put_spread", "strangle"}
+    {
+        "long_call",
+        "long_put",
+        "bull_call_spread",
+        "bear_put_spread",
+        "strangle",
+        "long_straddle",
+        "short_straddle",
+    }
 )
+
+#: Naked short-option structures whose worst-case loss is unbounded at the
+#: structure level (OPT-4): ``structure_capped=True`` without ``max_loss_inr``
+#: cannot satisfy their hard-stop requirement.
+_UNCAPPED_SHORT_STRUCTURES: frozenset[str] = frozenset({"strangle", "short_straddle"})
 
 _STRIKE_SELECTIONS = frozenset({"atm", "delta", "fixed_distance", "target_price"})
 _EXPIRY_POLICIES = frozenset({"nearest", "weekly", "fixed_days", "minimum_days"})
@@ -466,6 +479,19 @@ class ExecutionSpec:
             raise ExecutionSpecError(
                 f"allowed_overrides outside selectable fields: {sorted(bad_overrides)}"
             )
+        uncapped = sorted(
+            {
+                r.structure
+                for r in structures.values()
+                if r.structure in _UNCAPPED_SHORT_STRUCTURES
+            }
+        )
+        if uncapped and self.exit_plan.structure_capped and self.exit_plan.max_loss_inr is None:
+            raise ExecutionSpecError(
+                f"short-premium structure(s) {uncapped} carry undefined risk: "
+                "ExitPlan cannot rely on structure_capped=True without "
+                "stop_loss_pct, stop_loss_points, or max_loss_inr"
+            )
 
     # -- parsing ---------------------------------------------------------- #
 
@@ -766,6 +792,29 @@ def validate_expression(
                 "price-based stops; use stop_loss_pct, stop_loss_points, or "
                 "structure_capped instead"
             )
+        if (
+            _plan.structure_capped
+            and _plan.max_loss_inr is None
+            and _plan.stop_loss_pct is None
+            and _plan.stop_loss_points is None
+        ):
+            declared_structs: set[str] = set()
+            raw_type_cfg = expression.get("type")
+            if isinstance(raw_type_cfg, str):
+                declared_structs.add(raw_type_cfg.strip().lower())
+            elif isinstance(raw_type_cfg, Mapping):
+                for raw_r in raw_type_cfg.values():
+                    if isinstance(raw_r, str):
+                        declared_structs.add(raw_r.strip().lower())
+                    elif isinstance(raw_r, Mapping) and raw_r.get("structure"):
+                        declared_structs.add(str(raw_r["structure"]).strip().lower())
+            bad_short = sorted(declared_structs & _UNCAPPED_SHORT_STRUCTURES)
+            if bad_short:
+                errors.append(
+                    f"short-premium structure(s) {bad_short} carry undefined risk: "
+                    "ExitPlan cannot rely on structure_capped=True without "
+                    "stop_loss_pct, stop_loss_points, or max_loss_inr"
+                )
     except ExecutionSpecError as exc:
         errors.append(str(exc))
     if spec is not None:

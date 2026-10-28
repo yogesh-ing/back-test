@@ -267,6 +267,33 @@
       : '<span title="Equity strategy" style="margin-right:4px">📈</span>';
   }
 
+  function warmupSubHtml(r) {
+    const ws = String(r.warmup_status || "").toUpperCase();
+    if (ws === "WARMING_UP") {
+      return '<div class="cell-sub badge-warmup-pending" ' +
+        'title="Seeding historical + intraday warmup bars in background…">⏳ warming up</div>';
+    }
+    if (ws === "DEGRADED") {
+      const degraded = Array.isArray(r.warmup_degraded_symbols)
+        ? r.warmup_degraded_symbols.length
+        : 0;
+      const total = Number(r.symbol_count || 1);
+      const minBars = Number(r.warmup_min_symbol_bars ?? r.warmup_bars_seeded ?? 0);
+      const target = Number(r.warmup_target_bars || 0);
+      const shortLabel = total > 1
+        ? "⚠ warmup degraded (" + Math.max(0, total - degraded) + "/" + total + ")"
+        : (target > 0
+          ? "⚠ warmup degraded (" + minBars + "/" + target + ")"
+          : "⚠ warmup degraded");
+      const tip = String(
+        r.warmup_reason || "Insufficient warmup history for indicator convergence"
+      ).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      return '<div class="cell-sub cell-error badge-warmup-degraded" title="' +
+        tip + '">' + shortLabel + "</div>";
+    }
+    return "";
+  }
+
   function renderMatrix(p) {
     const body = $("matrix-body");
     const rows = filteredRunners(p);
@@ -313,6 +340,11 @@
         '<td class="num">' + posCell.primary +
           (posCell.sub ? '<div class="cell-sub">' + posCell.sub + '</div>' : "") + '</td>' +
         '<td><span class="status-cell">' + (STATUS_DOT[r.status] || "⚪") + " " + r.status + "</span>" +
+          warmupSubHtml(r) +
+          (r.duplicate_of
+            ? '<div class="cell-sub cell-error" title="Duplicates active runner ' +
+              String(r.duplicate_of).slice(0, 8) + '">⚠ duplicate</div>'
+            : "") +
           (r.error ? '<div class="cell-sub cell-error" title="' + (r.error || "") + '">⚠ risk halt</div>' : "") +
         '</td>' +
         '<td><div class="row-actions">' + rowActions(r) + "</div>" +

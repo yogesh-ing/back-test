@@ -5,10 +5,10 @@ Supports on-the-fly resampling: stores 1min data, queries resample to any interv
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, text
 
 from backtest.data.base import (
     CANONICAL_TIMEFRAMES,
@@ -63,6 +63,21 @@ _INTERVAL_TO_RULE = {
 _SOURCE_TF_PRIORITY = list(CANONICAL_TIMEFRAMES)
 
 
+def base_stored_timeframe(interval: str | None) -> str:
+    """Derive the canonical stored ``market_data_cache.timeframe`` for ``interval``.
+
+    ``market_data_cache`` stores ``1day`` for daily/weekly series and ``1min``
+    for intraday series (resampled up on read). Deriving the stored granularity
+    directly avoids any unbounded ``GROUP BY symbol, timeframe`` discovery scan
+    across the 46M-row hypertable and lets bulk warmup hit ``ix_mdc_tf_ts``
+    (migration 019) + hypertable ``ts`` chunk exclusion in a single query.
+    """
+    norm = normalize_timeframe(interval or "1day") or "1day"
+    if norm in ("1day", "1week"):
+        return "1day"
+    return "1min"
+
+
 def window_bounds(start: str, end: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     """Resolve a caller's ``start``/``end`` into a **half-open** ``[lo, hi)``.
 
@@ -110,15 +125,99 @@ class DbSource:
         """
         # Single DB-URL authority (ticket P4.3): explicit arg >
         # FORWARD_TEST_DB_URL env > config/database.yaml profile.
+        self._explicit_db_url = db_url
         self.db_url = get_db_url(db_url)
         self._engine = None
 
     def _get_engine(self):
         if self._engine is None:
-            masked = self.db_url.rsplit("@", 1)[-1] if "@" in self.db_url else self.db_url
-            log.debug("[db] creating engine for %s", masked)
-            self._engine = create_engine(self.db_url)
+            # Share the process-wide DatabaseManager pool (POOL-3, 2026-10-24).
+            # Never fall back to a private create_engine(): an unpooled engine
+            # per DbSource() silently re-opens connection leaks under load.
+            from backtest.db.manager import DatabaseManager
+
+            explicit_url = getattr(self, "_explicit_db_url", None)
+            overrides = {"url": explicit_url} if explicit_url else {}
+            self._engine = DatabaseManager.from_env(**overrides).engine
         return self._engine
+
+    def get_candles_bulk(
+        self,
+        symbols: Sequence[str],
+        start: str,
+        end: str,
+        interval: str = "1day",
+        *,
+        source_timeframe: Optional[str] = None,
+    ) -> dict[str, pd.DataFrame]:
+        """Load OHLCV frames for many symbols in a SINGLE ``ts``-bounded SQL query.
+
+        Derives the stored base timeframe directly from ``interval`` (``1day``
+        for daily/weekly, ``1min`` for intraday — overrideable via
+        ``source_timeframe``) so PostgreSQL / TimescaleDB prunes hypertable
+        chunks on ``ts >= :start AND ts < :end`` and scans ``ix_mdc_tf_ts``
+        (migration 019) / ``ix_mdc_symbol_tf_ts`` in one round-trip with zero
+        unbounded discovery queries. Missing symbols are omitted rather than
+        raising so a 50-stock pool warmup degrades per-symbol cleanly.
+        """
+        cleaned = sorted({str(s).strip().upper() for s in symbols if str(s).strip()})
+        if not cleaned:
+            return {}
+
+        req_tf = normalize_timeframe(interval) or interval
+        source_tf = (
+            normalize_timeframe(source_timeframe) or source_timeframe
+            if source_timeframe
+            else base_stored_timeframe(req_tf)
+        )
+        if not _can_serve(source_tf, req_tf):
+            return {}
+
+        engine = self._get_engine()
+        lo, hi_exclusive = window_bounds(start, end)
+        data_query = text(
+            """
+            SELECT symbol, ts, open, high, low, close, volume
+            FROM market_data_cache
+            WHERE timeframe = :timeframe
+              AND ts >= :start
+              AND ts < :end
+              AND symbol IN :symbols
+            ORDER BY ts ASC
+            """
+        ).bindparams(bindparam("symbols", expanding=True))
+
+        df_all = pd.read_sql(
+            data_query,
+            engine,
+            params={
+                "timeframe": source_tf,
+                "start": lo.to_pydatetime(),
+                "end": hi_exclusive.to_pydatetime(),
+                "symbols": cleaned,
+            },
+        )
+        if df_all.empty:
+            return {}
+
+        df_all["symbol"] = df_all["symbol"].astype(str).str.strip().str.upper()
+        ts_series = pd.to_datetime(df_all["ts"])
+        if getattr(ts_series.dt, "tz", None) is not None:
+            ts_series = ts_series.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+        df_all["ts"] = ts_series
+
+        out: dict[str, pd.DataFrame] = {}
+        for sym, grp in df_all.groupby("symbol", sort=False):
+            sub = grp.drop(columns=["symbol"]).set_index("ts")
+            if not sub.index.is_monotonic_increasing:
+                sub = sub.sort_index()
+            try:
+                if source_tf != req_tf and req_tf in _INTERVAL_TO_RULE:
+                    sub = self._resample(sub, req_tf)
+                out[str(sym)] = normalize_candles(sub)
+            except ValueError as exc:
+                log.debug("[db] bulk skip %s (%s): %s", sym, req_tf, exc)
+        return out
 
     def get_candles(
         self,

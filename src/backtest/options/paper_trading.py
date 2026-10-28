@@ -130,6 +130,14 @@ def _iso_utc(dt: datetime | None) -> str | None:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+def _ist_session_date(dt: datetime | None) -> str | None:
+    """Map ``dt`` to its IST calendar date ``YYYY-MM-DD`` (naive treated as UTC)."""
+    stamp = _utc(dt)
+    if stamp is None:
+        return None
+    return stamp.astimezone(IST).date().isoformat()
+
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -326,6 +334,11 @@ class StructurePosition:
     #: ``"auto_square_off"``, ``"expiry_settlement"`` — or ``None`` while
     #: the structure is still open.
     exit_reason: str | None = None
+    #: IST calendar date (``YYYY-MM-DD``) stamped when the structure closes so
+    #: ``StrategyRunner.daily_pnl()`` rolls options at ``00:00 IST`` (OPT-6).
+    session_date: str | None = None
+    #: Entry + exit statutory charges attributed to this structure (Recon F4).
+    statutory_fees: Decimal = ZERO
 
     @property
     def is_open(self) -> bool:
@@ -354,6 +367,25 @@ class StructurePosition:
     @property
     def total_commission(self) -> Decimal:
         return sum(leg.commission for leg in self.legs)
+
+    @property
+    def gross_pnl(self) -> Decimal:
+        """Gross realized P&L across closed/expired legs (before commissions)."""
+        return self.total_realized_pnl
+
+    @property
+    def net_pnl(self) -> Decimal:
+        """Realized P&L net of brokerage commissions and statutory fees (Recon F4)."""
+        return self.total_realized_pnl - self.total_commission - self.statutory_fees
+
+    @property
+    def effective_session_date(self) -> str | None:
+        """IST calendar date of closure, falling back to ``closed_at`` if unstamped."""
+        if self.session_date:
+            return self.session_date
+        if self.closed_at is not None:
+            return _ist_session_date(self.closed_at)
+        return None
 
     @property
     def mark_ts(self) -> str | None:
@@ -681,6 +713,15 @@ class OptionPaperBroker:
 
         for leg, fill_price, commission, quoted_price in fills:
             self._position_seq += 1
+            raw_opt_type = str(intent.metadata.get("option_type", "") or "").upper()
+            if raw_opt_type not in ("CE", "PE"):
+                sym_up = str(leg.trading_symbol or "").upper()
+                if sym_up.endswith("CE"):
+                    raw_opt_type = "CE"
+                elif sym_up.endswith("PE"):
+                    raw_opt_type = "PE"
+                else:
+                    raw_opt_type = str(intent.metadata.get("option_type", ""))
             position = OptionPosition(
                 position_id=f"pos_{ts:%Y%m%d%H%M%S}_{self._position_seq:04d}",
                 structure_id=structure_id,
@@ -688,7 +729,7 @@ class OptionPaperBroker:
                 instrument_token=leg.instrument_token,
                 trading_symbol=leg.trading_symbol,
                 underlying=intent.view.underlying,
-                option_type=intent.metadata.get("option_type", ""),
+                option_type=raw_opt_type,
                 strike=Decimal(str(strikes_map.get(leg.trading_symbol, default_strike))),
                 expiry=intent.expiry,
                 lot_size=leg.lot_size,
@@ -734,6 +775,7 @@ class OptionPaperBroker:
             expiry=intent.expiry,
             legs=positions,
             opened_at=ts,
+            statutory_fees=statutory_fees,
         )
         self._structures[structure_id] = structure
 
@@ -872,6 +914,8 @@ class OptionPaperBroker:
 
         structure.closed_at = ts
         structure.exit_reason = reason
+        structure.session_date = _ist_session_date(ts)
+        structure.statutory_fees += exit_fees
 
         self._fire_structure_closed(structure, total_pnl)
 
@@ -1022,6 +1066,8 @@ class OptionPaperBroker:
             return
         if structure.closed_at is None:
             structure.closed_at = _now_utc()
+        if structure.session_date is None:
+            structure.session_date = _ist_session_date(structure.closed_at)
         self._fire_structure_closed(structure, structure.total_realized_pnl)
 
     def restore_structure(self, structure: StructurePosition, fees_paid: Decimal = ZERO) -> None:

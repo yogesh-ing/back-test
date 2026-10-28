@@ -11,6 +11,10 @@ close code/reason are printed verbatim.
 Usage (Git Bash, from C:/learning/back-test):
     PYTHONPATH=src python tools/mticker_ws_probe.py --totp 123456
     # optionally: --totp-stdin, --duration 8, --tokens 51334,26000
+    # Monday 09:15 production-stack 26-token MODE_FULL soak (no re-login):
+    PYTHONPATH=src python tools/mticker_ws_probe.py --from-store --mticker-soak --auto-ring NIFTY --duration 180
+    # Or with explicit token list:
+    PYTHONPATH=src python tools/mticker_ws_probe.py --from-store --mticker-soak --tokens <26_tokens> --duration 180
 
 WARNING: each login kicks the broker's active session — the running :5000
 server (and the mStock app) will need a re-login afterwards.
@@ -43,7 +47,8 @@ def load_env(path: str = ".env") -> None:
 def make_client(ws_url: str, duration: float, tokens: str, label: str,
                 send_login_first: bool = False, headers: dict | None = None,
                 auth_token: str = "", auth_key: str = "",
-                auth_instruments: str = "51334") -> dict:
+                auth_instruments: str = "51334",
+                stream_mode: str = "") -> dict:
     """Connect once, optionally send the MTicker subscribe frame, dump all frames."""
     events: list[str] = []
     t0 = time.time()
@@ -61,16 +66,25 @@ def make_client(ws_url: str, duration: float, tokens: str, label: str,
                     await ws.send(f"LOGIN:{auth_token}")
                     events.append("sent LOGIN:<access_token> text (send_login_after_connect)")
                 if tokens == "__FRAME__":
+                    tok_ints = [int(t) for t in auth_instruments.split(",") if t.strip()]
                     frame = {"a": "subscribe",
-                             "v": [int(t) for t in auth_instruments.split(",") if t.strip()],
+                             "v": tok_ints,
                              "ACCESS_TOKEN": auth_token, "API_KEY": auth_key}
                     await ws.send(json.dumps(frame))
                     events.append(f"sent auth-in-frame: {json.dumps({**frame, 'ACCESS_TOKEN': '..masked..'})}")
+                    if stream_mode and tok_ints:
+                        mframe = {"a": "mode", "v": [stream_mode, tok_ints]}
+                        await ws.send(json.dumps(mframe))
+                        events.append(f"sent mode frame: {json.dumps(mframe)}")
                 elif tokens:
-                    frame = {"a": "subscribe",
-                             "v": [int(t) for t in tokens.split(",") if t.strip()]}
+                    tok_ints = [int(t) for t in tokens.split(",") if t.strip()]
+                    frame = {"a": "subscribe", "v": tok_ints}
                     await ws.send(json.dumps(frame))
                     events.append(f"sent subscribe frame: {json.dumps(frame)}")
+                    if stream_mode and tok_ints:
+                        mframe = {"a": "mode", "v": [stream_mode, tok_ints]}
+                        await ws.send(json.dumps(mframe))
+                        events.append(f"sent mode frame: {json.dumps(mframe)}")
                 deadline = t0 + duration
                 while time.time() < deadline:
                     try:
@@ -96,6 +110,217 @@ def make_client(ws_url: str, duration: float, tokens: str, label: str,
     return {"label": label, "events": events}
 
 
+def _resolve_auto_ring_tokens(
+    api_key: str,
+    access_token: str,
+    underlyings_csv: str,
+) -> list[int]:
+    """Resolve live ATM +/- 6 CE/PE option tokens + index tokens via REST."""
+    from datetime import datetime, timedelta
+    import requests
+    from backtest.brokers.mstock import MStockBroker
+    from backtest.options.quote_providers import HotStrikeRing
+
+    broker = MStockBroker()
+    broker._session_token = access_token
+    broker._expires_at = datetime.now() + timedelta(hours=4)
+
+    headers = {"X-Mirae-Version": "1", "Authorization": f"token {api_key}:{access_token}"}
+    base_url = broker._base_url()
+    idx_query = {"NIFTY": "NSE:NIFTY 50", "BANKNIFTY": "NSE:NIFTY BANK"}
+
+    resolved: list[int] = []
+    for raw_u in underlyings_csv.split(","):
+        u = raw_u.strip().upper()
+        if not u:
+            continue
+        idx_tok = broker.UNDERLYING_INDEX_TOKENS.get(u)
+        if idx_tok:
+            resolved.append(idx_tok)
+
+        spot = 0.0
+        q_sym = idx_query.get(u, f"NSE:{u}")
+        try:
+            resp = requests.get(
+                f"{base_url}/openapi/typea/instruments/quote/ltp",
+                headers=headers,
+                params=[("i", q_sym)],
+                timeout=10.0,
+            )
+            data = resp.json().get("data") or {}
+            inner = data.get(q_sym) or next(iter(data.values()), {})
+            spot = float(inner.get("last_price") or inner.get("ltp") or 0.0)
+        except Exception as exc:
+            print(f"warn: spot lookup for {u} failed ({exc})", file=sys.stderr)
+
+        contracts = broker.get_option_chain(u)
+        if spot <= 0.0 and contracts:
+            strikes = sorted({float(c.strike) for c in contracts})
+            spot = strikes[len(strikes) // 2]
+
+        captured: list[int] = []
+
+        class _RecorderBroker:
+            def subscribe_tokens_ws(self, toks, mode="full"):
+                captured.extend(int(t) for t in toks)
+                return list(captured)
+
+        ring = HotStrikeRing(_RecorderBroker())
+        ring.recenter(u, spot, contracts)
+        print(
+            f"auto-ring {u}: spot={spot:.2f} center={ring.center_strike(u)} "
+            f"ring_tokens={len(captured)}"
+        )
+        resolved.extend(captured)
+
+    dedup: list[int] = []
+    seen: set[int] = set()
+    for t in resolved:
+        if t not in seen:
+            seen.add(t)
+            dedup.append(t)
+    return dedup
+
+
+def run_mticker_soak(
+    ws_url: str,
+    api_key: str,
+    access_token: str,
+    token_list: list[int],
+    duration: float,
+    mode: str = "full",
+) -> int:
+    """Run the real Twisted MTicker + MStockWebSocketWrapper soak test."""
+    from twisted.python import log as twisted_log
+    from backtest.data.mticker import MTicker
+    from backtest.data.mstock_ws_wrapper import MStockWebSocketWrapper
+
+    reactor_errors: list[str] = []
+    closes: list[tuple[object, object]] = []
+    reconnects: list[int] = []
+    tick_counts: dict[str, int] = {}
+    depth_counts: dict[str, int] = {}
+    frame_times: list[float] = []
+
+    def _tw_observer(event: dict) -> None:
+        if event.get("isError"):
+            failure = event.get("failure")
+            text = str(failure.getTraceback() if failure else event.get("message"))
+            reactor_errors.append(text)
+
+    twisted_log.addObserver(_tw_observer)
+    ticker = MTicker(
+        api_key=api_key,
+        access_token=access_token,
+        root=ws_url,
+        debug=False,
+        reconnect=True,
+        reconnect_max_tries=10,
+        reconnect_max_delay=30,
+    )
+    wrapper = MStockWebSocketWrapper(ticker, coalesce_ms=150)
+
+    orig_on_ticks = ticker.on_ticks
+    orig_on_close = ticker.on_close
+
+    def _counted_ticks(ws, ticks):
+        now_m = time.monotonic()
+        frame_times.append(now_m)
+        for t in ticks or []:
+            tok = str(t.get("instrument_token", ""))
+            if not tok:
+                continue
+            tick_counts[tok] = tick_counts.get(tok, 0) + 1
+            depth = t.get("depth") or {}
+            bids = depth.get("bid") or []
+            asks = depth.get("ask") or []
+            if bids and asks and (bids[0].get("price") or asks[0].get("price")):
+                depth_counts[tok] = depth_counts.get(tok, 0) + 1
+        if orig_on_ticks:
+            orig_on_ticks(ws, ticks)
+
+    def _counted_close(ws, code, reason):
+        closes.append((code, reason))
+        if orig_on_close:
+            orig_on_close(ws, code, reason)
+
+    ticker.on_ticks = _counted_ticks
+    ticker.on_close = _counted_close
+    ticker.on_reconnect = lambda attempt: reconnects.append(int(attempt))
+
+    subscribed_once = False
+
+    def _on_open(tkr) -> None:
+        nonlocal subscribed_once
+        tkr.send_login_after_connect()
+        if not subscribed_once:
+            subscribed_once = True
+            tkr.subscribe(token_list)
+            mode_map = {
+                "ltp": tkr.MODE_LTP,
+                "quote": tkr.MODE_QUOTE,
+                "full": tkr.MODE_FULL,
+            }
+            tkr.set_mode(mode_map.get(mode.lower(), tkr.MODE_FULL), token_list)
+
+    ticker.on_open = _on_open
+    print(
+        f"\n=== MTicker Production Soak: {len(token_list)} tokens, mode={mode}, "
+        f"duration={duration:.0f}s ==="
+    )
+    ticker.connect(threaded=True)
+    if not wrapper.wait_for_connection(timeout=10.0):
+        print("FAIL: MTicker did not connect within 10s", file=sys.stderr)
+        wrapper.close()
+        return 5
+
+    t_start = time.monotonic()
+    deadline = t_start + duration
+    next_report = t_start + 30.0
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        now_m = time.monotonic()
+        if now_m >= next_report:
+            print(
+                f"  +{now_m - t_start:5.1f}s  frames={len(frame_times)} "
+                f"tokens_seen={len(tick_counts)}/{len(token_list)} "
+                f"depth_tokens={len(depth_counts)} closes={len(closes)} "
+                f"reactor_errors={len(reactor_errors)}"
+            )
+            next_report += 30.0
+
+    # Compute max silence gap across the socket
+    gaps: list[float] = []
+    if frame_times:
+        gaps.append(frame_times[0] - t_start)
+        for i in range(1, len(frame_times)):
+            gaps.append(frame_times[i] - frame_times[i - 1])
+    max_gap = max(gaps) if gaps else duration
+
+    missing = [t for t in token_list if str(t) not in tick_counts]
+    wrapper.close()
+    twisted_log.removeObserver(_tw_observer)
+
+    print("\n=== MTICKER SOAK SUMMARY ===")
+    print(f"  Tokens subscribed : {len(token_list)}")
+    print(f"  Tokens w/ frames  : {len(tick_counts)}/{len(token_list)}")
+    print(f"  Tokens w/ depth   : {len(depth_counts)}")
+    print(f"  Total binary msgs : {len(frame_times)}")
+    print(f"  Max silence gap   : {max_gap:.2f}s")
+    print(f"  Closes / flaps    : {len(closes)} {closes[:3]}")
+    print(f"  Reconnects        : {len(reconnects)}")
+    print(f"  Reactor errors    : {len(reactor_errors)}")
+    if missing:
+        print(f"  Quiet/no-tick toks: {missing}")
+    if reactor_errors:
+        for err in reactor_errors[:3]:
+            print("  REACTOR TRACEBACK:\n", err)
+
+    passed = (len(closes) == 0 and len(reactor_errors) == 0 and len(frame_times) > 0)
+    print(f"  VERDICT           : {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--totp", help="6-digit TOTP (single-use; a fresh login is done)")
@@ -106,8 +331,14 @@ def main() -> int:
     ap.add_argument("--duration", type=float, default=8.0, help="seconds to hold each socket open")
     ap.add_argument("--tokens", default="51334,26000",
                     help="comma-separated instrument tokens for the subscribe frame")
+    ap.add_argument("--auto-ring", default="",
+                    help="auto-resolve live ATM+/-6 ring tokens for underlying(s), e.g. NIFTY or NIFTY,BANKNIFTY")
+    ap.add_argument("--mode", default="",
+                    help="optional mode frame ('full', 'quote', 'ltp'); default 'full' under --mticker-soak")
+    ap.add_argument("--mticker-soak", action="store_true",
+                    help="run the real Twisted MTicker + MStockWebSocketWrapper soak instead of raw protocol matrix")
     ap.add_argument("--only", default="",
-                    help="comma-separated variant id filter, e.g. --only V2 (no-login baseline)")
+                    help="comma-separated variant id filter, e.g. --only V10 (LOGIN+subscribe)")
     args = ap.parse_args()
 
     load_env()
@@ -156,9 +387,27 @@ def main() -> int:
         print(f"access token captured ({len(token or '')} chars) — session now ACTIVE, "
               "the :5000 server/app session was kicked")
 
+    base = os.environ.get("MSTOCK_WEBSOCKET_URL", "wss://ws.mstock.trade")
+    if args.auto_ring:
+        resolved_ring = _resolve_auto_ring_tokens(api_key, token or "", args.auto_ring)
+        if not resolved_ring:
+            print("auto-ring resolved 0 tokens", file=sys.stderr)
+            return 6
+        args.tokens = ",".join(str(t) for t in resolved_ring)
+
+    if args.mticker_soak:
+        tok_ints = [int(t) for t in args.tokens.split(",") if t.strip()]
+        return run_mticker_soak(
+            ws_url=base,
+            api_key=api_key,
+            access_token=token or "",
+            token_list=tok_ints,
+            duration=args.duration,
+            mode=args.mode or "full",
+        )
+
     ak_q = quote(api_key, safe="")
     tok_q = quote(token or "", safe="")
-    base = os.environ.get("MSTOCK_WEBSOCKET_URL", "wss://ws.mstock.trade")
     # Production builds the URL with plain %-NO formatting (mticker.py:261):
     # a '+' in the key crosses the wire as a space. V1b replicates it exactly.
     ak_raw = api_key
@@ -198,7 +447,8 @@ def main() -> int:
         print(f"\n=== {label} ===")
         res = make_client(url, args.duration, toks, label,
                           send_login_first=login_first, headers=hdrs,
-                          auth_token=token, auth_key=api_key)
+                          auth_token=token, auth_key=api_key,
+                          stream_mode=args.mode)
         for e in res["events"]:
             print("   ", e)
         results.append((label, res["events"]))
