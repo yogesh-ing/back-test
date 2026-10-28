@@ -1,0 +1,431 @@
+{
+ "bucket_limits": {
+  "live": {
+   "allowed_sources": [
+    "mstock"
+   ],
+   "max_gross_exposure_pct": "0.50",
+   "max_leverage": "1",
+   "max_open_positions": 5,
+   "max_position_pct": "0.10",
+   "max_position_value": "10000.0000",
+   "min_trade_value": "1000.0000"
+  },
+  "paper": {
+   "allowed_sources": [
+    "dhan",
+    "mstock",
+    "replay",
+    "synthetic",
+    "upstox"
+   ],
+   "max_gross_exposure_pct": null,
+   "max_leverage": "1",
+   "max_open_positions": null,
+   "max_position_pct": null,
+   "max_position_value": null,
+   "min_trade_value": null
+  }
+ },
+ "buckets": {
+  "live": {
+   "capital": 0,
+   "count": 0,
+   "daily_loss_pct": 0.0,
+   "daily_loss_used": 0.0,
+   "daily_pnl": 0,
+   "daily_pnl_pct": 0.0,
+   "deployed_capital": 0,
+   "drawdown_pct": 0.0,
+   "equity": 0,
+   "errors": 0,
+   "halt_mode": null,
+   "halt_reason": null,
+   "halted": false,
+   "halted_ts": null,
+   "open_positions": 0,
+   "paused": 0,
+   "peak_equity": 0.0,
+   "realized_pnl": 0,
+   "running": 0,
+   "stopped": 0
+  },
+  "paper": {
+   "capital": 10200000.0,
+   "count": 14,
+   "daily_loss_pct": 0.4933,
+   "daily_loss_used": 123327.56,
+   "daily_pnl": -123327.56,
+   "daily_pnl_pct": -0.020055,
+   "deployed_capital": 849252.15,
+   "drawdown_pct": 0.013,
+   "equity": 10012215.93,
+   "errors": 0,
+   "halt_mode": null,
+   "halt_reason": null,
+   "halted": false,
+   "halted_ts": null,
+   "open_positions": 10,
+   "paused": 1,
+   "peak_equity": 10144488.44,
+   "realized_pnl": -107318.93,
+   "running": 13,
+   "stopped": 0
+  }
+ },
+ "by_broker": [
+  {
+   "allocated_capital": 10200000.0,
+   "broker": "paper",
+   "daily_pnl": -123327.56,
+   "equity": 10012215.93,
+   "open_positions": 10,
+   "runner_count": 14
+  }
+ ],
+ "capability": {
+  "broker_connected": true,
+  "live_banner": "REAL MONEY",
+  "paper_banner": "Simulated fills"
+ },
+ "current": {
+  "daily_loss_pct": 0.4933,
+  "daily_loss_used": 123327.56,
+  "daily_pnl": -123327.56,
+  "deployed_capital": 849252.15,
+  "deployed_pct": 0.046,
+  "drawdown_pct": 0.013,
+  "halt_mode": null,
+  "halt_reason": null,
+  "halted": false,
+  "total_capital": 18450000.0,
+  "total_equity": 11012215.93,
+  "warnings": []
+ },
+ "exposure": {
+  "by_correlation": [
+   {
+    "count": 7,
+    "group": "OTHER",
+    "label": "OTHER",
+    "notional": 773946.9,
+    "symbols": [
+     "ADANIPORTS",
+     "APOLLOHOSP",
+     "CIPLA",
+     "DIVISLAB",
+     "ICICIBANK",
+     "JSWSTEEL",
+     "RELIANCE"
+    ],
+    "threshold": 3
+   }
+  ],
+  "by_symbol": [
+   {
+    "notional": 188799.7,
+    "qty": 137.0,
+    "runners": 1,
+    "sides": [
+     "LONG"
+    ],
+    "symbol": "ICICIBANK"
+   },
+   {
+    "notional": 99842.1,
+    "qty": 73.0,
+    "runners": 1,
+    "sides": [
+     "LONG"
+    ],
+    "symbol": "CIPLA"
+   },
+   {
+    "notional": 99840.0,
+    "qty": 80.0,
+    "runners": 1,
+    "sides": [
+     "LONG"
+    ],
+    "symbol": "JSWSTEEL"
+   },
+   {
+    "notional": 98324.8,
+    "qty": 56.0,
+    "runners": 1,
+    "sides": [
+     "LONG"
+    ],
+    "symbol": "ADANIPORTS"
+   },
+   {
+    "notional": 97080.0,
+    "qty": 12.0,
+    "runners": 1,
+    "sides": [
+     "LONG"
+    ],
+    "symbol": "APOLLOHOSP"
+   },
+   {
+    "notional": 95995.0,
+    "qty": 10.0,
+    "runners": 1,
+    "sides": [
+     "LONG"
+    ],
+    "symbol": "DIVISLAB"
+   },
+   {
+    "notional": 94065.3,
+    "qty": 81.0,
+    "runners": 1,
+    "sides": [
+     "LONG"
+    ],
+    "symbol": "RELIANCE"
+   }
+  ],
+  "gross_exposure_pct": 0.0703,
+  "total_gross_notional": 773946.9
+ },
+ "global_config": {
+  "breach_mode": "PAUSE_AND_HOLD",
+  "correlation_warning_threshold": 3,
+  "daily_loss_limit": 250000.0,
+  "max_drawdown_pct": 0.8,
+  "max_leverage": 1.0
+ },
+ "mode": "all",
+ "risk_audit": [
+  {
+   "action": "MANUAL_CLOSE_ALL \u00b7 QA13_sma_TCS_15min",
+   "detail": "close_all TCS qty=58.0",
+   "instance_id": "9d90b87efec34d8a8075d18914bf4b59",
+   "scope": "paper",
+   "ts": "2026-10-28T07:48:56.525985+00:00"
+  },
+  {
+   "action": "PAUSE QA13_sma_TCS_15min",
+   "detail": "action=pause",
+   "instance_id": "9d90b87efec34d8a8075d18914bf4b59",
+   "scope": "paper",
+   "ts": "2026-10-28T07:48:55.622095+00:00"
+  },
+  {
+   "action": "MANUAL_CLOSE_FRACTION \u00b7 QA13_sma_TCS_15min",
+   "detail": "close_fraction TCS qty=58.0",
+   "instance_id": "9d90b87efec34d8a8075d18914bf4b59",
+   "scope": "paper",
+   "ts": "2026-10-28T07:47:18.706462+00:00"
+  },
+  {
+   "action": "MANUAL_MODIFY_STOP_LOSS \u00b7 QA13_sma_TCS_15min",
+   "detail": "modify_stop_loss TCS = 2440.0",
+   "instance_id": "9d90b87efec34d8a8075d18914bf4b59",
+   "scope": "paper",
+   "ts": "2026-10-28T07:47:17.220327+00:00"
+  },
+  {
+   "action": "MANUAL_MODIFY_STOP_LOSS \u00b7 PE_instant_buy\u00b7NIFTY\u00b71min",
+   "detail": "modify_stop_loss NIFTY long_put = 322.5",
+   "instance_id": "d4db26bbc0b8463d9067df4a3eedbeb1",
+   "scope": "paper",
+   "ts": "2026-10-28T07:39:55.994443+00:00"
+  },
+  {
+   "action": "WARMUP QA13_ema_pool_5min",
+   "detail": "status=DEGRADED bars=2923 degraded=2",
+   "instance_id": "92cb25050af14eeabfc48cb6056a2855",
+   "scope": "paper",
+   "ts": "2026-10-28T07:23:13.545270+00:00"
+  },
+  {
+   "action": "WARMUP QA14_directional_BANKNIFTY_5min",
+   "detail": "status=READY bars=60 degraded=0",
+   "instance_id": "ca54e493d76d4a72a30ff820b72ce674",
+   "scope": "paper",
+   "ts": "2026-10-28T07:22:38.929036+00:00"
+  },
+  {
+   "action": "WARMUP QA13_sma_TCS_15min",
+   "detail": "status=READY bars=60 degraded=0",
+   "instance_id": "9d90b87efec34d8a8075d18914bf4b59",
+   "scope": "paper",
+   "ts": "2026-10-28T07:22:36.152583+00:00"
+  },
+  {
+   "action": "SPAWN QA14_directional_BANKNIFTY_5min",
+   "detail": "strategy=directional_options capital=1000000.0",
+   "instance_id": "ca54e493d76d4a72a30ff820b72ce674",
+   "scope": "paper",
+   "ts": "2026-10-28T07:22:13.938465+00:00"
+  },
+  {
+   "action": "WARMUP P3TICK_strangle_NIFTY_15min",
+   "detail": "status=READY bars=0 degraded=0",
+   "instance_id": "a2026057fb3340b9b8a94e9916c9452f",
+   "scope": "paper",
+   "ts": "2026-10-28T07:22:10.801407+00:00"
+  },
+  {
+   "action": "SPAWN P3TICK_strangle_NIFTY_15min",
+   "detail": "strategy=immediate_strangle capital=1000000.0",
+   "instance_id": "a2026057fb3340b9b8a94e9916c9452f",
+   "scope": "paper",
+   "ts": "2026-10-28T07:22:09.425012+00:00"
+  },
+  {
+   "action": "SPAWN QA13_ema_pool_5min",
+   "detail": "strategy=ema_pullback capital=500000.0",
+   "instance_id": "92cb25050af14eeabfc48cb6056a2855",
+   "scope": "paper",
+   "ts": "2026-10-28T07:22:07.673937+00:00"
+  },
+  {
+   "action": "SPAWN QA13_sma_TCS_15min",
+   "detail": "strategy=sma_crossover capital=300000.0",
+   "instance_id": "9d90b87efec34d8a8075d18914bf4b59",
+   "scope": "paper",
+   "ts": "2026-10-28T07:22:05.867454+00:00"
+  },
+  {
+   "action": "WARMUP QA12_hf_ICICIBANK",
+   "detail": "status=READY bars=60 degraded=0",
+   "instance_id": "316b096a2ea64f9c8c03b124e0a74d94",
+   "scope": "paper",
+   "ts": "2026-10-28T07:21:57.996216+00:00"
+  },
+  {
+   "action": "WARMUP QA14_strangle_NIFTY_1min",
+   "detail": "status=READY bars=0 degraded=0",
+   "instance_id": "e2f0322f143d4db7858c00c0c626c9b4",
+   "scope": "paper",
+   "ts": "2026-10-28T07:21:42.317207+00:00"
+  },
+  {
+   "action": "SPAWN QA14_strangle_NIFTY_1min",
+   "detail": "strategy=immediate_strangle capital=1000000.0",
+   "instance_id": "e2f0322f143d4db7858c00c0c626c9b4",
+   "scope": "paper",
+   "ts": "2026-10-28T07:21:41.258364+00:00"
+  },
+  {
+   "action": "SPAWN QA12_hf_ICICIBANK",
+   "detail": "strategy=hf_equity_scalp capital=200000.0",
+   "instance_id": "316b096a2ea64f9c8c03b124e0a74d94",
+   "scope": "paper",
+   "ts": "2026-10-28T07:21:39.758581+00:00"
+  },
+  {
+   "action": "SPAWN banknifty_ema_momentum\u00b7BANKNIFTY\u00b71min",
+   "detail": "strategy=banknifty_ema_momentum capital=1000000.0",
+   "instance_id": "34ae5ee894324b8a8912fbc35b44750b",
+   "scope": "paper",
+   "ts": "2026-10-28T07:12:57.870400+00:00"
+  },
+  {
+   "action": "SPAWN CE_instant_buy\u00b7BANKNIFTY\u00b71hour",
+   "detail": "strategy=CE_instant_buy capital=1000000.0",
+   "instance_id": "2201907ed4d74946adf0bd08eadc07c7",
+   "scope": "paper",
+   "ts": "2026-10-28T07:12:57.825738+00:00"
+  },
+  {
+   "action": "SPAWN immediate_strangle\u00b7NIFTY\u00b71hour",
+   "detail": "strategy=immediate_strangle capital=1000000.0",
+   "instance_id": "6dbd247591e448e8bcaf86fd4963c4e6",
+   "scope": "paper",
+   "ts": "2026-10-28T07:12:57.617830+00:00"
+  },
+  {
+   "action": "SPAWN PE_instant_buy\u00b7NIFTY\u00b71min",
+   "detail": "strategy=PE_instant_buy capital=1000000.0",
+   "instance_id": "d4db26bbc0b8463d9067df4a3eedbeb1",
+   "scope": "paper",
+   "ts": "2026-10-28T07:12:57.362572+00:00"
+  },
+  {
+   "action": "SPAWN CE_instant_buy\u00b7NIFTY\u00b71min",
+   "detail": "strategy=CE_instant_buy capital=1000000.0",
+   "instance_id": "b9d79783e8c14b8a8d74e5ff6d80d6b4",
+   "scope": "paper",
+   "ts": "2026-10-28T07:12:57.268723+00:00"
+  },
+  {
+   "action": "SPAWN persistence_probe_hf_RELIANCE_1min",
+   "detail": "strategy=hf_equity_scalp capital=100000.0",
+   "instance_id": "75e54d93bf5d4f9cabb2bf252b59ee54",
+   "scope": "paper",
+   "ts": "2026-10-28T07:12:56.974453+00:00"
+  },
+  {
+   "action": "SPAWN persistence_probe_equity_RELIANCE_1min",
+   "detail": "strategy=one_min_scalp capital=100000.0",
+   "instance_id": "cf9e57fb333145a1b9d48161b7a3a1b9",
+   "scope": "paper",
+   "ts": "2026-10-28T07:12:56.696402+00:00"
+  },
+  {
+   "action": "SPAWN ema_pullback\u00b7NIFTY50\u00b715min",
+   "detail": "strategy=ema_pullback capital=1000000.0",
+   "instance_id": "bc3fc4533e0445fbb36b53198ac4f499",
+   "scope": "paper",
+   "ts": "2026-10-28T07:12:56.609092+00:00"
+  }
+ ],
+ "segments": {
+  "equity_intraday": {
+   "allocated_capital": 800000.0,
+   "broker": "dhan",
+   "daily_pnl": 0.0,
+   "deployed": 0,
+   "display_name": "Equity Intraday",
+   "drawdown_pct": 0.0,
+   "equity": 0,
+   "halt_reason": null,
+   "halted": false,
+   "halted_ts": null,
+   "mode": "paper",
+   "risk": {
+    "daily_loss_limit": 30000,
+    "max_deployed_capital": 800000,
+    "max_drawdown_pct": 12
+   },
+   "runner_count": 0
+  },
+  "options_index": {
+   "allocated_capital": 1200000.0,
+   "broker": "mstock",
+   "daily_pnl": 0.0,
+   "deployed": 0,
+   "display_name": "Index Options",
+   "drawdown_pct": 0.0,
+   "equity": 0,
+   "halt_reason": null,
+   "halted": false,
+   "halted_ts": null,
+   "mode": "paper",
+   "risk": {
+    "daily_loss_limit": 50000,
+    "max_deployed_capital": 1200000,
+    "max_drawdown_pct": 15
+   },
+   "runner_count": 0
+  }
+ },
+ "timestamp": "2026-10-28T09:03:29.506349+00:00",
+ "trade_stats": {
+  "avg_loss": -229.09,
+  "avg_win": 131.29,
+  "best_trade": 8395.5,
+  "losses": 607,
+  "max_consecutive_losses": 115,
+  "profit_factor": 0.2313,
+  "total_pnl": -106893.75,
+  "total_trades": 852,
+  "win_rate": 0.2876,
+  "wins": 245,
+  "worst_trade": -3269.5
+ }
+}

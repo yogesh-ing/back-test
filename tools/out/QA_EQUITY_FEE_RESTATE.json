@@ -1,0 +1,38 @@
+{
+ "equity_intraday": {
+  "ema_pullback": [
+   20951.36,
+   7517.52
+  ],
+  "one_min_scalp": [
+   2662.5,
+   -1145.0
+  ],
+  "hf_equity_scalp": [
+   4313.26,
+   -131.7
+  ],
+  "sma_crossover": [
+   97.67,
+   922.2
+  ]
+ },
+ "equity_delivery": {
+  "ema_pullback": [
+   81413.34,
+   7517.52
+  ],
+  "one_min_scalp": [
+   7438.1,
+   -1145.0
+  ],
+  "hf_equity_scalp": [
+   13579.15,
+   -131.7
+  ],
+  "sma_crossover": [
+   331.46,
+   922.2
+  ]
+ }
+}

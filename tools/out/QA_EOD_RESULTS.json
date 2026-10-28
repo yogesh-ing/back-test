@@ -1,0 +1,302 @@
+{
+ "collected_ist": "2026-10-28T15:37:40.874080+05:30",
+ "eod_watch_file": "=== watcher start 13:30:38 IST ===\n=== watcher stop 15:36:03 IST ===\n",
+ "charts": [
+  {
+   "name": "CE_instant_buy_BANKNIFTY_1hour.csv",
+   "size": 2711,
+   "mtime_ist": "2026-10-28T15:31:06.089373+05:30"
+  },
+  {
+   "name": "CE_instant_buy_BANKNIFTY_1hour.png",
+   "size": 118000,
+   "mtime_ist": "2026-10-28T15:31:07.464965+05:30"
+  },
+  {
+   "name": "P3TICK_strangle_NIFTY_15min.csv",
+   "size": 1062,
+   "mtime_ist": "2026-10-28T15:31:08.374368+05:30"
+  },
+  {
+   "name": "P3TICK_strangle_NIFTY_15min.png",
+   "size": 110350,
+   "mtime_ist": "2026-10-28T15:31:08.830918+05:30"
+  },
+  {
+   "name": "PE_instant_buy_NIFTY_1min.csv",
+   "size": 7604,
+   "mtime_ist": "2026-10-28T15:30:59.090710+05:30"
+  },
+  {
+   "name": "PE_instant_buy_NIFTY_1min.png",
+   "size": 151748,
+   "mtime_ist": "2026-10-28T15:31:03.999804+05:30"
+  },
+  {
+   "name": "QA14_directional_BANKNIFTY_5min.csv",
+   "size": 616,
+   "mtime_ist": "2026-10-28T15:31:08.833461+05:30"
+  },
+  {
+   "name": "QA14_directional_BANKNIFTY_5min.png",
+   "size": 91561,
+   "mtime_ist": "2026-10-28T15:31:09.359447+05:30"
+  },
+  {
+   "name": "QA14_strangle_NIFTY_1min.csv",
+   "size": 1202,
+   "mtime_ist": "2026-10-28T15:31:07.470531+05:30"
+  },
+  {
+   "name": "QA14_strangle_NIFTY_1min.png",
+   "size": 119469,
+   "mtime_ist": "2026-10-28T15:31:08.370830+05:30"
+  },
+  {
+   "name": "immediate_strangle_NIFTY_1hour.csv",
+   "size": 1115,
+   "mtime_ist": "2026-10-28T15:31:04.009487+05:30"
+  },
+  {
+   "name": "immediate_strangle_NIFTY_1hour.png",
+   "size": 116212,
+   "mtime_ist": "2026-10-28T15:31:06.077557+05:30"
+  }
+ ],
+ "session": {
+  "allocated_capital": 10200000.0,
+  "day_start_equity": 6149577.5,
+  "drawdown_pct": 0.0202,
+  "equity": 9940039.99,
+  "net_today": -195503.5,
+  "peak_equity": 10144488.44,
+  "realized_total": -139719.08,
+  "trades_total": 1074,
+  "win_rate": 0.1946,
+  "wins": 209
+ },
+ "per_runner": [
+  {
+   "name": "ema_pullback\u00b7NIFTY50\u00b715min",
+   "status": "RUNNING",
+   "daily_pnl": 3758.76,
+   "realized_pnl": 3888.67,
+   "open_pnl": 0.0,
+   "equity": 1003888.67,
+   "trades_today": 89
+  },
+  {
+   "name": "persistence_probe_equity_RELIANCE_1min",
+   "status": "RUNNING",
+   "daily_pnl": -1375.8,
+   "realized_pnl": -498.9,
+   "open_pnl": 0.0,
+   "equity": 99501.1,
+   "trades_today": 45
+  },
+  {
+   "name": "persistence_probe_hf_RELIANCE_1min",
+   "status": "RUNNING",
+   "daily_pnl": -878.7,
+   "realized_pnl": -539.0,
+   "open_pnl": 0.0,
+   "equity": 99461.0,
+   "trades_today": 43
+  },
+  {
+   "name": "CE_instant_buy\u00b7NIFTY\u00b71min",
+   "status": "RUNNING",
+   "daily_pnl": -26.5,
+   "realized_pnl": -26997.75,
+   "open_pnl": 0.0,
+   "equity": 971321.7,
+   "trades_today": 1
+  },
+  {
+   "name": "PE_instant_buy\u00b7NIFTY\u00b71min",
+   "status": "RUNNING",
+   "daily_pnl": 2318.28,
+   "realized_pnl": -7103.2,
+   "open_pnl": 1456.65,
+   "equity": 992574.18,
+   "trades_today": 2
+  },
+  {
+   "name": "immediate_strangle\u00b7NIFTY\u00b71hour",
+   "status": "RUNNING",
+   "daily_pnl": -71413.19,
+   "realized_pnl": -31890.95,
+   "open_pnl": 0.0,
+   "equity": 925806.05,
+   "trades_today": 200
+  },
+  {
+   "name": "CE_instant_buy\u00b7BANKNIFTY\u00b71hour",
+   "status": "RUNNING",
+   "daily_pnl": 8824.62,
+   "realized_pnl": -14585.4,
+   "open_pnl": 506.4,
+   "equity": 984198.26,
+   "trades_today": 1
+  },
+  {
+   "name": "banknifty_ema_momentum\u00b7BANKNIFTY\u00b71min",
+   "status": "RUNNING",
+   "daily_pnl": 0.0,
+   "realized_pnl": 0.0,
+   "open_pnl": 0.0,
+   "equity": 1000000.0,
+   "trades_today": 0
+  },
+  {
+   "name": "QA12_hf_ICICIBANK",
+   "status": "RUNNING",
+   "daily_pnl": 814.3,
+   "realized_pnl": 814.3,
+   "open_pnl": 0.0,
+   "equity": 200814.3,
+   "trades_today": 34
+  },
+  {
+   "name": "QA14_strangle_NIFTY_1min",
+   "status": "RUNNING",
+   "daily_pnl": -67893.78,
+   "realized_pnl": -30581.2,
+   "open_pnl": 0.0,
+   "equity": 932106.22,
+   "trades_today": 194
+  },
+  {
+   "name": "QA13_sma_TCS_15min",
+   "status": "PAUSED",
+   "daily_pnl": 922.2,
+   "realized_pnl": 922.2,
+   "open_pnl": 0.0,
+   "equity": 300922.2,
+   "trades_today": 1
+  },
+  {
+   "name": "QA13_ema_pool_5min",
+   "status": "RUNNING",
+   "daily_pnl": -823.2,
+   "realized_pnl": -1695.0,
+   "open_pnl": 871.8,
+   "equity": 499176.8,
+   "trades_today": 6
+  },
+  {
+   "name": "P3TICK_strangle_NIFTY_15min",
+   "status": "RUNNING",
+   "daily_pnl": -69734.89,
+   "realized_pnl": -31452.85,
+   "open_pnl": 0.0,
+   "equity": 930265.11,
+   "trades_today": 199
+  },
+  {
+   "name": "QA14_directional_BANKNIFTY_5min",
+   "status": "RUNNING",
+   "daily_pnl": 4.4,
+   "realized_pnl": 0.0,
+   "open_pnl": 58.2,
+   "equity": 1000004.4,
+   "trades_today": 0
+  }
+ ],
+ "open_positions_total": 8,
+ "structures": [
+  {
+   "runner": "PE_instant_buy\u00b7NIFTY\u00b71min",
+   "label": "NIFTY long_put 22750",
+   "expiry": "2026-11-23",
+   "unrealized_pnl": 1456.65,
+   "bars_held": 146,
+   "mark_ts": "2026-10-28T10:07:41.073826+00:00"
+  },
+  {
+   "runner": "CE_instant_buy\u00b7BANKNIFTY\u00b71hour",
+   "label": "BANKNIFTY long_call 54300",
+   "expiry": "2026-11-23",
+   "unrealized_pnl": 506.4,
+   "bars_held": 65,
+   "mark_ts": "2026-10-28T10:07:41.081384+00:00"
+  },
+  {
+   "runner": "QA14_directional_BANKNIFTY_5min",
+   "label": "BANKNIFTY long_put 54200",
+   "expiry": "2026-11-23",
+   "unrealized_pnl": 58.2,
+   "bars_held": 15,
+   "mark_ts": "2026-10-28T10:07:41.107520+00:00"
+  }
+ ],
+ "drift_samples": 21,
+ "drift_tail": [
+  {
+   "ist": "2026-10-28T15:19:32+05:30",
+   "total_capital": 18450000.0,
+   "bucket_capital_sum": 10200000.0,
+   "runner_capital_sum": 10200000.0,
+   "total_equity": 10957304.28,
+   "bucket_equity_sum": 9957304.28,
+   "deployed_capital": 943461.85,
+   "daily_pnl": -178239.21,
+   "realized_pnl": -131460.78,
+   "open_pnl_sum": 2156.45,
+   "daily_pnl_sum": -178239.21,
+   "realized_sum": -131460.78,
+   "fill_count": 2401,
+   "order_count": 2401,
+   "open_positions": 11,
+   "stale_marks_count": 0,
+   "errors": 0,
+   "warnings": [],
+   "halted": false,
+   "duplicates": []
+  },
+  {
+   "ist": "2026-10-28T15:24:33+05:30",
+   "total_capital": 18450000.0,
+   "bucket_capital_sum": 10200000.0,
+   "runner_capital_sum": 10200000.0,
+   "total_equity": 10951572.66,
+   "bucket_equity_sum": 9951572.66,
+   "deployed_capital": 568214.55,
+   "daily_pnl": -183970.83,
+   "realized_pnl": -134543.78,
+   "open_pnl_sum": 2385.25,
+   "daily_pnl_sum": -183970.83,
+   "realized_sum": -134543.78,
+   "fill_count": 2470,
+   "order_count": 2470,
+   "open_positions": 8,
+   "stale_marks_count": 0,
+   "errors": 0,
+   "warnings": [],
+   "halted": false,
+   "duplicates": []
+  },
+  {
+   "ist": "2026-10-28T15:29:33+05:30",
+   "total_capital": 18450000.0,
+   "bucket_capital_sum": 10200000.0,
+   "runner_capital_sum": 10200000.0,
+   "total_equity": 10945315.47,
+   "bucket_equity_sum": 9945315.47,
+   "deployed_capital": 568214.55,
+   "daily_pnl": -190228.02,
+   "realized_pnl": -137318.63,
+   "open_pnl_sum": 2345.8,
+   "daily_pnl_sum": -190228.02,
+   "realized_sum": -137318.63,
+   "fill_count": 2542,
+   "order_count": 2542,
+   "open_positions": 8,
+   "stale_marks_count": 0,
+   "errors": 0,
+   "warnings": [],
+   "halted": false,
+   "duplicates": []
+  }
+ ]
+}

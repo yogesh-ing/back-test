@@ -1,0 +1,205 @@
+[
+ {
+  "iid": "bc3fc4533e0445fbb36b53198ac4f499",
+  "name": "ema_pullback·NIFTY50·15min",
+  "status": "RUNNING",
+  "exit_policy": null,
+  "open_structures": []
+ },
+ {
+  "iid": "cf9e57fb333145a1b9d48161b7a3a1b9",
+  "name": "persistence_probe_equity_RELIANCE_1min",
+  "status": "RUNNING",
+  "exit_policy": null,
+  "open_structures": []
+ },
+ {
+  "iid": "75e54d93bf5d4f9cabb2bf252b59ee54",
+  "name": "persistence_probe_hf_RELIANCE_1min",
+  "status": "RUNNING",
+  "exit_policy": null,
+  "open_structures": []
+ },
+ {
+  "iid": "b9d79783e8c14b8a8d74e5ff6d80d6b4",
+  "name": "CE_instant_buy·NIFTY·1min",
+  "status": "RUNNING",
+  "exit_policy": {
+   "max_bars": null,
+   "max_loss_inr": null,
+   "max_reentries_per_day": 2,
+   "min_days_to_expiry": null,
+   "neutral_bars": 0,
+   "reenter": false,
+   "signal_flip": false,
+   "stop_loss_pct": null,
+   "stop_loss_points": null,
+   "take_profit_pct": null,
+   "take_profit_points": null
+  },
+  "open_structures": []
+ },
+ {
+  "iid": "d4db26bbc0b8463d9067df4a3eedbeb1",
+  "name": "PE_instant_buy·NIFTY·1min",
+  "status": "RUNNING",
+  "exit_policy": {
+   "max_bars": null,
+   "max_loss_inr": null,
+   "max_reentries_per_day": 2,
+   "min_days_to_expiry": null,
+   "neutral_bars": 0,
+   "reenter": false,
+   "signal_flip": false,
+   "stop_loss_pct": null,
+   "stop_loss_points": null,
+   "take_profit_pct": null,
+   "take_profit_points": null
+  },
+  "open_structures": [
+   {
+    "label": "NIFTY long_put 22750",
+    "expiry": "2026-11-23",
+    "structure_id": "struct_20261028074000_0002",
+    "bars_held": 61,
+    "unrealized_pnl": 826.15,
+    "mark_stale": false
+   }
+  ]
+ },
+ {
+  "iid": "6dbd247591e448e8bcaf86fd4963c4e6",
+  "name": "immediate_strangle·NIFTY·1hour",
+  "status": "RUNNING",
+  "exit_policy": {
+   "max_bars": null,
+   "max_loss_inr": null,
+   "max_reentries_per_day": 2,
+   "min_days_to_expiry": null,
+   "neutral_bars": 0,
+   "reenter": false,
+   "signal_flip": false,
+   "stop_loss_pct": null,
+   "stop_loss_points": 100,
+   "take_profit_pct": null,
+   "take_profit_points": 100
+  },
+  "open_structures": []
+ },
+ {
+  "iid": "2201907ed4d74946adf0bd08eadc07c7",
+  "name": "CE_instant_buy·BANKNIFTY·1hour",
+  "status": "RUNNING",
+  "exit_policy": {
+   "max_bars": null,
+   "max_loss_inr": null,
+   "max_reentries_per_day": 2,
+   "min_days_to_expiry": null,
+   "neutral_bars": 0,
+   "reenter": false,
+   "signal_flip": false,
+   "stop_loss_pct": null,
+   "stop_loss_points": null,
+   "take_profit_pct": null,
+   "take_profit_points": null
+  },
+  "open_structures": []
+ },
+ {
+  "iid": "34ae5ee894324b8a8912fbc35b44750b",
+  "name": "banknifty_ema_momentum·BANKNIFTY·1min",
+  "status": "RUNNING",
+  "exit_policy": {
+   "max_bars": null,
+   "max_loss_inr": null,
+   "max_reentries_per_day": 2,
+   "min_days_to_expiry": 1,
+   "neutral_bars": 0,
+   "reenter": false,
+   "signal_flip": true,
+   "stop_loss_pct": 0.5,
+   "stop_loss_points": null,
+   "take_profit_pct": 1.0,
+   "take_profit_points": null
+  },
+  "open_structures": []
+ },
+ {
+  "iid": "316b096a2ea64f9c8c03b124e0a74d94",
+  "name": "QA12_hf_ICICIBANK",
+  "status": "RUNNING",
+  "exit_policy": null,
+  "open_structures": []
+ },
+ {
+  "iid": "e2f0322f143d4db7858c00c0c626c9b4",
+  "name": "QA14_strangle_NIFTY_1min",
+  "status": "RUNNING",
+  "exit_policy": {
+   "max_bars": null,
+   "max_loss_inr": null,
+   "max_reentries_per_day": 2,
+   "min_days_to_expiry": null,
+   "neutral_bars": 0,
+   "reenter": false,
+   "signal_flip": false,
+   "stop_loss_pct": null,
+   "stop_loss_points": 100,
+   "take_profit_pct": null,
+   "take_profit_points": 100
+  },
+  "open_structures": []
+ },
+ {
+  "iid": "9d90b87efec34d8a8075d18914bf4b59",
+  "name": "QA13_sma_TCS_15min",
+  "status": "PAUSED",
+  "exit_policy": null,
+  "open_structures": []
+ },
+ {
+  "iid": "92cb25050af14eeabfc48cb6056a2855",
+  "name": "QA13_ema_pool_5min",
+  "status": "RUNNING",
+  "exit_policy": null,
+  "open_structures": []
+ },
+ {
+  "iid": "a2026057fb3340b9b8a94e9916c9452f",
+  "name": "P3TICK_strangle_NIFTY_15min",
+  "status": "RUNNING",
+  "exit_policy": {
+   "max_bars": null,
+   "max_loss_inr": null,
+   "max_reentries_per_day": 2,
+   "min_days_to_expiry": null,
+   "neutral_bars": 0,
+   "reenter": false,
+   "signal_flip": false,
+   "stop_loss_pct": null,
+   "stop_loss_points": 100,
+   "take_profit_pct": null,
+   "take_profit_points": 100
+  },
+  "open_structures": []
+ },
+ {
+  "iid": "ca54e493d76d4a72a30ff820b72ce674",
+  "name": "QA14_directional_BANKNIFTY_5min",
+  "status": "RUNNING",
+  "exit_policy": {
+   "max_bars": null,
+   "max_loss_inr": null,
+   "max_reentries_per_day": 2,
+   "min_days_to_expiry": 1,
+   "neutral_bars": 0,
+   "reenter": false,
+   "signal_flip": true,
+   "stop_loss_pct": 0.5,
+   "stop_loss_points": null,
+   "take_profit_pct": 1.0,
+   "take_profit_points": null
+  },
+  "open_structures": []
+ }
+]

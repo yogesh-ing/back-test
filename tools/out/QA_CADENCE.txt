@@ -1,0 +1,27 @@
+A @ 13:05:30 IST   B @ 13:10:30 IST   gap=5.00 min
+runner                             tf      barsA  barsB   dB  per-min  expected  lastBarA  lastBarB   ok?
+ema_pullback·NIFTY50·15min         15min   42584  42584    0     0.00      0.33  12:45:00  12:45:00    OK
+persistence_probe_equity_RELIANCE_ 1min      261    266    5     1.00      5.00  13:04:00  13:09:00    OK
+persistence_probe_hf_RELIANCE_1min 1min      242    247    5     1.00      5.00  13:04:00  13:09:00    OK
+CE_instant_buy·NIFTY·1min          1min       75     80    5     1.00      5.00  13:04:00  13:09:00    OK
+PE_instant_buy·NIFTY·1min          1min       75     80    5     1.00      5.00  13:04:00  13:09:00    OK
+immediate_strangle·NIFTY·1hour     1hour      75     80    5     1.00      0.08  13:04:00  13:09:00 VIOLATION
+CE_instant_buy·BANKNIFTY·1hour     1hour      75     80    5     1.00      0.08  13:04:00  13:09:00 VIOLATION
+banknifty_ema_momentum·BANKNIFTY·1 1min       75     80    5     1.00      5.00  13:04:00  13:09:00    OK
+QA12_hf_ICICIBANK                  1min        9     14    5     1.00      5.00  13:04:00  13:09:00    OK
+QA14_strangle_NIFTY_1min           1min       14     19    5     1.00      5.00  13:04:00  13:09:00    OK
+QA13_sma_TCS_15min                 15min       1      1    0     0.00      0.33  12:45:00  12:45:00    OK
+QA13_ema_pool_5min                 5min      133    178   45     9.00      1.00  13:00:00  13:05:00 VIOLATION
+P3TICK_strangle_NIFTY_15min        15min      13     18    5     1.00      0.33  13:04:00  13:09:00 VIOLATION
+QA14_directional_BANKNIFTY_5min    5min        2      3    1     0.20      1.00  12:55:00  13:00:00    OK
+
+total_capital        A=18450000.0  B=18450000.0
+total_equity         A=11127219.26  B=11121109.38
+deployed_capital     A=882513.75  B=765600.6
+daily_pnl            A=-8324.23  B=-14434.11
+realized_pnl         A=-52117.58  B=-56588.33
+open_positions       A=8  B=6
+fill_count           A=259  B=341
+order_count          A=259  B=341
+bar_events           A=47014  B=47263
+stale_marks_count    A=0  B=0
