@@ -19,10 +19,11 @@ Usage::
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from enum import Enum
 from typing import Any, Protocol
 
@@ -484,6 +485,165 @@ def _mark_quote(provider: Any, instrument_token: str, side: str) -> dict[str, An
     return provider.get_quote(instrument_token)
 
 
+# ---------------------------------------------------------------------------
+# Exchange price grid (BUG-06) — every booked option fill must be printable
+# ---------------------------------------------------------------------------
+
+#: NSE option premiums move in ₹0.05. A price off this grid cannot be sent to
+#: the venue, so it cannot be a fill either — 733/910 paper fills on 2026-10-28
+#: were exactly that: numbers no counterparty ever quoted.
+NSE_OPTION_TICK_SIZE = Decimal("0.05")
+
+#: :class:`~backtest.options.quote_providers.BidAskQuoteProvider.source_name`
+#: appends this marker when it wraps a provider, i.e. the real live paper path
+#: reports ``"live:mstock+bidask"``. Its presence means fills were crossed
+#: through the spread by the seam, so the spread has ALREADY been paid.
+CROSS_SPREAD_SOURCE_MARKER = "+bidask"
+
+#: Labels naming a price built from a model instead of a venue book. Those
+#: quotes carry no real counterparty, so the percentage slippage model stays on.
+SYNTHETIC_SOURCE_MARKERS = ("synthetic", "model", "mid")
+
+#: ``OptionPosition.metadata`` key remembering the grid a leg was filled on, so
+#: the exit is quantised against the instrument's own tick and not a guess.
+TICK_SIZE_METADATA_KEY = "tick_size"
+
+
+def _to_decimal(value: Any) -> Decimal | None:
+    """Best-effort Decimal for quote/contract scalars; ``None`` when not a number."""
+    if value is None or isinstance(value, bool) or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def quantize_nse_tick(
+    price: Any,
+    side: str,
+    tick_size: Decimal = NSE_OPTION_TICK_SIZE,
+) -> Decimal:
+    """Push ``price`` onto the exchange grid, always in the ADVERSE direction.
+
+    NSE option contracts trade in ₹0.05 steps; a fill at ₹178.08 is not a price,
+    it is arithmetic noise (BUG-06). Rounding toward the trader would book a
+    fill the venue could never print, so the rounding is deliberately hostile:
+    ``BUY`` rounds UP (``ROUND_CEILING``) and ``SELL`` rounds DOWN
+    (``ROUND_FLOOR``). The result is always a multiple of ``tick_size``, so a
+    paper book stays reproducible as a live order — and any cost the rounding
+    adds is a cost a real session would have charged too.
+
+    ``tick_size`` comes from the contract when the model carries one; the
+    ₹0.05 default is the NSE derivative grid, NOT a general rule, which is why
+    this helper is only reachable from :class:`OptionPaperBroker` (option
+    legs) and never from the equity fill paths.
+    """
+    amount = _to_decimal(price)
+    if amount is None:
+        return ZERO
+    step = _to_decimal(tick_size)
+    if step is None or step <= 0:
+        step = NSE_OPTION_TICK_SIZE
+    rounding = ROUND_FLOOR if str(side).upper() == "SELL" else ROUND_CEILING
+    ticks = (amount / step).quantize(Decimal("1"), rounding=rounding)
+    return (ticks * step).quantize(step)
+
+
+def _fills_against_live_depth(quote: Any, side: str, provider: Any) -> bool:
+    """True when the leg priced off the venue's own two-sided book.
+
+    Three independent proofs, all required — this is what stops the spread +
+    bps double-count without ever letting the engine invent a side:
+
+    1. the cross-the-spread seam stamped the quote (``execution_side``), so
+       ``ltp`` IS the ask we bought at / the bid we sold into;
+    2. the row is genuinely two-sided (both ``bid`` and ``ask`` positive) —
+       a one-sided or errored row falls through to the old model;
+    3. the provider's ``source_name`` carries ``+bidask`` and is not
+       labelled synthetic/mid — a Black-Scholes book is a model, not depth.
+    """
+    if not isinstance(quote, dict) or quote.get("error"):
+        return False
+    if str(quote.get("execution_side", "")).upper() != str(side).upper():
+        return False
+    bid = _to_decimal(quote.get("bid"))
+    ask = _to_decimal(quote.get("ask"))
+    if bid is None or ask is None or bid <= 0 or ask <= 0:
+        return False
+    source = str(getattr(provider, "source_name", "") or "")
+    if CROSS_SPREAD_SOURCE_MARKER not in source:
+        return False
+    lowered = source.lower()
+    return not any(marker in lowered for marker in SYNTHETIC_SOURCE_MARKERS)
+
+
+def _top_of_book_quantity(quote: Any, side: str) -> Decimal | None:
+    """Visible size at the level being paid for, when the feed actually shows it.
+
+    ``None`` means "no evidence" — never assume a bigger book than the venue
+    published, and never assume a smaller one either: with no size the order is
+    treated as fitting the top of book, which is the zero-cost default the
+    ticket asks for, not an invented impact.
+    """
+    depth = quote.get("depth") if isinstance(quote, dict) else None
+    if not isinstance(depth, dict):
+        return None
+    levels = depth.get("ask" if str(side).upper() == "BUY" else "bid")
+    if not isinstance(levels, (list, tuple)) or not levels:
+        return None
+    level = levels[0]
+    if not isinstance(level, dict):
+        return None
+    side_price = _to_decimal(quote.get("ask" if str(side).upper() == "BUY" else "bid"))
+    level_price = _to_decimal(level.get("price"))
+    if side_price is None or level_price is None or level_price != side_price:
+        return None  # depth disagrees with the booked side: claim nothing
+    for key in ("quantity", "qty", "size"):
+        qty = _to_decimal(level.get(key))
+        if qty is not None and qty > 0:
+            return qty
+    return None
+
+
+def _resolve_tick_size(provider: Any, instrument_token: str, *carriers: Any) -> Decimal:
+    """The instrument's own tick, falling back to the NSE option grid.
+
+    Looked up in order: whatever the caller carries (leg / position metadata),
+    then the provider's contract registry, then ₹0.05. A contract that says
+    otherwise wins — the grid belongs to the instrument, not to this module.
+    """
+    for carrier in carriers:
+        if carrier is None:
+            continue
+        raw = (
+            carrier.get(TICK_SIZE_METADATA_KEY)
+            if isinstance(carrier, dict)
+            else getattr(carrier, TICK_SIZE_METADATA_KEY, None)
+        )
+        step = _to_decimal(raw)
+        if step is not None and step > 0:
+            return step
+    try:
+        contract: Any = None
+        for name in ("get_contract", "contract_for", "find_contract"):
+            finder = getattr(provider, name, None)
+            if callable(finder):
+                contract = finder(instrument_token)
+                if contract is not None:
+                    break
+        if contract is None:
+            registry = getattr(provider, "_contracts", None)
+            if isinstance(registry, dict):
+                contract = registry.get(str(instrument_token))
+        step = _to_decimal(getattr(contract, TICK_SIZE_METADATA_KEY, None))
+        if step is not None and step > 0:
+            return step
+    except Exception:  # noqa: BLE001 — a missing registry must never block a fill
+        logger.debug("[option-paper] tick lookup failed for %s", instrument_token)
+    return NSE_OPTION_TICK_SIZE
+
+
 class FakeQuoteProvider:
     """Returns a fixed price for all instruments (for testing)."""
 
@@ -521,7 +681,17 @@ class OptionPaperBroker:
     capital:
         Starting capital in ₹.
     slippage_pct:
-        Slippage as a percentage (e.g. 0.001 = 0.1%).
+        Slippage as a percentage (e.g. 0.001 = 0.1%). Applies to fills priced
+        off a mid/model quote only — a leg that already crossed a live
+        two-sided book pays the spread, not the spread *and* this (BUG-06).
+    slippage_ticks:
+        Residual impact in WHOLE ticks for fills against live two-sided depth,
+        added on top of the spread (default ``0``: the top of book was big
+        enough, the spread is the whole cost). Integer ticks keep the fill on
+        the exchange grid instead of drifting onto paise.
+    max_slippage_ticks:
+        Ceiling on the tick count when an order visibly walks the published
+        book, so a thin level cannot multiply into an absurd price.
     commission_per_lot:
         Commission per lot in ₹ (flat fee).
     fee_calculator:
@@ -550,12 +720,17 @@ class OptionPaperBroker:
         on_structure_closed: Any | None = None,
         on_leg_fill: Any | None = None,
         allowed_structures: Any | None = None,
+        slippage_ticks: int = 0,
+        max_slippage_ticks: int = 5,
     ) -> None:
         self.capital = Decimal(str(capital))
         self.available_cash = Decimal(str(capital))
         self.slippage_pct = Decimal(str(slippage_pct))
         self.commission_per_lot = Decimal(str(commission_per_lot))
         self.fee_calculator = fee_calculator
+        #: whole-tick residual impact on top of a crossed live book (BUG-06)
+        self.slippage_ticks = max(0, int(slippage_ticks))
+        self.max_slippage_ticks = max(self.slippage_ticks, int(max_slippage_ticks))
         self._statutory_fees_paid = ZERO
         self.allowed_structures = frozenset(
             allowed_structures
@@ -640,7 +815,15 @@ class OptionPaperBroker:
         for leg in intent.legs:
             quote = _execution_quote(quote_provider, leg.instrument_token, leg.side)
             quoted_price = Decimal(str(quote.get("ltp", 0)))
-            fill_price = self._apply_slippage(quoted_price, leg.side)
+            tick = _resolve_tick_size(quote_provider, leg.instrument_token, leg)
+            fill_price = self._apply_slippage(
+                quoted_price,
+                leg.side,
+                quote=quote,
+                provider=quote_provider,
+                quantity=int(leg.total_quantity),
+                tick_size=tick,
+            )
             # Unpriceable leg guard (live-session lesson 2026-09-21): a
             # transient broker failure surfaces as ltp=0. Filling at 0
             # books a phantom ₹0 entry and the exit then books the WHOLE
@@ -659,7 +842,15 @@ class OptionPaperBroker:
             else:
                 net_cost -= leg_cost - commission
 
-            fills.append((leg, fill_price, commission, quoted_price))
+            fills.append(
+                (
+                    leg,
+                    fill_price,
+                    commission,
+                    quoted_price,
+                    self._fill_basis(quote, leg.side, quote_provider),
+                )
+            )
 
         # Full statutory fee stack (Phase 8) — computed per leg when a fee
         # calculator is attached. Cash-bearing (Gap G4.1): the total is
@@ -678,7 +869,7 @@ class OptionPaperBroker:
                             "quantity": leg.total_quantity,
                             "price": fill_price,
                         }
-                        for leg, fill_price, _, _ in fills
+                        for leg, fill_price, _, _, _ in fills
                     ],
                     when=ts,
                 )
@@ -711,7 +902,7 @@ class OptionPaperBroker:
         strikes_map = intent.metadata.get("strikes", {})
         default_strike = intent.metadata.get("strike", "0")
 
-        for leg, fill_price, commission, quoted_price in fills:
+        for leg, fill_price, commission, quoted_price, fill_basis in fills:
             self._position_seq += 1
             raw_opt_type = str(intent.metadata.get("option_type", "") or "").upper()
             if raw_opt_type not in ("CE", "PE"):
@@ -742,6 +933,14 @@ class OptionPaperBroker:
                 metadata={
                     "structure_type": intent.structure_type,
                     "fill_price": str(fill_price),
+                    # the grid this leg filled on, remembered so the exit is
+                    # quantised against the same instrument tick (BUG-06)
+                    TICK_SIZE_METADATA_KEY: str(
+                        _resolve_tick_size(quote_provider, leg.instrument_token, leg)
+                    ),
+                    # how the fill was priced: "live_depth" crossed a real
+                    # two-sided book (spread only), "model" paid the bps model
+                    "fill_basis": fill_basis,
                 },
             )
             self._positions[position.position_id] = position
@@ -852,7 +1051,17 @@ class OptionPaperBroker:
             else:
                 quoted_price = Decimal(str(quote.get("ltp", 0) or 0))
             exit_side = "SELL" if position.is_long else "BUY"
-            exit_price = self._apply_slippage(quoted_price, exit_side)
+            exit_tick = _resolve_tick_size(
+                quote_provider, position.instrument_token, position.metadata, position
+            )
+            exit_price = self._apply_slippage(
+                quoted_price,
+                exit_side,
+                quote=quote if isinstance(quote, dict) else None,
+                provider=quote_provider,
+                quantity=int(position.total_quantity),
+                tick_size=exit_tick,
+            )
 
             pnl = position.close(exit_price, ts)
             total_pnl += pnl
@@ -1225,16 +1434,72 @@ class OptionPaperBroker:
                 f"Invalid quantity {leg.quantity} for {leg.trading_symbol}"
             )
 
-    def _apply_slippage(self, price: Decimal, side: str) -> Decimal:
-        """Apply slippage to fill price."""
+    def _apply_slippage(
+        self,
+        price: Decimal,
+        side: str,
+        *,
+        quote: Any | None = None,
+        provider: Any | None = None,
+        quantity: int = 0,
+        tick_size: Decimal | None = None,
+    ) -> Decimal:
+        """Turn a quoted price into a fill the exchange could have printed.
+
+        Two models, chosen by where the price came from, then ONE grid (BUG-06):
+
+        * **live two-sided depth** — the leg already paid the full spread by
+          crossing it, so a percentage of slippage on top double-charges a cost
+          the book is not carrying. Residual impact is an integer number of
+          ticks (``slippage_ticks``, default ``0`` while the order visibly fits
+          the top of book), never a fraction of a paise.
+        * **mid / synthetic / one-sided** — no real counterparty was crossed,
+          so the historical ``slippage_pct`` model still applies unchanged.
+
+        Either way the result goes through :func:`quantize_nse_tick`, rounding
+        adversely, so 100 % of option fills land on the instrument's grid.
+        """
+        step = tick_size if tick_size is not None else NSE_OPTION_TICK_SIZE
+        if _fills_against_live_depth(quote, side, provider):
+            return self._grid_fill(
+                price + self._residual_ticks(quote, side, int(quantity or 0)) * step,
+                side,
+                step,
+            )
         if side == "BUY":
-            return (price * (ONE + self.slippage_pct)).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
+            raw = price * (ONE + self.slippage_pct)
         else:
-            return (price * (ONE - self.slippage_pct)).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
+            raw = price * (ONE - self.slippage_pct)
+        return self._grid_fill(raw, side, step)
+
+    @staticmethod
+    def _grid_fill(price: Decimal, side: str, tick_size: Decimal) -> Decimal:
+        """Adverse rounding onto the instrument grid (last step of every fill)."""
+        return quantize_nse_tick(price, side, tick_size)
+
+    @staticmethod
+    def _fill_basis(quote: Any, side: str, provider: Any) -> str:
+        """Which pricing model a leg used — recorded so the fill is auditable."""
+        return (
+            "live_depth"
+            if _fills_against_live_depth(quote, side, provider)
+            else "model"
+        )
+
+    def _residual_ticks(self, quote: Any, side: str, quantity: int) -> Decimal:
+        """Whole ticks of own-impact on a spread-crossed fill.
+
+        Zero while the order fits inside the published top-of-book size; one
+        extra tick per whole top-of-book consumed beyond it, capped by
+        ``max_slippage_ticks``. No visible size is *not* a reason to charge
+        impact — the venue said nothing, so the model says nothing.
+        """
+        ticks = self.slippage_ticks
+        visible = _top_of_book_quantity(quote, side)
+        if visible is not None and quantity > int(visible):
+            extra = int(math.ceil(Decimal(quantity) / visible)) - 1
+            ticks += max(0, min(extra, self.max_slippage_ticks - self.slippage_ticks))
+        return Decimal(ticks)
 
     def _log_fill(
         self,
@@ -1259,7 +1524,7 @@ class OptionPaperBroker:
                     "fill_price": str(fill_price),
                     "commission": str(commission),
                 }
-                for leg, fill_price, commission, _ in fills
+                for leg, fill_price, commission, _, _ in fills
             ],
             "cash_after": str(self.available_cash),
             "statutory_fees": str(self._statutory_fees_paid),
