@@ -49,9 +49,11 @@ entitlement:
     - long_put
     - bull_call_spread
     - bear_put_spread
+    - long_straddle
     # Short premium (undefined risk, hard stop mandatory in the strategy's
     # ExitPlan): paper only until risk-reviewed — deliberately not in live.
     - strangle
+    - short_straddle
   live:
     - long_call
     - long_put

@@ -20,6 +20,8 @@ const OptionConfig = (() => {
     { id: "bear_put_spread", label: "Bear put spread" },
     { id: "long_call", label: "Long call" },
     { id: "long_put", label: "Long put" },
+    { id: "long_straddle", label: "Long straddle" },
+    { id: "short_straddle", label: "Short straddle" },
     { id: "strangle", label: "Short strangle" },
   ];
 

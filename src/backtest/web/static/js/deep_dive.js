@@ -321,6 +321,15 @@
           "the strategy/template code changed while this runner was down. It is PAUSED; " +
           "resuming restamps the spawn fingerprint as a conscious migration.</div>"
         : "") +
+      (String(r.warmup_status || "").toUpperCase() === "DEGRADED"
+        ? '<div class="card-error warmup-degraded-banner" style="margin-bottom:10px">' +
+          "⚠ WARMUP DEGRADED — " +
+          esc(r.warmup_reason || "Insufficient historical bars seeded to satisfy indicator quorum.") +
+          "</div>"
+        : (String(r.warmup_status || "").toUpperCase() === "WARMING_UP"
+          ? '<div class="dd-warmup-banner" style="margin-bottom:10px">' +
+            "⏳ Seeding historical + intraday warmup bars in background…</div>"
+          : "")) +
       '<div class="dd-stats">' +
       stat("Equity", "₹" + Math.round(r.equity || 0).toLocaleString("en-IN")) +
       stat("Daily P&L", fmtSigned(r.daily_pnl), pnlClass(r.daily_pnl)) +

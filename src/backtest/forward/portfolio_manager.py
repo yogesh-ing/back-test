@@ -18,6 +18,7 @@ Key properties:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -29,6 +30,13 @@ from typing import Any, Deque, Dict, List, Optional
 from backtest.data.sources_policy import policy_key, synthetic_enabled
 from backtest.forward.feed import SyntheticFeed
 from backtest.forward.feed_registry import get_chain_bus, get_feed_registry
+from backtest.forward.warmup import (
+    SessionBarRecorder,
+    TimeframeBarAggregator,
+    WarmupReport,
+    WarmupService,
+    requires_timeframe_aggregation,
+)
 from backtest.forward.state_store import (
     PortfolioStateStore,
     capture_runner,
@@ -77,6 +85,10 @@ class PortfolioManager:
         state_path: Optional[Any] = None,
         live_broker: Optional[Any] = None,
         confirm_live_orders: bool = False,
+        warmup_service: Optional[WarmupService] = None,
+        enable_broker_warmup: Optional[bool] = None,
+        async_warmup: Optional[bool] = None,
+        reject_duplicate_runners: bool = False,
     ) -> None:
         self.ledger = OrderLedger()
         self.broker = PaperBroker(self.ledger)
@@ -187,6 +199,36 @@ class PortfolioManager:
 
         # U3.3: audit log with scope — every control action logs scope=paper|live|playbook|dashboard
         self._audit_log_entries: Deque[Dict[str, Any]] = deque(maxlen=1000)
+
+        # Phase 1: SessionBarRecorder, TimeframeBarAggregator (Recon Finding F1),
+        # Unified WarmupService, and duplicate-runner guard.
+        self.session_bar_recorder = SessionBarRecorder()
+        self.bar_aggregator = TimeframeBarAggregator()
+        self.warmup_service: WarmupService = warmup_service or WarmupService(
+            session_recorder=self.session_bar_recorder
+        )
+        if self.warmup_service.session_recorder is None:
+            self.warmup_service.session_recorder = self.session_bar_recorder
+        in_pytest = "PYTEST_CURRENT_TEST" in os.environ
+        if enable_broker_warmup is None:
+            self._enable_broker_warmup = bool(
+                warmup_service is not None or not in_pytest
+            )
+        else:
+            self._enable_broker_warmup = bool(enable_broker_warmup)
+        # Never couple background warmup to auto_start_feed: a runner-spawn POST
+        # on a non-synthetic server (auto_start_feed=False) must still warm up
+        # off the request thread during the 09:15 rush.
+        self._async_warmup = (not in_pytest) if async_warmup is None else bool(async_warmup)
+        self._warmup_threads: Dict[str, threading.Thread] = {}
+        self._reject_duplicate_runners = bool(reject_duplicate_runners)
+        self._attached_ws_broker: Optional[Any] = None
+        self._ws_token_symbols: Dict[str, str] = {
+            "26000": "NIFTY",
+            "26009": "BANKNIFTY",
+            "26013": "MIDCPNIFTY",
+            "26037": "FINNIFTY",
+        }
 
         # Gap #3 / V2 (P2.4): optional JSON state persistence. No path →
         # byte-for-byte the old in-memory behaviour. With a path, every
@@ -818,6 +860,112 @@ class PortfolioManager:
             f"feeds runners from mstock, dhan, upstox, or (policy permitting) synthetic"
         )
 
+    @staticmethod
+    def _runner_signature(config: RunnerConfig) -> tuple:
+        """Canonical identity tuple for duplicate-runner detection (Recon Rec #4)."""
+        try:
+            params_key = json.dumps(config.strategy_params or {}, sort_keys=True, default=str)
+        except Exception:
+            params_key = str(config.strategy_params or {})
+        return (
+            str(config.strategy_name or "").strip().lower(),
+            tuple(sorted(str(s).strip().upper() for s in (config.symbols or []))),
+            str(config.timeframe or "").strip().lower(),
+            str(config.mode or "").strip().lower(),
+            params_key,
+        )
+
+    def _intraday_fetcher_for(self, source: str) -> Optional[Any]:
+        """Resolve an intraday 1-minute bar fetcher for broker ``source`` if available."""
+        src = str(source or "").strip().lower()
+        feed_map = {
+            "mstock": self.mstock_feed,
+            "dhan": self.dhan_feed,
+            "upstox": self.upstox_feed,
+        }
+        bar_feed = feed_map.get(src)
+        if bar_feed is None:
+            return None
+        client = getattr(bar_feed, "_client", None)
+        if client is None:
+            # Lazily materialize real client only when warmup is active
+            ensure_fn = getattr(bar_feed, "_ensure_client", None)
+            if callable(ensure_fn):
+                try:
+                    client = ensure_fn()
+                except Exception:  # noqa: BLE001 — degrade cleanly without creds
+                    return None
+        fetch_fn = getattr(client, "fetch_intraday_bars", None)
+        return fetch_fn if callable(fetch_fn) else None
+
+    def warmup_runner(
+        self, instance_id: str, *, background: bool = False
+    ) -> Optional[WarmupReport]:
+        """Warm up ``instance_id`` via historical DB + session intraday bars."""
+        with self._lock:
+            runner = self._runners.get(instance_id)
+            if runner is None:
+                return None
+            runner.warmup_status = "WARMING_UP"
+            source = str(runner.config.source or "").lower()
+            bucket = self._runner_bucket(runner)
+
+        def _execute() -> Optional[WarmupReport]:
+            try:
+                fetcher = self._intraday_fetcher_for(source)
+                report = self.warmup_service.warmup_runner(
+                    runner,
+                    intraday_fetcher=fetcher,
+                    bar_aggregator=self.bar_aggregator,
+                )
+                try:
+                    self._audit_log(
+                        f"WARMUP {runner.config.name}",
+                        scope=bucket,
+                        instance_id=instance_id,
+                        detail=(
+                            f"status={runner.warmup_status} "
+                            f"bars={report.total_bars_seeded} "
+                            f"degraded={len(report.degraded_symbols)}"
+                        ),
+                    )
+                except Exception:
+                    pass
+                self._persist_state()
+                return report
+            except Exception as exc:  # noqa: BLE001 — warmup never crashes runner
+                logger.exception("Warmup failed for runner %s: %s", instance_id[:8], exc)
+                runner.warmup_status = "DEGRADED"
+                runner.warmup_reason = f"Warmup failed ({type(exc).__name__}: {exc})"
+                self._persist_state()
+                return None
+            finally:
+                with self._lock:
+                    cur = self._warmup_threads.get(instance_id)
+                    if cur is threading.current_thread():
+                        self._warmup_threads.pop(instance_id, None)
+
+        if background:
+            t = threading.Thread(
+                target=_execute,
+                name=f"warmup-{instance_id[:8]}",
+                daemon=True,
+            )
+            with self._lock:
+                self._warmup_threads[instance_id] = t
+            t.start()
+            return None
+        return _execute()
+
+    def wait_for_warmup(self, instance_id: str, timeout: float = 5.0) -> bool:
+        """Join any active background warmup thread for ``instance_id``."""
+        with self._lock:
+            t = self._warmup_threads.get(instance_id)
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=timeout)
+            return not t.is_alive()
+        return True
+
     def add_runner(
         self,
         config: RunnerConfig,
@@ -825,7 +973,25 @@ class PortfolioManager:
         strategy: Any = None,
     ) -> str:
         """Spawn a runner from config. Returns its instance_id."""
+        should_warmup = False
         with self._lock:
+            sig = self._runner_signature(config)
+            dup_match = next(
+                (
+                    existing
+                    for existing in self._runners.values()
+                    if existing.status != STATUS_STOPPED
+                    and self._runner_signature(existing.config) == sig
+                ),
+                None,
+            )
+            if dup_match is not None and self._reject_duplicate_runners:
+                raise ValueError(
+                    f"duplicate active runner detected: matches {dup_match.config.name!r} "
+                    f"({dup_match.instance_id[:8]}) on {config.strategy_name} "
+                    f"{list(config.symbols)} {config.timeframe} [{config.mode}]"
+                )
+
             broker_for_runner = self.broker
             if config.mode == "live":
                 # F-12: live equity runners route orders to the REAL broker
@@ -838,6 +1004,20 @@ class PortfolioManager:
             runner = StrategyRunner(
                 config, ledger=self.ledger, broker=broker_for_runner, strategy=strategy
             )
+            if dup_match is not None:
+                runner.duplicate_of = dup_match.instance_id
+                logger.warning(
+                    "DUPLICATE_RUNNER_WARNING: %s (%s) duplicates active runner %s (%s) "
+                    "on strategy=%s symbols=%s tf=%s mode=%s",
+                    runner.config.name,
+                    runner.instance_id[:8],
+                    dup_match.config.name,
+                    dup_match.instance_id[:8],
+                    config.strategy_name,
+                    list(config.symbols),
+                    config.timeframe,
+                    config.mode,
+                )
             self._runners[runner.instance_id] = runner
             self.total_capital += config.allocated_capital
 
@@ -862,6 +1042,15 @@ class PortfolioManager:
 
             if start:
                 runner.start()
+                if self._enable_broker_warmup and str(config.source).lower() in (
+                    "mstock",
+                    "dhan",
+                    "upstox",
+                ):
+                    runner.warmup_status = "WARMING_UP"
+                    should_warmup = True
+                if str(runner.config.source or "").lower() == "mstock":
+                    self._ensure_ws_tick_subscription()
                 if self._auto_start_feed:
                     feed.start(warmup=True)
                     # Gap #1: keep the live poll thread in step with the
@@ -883,6 +1072,13 @@ class PortfolioManager:
                     instance_id=runner.instance_id,
                     detail=f"strategy={config.strategy_name} capital={config.allocated_capital}",
                 )
+                if dup_match is not None:
+                    self._audit_log(
+                        f"DUPLICATE_WARNING {runner.config.name}",
+                        scope=bucket,
+                        instance_id=runner.instance_id,
+                        detail=f"duplicate_of={dup_match.instance_id}",
+                    )
             except Exception:
                 pass
             if self.intelligence is not None:
@@ -891,7 +1087,11 @@ class PortfolioManager:
                 except Exception:  # noqa: BLE001
                     logger.exception("alert subscription failed for %s", runner.instance_id)
             self._persist_state()
-            return runner.instance_id
+            rid = runner.instance_id
+
+        if should_warmup:
+            self.warmup_runner(rid, background=self._async_warmup)
+        return rid
 
     def remove_runner(self, instance_id: str) -> bool:
         with self._lock:
@@ -913,6 +1113,7 @@ class PortfolioManager:
                 except Exception:  # noqa: BLE001
                     logger.exception("alert unsubscribe failed for %s", instance_id)
             runner.stop()  # U6.2: stop() releases the runner's chain-bus subscription
+            self.bar_aggregator.drop_runner(instance_id)
             self.ledger.unregister_handler(instance_id)
             # U6.2: release the bar-feed subscription this runner held.
             # (The chain subscription went with runner.stop() — one release
@@ -972,9 +1173,17 @@ class PortfolioManager:
         return runner
 
     def control_runner(self, instance_id: str, action: str) -> Dict[str, Any]:
+        should_warmup = False
         with self._lock:
             runner = self._control(instance_id, action)
-            state = runner.get_state()
+            if (
+                action.lower() in ("resume", "start")
+                and self._enable_broker_warmup
+                and runner.warmup_bars_seeded == 0
+                and str(runner.config.source).lower() in ("mstock", "dhan", "upstox")
+            ):
+                runner.warmup_status = "WARMING_UP"
+                should_warmup = True
             # Gap #1: start/stop flips change whether any mstock runner is
             # live — keep the shared poll thread in step.
             if runner.config.source == "mstock":
@@ -990,7 +1199,16 @@ class PortfolioManager:
             except Exception:
                 pass
             self._persist_state()
-            return state
+            state = runner.get_state()
+
+        if should_warmup:
+            self.warmup_runner(instance_id, background=self._async_warmup)
+            if not self._async_warmup:
+                with self._lock:
+                    r = self._runners.get(instance_id)
+                    if r is not None:
+                        state = r.get_state()
+        return state
 
     # ------------------------------------------------------------------ #
     # Live Order Management (2026-09-23)
@@ -1888,6 +2106,145 @@ class PortfolioManager:
                 feed.start()
             elif not has_live and feed.running:
                 feed.stop()
+            if source == "mstock":
+                if has_live:
+                    self._ensure_ws_tick_subscription()
+                else:
+                    self.detach_ws_broker()
+
+    def register_ws_symbol_token(self, symbol: str, token: int | str) -> None:
+        """Map a numeric MTicker instrument token to its canonical symbol."""
+        tok_str = str(token).strip()
+        sym_up = str(symbol).strip().upper()
+        if tok_str and sym_up:
+            self._ws_token_symbols[tok_str] = sym_up
+
+    def attach_ws_broker(self, broker: Any) -> bool:
+        """Subscribe ``_on_ws_tick_batch`` to an ``MStockBroker`` coalesced tick bus."""
+        if broker is None or type(broker).__module__ == "unittest.mock":
+            return False
+        add_fn = getattr(broker, "add_tick_listener", None)
+        if not callable(add_fn):
+            return False
+        if self._attached_ws_broker is broker:
+            return True
+        self.detach_ws_broker()
+        try:
+            add_fn(self._on_ws_tick_batch)
+            self._attached_ws_broker = broker
+            return True
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not attach WS tick listener to broker", exc_info=True)
+            return False
+
+    def detach_ws_broker(self) -> None:
+        """Remove ``_on_ws_tick_batch`` from the currently attached WS broker."""
+        broker = self._attached_ws_broker
+        self._attached_ws_broker = None
+        if broker is None:
+            return
+        rem_fn = getattr(broker, "remove_tick_listener", None)
+        if callable(rem_fn):
+            try:
+                rem_fn(self._on_ws_tick_batch)
+            except Exception:  # noqa: BLE001
+                logger.debug("Could not detach WS tick listener", exc_info=True)
+
+    def _ensure_ws_tick_subscription(self) -> bool:
+        if self._attached_ws_broker is not None:
+            return True
+        candidate = self._injected_live_broker
+        if candidate is not None and getattr(candidate, "broker_name", "mstock") == "mstock":
+            if self.attach_ws_broker(candidate):
+                return True
+        try:
+            from backtest.brokers.session_manager import get_session_manager
+
+            broker = get_session_manager().get_authenticated_broker("mstock")
+            if broker is not None:
+                return self.attach_ws_broker(broker)
+        except Exception:  # noqa: BLE001
+            logger.debug("WS broker auto-discovery skipped", exc_info=True)
+        return False
+
+    def _on_ws_tick_batch(self, quotes_by_token: Dict[str, dict]) -> None:
+        """Dispatch coalesced 150ms MTicker batches to ``LiveMinuteBarBuilder`` and runners."""
+        if not quotes_by_token:
+            return
+
+        spot_updates: Dict[str, tuple[float, str, Optional[Dict[str, Any]]]] = {}
+        for tok_str, quote in quotes_by_token.items():
+            if not isinstance(quote, dict):
+                continue
+            sym = self._ws_token_symbols.get(str(tok_str))
+            if not sym:
+                continue
+            ltp = float(quote.get("ltp") or quote.get("last_price") or 0.0)
+            if ltp <= 0.0:
+                continue
+            ts = str(quote.get("recv_utc") or quote.get("timestamp") or "")
+            _, forming = self.mstock_feed.ingest_ws_tick(sym, quote)
+            spot_updates[sym] = (ltp, ts, forming)
+
+        with self._lock:
+            running_mstock = [
+                r
+                for r in self._runners.values()
+                if r.status == STATUS_RUNNING
+                and str(r.config.source or "").lower() == "mstock"
+            ]
+
+        if not running_mstock:
+            return
+
+        tick_tokens = set(str(k) for k in quotes_by_token.keys())
+        exited_runners: List[StrategyRunner] = []
+        entered_any = False
+
+        for runner in running_mstock:
+            matched_spot = False
+            for sym in runner.config.symbols:
+                sym_up = sym.upper()
+                if sym_up not in spot_updates:
+                    continue
+                matched_spot = True
+                ltp, ts, forming = spot_updates[sym_up]
+                res = runner.on_tick(sym_up, price=ltp, ts=ts, forming_bar=forming)
+                if isinstance(res, dict):
+                    if res.get("exited"):
+                        exited_runners.append(runner)
+                    elif res.get("structure_id"):
+                        entered_any = True
+
+            if not matched_spot and runner.options_bridge is not None and runner.config.symbols:
+                held_hits = runner.open_option_tokens().intersection(tick_tokens)
+                if held_hits:
+                    sample_tok = next(iter(held_hits))
+                    sample_q = quotes_by_token.get(sample_tok) or {}
+                    leg_ts = str(
+                        sample_q.get("recv_utc") or sample_q.get("timestamp") or ""
+                    )
+                    res = runner.on_tick(
+                        runner.config.symbols[0].upper(),
+                        price=None,
+                        ts=leg_ts,
+                    )
+                    if isinstance(res, dict) and res.get("exited"):
+                        exited_runners.append(runner)
+
+        if exited_runners or entered_any:
+            with self._lock:
+                if exited_runners:
+                    self._evaluate_risk()
+                self._persist_state()
+            if self._trade_persister is not None and not self._restoring:
+                for runner in exited_runners:
+                    try:
+                        self._trade_persister.flush_runner(runner)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "tick trade flush failed for %s", runner.instance_id
+                        )
 
     # ------------------------------------------------------------------ #
     # State persistence (Gap #3 / V2 — P2.4). No-op unless a state path is
@@ -2185,12 +2542,32 @@ class PortfolioManager:
             # old symbol-only behaviour. Popped so the tag never leaks into a
             # runner's candle buffer / DataFrame / persisted state.
             bar_source = bar.pop("_source", None)
+            bar_timeframe = bar.pop("_timeframe", None)
+            if bar_source in ("mstock", "dhan", "upstox") and bar_timeframe == "1min":
+                self.session_bar_recorder.record_bar(bar_source, symbol, bar)
+
+            sym_up = symbol.upper()
             for runner in self._runners.values():
-                if symbol.upper() not in [s.upper() for s in runner.config.symbols]:
+                if sym_up not in [s.upper() for s in runner.config.symbols]:
                     continue
                 if not self._source_matches(runner, bar_source):
                     continue
-                runner.process_candle_event(symbol, bar)
+                if bar_timeframe == "1min" and requires_timeframe_aggregation(runner):
+                    runner.mark_live_price(
+                        symbol,
+                        float(bar["close"]),
+                        str(bar.get("ts") or bar.get("timestamp") or ""),
+                    )
+                    sealed_bars = self.bar_aggregator.ingest_minute_bar(
+                        runner.instance_id,
+                        symbol,
+                        runner.config.timeframe,
+                        bar,
+                    )
+                    for sealed in sealed_bars:
+                        runner.process_candle_event(symbol, sealed)
+                else:
+                    runner.process_candle_event(symbol, bar)
 
             # GAP-4: flush closed trades the moment they close (a bar can exit
             # a structure). The persister's dedupe makes this cheap — already-
@@ -2932,6 +3309,7 @@ class PortfolioManager:
                 logger.debug("intelligence shutdown failed", exc_info=True)
         if self.feed is not None:
             self.feed.stop()
+        self.detach_ws_broker()
         self.mstock_feed.stop()
         self._watchdog_stop.set()
         with self._lock:

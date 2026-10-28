@@ -519,6 +519,134 @@ class ShortStrangle(OptionStructure):
 
 
 # ---------------------------------------------------------------------------
+# Straddles (Long Debit & Short Credit — Phase 4 / OPT-4)
+# ---------------------------------------------------------------------------
+
+class _StraddleBase(OptionStructure):
+    """Shared ATM strike + two-sided CE/PE resolution for straddles."""
+
+    min_legs = 2
+    max_legs = 2
+    leg_side: str = "BUY"
+
+    def _resolve_atm_strike(
+        self,
+        view: MarketView,
+        strikes: list[Decimal],
+        chain: Any,
+    ) -> Decimal:
+        if not chain:
+            raise ValueError(f"{type(self).__name__} requires a non-empty chain")
+        if strikes:
+            return Decimal(str(strikes[0]))
+        spot = float(view.spot_price or 0)
+        if spot <= 0:
+            raise ValueError(
+                f"{type(self).__name__} requires either selected strikes or a positive spot"
+            )
+        spot_dec = Decimal(str(spot))
+        candidates = sorted(s for s, c in chain.items() if c)
+        if not candidates:
+            raise ValueError(f"{type(self).__name__} found no strikes in chain")
+        return min(candidates, key=lambda s: abs(Decimal(str(s)) - spot_dec))
+
+    def _require_both_sides(
+        self,
+        chain: Any,
+        strike: Decimal,
+    ) -> tuple[OptionContract, OptionContract]:
+        entry = chain.get(strike)
+        if entry is None:
+            raise ValueError(f"No contract found for strike {strike}")
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"{type(self).__name__} requires a two-sided chain "
+                f"{{strike: {{'CE': c, 'PE': c}}}} at strike {strike}"
+            )
+        call_contract = entry.get("CE")
+        put_contract = entry.get("PE")
+        if call_contract is None or put_contract is None:
+            missing = "CE" if call_contract is None else "PE"
+            raise ValueError(f"No {missing} contract at strike {strike}")
+        return call_contract, put_contract
+
+    def build(
+        self,
+        view: MarketView,
+        strikes: list[Decimal],
+        chain: Any,
+        expiry: date,
+        strategy_name: str = "",
+        distance_pct: float | None = None,
+    ) -> TradeIntent:
+        atm_strike = self._resolve_atm_strike(view, strikes, chain)
+        call_contract, put_contract = self._require_both_sides(chain, atm_strike)
+        call_leg = self._build_leg(call_contract, self.leg_side)
+        put_leg = self._build_leg(put_contract, self.leg_side)
+
+        return TradeIntent(
+            view=view,
+            structure_type=self.name,
+            estimated_premium=self._estimate_net_premium(
+                [(call_contract, call_leg), (put_contract, put_leg)],
+                view,
+                expiry,
+            ),
+            legs=(call_leg, put_leg),
+            expiry=expiry,
+            strategy_name=strategy_name,
+            metadata={
+                "strike": str(atm_strike),
+                "call_strike": str(atm_strike),
+                "put_strike": str(atm_strike),
+                "option_type": "BOTH",
+                "strikes": {
+                    call_leg.trading_symbol: str(atm_strike),
+                    put_leg.trading_symbol: str(atm_strike),
+                },
+            },
+        )
+
+
+class LongStraddle(_StraddleBase):
+    """Buy ATM call + ATM put at the same strike — defined-risk volatility debit.
+
+    Maximum loss: total net debit paid (``structure_capped=True`` valid).
+    Maximum gain: unlimited on upside, strike − premium on downside.
+    """
+
+    name = "long_straddle"
+    description = (
+        "Long straddle — buy ATM call and ATM put at the same strike "
+        "for net debit (capped loss)."
+    )
+    leg_side = "BUY"
+    is_defined_risk = True
+
+    def max_loss_description(self) -> str:
+        return "net_debit"
+
+
+class ShortStraddle(_StraddleBase):
+    """Sell ATM call + ATM put at the same strike — neutral premium-selling trade.
+
+    Maximum gain: net premium received. Maximum loss: unlimited (requires an
+    explicit hard stop in ``ExitPlan``; ``structure_capped=True`` alone is refused).
+    """
+
+    name = "short_straddle"
+    description = (
+        "Short straddle — sell ATM call and ATM put at the same strike "
+        "for net credit (undefined risk; hard stop mandatory)."
+    )
+    leg_side = "SELL"
+    is_defined_risk = False
+
+    def max_loss_description(self) -> str:
+        return "unlimited"
+
+
+# ---------------------------------------------------------------------------
 # Structure factory
 # ---------------------------------------------------------------------------
 
@@ -529,7 +657,8 @@ def create_structure(structure_type: str) -> OptionStructure:
     ----------
     structure_type:
         One of ``"long_call"``, ``"long_put"``, ``"bull_call_spread"``,
-        ``"bear_put_spread"``.
+        ``"bear_put_spread"``, ``"strangle"``, ``"long_straddle"``,
+        ``"short_straddle"``.
     """
     structures = {
         "long_call": LongCall,
@@ -537,6 +666,8 @@ def create_structure(structure_type: str) -> OptionStructure:
         "bull_call_spread": BullCallSpread,
         "bear_put_spread": BearPutSpread,
         "strangle": ShortStrangle,
+        "long_straddle": LongStraddle,
+        "short_straddle": ShortStraddle,
     }
     cls = structures.get(structure_type)
     if cls is None:

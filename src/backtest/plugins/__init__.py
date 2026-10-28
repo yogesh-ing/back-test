@@ -190,7 +190,20 @@ def conformance_errors(cls: type, *, run_behaviour: bool = True) -> ConformanceR
             )
         if issubclass(cls, StructureStrategy) and spec is not None:
             plan_ = spec.exit_plan
-            if plan_.structure_capped and not (
+            opening = getattr(cls, "opening_structure", None) or {}
+            opening_struct = str(opening.get("structure", "")).strip().lower()
+            defined_risk = {
+                "long_call",
+                "long_put",
+                "bull_call_spread",
+                "bear_put_spread",
+                "long_straddle",
+            }
+            declared_all = {r.structure for r in spec.structures.values()}
+            if opening_struct:
+                declared_all.add(opening_struct)
+            has_undefined_risk = not declared_all or bool(declared_all - defined_risk)
+            if has_undefined_risk and plan_.structure_capped and not (
                 plan_.stop_loss_pct is not None
                 or plan_.stop_loss_points is not None
                 or plan_.max_loss_inr is not None

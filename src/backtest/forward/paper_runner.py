@@ -273,6 +273,42 @@ def _as_ist_date(moment: datetime) -> str:
     return moment.astimezone(_IST).date().isoformat()
 
 
+def infer_evaluation_cadence(strategy: Any) -> str:
+    """Resolve ``'tick'`` vs ``'bar_close'`` without mutating hashed base classes.
+
+    * Explicit ``strategy.evaluation_cadence`` wins when declared (``'tick'``
+      or ``'bar_close'``).
+    * Unconditional option templates (``InstantLongOptionStrategy`` ->
+      ``template == 'instant_long_option'``, ``StructureStrategy`` ->
+      ``template == 'structure'``) default to ``'tick'`` so ``CE_instant_buy``,
+      ``PE_instant_buy``, and ``immediate_strangle`` enter intra-bar on live
+      ticks without waiting for bar close.
+    * Indicator-driven option and equity strategies default to ``'bar_close'``
+      (Caveats Q-2, Q-3).
+    """
+    explicit = getattr(strategy, "evaluation_cadence", None)
+    if isinstance(explicit, str):
+        norm = explicit.strip().lower()
+        if norm in ("tick", "bar_close"):
+            return norm
+    tmpl = str(getattr(strategy, "template", "") or "").strip().lower()
+    if tmpl in ("instant_long_option", "structure"):
+        return "tick"
+    return "bar_close"
+
+
+def _infer_wing_distance_pct(strategy: Any) -> Optional[float]:
+    """Extract strangle ``distance_pct`` from ``opening_structure`` if present."""
+    opening = getattr(strategy, "opening_structure", None)
+    if isinstance(opening, dict) and opening.get("distance_pct") is not None:
+        try:
+            dist = float(opening["distance_pct"])
+            return dist if dist > 0.0 else None
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 class OrderLedger:
     """Thread-safe order tagging & fill-routing ledger.
 
@@ -494,13 +530,17 @@ class OrderLedger:
         requested_price: Optional[float] = None,
         ts: Optional[str] = None,
         tag: Optional[Dict[str, Any]] = None,
+        broker_order_id: Optional[str] = None,
+        order_type: str = "MARKET",
+        limit_price: Optional[float] = None,
     ) -> Order:
         """Write a **terminal FILLED row** for a fill that never was a routed order.
 
-        Option structure legs are the case: ``OptionPaperBroker`` fills a leg
-        against the live depth inside one call, so there is no PENDING order to
-        advance — yet the execution still belongs in the ledger, because the
-        Orders tab is the audit of "did it fill, and at what price?".
+        Option structure legs are the case: ``OptionPaperBroker`` (or
+        ``LiveOptionBrokerAdapter``) fills a leg synchronously, so there is no
+        PENDING order to advance — yet the execution still belongs in the
+        ledger, because the Orders tab is the audit of "did it fill, and at
+        what price?".
 
         Deliberately **not** :meth:`apply_fill`: that routes a FillEvent to the
         owning runner's equity handler, which would open a share-simulation
@@ -514,14 +554,15 @@ class OrderLedger:
 
         stamp = ts or datetime.now(timezone.utc).isoformat()
         coid = self._make_client_order_id(instance_id)
+        norm_type = str(order_type or "MARKET").strip().upper() or "MARKET"
         order = Order(
             client_order_id=coid,
             instance_id=instance_id,
             symbol=str(symbol).strip().upper(),
             side=side,
             quantity=float(quantity),
-            order_type="MARKET",
-            limit_price=None,
+            order_type=norm_type,
+            limit_price=float(limit_price) if limit_price is not None else None,
             status=ORDER_FILLED,
             created_ts=stamp,
             filled_qty=float(quantity),
@@ -529,6 +570,7 @@ class OrderLedger:
             filled_ts=stamp,
             updated_ts=stamp,
             tag=dict(tag or {}),
+            broker_order_id=str(broker_order_id) if broker_order_id else None,
             requested_price=float(requested_price) if requested_price else None,
         )
         order.slippage, order.slippage_pct = self._slippage(
@@ -878,7 +920,7 @@ STATUS_PAUSED = "PAUSED"
 STATUS_STOPPED = "STOPPED"
 STATUS_ERROR = "ERROR"
 
-MAX_BARS_PER_SYMBOL = 500  # Task 5: light rolling buffers
+MAX_BARS_PER_SYMBOL = 600  # Sized for EMA(200) 3x IIR convergence + 2yr 1day VCP/RS
 MAX_SIGNAL_LOG = 200
 MAX_TRADE_LOG = 200
 MAX_EQUITY_POINTS = 500
@@ -1082,6 +1124,7 @@ class StrategyRunner:
         ledger: OrderLedger,
         broker: Optional[PaperBroker] = None,
         strategy: Optional[Any] = None,
+        option_broker: Optional[Any] = None,
     ) -> None:
         self.config = config
         self.instance_id: str = config.instance_id or uuid.uuid4().hex
@@ -1168,7 +1211,9 @@ class StrategyRunner:
             # The fallback is deliberate and labelled ("synthetic:bs") so a
             # synthetic-priced runner can never pass as live.
             provider, quote_label = option_quote_provider_for(
-                config.source, self._chain_underlying
+                config.source,
+                self._chain_underlying,
+                wing_distance_pct=_infer_wing_distance_pct(self.strategy),
             )
             # The bus STORE the acquire landed in (synthetic|mstock|dhan|upstox) —
             # derived from the resolved provider, not from config.source: a
@@ -1180,17 +1225,71 @@ class StrategyRunner:
                 str(config.source).lower() if quote_label.startswith("live:") else "synthetic"
             )
             self._chain_released = False  # one release per acquire (stop is idempotent)
-            self.options_bridge = OptionsBridge(
-                capital=config.allocated_capital,
-                expression=config.instrument.get("expression"),
-                mode=config.mode,
-                quote_provider=provider,
-                # Marks land on bar close (plus the portfolio watchdog), so the
-                # freshness SLA is sized off the bar cadence — see OptionsBridge.
-                bar_cadence_seconds=60.0
-                * TIMEFRAME_MINUTES.get(config.timeframe, 0),
-                fee_calculator=CommissionCalculator.for_broker("zerodha"),
-            )
+            try:
+                resolved_opt_broker = option_broker
+                fee_calc = CommissionCalculator.for_broker("zerodha")
+                if config.mode == "live" and policy_key(config.source) != "synthetic":
+                    from backtest.options.live_trading import (
+                        LiveOptionBrokerAdapter,
+                        LiveOptionTrader,
+                    )
+
+                    if resolved_opt_broker is not None:
+                        if not bool(getattr(resolved_opt_broker, "is_live_adapter", False)):
+                            raise ValueError(
+                                "live option runner refused: option_broker must be a "
+                                "LiveOptionBrokerAdapter when mode='live'"
+                            )
+                    else:
+                        if self._chain_source == "synthetic":
+                            raise ValueError(
+                                f"live option runner {config.name!r} refused: live option "
+                                f"chain for {config.source!r} is unavailable (refusing "
+                                "synthetic chain fallback in mode='live')"
+                            )
+                        raw_live_broker = getattr(self.broker, "broker", None)
+                        if raw_live_broker is None:
+                            raise ValueError(
+                                f"live option runner {config.name!r} refused: live broker "
+                                "gateway is not armed (confirm_live=True and "
+                                "ALLOW_LIVE_ORDERS=1 required)"
+                            )
+                        live_trader = LiveOptionTrader(
+                            broker=raw_live_broker,
+                            dry_run=False,
+                            confirm_live=True,
+                            quote_provider=provider,
+                        )
+                        resolved_opt_broker = LiveOptionBrokerAdapter(
+                            trader=live_trader,
+                            capital=config.allocated_capital,
+                            fee_calculator=fee_calc,
+                        )
+
+                self.options_bridge = OptionsBridge(
+                    capital=config.allocated_capital,
+                    expression=config.instrument.get("expression"),
+                    option_broker=resolved_opt_broker,
+                    mode=config.mode,
+                    quote_provider=provider,
+                    # Marks land on bar close (plus the portfolio watchdog), so the
+                    # freshness SLA is sized off the bar cadence — see OptionsBridge.
+                    bar_cadence_seconds=60.0
+                    * TIMEFRAME_MINUTES.get(config.timeframe, 0),
+                    fee_calculator=fee_calc,
+                    on_halt=self._on_option_execution_halt,
+                )
+            except Exception:
+                try:
+                    from backtest.forward.feed_registry import get_chain_bus
+
+                    get_chain_bus().release(
+                        self._chain_underlying, source=self._chain_source
+                    )
+                    self._chain_released = True
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
             self.options_bridge.runner_id = self.instance_id
             self.options_bridge.runner_name = self.config.name
             self.options_bridge.runner_running = False
@@ -1199,10 +1298,16 @@ class StrategyRunner:
             self.options_bridge.option_broker.on_leg_fill = self._record_option_leg_fill
 
         # -- rolling candle buffers ----------------------------------------
+        # Caveat Q-2: _bars holds strictly immutable CLOSED timeframe candles;
+        # intra-interval tick state lives exclusively in _forming_bar.
         self._bars: Dict[str, Deque[Dict[str, Any]]] = {
             sym: deque(maxlen=MAX_BARS_PER_SYMBOL) for sym in config.symbols
         }
+        self._forming_bar: Dict[str, Dict[str, Any]] = {}
         self._last_bar_ts: Dict[str, str] = {}
+        self.evaluation_cadence: str = infer_evaluation_cadence(self.strategy)
+        self._entry_lock = threading.Lock()
+        self._entry_in_flight: bool = False
 
         # -- metrics ---------------------------------------------------------
         self.equity_curve: List[Dict[str, Any]] = []
@@ -1239,6 +1344,15 @@ class StrategyRunner:
         self.error: Optional[str] = None
         self.bars_processed: int = 0
         self.created_ts: str = datetime.now(timezone.utc).isoformat()
+        self.max_bars_per_symbol: int = MAX_BARS_PER_SYMBOL
+        self.warmup_status: str = "IDLE"
+        self.warmup_bars_seeded: int = 0
+        self.warmup_target_bars: int = 0
+        self.warmup_quorum_bars: int = 0
+        self.warmup_degraded_symbols: List[str] = []
+        self.warmup_reason: Optional[str] = None
+        self.duplicate_of: Optional[str] = None
+        self._bar_sealed_since_tick_end: bool = False
 
         # -- operator-set levels (Live Order Management) --------------------
         # ``{position_key: {"stop_loss": float|None, "target": float|None}}``
@@ -1336,7 +1450,19 @@ class StrategyRunner:
             return float(total / Decimal(str(units))) if units else 0.0
 
         strikes = sorted({str(leg.strike) for leg in legs})
-        pnl = float(structure.total_realized_pnl)
+        gross_pnl = float(structure.total_realized_pnl)
+        commission = float(structure.total_commission)
+        statutory_fees = float(getattr(structure, "statutory_fees", Decimal("0")) or 0)
+        net_pnl = float(
+            getattr(
+                structure,
+                "net_pnl",
+                structure.total_realized_pnl - structure.total_commission,
+            )
+        )
+        session_date = getattr(structure, "effective_session_date", None)
+        if not session_date and getattr(structure, "closed_at", None) is not None:
+            session_date = _as_ist_date(structure.closed_at)
         return {
             "symbol": f"{structure.underlying} {structure.structure_type}",
             "label": (
@@ -1356,9 +1482,13 @@ class StrategyRunner:
             "exit_price": round(_net_premium("current_price"), 2),
             "entry_ts": structure.opened_at.isoformat() if structure.opened_at else None,
             "exit_ts": structure.closed_at.isoformat() if structure.closed_at else None,
-            "pnl": round(pnl, 2),
-            "commission": round(float(structure.total_commission), 2),
-            "win": pnl >= 0,
+            "session_date": session_date,
+            "pnl": round(gross_pnl, 2),
+            "gross_pnl": round(gross_pnl, 2),
+            "net_pnl": round(net_pnl, 2),
+            "commission": round(commission, 2),
+            "statutory_fees": round(statutory_fees, 2),
+            "win": gross_pnl >= 0,
             "exit_reason": structure.exit_reason,
             "coid": None,
             "exit_coid": None,
@@ -1408,14 +1538,31 @@ class StrategyRunner:
     def _record_option_leg_fill(self, record: Dict[str, Any]) -> None:
         """Mirror one option leg fill into the order ledger (Orders tab).
 
-        An option leg fills inside ``OptionPaperBroker``, so there is no
-        PENDING order to advance and no reason to route a FillEvent — this
-        writes the terminal row only. The option book stays the single owner
-        of option accounting.
+        An option leg fills inside ``OptionPaperBroker`` (or
+        ``LiveOptionBrokerAdapter``), so there is no PENDING order to advance
+        and no reason to route a FillEvent — this writes the terminal row only.
+        The option book stays the single owner of option accounting.
         """
         ts = record.get("ts")
         phase = str(record.get("phase") or "fill")
         structure_type = str(record.get("structure_type") or "")
+        broker_order_id = record.get("broker_order_id")
+        order_type = str(record.get("order_type") or "MARKET")
+        limit_price = record.get("limit_price")
+        tag_payload: Dict[str, Any] = {
+            "kind": "option",
+            "phase": phase,
+            "lots": int(record.get("lots") or 0),
+            "lot_size": int(record.get("lot_size") or 0),
+            "structure_id": record.get("structure_id"),
+            "structure_type": structure_type,
+            "underlying": record.get("underlying"),
+            "position_id": record.get("position_id"),
+            "reason": f"{phase} {structure_type}".strip(),
+        }
+        if broker_order_id:
+            tag_payload["broker_order_id"] = str(broker_order_id)
+            tag_payload["order_type"] = order_type
         self.ledger.record_filled(
             self.instance_id,
             symbol=str(record.get("symbol") or record.get("instrument_token") or ""),
@@ -1425,17 +1572,22 @@ class StrategyRunner:
             requested_price=float(record["requested_price"])
             if record.get("requested_price") is not None else None,
             ts=ts.isoformat() if isinstance(ts, datetime) else (str(ts) if ts else None),
-            tag={
-                "kind": "option",
-                "phase": phase,
-                "lots": int(record.get("lots") or 0),
-                "lot_size": int(record.get("lot_size") or 0),
-                "structure_id": record.get("structure_id"),
-                "structure_type": structure_type,
-                "underlying": record.get("underlying"),
-                "position_id": record.get("position_id"),
-                "reason": f"{phase} {structure_type}".strip(),
-            },
+            tag=tag_payload,
+            broker_order_id=str(broker_order_id) if broker_order_id else None,
+            order_type=order_type,
+            limit_price=float(limit_price) if limit_price is not None else None,
+        )
+
+    def _on_option_execution_halt(self, reason: str) -> None:
+        """Pause the runner immediately when live option execution halts (OPT-3)."""
+        with self._lock:
+            self.error = f"LIVE_EXECUTION_HALTED: {reason}"
+        self.pause()
+        logger.error(
+            "Runner %s (%s) PAUSED due to live option execution halt: %s",
+            self.instance_id[:8],
+            self.config.name,
+            reason,
         )
 
     @property
@@ -1561,6 +1713,9 @@ class StrategyRunner:
             logger.exception("synthetic chain release failed for %s", self.instance_id[:8])
 
         bridge.quote_provider = provider
+        trader_obj = getattr(bridge.option_broker, "trader", None)
+        if trader_obj is not None:
+            trader_obj.quote_provider = provider
         self._chain_source = src
         self._chain_released = False  # we now hold the live entry; stop() releases it
         logger.info(
@@ -1666,6 +1821,14 @@ class StrategyRunner:
                     except Exception:  # noqa: BLE001 — release must never block stop
                         logger.exception("chain bus release failed for %s", self.instance_id[:8])
                 self._chain_released = True
+            if self.options_bridge is not None:
+                trader_obj = getattr(self.options_bridge.option_broker, "trader", None)
+                close_fn = getattr(trader_obj, "close", None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception:  # noqa: BLE001
+                        pass
             self.status = STATUS_STOPPED
             self._sync_bridge_runner_state()
             logger.info("Runner %s stopped", self.instance_id[:8])
@@ -2074,8 +2237,315 @@ class StrategyRunner:
             }
 
     # ------------------------------------------------------------------ #
-    # Candle event processing
+    # Candle event processing & silent warmup seeding
     # ------------------------------------------------------------------ #
+
+    def seed_history(
+        self,
+        bars_by_symbol: Dict[str, Any],
+        *,
+        degraded_symbols: Optional[List[str]] = None,
+        target_bars: Optional[int] = None,
+        quorum_bars: Optional[int] = None,
+        warmup_reason: Optional[str] = None,
+    ) -> int:
+        """Silently populate historical + intraday warmup bars (Caveat Q-6).
+
+        Populates ``_bars``, ``_last_bar_ts``, ``last_price``, portfolio marks,
+        and option-chain spot **without** evaluating signals or submitting any
+        orders (eliminating phantom fills on historical warmup candles). Any
+        newer live bars that arrived while warmup ran in the background are
+        merged and preserved in chronological order.
+        """
+        seeded_total = 0
+        price_updates: Dict[str, float] = {}
+        with self._lock:
+            for raw_sym, rows in (bars_by_symbol or {}).items():
+                sym = str(raw_sym).strip().upper()
+                if sym not in self._bars or not rows:
+                    continue
+                by_ts: Dict[str, Dict[str, Any]] = {}
+                for candle in rows:
+                    ts = str(candle.get("ts") or candle.get("timestamp") or "")
+                    if not ts:
+                        continue
+                    price = float(candle["close"])
+                    by_ts[ts] = {
+                        "ts": ts,
+                        "open": float(candle.get("open", price)),
+                        "high": float(candle.get("high", price)),
+                        "low": float(candle.get("low", price)),
+                        "close": price,
+                        "volume": float(candle.get("volume", 0) or 0),
+                    }
+                # Preserve any newer live bars already buffered during async warmup
+                for existing in self._bars[sym]:
+                    ex_ts = str(existing.get("ts") or "")
+                    if ex_ts:
+                        by_ts[ex_ts] = existing
+
+                if not by_ts:
+                    continue
+                ordered = [by_ts[k] for k in sorted(by_ts)][-MAX_BARS_PER_SYMBOL:]
+                self._bars[sym].clear()
+                self._bars[sym].extend(ordered)
+                latest = ordered[-1]
+                self._last_bar_ts[sym] = latest["ts"]
+                self.last_price[sym] = float(latest["close"])
+                price_updates[sym] = float(latest["close"])
+                seeded_total += len(ordered)
+
+            if price_updates:
+                self.portfolio.update_prices(price_updates)
+                if self.options_bridge is not None:
+                    und = getattr(self, "_chain_underlying", None) or (
+                        self.config.symbols[0] if self.config.symbols else "NIFTY"
+                    )
+                    und_up = str(und).upper()
+                    if und_up in price_updates:
+                        try:
+                            self.options_bridge._sync_market(
+                                und_up,
+                                price_updates[und_up],
+                                self._last_bar_ts.get(und_up),
+                            )
+                        except Exception:  # noqa: BLE001 — spot sync never fails seed
+                            logger.debug("Warmup option spot sync skipped", exc_info=True)
+                self._mark_to_market(record=False)
+
+            if target_bars is not None:
+                self.warmup_target_bars = max(0, int(target_bars))
+            if quorum_bars is not None:
+                self.warmup_quorum_bars = max(0, int(quorum_bars))
+            self.warmup_bars_seeded = seeded_total
+            if degraded_symbols is not None:
+                degraded_set = {
+                    str(s).strip().upper() for s in degraded_symbols if str(s).strip()
+                }
+            elif self.warmup_quorum_bars > 0:
+                degraded_set = {
+                    sym
+                    for sym, buf in self._bars.items()
+                    if len(buf) < self.warmup_quorum_bars
+                }
+            else:
+                degraded_set = set()
+            self.warmup_degraded_symbols = sorted(degraded_set)
+            if self.warmup_degraded_symbols:
+                self.warmup_status = "DEGRADED"
+                self.warmup_reason = warmup_reason or (
+                    f"{len(self.warmup_degraded_symbols)}/{len(self._bars)} symbol(s) "
+                    f"below quorum (>={self.warmup_quorum_bars} bars)"
+                )
+            else:
+                self.warmup_status = "READY"
+                self.warmup_reason = None
+        return seeded_total
+
+    def _refresh_warmup_quorum(self) -> None:
+        """Promote ``DEGRADED -> READY`` once live bars fill all symbols to quorum."""
+        if self.warmup_status != "DEGRADED" or self.warmup_quorum_bars <= 0:
+            return
+        remaining = [
+            sym for sym, buf in self._bars.items() if len(buf) < self.warmup_quorum_bars
+        ]
+        if remaining != self.warmup_degraded_symbols:
+            self.warmup_degraded_symbols = sorted(remaining)
+        if not self.warmup_degraded_symbols:
+            self.warmup_status = "READY"
+            self.warmup_reason = None
+
+    def mark_live_price(self, symbol: str, price: float, ts: str = "") -> None:
+        """Update intra-timeframe MTM, option marks, manual stops, and risk breakers.
+
+        Used while :class:`TimeframeBarAggregator` accumulates an unsealed
+        ``5min`` / ``15min`` / ``1hour`` / ``1day`` candle so open positions and
+        option structures stay freshly marked every minute without triggering
+        premature indicator signals (Recon Finding F1).
+        """
+        symbol = str(symbol).upper()
+        if symbol not in self._bars:
+            return
+        with self._lock:
+            if self.status in (STATUS_STOPPED, STATUS_ERROR):
+                return
+            try:
+                px = float(price)
+                if ts:
+                    self._roll_trading_day(ts)
+                self.last_price[symbol] = px
+                self.portfolio.update_prices({symbol: px})
+                if self.options_bridge is not None:
+                    self._tick_option_book(symbol, px, ts)
+                self._mark_to_market(record=True)
+                self._check_position_rules(symbol, px)
+                self._check_instance_risk()
+                self._apply_strategy_requests()
+            except Exception as exc:  # noqa: BLE001 — never kill runner on mark
+                logger.exception(
+                    "Runner %s live mark error on %s: %s",
+                    self.instance_id[:8],
+                    symbol,
+                    exc,
+                )
+
+    def _try_begin_entry(self) -> bool:
+        """Atomically acquire the per-runner single-flight entry guard (Caveat Q-4)."""
+        with self._entry_lock:
+            if self._entry_in_flight:
+                return False
+            self._entry_in_flight = True
+            return True
+
+    def _end_entry(self) -> None:
+        with self._entry_lock:
+            self._entry_in_flight = False
+
+    def open_option_tokens(self) -> set[str]:
+        """Return active instrument tokens for open option legs on this runner."""
+        bridge = self.options_bridge
+        if bridge is None:
+            return set()
+        return {
+            str(pos.instrument_token)
+            for pos in bridge.option_broker.get_open_positions()
+            if getattr(pos, "instrument_token", "")
+        }
+
+    def _update_forming_bar(
+        self,
+        symbol: str,
+        price: float,
+        ts: str,
+        forming_bar: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Maintain intra-interval candle state separately from ``self._bars`` (Q-2)."""
+        if forming_bar is not None:
+            row = {
+                "ts": str(forming_bar.get("ts") or ts or ""),
+                "open": float(forming_bar.get("open", price)),
+                "high": float(forming_bar.get("high", price)),
+                "low": float(forming_bar.get("low", price)),
+                "close": float(price),
+                "volume": float(forming_bar.get("volume", 0.0)),
+            }
+            self._forming_bar[symbol] = row
+            return row
+        cur = self._forming_bar.get(symbol)
+        if cur is None:
+            row = {
+                "ts": ts,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": 0.0,
+            }
+            self._forming_bar[symbol] = row
+            return row
+        cur["high"] = max(float(cur["high"]), price)
+        cur["low"] = min(float(cur["low"]), price)
+        cur["close"] = price
+        if ts:
+            cur["ts"] = ts
+        return cur
+
+    def _tick_view_frame(
+        self, symbol: str, price: float, ts: str
+    ) -> pd.DataFrame:
+        """Build an isolated DataFrame for ``evaluation_cadence='tick'`` (Caveat Q-2)."""
+        closed_tail = list(self._bars[symbol])[-5:]
+        forming = dict(
+            self._forming_bar.get(symbol)
+            or {
+                "ts": ts or datetime.now(timezone.utc).isoformat(),
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": 0.0,
+            }
+        )
+        forming["close"] = float(price)
+        if not forming.get("ts"):
+            forming["ts"] = datetime.now(timezone.utc).isoformat()
+        if closed_tail and str(closed_tail[-1].get("ts")) == str(forming["ts"]):
+            rows = closed_tail[:-1] + [forming]
+        else:
+            rows = closed_tail + [forming]
+        return self._bars_to_frame(rows)
+
+    def on_tick(
+        self,
+        symbol: str,
+        price: Optional[float] = None,
+        ts: str = "",
+        *,
+        forming_bar: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Process a coalesced live tick for sub-second protective exits and tick entries.
+
+        * ``self._bars[symbol]`` is NEVER mutated here (Caveat Q-2).
+        * Protective exits (``stop_loss``, ``take_profit``, ``risk_cap``, manual
+          stops, intraday square-off) run for ALL open option runners without
+          advancing ``bars_in_trade`` or firing ``signal_flip`` (Fix F3, Q-3).
+        * Intra-bar entries run ONLY when ``self.evaluation_cadence == 'tick'``
+          under the atomic ``_entry_in_flight`` lock (Q-4, Q-7).
+        """
+        symbol = str(symbol).upper()
+        if symbol not in self._bars:
+            return None
+
+        with self._lock:
+            if self.status != STATUS_RUNNING:
+                return None
+            try:
+                resolved_px: Optional[float] = None
+                if price is not None and float(price) > 0:
+                    resolved_px = float(price)
+                elif symbol in self.last_price and self.last_price[symbol] > 0:
+                    resolved_px = float(self.last_price[symbol])
+
+                if ts:
+                    self._roll_trading_day(ts)
+
+                if resolved_px is not None:
+                    self._update_forming_bar(
+                        symbol, resolved_px, ts, forming_bar=forming_bar
+                    )
+                    self.last_price[symbol] = resolved_px
+                    self.portfolio.update_prices({symbol: resolved_px})
+
+                exited = False
+                if self.options_bridge is not None:
+                    exited = self._tick_option_book(symbol, resolved_px, ts)
+                self._mark_to_market(record=exited)
+                if resolved_px is not None:
+                    self._check_position_rules(symbol, resolved_px)
+                self._check_instance_risk()
+                self._apply_strategy_requests()
+
+                if exited or self.status != STATUS_RUNNING:
+                    return {"exited": True} if exited else None
+
+                if (
+                    self.evaluation_cadence == "tick"
+                    and self.config.target_type == TARGET_SINGLE
+                    and self.warmup_status != "WARMING_UP"
+                    and resolved_px is not None
+                    and self.options_bridge is not None
+                    and not self.options_bridge._has_open_structure()
+                ):
+                    return self._process_option_tick_entry(symbol, resolved_px, ts)
+                return None
+            except Exception as exc:  # noqa: BLE001 — never kill runner on tick
+                logger.exception(
+                    "Runner %s tick error on %s: %s",
+                    self.instance_id[:8],
+                    symbol,
+                    exc,
+                )
+                return None
 
     def process_candle_event(self, symbol: str, candle: Dict[str, Any]) -> None:
         """Feed one closed bar. Main entry point from the portfolio feed."""
@@ -2105,10 +2575,13 @@ class StrategyRunner:
                     "volume": float(candle.get("volume", 0)),
                 }
                 self._bars[symbol].append(bar)
+                self._forming_bar.pop(symbol, None)
                 if ts:
                     self._last_bar_ts[symbol] = ts
                 self.last_price[symbol] = price
                 self.bars_processed += 1
+                self._bar_sealed_since_tick_end = True
+                self._refresh_warmup_quorum()
 
                 self._roll_trading_day(ts)
                 self.portfolio.update_prices({symbol: price})
@@ -2122,15 +2595,23 @@ class StrategyRunner:
 
                 if self.config.target_type == TARGET_SINGLE:
                     # Single-symbol runners act immediately on their own bar.
-                    # Option runners are exempt from the warmup gate (2026-09-18):
-                    # the bridge owns history needs (ATM strike = closest chain
-                    # strike, no lookback math), and an "immediate entry" spec
-                    # cannot wait 12 bars for a warmup designed for lookback
-                    # indicators. The strategy contract is unaffected.
-                    warmup_ok = (
-                        len(self._bars[symbol]) >= MIN_WARMUP_BARS
-                        or self.options_bridge is not None
-                    )
+                    # Unconditional option runners (warmup_quorum_bars == 0) stay
+                    # exempt from the 12-bar floor; lookback strategies warmed via
+                    # WarmupService require >= warmup_quorum_bars so an EMA(200)
+                    # runner degraded to 1 intraday session never fires on 25 bars.
+                    if self.warmup_quorum_bars > 0:
+                        warmup_ok = (
+                            self.warmup_status != "WARMING_UP"
+                            and len(self._bars[symbol]) >= self.warmup_quorum_bars
+                        )
+                    else:
+                        warmup_ok = (
+                            self.warmup_status != "WARMING_UP"
+                            and (
+                                len(self._bars[symbol]) >= MIN_WARMUP_BARS
+                                or self.options_bridge is not None
+                            )
+                        )
                     if warmup_ok:
                         if self.options_bridge is not None:
                             # Gap G3.2: option instrument → expression layer.
@@ -2196,13 +2677,18 @@ class StrategyRunner:
     def on_tick_end(self, tick_ts: str) -> None:
         """Hook fired by the feed after every symbol's bar for this tick.
 
-        Pool runners run the basket scan exactly once here.
+        Pool runners run the basket scan strictly when at least one symbol
+        sealed a completed timeframe bar during the sweep and warmup is ready.
         """
         with self._lock:
             if self.status in (STATUS_STOPPED, STATUS_ERROR):
                 return
             if self.config.target_type != TARGET_POOL:
+                self._bar_sealed_since_tick_end = False
                 return
+            if not self._bar_sealed_since_tick_end or self.warmup_status == "WARMING_UP":
+                return
+            self._bar_sealed_since_tick_end = False
             try:
                 self._process_pool(tick_ts)
                 self._check_instance_risk()
@@ -2359,10 +2845,21 @@ class StrategyRunner:
         # A viewless bar is meaningful (B1): the bridge counts it towards the
         # neutral exit rule and can close a position the strategy walked away
         # from. So the call happens even when the strategy has no opinion.
-        if _intent is not None and getattr(self.options_bridge, "strict", False):
-            result = self.options_bridge.on_intent(_intent, view, self.config.strategy_name)
-        else:
-            result = self.options_bridge.on_market_view(view, self.config.strategy_name)
+        entering = (
+            _intent is not None
+            and getattr(self.options_bridge, "strict", False)
+            and not self.options_bridge._has_open_structure()
+        )
+        if entering and not self._try_begin_entry():
+            return
+        try:
+            if _intent is not None and getattr(self.options_bridge, "strict", False):
+                result = self.options_bridge.on_intent(_intent, view, self.config.strategy_name)
+            else:
+                result = self.options_bridge.on_market_view(view, self.config.strategy_name)
+        finally:
+            if entering:
+                self._end_entry()
         if not result:
             return
         if result.get("exited"):
@@ -2373,11 +2870,16 @@ class StrategyRunner:
                 symbol, "OPTION_BLOCKED", None, bar["close"], str(result.get("reason"))
             )
             return
+        self._record_option_entry_signal(symbol, result, bar["close"])
+
+    def _record_option_entry_signal(
+        self, symbol: str, result: Dict[str, Any], spot_price: float
+    ) -> None:
         self._log_signal(
             symbol,
             "OPTION_ENTRY",
             1 if result.get("direction") == "bullish" else -1,
-            bar["close"],
+            spot_price,
             "{} {} expiry={} legs={}".format(
                 result.get("structure_type"),
                 "/".join(result.get("strikes", [])),
@@ -2393,6 +2895,63 @@ class StrategyRunner:
             ).strip()
         except Exception:  # noqa: BLE001 — a label must never kill the entry
             pass
+
+    def _process_option_tick_entry(
+        self, symbol: str, price: float, ts: str
+    ) -> Optional[Dict[str, Any]]:
+        """Evaluate an intra-bar tick entry under the atomic ``_entry_in_flight`` lock."""
+        if (
+            self.options_bridge is None
+            or not getattr(self.options_bridge, "strict", False)
+            or self.options_bridge._has_open_structure()
+        ):
+            return None
+        if not self._try_begin_entry():
+            return None
+        try:
+            if self.options_bridge._has_open_structure():
+                return None
+            if self.options_bridge.mark_stale or self._entries_paused_by_strategy():
+                return None
+            df = self._tick_view_frame(symbol, price, ts)
+            view = self.strategy.generate_market_view(df)
+            if view is None:
+                return None
+            from backtest.strategy.templates import TemplateBase
+
+            if not isinstance(self.strategy, TemplateBase):
+                return None
+            intent = self.strategy.build_opening_intent(view)
+            if intent is None:
+                return None
+            result = self.options_bridge.on_intent(
+                intent,
+                view,
+                self.config.strategy_name,
+                from_tick=True,
+                tick_ts=ts,
+            )
+            if not result:
+                return None
+            if result.get("rejected"):
+                self._log_signal(
+                    symbol, "OPTION_BLOCKED", None, price, str(result.get("reason"))
+                )
+                return result
+            if not result.get("exited"):
+                self._record_option_entry_signal(symbol, result, price)
+                self._mark_to_market(record=True)
+            return result
+        except Exception as exc:  # noqa: BLE001 — tick entry never kills runner
+            logger.debug(
+                "Strategy %s tick entry skipped for %s: %s",
+                self.config.strategy_name,
+                symbol,
+                exc,
+            )
+            return None
+        finally:
+            self._end_entry()
 
     def options_summary(self) -> Optional[Dict[str, Any]]:
         """Option-book state for runners with ``instrument.type == 'option'``.
@@ -2462,6 +3021,32 @@ class StrategyRunner:
                 symbol, "OPTION_MTM", None, price, f"option MTM {float(pnl):+,.0f}"
             )
 
+    def _tick_option_book(
+        self, symbol: str, price: Optional[float], ts: Optional[str]
+    ) -> bool:
+        """Mark open option legs on a tick and drain any sub-second protective exit."""
+        bridge = self.options_bridge
+        if bridge is None:
+            return False
+        self._sync_bridge_runner_state()
+        pnl = bridge.on_tick(symbol, price, ts)
+        if pnl is None:
+            return False
+        self.last_option_pnl = float(pnl)
+        spot_for_log = (
+            float(price)
+            if price is not None and float(price) > 0
+            else float(self.last_price.get(symbol) or bridge.last_spot or 0.0)
+        )
+        exited = False
+        while True:
+            event = bridge.pop_exit_event()
+            if event is None:
+                break
+            exited = True
+            self._log_option_exit(symbol, event, spot_for_log)
+        return exited
+
     def _record_watch_point(self, ts: Optional[str], spot: float, option_pnl: float) -> None:
         """Append one watch-series row (2026-09-24, watch_export.py).
 
@@ -2513,8 +3098,9 @@ class StrategyRunner:
     def _process_pool(self, tick_ts: str) -> None:
         """Evaluate every basket symbol; rank candidates; enter top-K."""
         scores: List[tuple] = []  # (score, symbol, signal)
+        min_bars = max(MIN_WARMUP_BARS, self.warmup_quorum_bars)
         for symbol in self.config.symbols:
-            if len(self._bars[symbol]) < MIN_WARMUP_BARS:
+            if len(self._bars[symbol]) < min_bars:
                 continue
             signal = self._signal_for(symbol)
             if signal is None:
@@ -3139,8 +3725,9 @@ class StrategyRunner:
         IST UTC/IST seam is resolved once, via ``_as_ist_date``).
         ``Position.net_pnl`` is net of every commission on the round trip.
 
-        The option book stays session-anchored until structure closes stamp
-        a session_date too (next-sprint item).
+        Both closed and open option structures stamp IST ``session_date`` and
+        net out brokerage + statutory fees so ``daily_pnl()`` reconciles with
+        ``equity() - _day_start_equity`` and rolls cleanly at 00:00 IST.
         """
         today = datetime.now(_IST).date().isoformat()
         realized_today = sum(
@@ -3154,12 +3741,34 @@ class StrategyRunner:
 
         total = float(realized_today) + float(self.portfolio.unrealized_pnl)
 
-        # Add option book contribution if present
+        # Add option book contribution if present (OPT-6: closed structures
+        # stamp IST session_date so options roll at 00:00 IST and survive
+        # mid-day restarts identically to equities, net of commissions/fees;
+        # open structures also net entry brokerage + statutory fees so open MTM
+        # reconciles with OptionPaperBroker.total_equity).
         if self.options_bridge is not None:
-            total += float(
-                self.options_bridge.option_broker.total_realized_pnl
-            ) - self._option_session_start_realized
-            total += float(self.options_bridge.unrealized_pnl)
+            book = self.options_bridge.option_broker
+            option_realized_today = Decimal("0")
+            for structure in book.get_closed_structures():
+                s_date = getattr(structure, "effective_session_date", None)
+                if not s_date and getattr(structure, "closed_at", None) is not None:
+                    s_date = _as_ist_date(structure.closed_at)
+                if s_date == today:
+                    option_realized_today += getattr(
+                        structure,
+                        "net_pnl",
+                        structure.total_realized_pnl - structure.total_commission,
+                    )
+            open_option_costs = sum(
+                (
+                    getattr(s, "total_commission", Decimal("0"))
+                    + getattr(s, "statutory_fees", Decimal("0"))
+                    for s in book.get_open_structures()
+                ),
+                Decimal("0"),
+            )
+            total += float(option_realized_today)
+            total += float(self.options_bridge.unrealized_pnl - open_option_costs)
 
         return total
 
@@ -3340,6 +3949,17 @@ class StrategyRunner:
                 ),
                 "error": self.error,
                 "bars_processed": self.bars_processed,
+                "evaluation_cadence": self.evaluation_cadence,
+                "warmup_status": self.warmup_status,
+                "warmup_bars_seeded": self.warmup_bars_seeded,
+                "warmup_target_bars": self.warmup_target_bars,
+                "warmup_quorum_bars": self.warmup_quorum_bars,
+                "warmup_min_symbol_bars": (
+                    min((len(buf) for buf in self._bars.values()), default=0)
+                ),
+                "warmup_degraded_symbols": list(self.warmup_degraded_symbols),
+                "warmup_reason": self.warmup_reason,
+                "duplicate_of": self.duplicate_of,
                 "last_bar_ts": max(self._last_bar_ts.values()) if self._last_bar_ts else None,
                 "created_ts": self.created_ts,
                 "instrument": dict(self.config.instrument or {"type": "equity"}),

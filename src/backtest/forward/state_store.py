@@ -270,12 +270,23 @@ def _structure_to_snapshot(s: Any) -> Dict[str, Any]:
         "opened_at": s.opened_at.isoformat() if s.opened_at else None,
         "closed_at": s.closed_at.isoformat() if s.closed_at else None,
         "exit_reason": s.exit_reason,
+        "session_date": getattr(s, "session_date", None),
+        "statutory_fees": str(getattr(s, "statutory_fees", 0) or 0),
         "legs": [_opt_position_to_snapshot(leg) for leg in s.legs],
     }
 
 
 def _structure_from_snapshot(payload: Dict[str, Any]) -> Any:
-    from backtest.options.paper_trading import StructurePosition
+    from backtest.options.paper_trading import StructurePosition, _ist_session_date
+
+    closed_at = (
+        datetime.fromisoformat(payload["closed_at"])
+        if payload.get("closed_at")
+        else None
+    )
+    session_date = payload.get("session_date")
+    if not session_date and closed_at is not None:
+        session_date = _ist_session_date(closed_at)
 
     return StructurePosition(
         structure_id=payload["structure_id"],
@@ -291,12 +302,10 @@ def _structure_from_snapshot(payload: Dict[str, Any]) -> Any:
             if payload.get("opened_at")
             else datetime.utcnow()
         ),
-        closed_at=(
-            datetime.fromisoformat(payload["closed_at"])
-            if payload.get("closed_at")
-            else None
-        ),
+        closed_at=closed_at,
         exit_reason=payload.get("exit_reason"),
+        session_date=session_date,
+        statutory_fees=Decimal(str(payload.get("statutory_fees", "0") or "0")),
     )
 
 

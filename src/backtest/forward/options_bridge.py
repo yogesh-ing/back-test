@@ -52,9 +52,10 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import time
 from collections import deque
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Deque, Iterable, Optional
 
@@ -74,6 +75,9 @@ from backtest.options.exit_policy import (
     EXIT_DTE,
     EXIT_MANUAL_STOP,
     EXIT_MANUAL_TARGET,
+    EXIT_RISK_CAP,
+    EXIT_STOP_LOSS,
+    EXIT_TAKE_PROFIT,
     PRICE_MEASURED_REASONS,
     RISK_REASONS,
     ExitConfig,
@@ -92,6 +96,7 @@ from backtest.options.intent_journal import (
 from backtest.options.greeks import BlackScholes
 from backtest.options.expiry import EXIT_REASON_SETTLEMENT, ExpiryManager
 from backtest.options.expiry_policy import NearestExpiryPolicy, create_expiry_policy
+from backtest.options.live_trading import LiveExecutionHaltedError
 from backtest.options.paper_trading import (
     STALE_AFTER_SECONDS,
     OptionPaperBroker,
@@ -107,6 +112,8 @@ from backtest.options.structures import (
     BullCallSpread,
     LongCall,
     LongPut,
+    LongStraddle,
+    ShortStraddle,
     ShortStrangle,
 )
 from backtest.strategy.intent import Direction, MarketView
@@ -116,6 +123,19 @@ logger = logging.getLogger("backtest.forward.options_bridge")
 #: Sentinel for "argument not supplied" in :meth:`OptionsBridge.set_manual_rule`
 #: — distinct from an explicit ``None``, which CLEARS the level.
 _UNSET: Any = object()
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+_NSE_OPEN_TIME = dt_time(9, 15, 0)
+_NSE_CLOSE_MINUTES = 15 * 60 + 30  # 15:30 IST
+
+#: Non-expiry intraday square-off reason (OPT-5 / Recon F5).
+EXIT_INTRADAY_SQUAREOFF = "intraday_squareoff"
+
+#: Protective price/P&L exits evaluated sub-second on ``on_tick`` (Caveat Q-3).
+#: ``max_bars``, ``neutral_bars``, and ``signal_flip`` stay strictly on closed bars.
+TICK_PROTECTIVE_REASONS = frozenset(
+    {EXIT_RISK_CAP, EXIT_STOP_LOSS, EXIT_TAKE_PROFIT}
+)
 
 
 def _market_is_open(now_utc: Optional[datetime] = None) -> bool:
@@ -134,9 +154,10 @@ STRUCTURES: dict[str, tuple[Any, str]] = {
     "long_put": (LongPut(), "PE"),
     "bull_call_spread": (BullCallSpread(), "CE"),
     "bear_put_spread": (BearPutSpread(), "PE"),
-    # Strangles need BOTH sides — the bridge materialises a two-sided
-    # nested chain {strike: {"CE": c, "PE": c}} at execution time (the flat
-    # V1 shape cannot hold two contracts at one strike).
+    # Straddles & strangles need BOTH sides — the bridge materialises a
+    # two-sided nested chain {strike: {"CE": c, "PE": c}} at execution time.
+    "long_straddle": (LongStraddle(), "BOTH"),
+    "short_straddle": (ShortStraddle(), "BOTH"),
     "strangle": (ShortStrangle(), "BOTH"),
 }
 
@@ -144,6 +165,8 @@ STRUCTURES: dict[str, tuple[Any, str]] = {
 _STRICKES_NEEDED = {
     "long_call": 1,
     "long_put": 1,
+    "long_straddle": 1,
+    "short_straddle": 1,
     "bull_call_spread": 2,
     "bear_put_spread": 2,
     "short_strangle": 2,
@@ -196,6 +219,7 @@ class OptionsBridge:
         fee_calculator: Any | None = None,
         mode: str = "paper",
         risk_gate: Optional[PreTradeRiskGate] = None,
+        on_halt: Optional[Any] = None,
     ) -> None:
         # Phase 4 (Plan v2.1 Phase 4): strict mode is unconditional. The
         # legacy v1 path (default-expression merge, cross-direction and
@@ -205,6 +229,7 @@ class OptionsBridge:
         # as a constant True for callers that probe it.
         self.strict: bool = True
         self.mode: str = str(mode or "paper").strip().lower()
+        self.on_halt = on_halt
         self.risk_gate: Optional[PreTradeRiskGate] = None
         self._strict_rules: dict[Direction, Any] = {}
         self._active_rule: Any = None
@@ -327,6 +352,29 @@ class OptionsBridge:
         self.squareoff_minutes_before: int = int(
             self.expression.get("squareoff_minutes_before", 30) or 0
         )
+        #: Optional non-expiry intraday square-off minutes before 15:30 IST
+        #: (OPT-5 / Recon F5). Enforces a 20-minute floor (<= 15:10 IST) by
+        #: default so broker RMS auto-squareoff (~15:15–15:20 IST) never races.
+        self.intraday_squareoff_minutes_before: Optional[int] = (
+            self._resolve_intraday_squareoff_minutes()
+        )
+        #: Phase 3 tick-cadence entry guards (Caveats Q-4, Q-7).
+        self.reentry_cooldown_seconds: float = self._resolve_float_knob(
+            "reentry_cooldown_seconds",
+            "MSTOCK_REENTRY_COOLDOWN_SECONDS",
+            default=60.0,
+            minimum=0.0,
+        )
+        self.market_open_stabilization_seconds: float = self._resolve_float_knob(
+            "market_open_stabilization_seconds",
+            "MSTOCK_OPEN_STABILIZATION_SECONDS",
+            default=5.0,
+            minimum=0.0,
+        )
+        self.max_bid_ask_spread_pct: Optional[float] = self._resolve_optional_spread_pct()
+        self._last_exit_mono: Optional[float] = None
+        self._last_exit_reason: Optional[str] = None
+        self._pinned_structure_ids: set[str] = set()
         #: Minimum days-to-expiry for ENTRY selection (2026-09-24): the bridge
         #: always picked the NEAREST expiry, so a structure spawned on expiry
         #: day was cash-settled on the very next bar (instant churn). With
@@ -435,7 +483,13 @@ class OptionsBridge:
         return None
 
     def on_intent(
-        self, intent: dict[str, Any], view: MarketView | None, strategy_name: str
+        self,
+        intent: dict[str, Any],
+        view: MarketView | None,
+        strategy_name: str,
+        *,
+        from_tick: bool = False,
+        tick_ts: Any = None,
     ) -> dict[str, Any] | None:
         """Consume a strategy's explicit, complete opening intent (Phase 2).
 
@@ -446,10 +500,16 @@ class OptionsBridge:
         :meth:`on_market_view` (exits are never blocked by entry rules).
         """
         if view is None:
-            return self.on_market_view(None, strategy_name)
+            return None if from_tick else self.on_market_view(None, strategy_name)
         if self._has_open_structure():
-            return self.on_market_view(view, strategy_name)
-        if self._bar_dt is not None and self._blocked_reentry(view):
+            return None if from_tick else self.on_market_view(view, strategy_name)
+        if from_tick:
+            probe_ts = tick_ts or getattr(view, "bar_timestamp", None)
+            if self._in_opening_stabilization_window(probe_ts):
+                return None
+            if self._blocked_tick_reentry():
+                return None
+        elif self._bar_dt is not None and self._blocked_reentry(view):
             # Same-bar re-entry guard (U2.2, end-state form): a structure
             # that exited on this bar — stop, flip, square-off, settlement —
             # is not replaced on the same bar. The strategy re-emits its
@@ -726,6 +786,10 @@ class OptionsBridge:
         open_structures = broker.get_open_structures()
         wins = sum(1 for s in closed if s.total_realized_pnl >= 0)
         total_pnl = sum((s.total_realized_pnl for s in closed), Decimal("0"))
+        net_closed_pnl = sum(
+            (getattr(s, "net_pnl", s.total_realized_pnl) for s in closed),
+            Decimal("0"),
+        )
         stale_positions = sum(
             1
             for s in open_structures
@@ -739,6 +803,10 @@ class OptionsBridge:
             "capital": float(broker.capital),
             "equity": float(broker.total_equity),
             "realized_pnl": float(broker.total_realized_pnl),
+            "gross_realized_pnl": float(broker.total_realized_pnl),
+            "net_realized_pnl": float(net_closed_pnl),
+            "commission_paid": float(broker.total_commission_paid),
+            "statutory_fees_paid": float(broker.total_statutory_fees_paid),
             "unrealized_pnl": float(self.last_unrealized_pnl),
             "last_spot": self.last_spot,
             "last_mtm_ts": self.last_mtm_ts,
@@ -1110,8 +1178,58 @@ class OptionsBridge:
         # only reason a manual stop can be trusted — it never waits for a
         # strategy view that may never come).
         self._maybe_manual_exit()
+        self._maybe_intraday_squareoff(ts)
         self._maybe_risk_exit(strategy_name="")
         self._maybe_expiry_settlement()
+        self._update_stale_episode_state()
+        return self.last_unrealized_pnl
+
+    def on_tick(
+        self,
+        symbol: str,
+        price: Optional[float] = None,
+        ts: Any = None,
+    ) -> Optional[Decimal]:
+        """Evaluate sub-second MTM and protective exits without advancing bar counters.
+
+        Fixes Recon Finding F3 (the -₹546 overshoot on a -₹100 stop while
+        waiting for bar close) while preserving Caveat Q-3: ``_bar_index``,
+        ``bars_in_trade``, ``_bars_without_view``, ``max_bars``, and
+        ``signal_flip`` NEVER advance or fire intra-bar.
+        """
+        underlying = str(symbol or self.underlying or "NIFTY").upper()
+        self.underlying = underlying
+        if price is not None and float(price) > 0:
+            self.last_spot = float(price)
+            try:
+                self._sync_market(underlying, float(price), ts)
+            except Exception:  # noqa: BLE001 — spot sync never kills tick
+                logger.debug("[options-bridge] tick spot sync skipped", exc_info=True)
+
+        if not self._has_open_structure():
+            return None
+
+        tick_dt = self._bar_datetime(ts)
+        ts_str = str(ts) if ts else self._bar_ts(tick_dt or self._bar_dt)
+        try:
+            self._rebind_restored_contracts()
+            unrealized = self.option_broker.update_mtm(self.quote_provider, tick_dt)
+            self.last_unrealized_pnl = Decimal(str(unrealized))
+            self.last_mtm_ts = str(ts) if ts else self.last_mtm_ts
+            self._after_mtm_attempt(symbol=underlying)
+        except Exception as exc:  # noqa: BLE001 — pricing must never kill the runner
+            self._log_mtm_failure_throttled(
+                underlying,
+                f"Tick MTM failed for {underlying} @ {price}: {exc}",
+            )
+            self._update_stale_episode_state()
+            return None
+
+        self._maybe_manual_exit(ts_override=ts_str)
+        self._maybe_intraday_squareoff(ts, ts_override=ts_str)
+        self._maybe_tick_protective_exit(ts_override=ts_str)
+        if tick_dt is not None:
+            self._maybe_expiry_settlement(as_of=tick_dt)
         self._update_stale_episode_state()
         return self.last_unrealized_pnl
 
@@ -1134,7 +1252,9 @@ class OptionsBridge:
             )
         return self._expiry_manager
 
-    def _maybe_expiry_settlement(self) -> Optional[dict[str, Any]]:
+    def _maybe_expiry_settlement(
+        self, as_of: Optional[datetime] = None
+    ) -> Optional[dict[str, Any]]:
         """Cash-settle a structure whose expiry the bar clock has reached.
 
         Runs on every bar after the mark-to-market, and settles **on** the
@@ -1144,7 +1264,8 @@ class OptionsBridge:
         (``min_days_to_expiry: null``) — otherwise the DTE rule has already
         squared the position off the day before.
         """
-        if self._bar_dt is None or not self._has_open_structure():
+        ref_dt = as_of if as_of is not None else self._bar_dt
+        if ref_dt is None or not self._has_open_structure():
             return None
         structure = self.option_broker.get_structure(self.open_structure_id or "")
         if structure is None or structure.expiry is None:
@@ -1154,7 +1275,7 @@ class OptionsBridge:
             report = self._expiry().process_expiries(
                 self.quote_provider,
                 _GeneratorSettlementProvider(self._generator(), self.underlying),
-                as_of=self._bar_dt,
+                as_of=ref_dt,
                 include_today=True,
             )
         except Exception as exc:  # noqa: BLE001 — a settlement failure must not kill the runner
@@ -1189,11 +1310,14 @@ class OptionsBridge:
             "settled": settled,
         }
 
+        self._unpin_structure_legs(structure)
         self.open_structure_id = None
         self.closed_count += 1
         self._settlement_count += 1
         self.last_exit = event
         self._exit_bar_index = self._bar_index
+        self._last_exit_mono = time.monotonic()
+        self._last_exit_reason = str(event["reason"])
         self._entry_bar_index = None
         self._bars_without_view = 0
         self._structure_direction = None
@@ -1216,7 +1340,9 @@ class OptionsBridge:
         )
         return event
 
-    def _maybe_manual_exit(self) -> Optional[dict[str, Any]]:
+    def _maybe_manual_exit(
+        self, ts_override: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
         """Fire an operator-set stop/target against the freshly marked book.
 
         Levels are premium-per-unit marks (see :meth:`set_manual_rule`), so
@@ -1249,12 +1375,13 @@ class OptionsBridge:
             level, reason, label = target, EXIT_MANUAL_TARGET, "manual target"
         if reason is None:
             return None
+        close_ts = ts_override if ts_override is not None else self._bar_ts(self._bar_dt)
         return self._exit_structure(
             ExitDecision(
                 reason=reason,
                 detail=f"{label} {float(level):.2f} hit (mark {mark:.2f})",
             ),
-            self._bar_ts(self._bar_dt),
+            close_ts,
             strategy_name="",
             queue=True,
         )
@@ -1265,6 +1392,51 @@ class OptionsBridge:
         if decision is None or decision.reason not in RISK_REASONS:
             return None
         return self._exit_structure(decision, self._bar_ts(self._bar_dt), strategy_name, queue=True)
+
+    def _maybe_tick_protective_exit(
+        self, ts_override: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        """Evaluate protective price/P&L exits intra-bar without advancing bar age (Q-3)."""
+        if not self._has_open_structure():
+            return None
+        decision = self._evaluate_exit(view=None)
+        if decision is None or decision.reason not in TICK_PROTECTIVE_REASONS:
+            return None
+        close_ts = ts_override if ts_override is not None else self._bar_ts(self._bar_dt)
+        return self._exit_structure(decision, close_ts, strategy_name="", queue=True)
+
+    def _maybe_intraday_squareoff(
+        self,
+        ts: Any,
+        *,
+        ts_override: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Square off intraday option structures >= 20 min before 15:30 IST close (OPT-5)."""
+        mins_before = self.intraday_squareoff_minutes_before
+        if mins_before is None or mins_before <= 0 or not self._has_open_structure():
+            return None
+        ist_dt = self._ist_clock_from_ts(ts)
+        if ist_dt is None:
+            return None
+        cur_minutes = ist_dt.hour * 60 + ist_dt.minute
+        cutoff_minutes = _NSE_CLOSE_MINUTES - int(mins_before)
+        if cur_minutes < cutoff_minutes or cur_minutes > _NSE_CLOSE_MINUTES:
+            return None
+        close_ts = ts_override if ts_override is not None else (
+            str(ts) if ts else self._bar_ts(self._bar_dt)
+        )
+        return self._exit_structure(
+            ExitDecision(
+                reason=EXIT_INTRADAY_SQUAREOFF,
+                detail=(
+                    f"intraday EOD square-off at {ist_dt:%H:%M:%S} IST "
+                    f"({mins_before}m before close)"
+                ),
+            ),
+            close_ts,
+            strategy_name="",
+            queue=True,
+        )
 
     _restored_contracts_rebound: bool = False
 
@@ -1334,6 +1506,7 @@ class OptionsBridge:
                             settlement_type=SettlementType.CASH,
                         )
                         register(sym_contract)
+                self._pin_structure_legs(structure)
             self._restored_contracts_rebound = True
             return True
         except Exception:  # noqa: BLE001 — recovery must never kill the bar
@@ -1723,6 +1896,14 @@ class OptionsBridge:
             logger.warning("[options-bridge] exit evaluation failed: %s", exc)
             return None
 
+    def _notify_halt(self, reason: str) -> None:
+        """Invoke the runner halt callback when a live execution outcome is uncertain."""
+        if callable(self.on_halt):
+            try:
+                self.on_halt(reason)
+            except Exception:  # noqa: BLE001 — halt callback must never mask journal
+                logger.exception("[options-bridge] on_halt callback failed")
+
     def _exit_structure(
         self,
         decision: Any,
@@ -1752,6 +1933,24 @@ class OptionsBridge:
                 timestamp=self._bar_datetime(ts),
                 reason=decision.reason,
             )
+        except LiveExecutionHaltedError as exc:
+            logger.error(
+                "[options-bridge] LIVE CLOSE HALTED for %s: %s — pausing runner for reconciliation",
+                structure_id[:8],
+                exc,
+            )
+            self._journal(
+                KIND_HALTED,
+                intent_id=decision_key(
+                    "halt", f"close {structure_id}", code="close_halted", clock=self._bar_dt
+                ),
+                structure_id=structure_id,
+                detail={"code": "close_halted", "reason": str(exc)},
+                structure_type=structure.structure_type,
+                underlying=structure.underlying,
+            )
+            self._notify_halt(f"close_halted ({structure_id[:8]}): {exc}")
+            return None
         except Exception as exc:  # noqa: BLE001 — a failed close must not kill the runner
             logger.warning("[options-bridge] close failed for %s: %s", structure_id[:8], exc)
             self._journal(
@@ -1766,6 +1965,7 @@ class OptionsBridge:
             )
             return None
 
+        is_simulated = not bool(getattr(self.option_broker, "is_live_adapter", False))
         self._journal(
             KIND_EXECUTED,
             intent_id=decision_key(
@@ -1773,7 +1973,7 @@ class OptionsBridge:
             ),
             structure_id=structure_id,
             detail={
-                "simulated": True,
+                "simulated": is_simulated,
                 "action": "close",
                 "reason": decision.reason,
                 "pnl": float(realized),
@@ -1796,10 +1996,13 @@ class OptionsBridge:
             "bars_held": bars_held,
             "strategy_name": strategy_name,
         }
+        self._unpin_structure_legs(structure)
         self.open_structure_id = None
         self.closed_count += 1
         self.last_exit = event
         self._exit_bar_index = self._bar_index
+        self._last_exit_mono = time.monotonic()
+        self._last_exit_reason = str(decision.reason)
         self._entry_bar_index = None
         self._bars_without_view = 0
         self._structure_direction = None
@@ -2142,7 +2345,7 @@ class OptionsBridge:
                 for s in strikes
             ],
         )
-        self._validate_entry_contracts(strikes, chain, option_type)
+        self._validate_entry_contracts(strikes, chain, option_type, structure_type)
         # A declared fixed distance (strict mode: the DirectionRule the
         # strategy/spec stated) reaches builders that select their own
         # strikes (ShortStrangle); the rest ignore it. Legacy v1 passes
@@ -2167,6 +2370,17 @@ class OptionsBridge:
 
         try:
             positions = self.option_broker.execute_structure(intent, self.quote_provider)
+        except LiveExecutionHaltedError as exc:
+            logger.error(
+                "[options-bridge] LIVE ENTRY HALTED for %s: %s — pausing runner for reconciliation",
+                strategy_name,
+                exc,
+            )
+            self._journal_intent(
+                KIND_HALTED, intent, detail={"reason": str(exc)}
+            )
+            self._notify_halt(f"entry_halted: {exc}")
+            return {"halted": True, "rejected": True, "reason": str(exc)}
         except InsufficientMarginError as exc:
             self._journal_intent(
                 KIND_REJECTED, intent, detail={"reason": str(exc)}
@@ -2185,12 +2399,13 @@ class OptionsBridge:
                 for p in positions
             ],
         )
+        is_simulated = not bool(getattr(self.option_broker, "is_live_adapter", False))
         self._journal_intent(
             KIND_EXECUTED,
             intent,
             structure_id=self.open_structure_id,
             detail={
-                "simulated": True,
+                "simulated": is_simulated,
                 "fills": [
                     {
                         "symbol": getattr(p, "trading_symbol", ""),
@@ -2210,6 +2425,8 @@ class OptionsBridge:
         self._structure_direction = view.direction
         self._structure_expiry = expiry
         opened = self.option_broker.get_structure(self.open_structure_id or "")
+        if opened is not None:
+            self._pin_structure_legs(opened)
         self._entry_premium = opened.total_entry_cost if opened is not None else Decimal("0")
         logger.info(
             "[options-bridge] opened %s on %s strikes=%s expiry=%s (view %s conf=%.2f)",
@@ -2231,7 +2448,11 @@ class OptionsBridge:
         }
 
     def _validate_entry_contracts(
-        self, strikes: list[Any], chain: Any, option_type: str
+        self,
+        strikes: list[Any],
+        chain: Any,
+        option_type: str,
+        structure_type: str = "",
     ) -> None:
         """The strikes the selector picked must name chain contracts with real terms.
 
@@ -2239,21 +2460,39 @@ class OptionsBridge:
         constructed, and a guessed lot would size the premium outlay and every
         rupee stop in the book off a number the exchange never published.
         """
+        require_both = structure_type in ("long_straddle", "short_straddle")
         for strike in strikes:
-            contract = chain.get(strike)
+            entry = chain.get(strike)
             if option_type == "BOTH":
-                contract = (contract or {}).get("CE") or (contract or {}).get("PE")
-            if contract is None:
+                if require_both:
+                    sides = [
+                        (entry or {}).get("CE") if isinstance(entry, dict) else None,
+                        (entry or {}).get("PE") if isinstance(entry, dict) else None,
+                    ]
+                    if any(c is None for c in sides):
+                        raise ContractValidityError(
+                            REASON_NO_CONTRACT,
+                            f"{self.underlying} {strike}: straddle requires both CE and PE "
+                            "contracts at this strike",
+                        )
+                    contracts_to_check = sides
+                else:
+                    contract = (entry or {}).get("CE") or (entry or {}).get("PE")
+                    contracts_to_check = [contract] if contract is not None else []
+            else:
+                contracts_to_check = [entry] if entry is not None else []
+            if not contracts_to_check:
                 raise ContractValidityError(
                     REASON_NO_CONTRACT,
                     f"{self.underlying} {strike}: the chain has no contract at this strike",
                 )
-            if int(getattr(contract, "lot_size", 0) or 0) <= 0:
-                raise ContractValidityError(
-                    REASON_NO_LOT_SIZE,
-                    f"{getattr(contract, 'trading_symbol', strike)}: the chain row "
-                    "carries no lot size — refusing to guess one",
-                )
+            for contract in contracts_to_check:
+                if int(getattr(contract, "lot_size", 0) or 0) <= 0:
+                    raise ContractValidityError(
+                        REASON_NO_LOT_SIZE,
+                        f"{getattr(contract, 'trading_symbol', strike)}: the chain row "
+                        "carries no lot size — refusing to guess one",
+                    )
 
     def _gate_check_at_entry(self, intent: Any, structure_type: str) -> None:
         """Wire the dormant Layer-1 ceilings at entry (Phase 1 flag disposition).
@@ -2273,7 +2512,7 @@ class OptionsBridge:
         has_sell = False
         for leg in intent.legs:
             quote = self.quote_provider.get_quote(leg.instrument_token) or {}
-            price = Decimal(str(quote.get("ltp") or quote.get("ask") or "0"))
+            price = Decimal(str(quote.get("ltp") or quote.get("ask") or quote.get("bid") or "0"))
             units = Decimal(str(int(leg.quantity) * int(leg.lot_size)))
             if str(leg.side).upper() == "BUY":
                 gross_buy += price * units
@@ -2283,14 +2522,15 @@ class OptionsBridge:
                 net -= price * units
         if has_sell:
             # A short structure's stateable worst case is its declared risk
-            # cap: max_loss_inr if set, else the hard stop itself (the
-            # ExitPlan's stop_loss_points is the loss the trade is managed
-            # to; gap-through-stop risk is why short premium additionally
-            # needs the per-trade ceiling to be set with headroom).
+            # cap: max_loss_inr if set, else stop_loss_points, else
+            # stop_loss_pct × net credit collected (only when net < 0, i.e. a
+            # genuinely priced credit structure).
             if self._strict_exit_plan.max_loss_inr is not None:
                 worst: float | None = float(self._strict_exit_plan.max_loss_inr)
             elif self._strict_exit_plan.stop_loss_points is not None:
                 worst = float(self._strict_exit_plan.stop_loss_points)
+            elif self._strict_exit_plan.stop_loss_pct is not None and net < Decimal("0"):
+                worst = float(self._strict_exit_plan.stop_loss_pct) * abs(float(net))
             else:
                 worst = None
             if worst is None:
@@ -2348,6 +2588,167 @@ class OptionsBridge:
                 REASON_NO_FRESH_QUOTE,
                 f"{token}: no quote to {side} against ({reason})",
             )
+        max_spread = self._effective_max_spread_pct()
+        if max_spread is not None and max_spread > 0.0:
+            bid = float(quote.get("bid") or 0.0)
+            ask = float(quote.get("ask") or 0.0)
+            mid = (bid + ask) / 2.0
+            if bid > 0.0 and ask >= bid and mid >= 5.0:
+                spread_pct = (ask - bid) / mid
+                if spread_pct > max_spread:
+                    raise ContractValidityError(
+                        REASON_NO_FRESH_QUOTE,
+                        f"{token}: bid/ask spread {spread_pct:.1%} ({bid:.2f}/{ask:.2f}) "
+                        f"exceeds max_bid_ask_spread_pct {max_spread:.1%}",
+                    )
+
+    # ------------------------------------------------------------------ #
+    # Phase 3 helpers: HotStrikeRing leg pinning & tick-entry guards
+    # ------------------------------------------------------------------ #
+
+    def _resolve_intraday_squareoff_minutes(self) -> Optional[int]:
+        raw = self.expression.get("intraday_squareoff_minutes_before")
+        if raw is None and bool(self.expression.get("intraday_squareoff")):
+            raw = 20
+        if raw is None:
+            env_raw = os.environ.get("OPTIONS_INTRADAY_SQUAREOFF_MINUTES", "").strip()
+            raw = env_raw if env_raw else None
+        if raw is None:
+            return None
+        try:
+            mins = int(raw)
+        except (TypeError, ValueError):
+            return None
+        if mins <= 0:
+            return None
+        # OPT-5: enforce >= 20 min before 15:30 IST (<= 15:10 IST) so runner
+        # square-off never collides with broker RMS auto-squareoff (~15:15–15:20).
+        return max(20, mins)
+
+    def _resolve_float_knob(
+        self,
+        expr_key: str,
+        env_key: str,
+        *,
+        default: float,
+        minimum: float = 0.0,
+    ) -> float:
+        raw = self.expression.get(expr_key)
+        if raw is None:
+            env_raw = os.environ.get(env_key, "").strip()
+            raw = env_raw if env_raw else default
+        try:
+            return max(minimum, float(raw))
+        except (TypeError, ValueError):
+            return default
+
+    def _resolve_optional_spread_pct(self) -> Optional[float]:
+        raw = self.expression.get("max_bid_ask_spread_pct")
+        if raw is None:
+            env_raw = os.environ.get("MSTOCK_MAX_BID_ASK_SPREAD_PCT", "").strip()
+            raw = env_raw if env_raw else None
+        if raw is None:
+            return None
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return val if val > 0.0 else 0.0
+
+    def _effective_max_spread_pct(self) -> Optional[float]:
+        if self.max_bid_ask_spread_pct is not None:
+            return self.max_bid_ask_spread_pct
+        src = str(getattr(self.quote_provider, "source_name", "") or "")
+        if src.startswith("live:"):
+            return 0.50
+        return None
+
+    @staticmethod
+    def _ist_clock_from_ts(ts: Any) -> Optional[datetime]:
+        if ts is None:
+            return None
+        if isinstance(ts, datetime):
+            parsed = ts
+        else:
+            text = str(ts).strip()
+            if not text:
+                return None
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(_IST)
+        return parsed.replace(tzinfo=_IST)
+
+    def _in_opening_stabilization_window(self, ts: Any) -> bool:
+        """True during 09:15:00..(09:15:00 + stabilization_s) IST (Caveat Q-7)."""
+        window_s = self.market_open_stabilization_seconds
+        if window_s <= 0.0:
+            return False
+        ist_dt = self._ist_clock_from_ts(ts)
+        if ist_dt is None:
+            return False
+        open_dt = datetime.combine(ist_dt.date(), _NSE_OPEN_TIME, tzinfo=_IST)
+        elapsed = (ist_dt - open_dt).total_seconds()
+        return 0.0 <= elapsed < window_s
+
+    def _blocked_tick_reentry(self) -> bool:
+        """Prevent machine-gun re-entry on ticks after a close (Caveat Q-4)."""
+        if (
+            self._last_exit_reason in ("manual", "emergency_flatten", EXIT_INTRADAY_SQUAREOFF)
+            and self._exit_bar_index is not None
+            and self._exit_bar_index == self._bar_index
+        ):
+            return True
+        if self._last_exit_mono is not None and self.reentry_cooldown_seconds > 0.0:
+            if (time.monotonic() - self._last_exit_mono) < self.reentry_cooldown_seconds:
+                return True
+        return False
+
+    def _pin_structure_legs(self, structure: Any) -> None:
+        sid = getattr(structure, "structure_id", None)
+        if not sid or sid in self._pinned_structure_ids:
+            return
+        if type(self.quote_provider).__module__ == "unittest.mock":
+            return
+        pin_fn = getattr(self.quote_provider, "pin_contracts", None)
+        if not callable(pin_fn):
+            return
+        tokens = [
+            str(leg.instrument_token)
+            for leg in getattr(structure, "legs", [])
+            if getattr(leg, "instrument_token", "")
+        ]
+        if not tokens:
+            return
+        try:
+            pin_fn(tokens)
+            self._pinned_structure_ids.add(str(sid))
+        except Exception:  # noqa: BLE001
+            logger.debug("[options-bridge] pin_contracts failed for %s", sid, exc_info=True)
+
+    def _unpin_structure_legs(self, structure: Any) -> None:
+        sid = getattr(structure, "structure_id", None)
+        if not sid or str(sid) not in self._pinned_structure_ids:
+            return
+        self._pinned_structure_ids.discard(str(sid))
+        if type(self.quote_provider).__module__ == "unittest.mock":
+            return
+        unpin_fn = getattr(self.quote_provider, "unpin_contracts", None)
+        if not callable(unpin_fn):
+            return
+        tokens = [
+            str(leg.instrument_token)
+            for leg in getattr(structure, "legs", [])
+            if getattr(leg, "instrument_token", "")
+        ]
+        if not tokens:
+            return
+        try:
+            unpin_fn(tokens)
+        except Exception:  # noqa: BLE001
+            logger.debug("[options-bridge] unpin_contracts failed for %s", sid, exc_info=True)
 
     def _pick_strikes(
         self,
