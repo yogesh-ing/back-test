@@ -1274,11 +1274,18 @@ class StrategyRunner:
                     quote_provider=provider,
                     # Marks land on bar close (plus the portfolio watchdog), so the
                     # freshness SLA is sized off the bar cadence — see OptionsBridge.
-                    bar_cadence_seconds=60.0
-                    * TIMEFRAME_MINUTES.get(config.timeframe, 0),
+                    # BUG-01 secondary (QA 2026-10-28): a tick-cadence runner is
+                    # marked by WS ticks, not bars, so sizing the SLA off a 1-hour
+                    # bar let a dead feed go unflagged for 63 minutes. Quote SLA only.
+                    bar_cadence_seconds=(
+                        0.0
+                        if infer_evaluation_cadence(self.strategy) == "tick"
+                        else 60.0 * TIMEFRAME_MINUTES.get(config.timeframe, 0)
+                    ),
                     fee_calculator=fee_calc,
                     on_halt=self._on_option_execution_halt,
                 )
+                self.options_bridge.entry_bucket_timeframe = config.timeframe
             except Exception:
                 try:
                     from backtest.forward.feed_registry import get_chain_bus

@@ -688,9 +688,20 @@ class TestTickCadenceEntriesAndGuards:
             runner.on_tick("NIFTY", price=25200.0, ts=f"2026-10-24T04:50:{sec:02d}+00:00")
         assert runner.options_bridge.executed_count == 1
 
-        # Simulate cooldown elapsed -> clean re-entry permitted
+        # Simulate cooldown elapsed -> still blocked INSIDE the same 1hour bar.
+        # BUG-01 (QA 2026-10-28): the cooldown was the only latch, so a runner
+        # declared on "1hour" could re-open 6 times a minute. One entry per
+        # timeframe bucket now, and the bucket is spent by the deploy entry.
         runner.options_bridge._last_exit_mono = time.monotonic() - 61.0
-        reentered = runner.on_tick("NIFTY", price=25200.0, ts="2026-10-24T04:51:10+00:00")
+        same_bucket = runner.on_tick("NIFTY", price=25200.0, ts="2026-10-24T04:51:10+00:00")
+        assert same_bucket is None
+        assert runner.options_bridge.executed_count == 1
+
+        # Next genuine hourly boundary — 11:00 IST = 05:30 UTC — with the feed
+        # still live (ticks 20 s apart, as a real WS stream delivers them).
+        runner.on_tick("NIFTY", price=25200.0, ts="2026-10-24T05:29:50+00:00")
+        assert runner.options_bridge.executed_count == 1
+        reentered = runner.on_tick("NIFTY", price=25200.0, ts="2026-10-24T05:30:10+00:00")
         assert reentered is not None and reentered.get("structure_id")
         assert runner.options_bridge.executed_count == 2
 

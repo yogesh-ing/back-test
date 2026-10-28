@@ -210,24 +210,20 @@ def requires_timeframe_aggregation(runner_or_tf: Any) -> bool:
     """True when ``1min`` live broker bars must aggregate into ``runner.config.timeframe``.
 
     Resolves Recon Finding F1 (``15min`` runner previously firing on ``1min``
-    bars) while letting unconditional instant templates (``CE_instant_buy``,
-    ``PE_instant_buy``, ``immediate_strangle``) act immediately on deploy
-    without waiting for an hourly/daily bar boundary.
+    bars). QA-2026-10-28 BUG-01 removed the exception for the unconditional
+    option templates (``CE_instant_buy``, ``PE_instant_buy``,
+    ``immediate_strangle``): "enter now" is a one-shot deploy decision, not a
+    licence to re-evaluate entries every minute on an hourly runner. Their
+    intra-bar behaviour now lives in :attr:`OptionsBridge.entry_bucket_seconds`,
+    which allows at most one entry per ``timeframe`` bucket while protective
+    exits still run on every tick.
     """
     if isinstance(runner_or_tf, str):
         tf = normalize_timeframe(runner_or_tf) or "1min"
         return tf != "1min"
     cfg = getattr(runner_or_tf, "config", None)
     tf = normalize_timeframe(getattr(cfg, "timeframe", "1min")) or "1min"
-    if tf == "1min":
-        return False
-    strategy = getattr(runner_or_tf, "strategy", None)
-    template = str(
-        getattr(strategy, "template", "") or getattr(strategy, "name", "") or ""
-    ).strip().lower()
-    if template in ("instant_long_option", "structure") and _extract_max_lookback(strategy) == 0:
-        return False
-    return True
+    return tf != "1min"
 
 
 # ---------------------------------------------------------------------------

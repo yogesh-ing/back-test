@@ -117,6 +117,7 @@ from backtest.options.structures import (
     ShortStraddle,
     ShortStrangle,
 )
+from backtest.forward.warmup import bucket_start_ts
 from backtest.strategy.intent import Direction, MarketView
 
 logger = logging.getLogger("backtest.forward.options_bridge")
@@ -419,6 +420,13 @@ class OptionsBridge:
         self._exit_bar_index: Optional[int] = None
         self._bars_without_view: int = 0
         self._bar_dt: Optional[datetime] = None
+        #: BUG-01 (QA 2026-10-28): tick-cadence entries are latched to the
+        #: runner's declared ``timeframe``. One entry per bucket, whatever the
+        #: tick stream does. ``None`` disables the gate (bar-close cadence, where
+        #: the bar clock already paces entries).
+        self.entry_bucket_timeframe: Optional[str] = None
+        self._last_entry_bucket: Optional[str] = None
+        self._bucket_block_logged: Optional[str] = None
         self._structure_direction: Optional[Any] = None
         self._structure_expiry: Optional[Any] = None
         self._entry_premium: Decimal = Decimal("0")
@@ -503,12 +511,34 @@ class OptionsBridge:
             return None if from_tick else self.on_market_view(None, strategy_name)
         if self._has_open_structure():
             return None if from_tick else self.on_market_view(view, strategy_name)
+        tick_entry_dt: Optional[datetime] = None
+        entry_bucket: Optional[str] = None
         if from_tick:
             probe_ts = tick_ts or getattr(view, "bar_timestamp", None)
             if self._in_opening_stabilization_window(probe_ts):
                 return None
             if self._blocked_tick_reentry():
                 return None
+            entry_bucket = self._entry_bucket_key(probe_ts)
+            if (
+                entry_bucket is not None
+                and self._last_entry_bucket is not None
+                and entry_bucket == self._last_entry_bucket
+            ):
+                # One entry per timeframe bucket: the deploy entry spends this
+                # bucket, so a stop-out 34 s later must not re-open at the next
+                # tick. The next genuine bar boundary is the next chance.
+                if self._bucket_block_logged != entry_bucket:
+                    self._bucket_block_logged = entry_bucket
+                    logger.info(
+                        "ENTRY_BUCKET_LATCHED strategy=%s timeframe=%s bucket=%s — "
+                        "next entry waits for the next bar boundary",
+                        strategy_name,
+                        self.entry_bucket_timeframe,
+                        entry_bucket,
+                    )
+                return None
+            tick_entry_dt = self._bar_datetime(probe_ts)
         elif self._bar_dt is not None and self._blocked_reentry(view):
             # Same-bar re-entry guard (U2.2, end-state form): a structure
             # that exited on this bar — stop, flip, square-off, settlement —
@@ -555,7 +585,13 @@ class OptionsBridge:
             blocked = self._entry_dte_block()
             if blocked is not None:
                 return blocked
-            return self._execute(view, rule.structure, strategy_name)
+            result = self._execute(
+                view, rule.structure, strategy_name, entry_dt=tick_entry_dt
+            )
+            if result and not result.get("rejected") and not result.get("halted"):
+                # The bucket is spent only by a fill that actually happened.
+                self._last_entry_bucket = entry_bucket
+            return result
         except Exception as exc:  # noqa: BLE001 — coded refusal, no trade
             code = str(getattr(exc, "reason", "") or type(exc).__name__)
             self._journal_halt_once(code, str(exc))
@@ -2284,7 +2320,14 @@ class OptionsBridge:
             self.quote_provider.generator = generator
         return generator
 
-    def _execute(self, view: MarketView, structure_type: str, strategy_name: str) -> dict[str, Any]:
+    def _execute(
+        self,
+        view: MarketView,
+        structure_type: str,
+        strategy_name: str,
+        *,
+        entry_dt: Optional[datetime] = None,
+    ) -> dict[str, Any]:
         from backtest.options.paper_trading import InsufficientMarginError
 
         check_structure_type(structure_type, self.allowed_structures)
@@ -2386,8 +2429,11 @@ class OptionsBridge:
             # close_structure left execute_structure falling back to the wall
             # clock, so a one-bar scalp was booked as a 5h30 holding period —
             # the exact offset between the feed's IST bar time and utcnow().
+            # BUG-16 (QA 2026-10-28): a tick entry passes ``entry_dt`` — the
+            # tick's own instant, microseconds and all — because the bar clock
+            # is the floored minute and would book a 34-second hold as 0.
             positions = self.option_broker.execute_structure(
-                intent, self.quote_provider, timestamp=self._bar_dt
+                intent, self.quote_provider, timestamp=entry_dt or self._bar_dt
             )
         except LiveExecutionHaltedError as exc:
             logger.error(
@@ -2711,6 +2757,25 @@ class OptionsBridge:
         open_dt = datetime.combine(ist_dt.date(), _NSE_OPEN_TIME, tzinfo=EXCHANGE_TZ)
         elapsed = (ist_dt - open_dt).total_seconds()
         return 0.0 <= elapsed < window_s
+
+    def _entry_bucket_key(self, ts: Any) -> Optional[str]:
+        """Bucket key for the BUG-01 entry latch, or ``None`` when unlatched.
+
+        Uses the *same* floor as the bar aggregator (:func:`bucket_start_ts`) so
+        "this bar already traded" means exactly what a sealed bar says — an epoch
+        floor would have been offset 30 minutes from NSE hourly bars. Date-free on
+        purpose? No: the key carries the date, which is what makes it roll over at
+        midnight for free.
+        """
+        if not self.entry_bucket_timeframe:
+            return None
+        text = str(ts or "").strip()
+        if not text:
+            return None
+        try:
+            return bucket_start_ts(text, self.entry_bucket_timeframe)
+        except Exception:  # noqa: BLE001 — an unparseable stamp must not open a trade
+            return None
 
     def _blocked_tick_reentry(self) -> bool:
         """Prevent machine-gun re-entry on ticks after a close (Caveat Q-4)."""
