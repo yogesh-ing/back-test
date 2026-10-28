@@ -260,6 +260,20 @@ class FillEvent:
     quantity: float
     price: float
     ts: str
+    #: Why the runner sent the order (``{"kind": "exit", "reason": "stop_loss"}``).
+    #: The ledger already holds the ticket's tag; routing it with the fill is
+    #: what lets a closed trade say WHY it closed instead of being re-guessed
+    #: from the timestamps (BUG-26).
+    tag: Optional[Dict[str, Any]] = None
+    #: Brokerage the fee engine charged on THIS fill.
+    commission: float = 0.0
+    #: Exchange + statutory charges (STT, stamp duty, SEBI, GST…) on this fill.
+    statutory_fees: float = 0.0
+
+    @property
+    def total_fees(self) -> float:
+        """Everything this fill cost, which is what the book nets out of P&L."""
+        return float(self.commission) + float(self.statutory_fees)
 
 
 #: The day fuse rolls at 00:00 IST (Asia/Kolkata) — see daily_pnl().
@@ -271,6 +285,102 @@ def _as_ist_date(moment: datetime) -> str:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     return moment.astimezone(_IST).date().isoformat()
+
+
+#: Timeframes that trade a same-session round trip, so the fee engine has to
+#: price them as intraday. Delivery and intraday STT differ by roughly 8x on a
+#: round trip, so a 1-minute scalper costed like a delivery swing books a profit
+#: the venue would have taken away (BUG-26).
+INTRADAY_FEE_TIMEFRAMES = frozenset({"1min", "3min", "5min", "15min", "30min", "1hour"})
+
+
+def equity_fee_segment(timeframe: Any) -> str:
+    """The fee segment an equity runner's fills belong to.
+
+    ``config.segment`` is NOT used here: in this app it names a capital
+    partition mapped to a broker (``config/segments.yaml``), not the cost
+    engine's delivery/intraday distinction.
+    """
+    from backtest.simulator.fees import TradeSegment
+
+    return (
+        TradeSegment.EQUITY_INTRADAY
+        if str(timeframe or "").strip().lower() in INTRADAY_FEE_TIMEFRAMES
+        else TradeSegment.EQUITY_DELIVERY
+    )
+
+
+def equity_fee_broker(config: "RunnerConfig") -> Optional[str]:
+    """Whose cost model an equity paper runner pays, or ``None`` for the active one.
+
+    The named execution broker wins, then a broker feed named by ``source``.
+    ``None`` means this config names no venue — a data-only feed
+    (synthetic/replay) does not decide what a round trip costs, and the
+    deployment's own Cost & Risk Settings do.
+    """
+    from backtest.brokers.segments import known_broker_names
+
+    known = known_broker_names()
+    for candidate in (config.execution_broker, config.source):
+        name = str(candidate or "").strip().lower()
+        if name and (not known or name in known):
+            return name
+    return None
+
+
+def equity_costed_executor(portfolio: Portfolio, config: "RunnerConfig") -> OrderExecutor:
+    """This runner's fill engine, with the broker's real cost stack attached.
+
+    Every paper equity bucket used to execute on :func:`free_executor`, whose
+    zero-fee profile was written for V1 ("paper trading had no costs") — so an
+    equity runner's P&L was gross-only and a scalping strategy looked profitable
+    at exactly the frequency the venue would have taxed it (BUG-26). This keeps
+    the rest of that contract identical (deterministic, no slippage, no price
+    improvement, no market-hours gate, same participation cap) and attaches the
+    fee engine, resolved the same way the settings panel resolves it:
+    DB profile → ``config/brokers.yaml`` → built-in preset.
+
+    Option books are deliberately not routed here — ``OptionPaperBroker`` prices
+    its own stack per structure.
+    """
+    from backtest.simulator.execution import costed_executor
+    from backtest.simulator.fees import load_broker_profile
+
+    # A USD-quoted crypto pair has no Indian cash-market cost model: booking
+    # STT and GST on it would be inventing a charge, not measuring one.
+    if config.symbols and all("/" in str(sym) for sym in config.symbols):
+        return free_executor(portfolio)
+
+    broker = equity_fee_broker(config)
+    try:
+        profile = load_broker_profile(broker=broker)
+    except Exception as exc:  # noqa: BLE001 — a mis-read cost model must be loud
+        raise ValueError(
+            f"cannot resolve the equity fee model for broker {broker!r}: {exc}. "
+            "Fix Cost & Risk Settings; a runner must never fall back to trading "
+            "as if fills were free."
+        ) from exc
+    # ``max_participation=None`` on purpose: it leaves the same 10 % cap
+    # :func:`free_executor` used, so this changes ONLY what a fill costs, never
+    # how much of it fills. The segment is set after construction because the
+    # fill provider reads the live config, and costed_executor takes no segment.
+    executor = costed_executor(portfolio, broker=profile, max_participation=None)
+    executor.config.segment = equity_fee_segment(config.timeframe)
+    return executor
+
+
+def equity_fee_split(position: Any) -> tuple[float, float]:
+    """``(brokerage, statutory charges)`` for a position, in that order.
+
+    Books restored from a snapshot written before the split existed carry only
+    ``commission_total``; attributing the whole stack to brokerage keeps such a
+    trade from reading as a zero-cost round trip.
+    """
+    brokerage = float(getattr(position, "brokerage_total", 0) or 0)
+    statutory = float(getattr(position, "statutory_fees_total", 0) or 0)
+    if brokerage == 0.0 and statutory == 0.0:
+        return float(getattr(position, "commission_total", 0) or 0), 0.0
+    return brokerage, statutory
 
 
 def infer_evaluation_cadence(strategy: Any) -> str:
@@ -459,8 +569,14 @@ class OrderLedger:
         price: float,
         quantity: Optional[float] = None,
         ts: Optional[str] = None,
+        commission: Optional[float] = None,
+        statutory_fees: Optional[float] = None,
     ) -> FillEvent:
         """Record a broker fill and route it to the owning runner.
+
+        ``commission`` / ``statutory_fees`` are the fee engine's own split for
+        this fill (BUG-26) — whoever executed the order knows them and hands
+        them here so the runner can report what a round trip actually cost.
 
         Raises ``KeyError`` if the client order id is unknown — an unknown
         order id must never silently fill.
@@ -480,6 +596,9 @@ class OrderLedger:
                 quantity=qty,
                 price=float(price),
                 ts=ts or datetime.now(timezone.utc).isoformat(),
+                tag=dict(order.tag or {}),
+                commission=float(commission or 0.0),
+                statutory_fees=float(statutory_fees or 0.0),
             )
 
             order.status = ORDER_FILLED
@@ -900,7 +1019,14 @@ class PaperBroker:
         runner.portfolio.add_order(sim_order)
 
         return self.ledger.apply_fill(
-            order.client_order_id, float(fill.fill_price), float(fill.quantity), ts=ts
+            order.client_order_id,
+            float(fill.fill_price),
+            float(fill.quantity),
+            ts=ts,
+            # The fee engine's own split for this fill, so the runner's closed
+            # trade says what it cost and who took it (BUG-26).
+            commission=float(fill.commission),
+            statutory_fees=float(fill.exchange_fees + fill.regulatory_fees),
         )
 
 
@@ -1185,7 +1311,11 @@ class StrategyRunner:
             # runner bars from — normalised above, so it is never empty.
             source=str(config.source),
         )
-        self.executor = free_executor(self.portfolio)
+        self.executor = equity_costed_executor(self.portfolio, config)
+        # What the cost engine actually charged, so a closed trade can name its
+        # own segment and profile instead of being re-derived later.
+        self.fee_segment = str(self.executor.config.segment)
+        self.fee_profile = str(getattr(self.executor.fees.broker, "name", "") or "")
         self.closed_trades_cache: List[Dict[str, Any]] = []
 
         # -- options bridge (Gap G3.2) --------------------------------------
@@ -1511,7 +1641,10 @@ class StrategyRunner:
         """
         trades: List[Dict[str, Any]] = []
         for pos in self.portfolio.closed_positions:
+            # ``realized_pnl`` is the price P&L only — the fee stack lives
+            # beside it, so ``pnl`` stays gross exactly like an option record.
             pnl = float(pos.realized_pnl)
+            brokerage, statutory = equity_fee_split(pos)
             # A closed position's own ``quantity`` is zero by definition, so the
             # round trip's size/direction come from the stamp taken at the final
             # fill (rows written before that stamp keep the old reading).
@@ -1532,8 +1665,15 @@ class StrategyRunner:
                     ),
                     "entry_ts": pos.opened_at.isoformat() if pos.opened_at else None,
                     "exit_ts": pos.closed_at.isoformat() if pos.closed_at else None,
+                    "session_date": _as_ist_date(pos.closed_at) if pos.closed_at else None,
                     "pnl": round(pnl, 2),
+                    "gross_pnl": round(pnl, 2),
+                    "net_pnl": round(float(pos.net_pnl), 2),
+                    "commission": round(brokerage, 2),
+                    "statutory_fees": round(statutory, 2),
+                    "segment": str(self.fee_segment),
                     "win": pnl >= 0,
+                    "exit_reason": pos.exit_reason,
                     "coid": None,
                     "exit_coid": None,
                 }
@@ -3641,11 +3781,19 @@ class StrategyRunner:
             )
             return
 
+        # WHY the book closed travels on the exit order's tag, and this fill is
+        # the only moment it still has a position to attach to (BUG-26). The
+        # first reason wins: a re-delivered fill must not rewrite history.
+        reason = str((closing_fill.tag or {}).get("reason") or "").strip()
+        if reason and not position.exit_reason:
+            position.exit_reason = reason
+
         exit_time = position.closed_at or datetime.now(timezone.utc)
         if exit_time.tzinfo is None:
             exit_time = exit_time.replace(tzinfo=timezone.utc)
         net_pnl = position.net_pnl
         session_date = exit_time.astimezone(_IST).date().isoformat()
+        brokerage, statutory = equity_fee_split(position)
 
         for existing in self._closed_trades:
             if (
@@ -3667,7 +3815,12 @@ class StrategyRunner:
             "instance_id": self.instance_id,
             "exit_time": exit_time,
             "session_date": session_date,
+            "gross_pnl": str(position.realized_pnl),
             "net_pnl": str(net_pnl),
+            "commission": str(brokerage),
+            "statutory_fees": str(statutory),
+            "segment": str(self.fee_segment),
+            "exit_reason": position.exit_reason,
         }
         self._closed_trades.append(trade_record)
 

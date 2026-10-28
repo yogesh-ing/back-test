@@ -251,6 +251,15 @@ class Fill:
         return quantize_money(self.commission + self.exchange_fees + self.regulatory_fees)
 
     @property
+    def statutory_fees(self) -> Decimal:
+        """Everything the broker did NOT keep: venue charges plus statutory taxes.
+
+        Split out so a closed trade can answer "how much of this cost was tax
+        and how much was brokerage?" — ``total_fees`` alone cannot (BUG-26).
+        """
+        return quantize_money(self.exchange_fees + self.regulatory_fees)
+
+    @property
     def slippage_per_share(self) -> Decimal:
         """Signed execution shortfall per share; positive is adverse.
 
@@ -415,6 +424,7 @@ class Fill:
 
         if preview.action is PositionAction.INCREASE:
             cash = position.add_shares(self.quantity, self.fill_price, self.total_fees)
+            position.note_fee_split(self.commission, self.statutory_fees)
             return PositionImpact(
                 action=PositionAction.INCREASE,
                 quantity=self.quantity,
@@ -423,6 +433,7 @@ class Fill:
             )
 
         result = position.reduce_shares(self.quantity, self.fill_price, self.total_fees)
+        position.note_fee_split(self.commission, self.statutory_fees)
         return PositionImpact(
             action=PositionAction.CLOSE if result.fully_closed else PositionAction.REDUCE,
             quantity=result.quantity_closed,

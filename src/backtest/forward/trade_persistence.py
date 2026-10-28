@@ -152,7 +152,17 @@ class LiveTradePersister:
         exit_ts = _parse_ts(t.get("exit_ts")) or now_utc()
         if entry_ts is None:
             entry_ts = exit_ts
-        pnl = Decimal(str(t.get("pnl") or 0))
+        # The runner's book is the truth for a round trip: it knows the price
+        # P&L, the brokerage and the venue/statutory charges separately. Until
+        # BUG-26 the equity flow reported only one number, which the writer had
+        # to copy into both P&L columns — so a costed loss read as a gross one.
+        gross_raw = t.get("gross_pnl")
+        gross = Decimal(str(gross_raw if gross_raw is not None else t.get("pnl") or 0))
+        commission = Decimal(str(t.get("commission") or 0))
+        statutory = Decimal(str(t.get("statutory_fees") or 0))
+        costs = commission + statutory
+        net_raw = t.get("net_pnl")
+        net = Decimal(str(net_raw)) if net_raw is not None else gross - costs
         qty = Decimal(str(t.get("units") or t.get("qty") or 1))
         entry_px = Decimal(str(t.get("entry_price") or 0))
         exit_px = Decimal(str(t.get("exit_price") or 0))
@@ -171,9 +181,9 @@ class LiveTradePersister:
                     exit_price=abs(exit_px),
                     entry_time=entry_ts,
                     exit_time=exit_ts,
-                    gross_pnl=pnl,
-                    net_pnl=pnl,
-                    commission_total=Decimal(str(t.get("commission") or 0)),
+                    gross_pnl=gross,
+                    net_pnl=net,
+                    commission_total=costs,
                     holding_period_minutes=holding_min,
                     exit_reason=exit_reason,
                 )

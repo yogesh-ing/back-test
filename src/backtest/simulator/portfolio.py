@@ -924,6 +924,12 @@ class Portfolio:
                 current_price=fill.fill_price,
                 portfolio_id=self.portfolio_id,
                 commission_total=fill.total_fees,
+                # The OPEN path constructs the position instead of applying the
+                # fill to one, so it carries the cost split here — otherwise a
+                # one-entry-one-exit round trip reports brokerage and statutory
+                # charges for only half its costs (BUG-26).
+                brokerage_total=fill.commission,
+                statutory_fees_total=fill.statutory_fees,
                 strategy_name=getattr(fill, "strategy_name", None),
             )
             self.positions[symbol] = opened

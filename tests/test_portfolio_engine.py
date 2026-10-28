@@ -273,8 +273,12 @@ class TestStrategyRunner:
         assert r1.positions["AAA"]["qty"] == 100
         assert "AAA" not in r2.positions
         assert "BBB" not in r1.positions
-        assert r1.cash == pytest.approx(90_000)
-        assert r2.cash == pytest.approx(90_000)
+        # Cash is gross less each book's OWN cost stack (BUG-26): paper pays
+        # real brokerage and statutory charges, and one runner's fees never
+        # land on the other's cash.
+        assert float(r1.portfolio.total_commission) > 0
+        assert r1.cash == pytest.approx(90_000 - float(r1.portfolio.total_commission))
+        assert r2.cash == pytest.approx(90_000 - float(r2.portfolio.total_commission))
 
     def test_trade_round_trip_records_pnl(self, ledger):
         r = self._runner(ledger)
@@ -287,7 +291,10 @@ class TestStrategyRunner:
         assert r.wins == 1
         assert r.win_rate() == 1.0
         assert "AAA" not in r.positions
-        assert r.cash == pytest.approx(101_000.0)
+        # ``realized_pnl`` is the price P&L; the cash shows what the trip
+        # actually left after the venue took its cut.
+        assert r.cash == pytest.approx(101_000.0 - float(r.portfolio.total_commission))
+        assert float(r.portfolio.total_commission) > 0
 
     def test_win_rate_and_equity(self, ledger):
         r = self._runner(ledger)
@@ -301,7 +308,8 @@ class TestStrategyRunner:
         broker.submit_market(r.instance_id, "AAA", SIDE_SELL, 10, 90.0)
         assert r.wins == 1 and r.losses == 1
         assert r.win_rate() == pytest.approx(0.5)
-        assert r.equity() == pytest.approx(100_000.0)  # +100 -100
+        # +100 −100 on price, less the costs both round trips paid.
+        assert r.equity() == pytest.approx(100_000.0 - float(r.portfolio.total_commission))
 
     def test_paused_runner_blocks_new_entries(self, ledger):
         r = self._runner(ledger)
