@@ -34,6 +34,7 @@ from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRun
 from backtest.strategy.base import Strategy
 from backtest.strategy.intent import Direction, MarketView
 from backtest.strategy import registry as _registry
+from options_support import pin_session_clock, research_profile, stale_marks, wide_gate
 
 if "silent_option_fixture" not in _registry._REGISTRY:
 
@@ -97,11 +98,15 @@ def _option_runner_config(**overrides) -> RunnerConfig:
     instrument = {
         "type": "option",
         "expression": {
+            "expression_version": 2,
             "type": "bull_call_spread",
-            "strike_selection": "atm",
             "quantity": 12,
             # 2 bars: enough to force one close, deterministic and view-free.
-            "exit": {"max_bars": 2, "min_days_to_expiry": 1},
+            "exit": {
+                "stop_loss_points": 10_000.0,
+                "max_bars": 2,
+                "min_days_to_expiry": 1,
+            },
         },
     }
     # NOTE (2026-09-21): option runners are exempt from the warmup gate, so
@@ -143,6 +148,8 @@ def option_runner():
     """A runner with one **closed** structure and one **open** one."""
     runner = StrategyRunner(_option_runner_config(), ledger=OrderLedger())
     runner.start()
+    research_profile(runner)
+    runner.options_bridge.risk_gate = wide_gate()
 
     for bar in _bars([25_000, 25_010, 25_020, 25_030, 25_040]):
         runner.process_candle_event("NIFTY", bar)
@@ -151,13 +158,21 @@ def option_runner():
     assert bridge is not None
 
     # 1) first structure — the time stop closes it two bars later
-    bridge.on_market_view(_bull_view(runner.last_price["NIFTY"]), runner.config.strategy_name)
+    bridge.on_intent(
+        {"structure": "bull_call_spread", "strike_selection": "atm"},
+        _bull_view(runner.last_price["NIFTY"]),
+        runner.config.strategy_name,
+    )
     for bar in _bars([25_120, 25_240, 25_360], day_offset=6):
         runner.process_candle_event("NIFTY", bar)
 
     # 2) second structure — one bar later it is still open (max_bars closes on
     # the *second* bar), so the render has a live book to show.
-    bridge.on_market_view(_bull_view(runner.last_price["NIFTY"]), runner.config.strategy_name)
+    bridge.on_intent(
+        {"structure": "bull_call_spread", "strike_selection": "atm"},
+        _bull_view(runner.last_price["NIFTY"]),
+        runner.config.strategy_name,
+    )
     for bar in _bars([25_650], day_offset=10):
         runner.process_candle_event("NIFTY", bar)
 
@@ -182,6 +197,7 @@ def snapshots(option_runner, tmp_path):
         ledger=OrderLedger(),
     )
     equity.start()
+    research_profile(equity)
     for bar in _bars([1_400, 1_410, 1_420]):
         bar = dict(bar, ts=bar["ts"].replace("2026-10-01", "2026-10-01"))
         equity.process_candle_event("RELIANCE", bar)
@@ -456,10 +472,14 @@ def test_live_api_payload_renders_option_columns(api_client, tmp_path):
         "instrument": {
             "type": "option",
             "expression": {
+                "expression_version": 2,
                 "type": "bull_call_spread",
-                "strike_selection": "atm",
                 "quantity": 5,
-                "exit": {"max_bars": 2, "min_days_to_expiry": 1},
+                "exit": {
+                    "stop_loss_points": 10_000.0,
+                    "max_bars": 2,
+                    "min_days_to_expiry": 1,
+                },
             },
         },
     }
@@ -468,13 +488,23 @@ def test_live_api_payload_renders_option_columns(api_client, tmp_path):
     iid = created.get_json()["instance_id"]
 
     runner = get_portfolio_manager().get_runner(iid)
+    research_profile(runner)  # bull call spread: widen before the first bar
+    runner.options_bridge.risk_gate = wide_gate()
     for bar in _bars([25_000, 25_010, 25_020, 25_030, 25_040]):
         runner.process_candle_event("NIFTY", bar)
     bridge = runner.options_bridge
-    bridge.on_market_view(_bull_view(runner.last_price["NIFTY"]), payload["strategy"])
+    bridge.on_intent(
+        {"structure": "bull_call_spread", "strike_selection": "atm"},
+        _bull_view(runner.last_price["NIFTY"]),
+        payload["strategy"],
+    )
     for bar in _bars([25_120, 25_240, 25_360], day_offset=6):
         runner.process_candle_event("NIFTY", bar)
-    bridge.on_market_view(_bull_view(runner.last_price["NIFTY"]), payload["strategy"])
+    bridge.on_intent(
+        {"structure": "bull_call_spread", "strike_selection": "atm"},
+        _bull_view(runner.last_price["NIFTY"]),
+        payload["strategy"],
+    )
     for bar in _bars([25_650], day_offset=10):
         runner.process_candle_event("NIFTY", bar)
 
@@ -611,12 +641,15 @@ def test_the_action_and_order_styles_exist():
 
 
 @requires_node
-def test_stale_mark_live_drill_renders_badge_tooltip_and_refresh_button(option_runner, tmp_path):
+def test_stale_mark_live_drill_renders_badge_tooltip_and_refresh_button(
+    option_runner, tmp_path, monkeypatch
+):
     """AC #2 & AC #10 (Live drill): Kill the quote session on a running option
     runner, wait 3 bars, and verify the rendered dashboard visibly shows
     '⚠ stale mark' badge, 'last good quote ... — ...' tooltip, 'stale-mark-row'
     highlight, and '↻ Refresh marks' button in matrix, positions, and deep-dive.
     """
+    pin_session_clock(monkeypatch)
     bridge = option_runner.options_bridge
     assert bridge is not None
     assert bridge.open_structure_id is not None
@@ -641,9 +674,14 @@ def test_stale_mark_live_drill_renders_badge_tooltip_and_refresh_button(option_r
     for bar in _bars([25_700, 25_750, 25_800], day_offset=12):
         option_runner.process_candle_event("NIFTY", bar)
 
+    # The kill leaves the marks frozen, so age them past the SLA in session time
+    # (§8.1) — the drill must not depend on the wall clock it runs at.
+    stale_marks(bridge, bridge.stale_after_seconds + 1)
+
     row = option_runner.get_state()
     detail = option_runner.get_detail()
     assert row["mark_stale"] is True
+    assert bridge.mark_age_seconds() > bridge.stale_after_seconds
     assert "session killed" in (row["quote_error"] or "")
     assert row["mark_ts"] is not None
 

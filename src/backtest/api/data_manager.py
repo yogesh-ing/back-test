@@ -1909,7 +1909,9 @@ def _persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timefram
     for bar in bars:
         try:
             if isinstance(bar, dict):
-                ts = bar_timestamp(bar.get("t", bar.get("time", bar.get("timestamp"))))
+                ts = bar_timestamp(
+                    bar.get("t", bar.get("time", bar.get("timestamp"))), timeframe
+                )
                 o, h, l, c = (
                     float(bar.get("o", bar.get("open", 0))),
                     float(bar.get("h", bar.get("high", 0))),
@@ -1918,7 +1920,7 @@ def _persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timefram
                 )
                 v = int(bar.get("v", bar.get("volume", 0)))
             elif isinstance(bar, (list, tuple)) and len(bar) >= 6:
-                ts = bar_timestamp(bar[0])
+                ts = bar_timestamp(bar[0], timeframe)
                 o, h, l, c = float(bar[1]), float(bar[2]), float(bar[3]), float(bar[4])
                 v = int(bar[5])
             else:

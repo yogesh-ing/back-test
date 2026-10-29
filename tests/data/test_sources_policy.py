@@ -66,12 +66,13 @@ def test_only_db_and_mstock_are_certifiable():
 def test_the_whole_vocabulary_is_described():
     """A source that silently vanishes is impossible to debug.
 
-    ``dhan`` joined the vocabulary with the multi-broker feed: it is a real
-    broker source a runner can name, so the config has to describe it — an
-    undescribed source is one the policy cannot refuse or allow on purpose.
+    ``dhan`` joined the vocabulary with the multi-broker feed and ``upstox``
+    with the third broker (2026-10-13): both are real broker sources a runner
+    can name, so the config has to describe them — an undescribed source is
+    one the policy cannot refuse or allow on purpose.
     """
     names = {row["name"] for row in SHIPPED.describe()}
-    assert names == {"synthetic", "csv", "db", "mstock", "dhan"}
+    assert names == {"synthetic", "csv", "db", "mstock", "dhan", "upstox"}
 
 
 def test_disabled_sources_are_still_listed():
@@ -229,6 +230,23 @@ def test_a_disabled_source_is_never_certifiable():
 def test_missing_is_disabled_not_enabled():
     assert SHIPPED.is_enabled("") is False
     assert SHIPPED.is_enabled(None) is False
+
+
+def test_the_third_venue_is_in_the_trading_default(monkeypatch):
+    """``default_broker_source`` walks the broker feeds in order; a deployment
+    whose only enabled feed is the third venue must land on it, not on "".
+    """
+    from backtest.data import sources_policy as sp
+
+    upstox_only = SourcePolicy(
+        {"upstox": SourceSpec("upstox", enabled=True, certifiable=True)},
+        profile="unit",
+    )
+    monkeypatch.setattr(sp, "_POLICY", upstox_only)
+    try:
+        assert sp.default_broker_source() == "upstox"
+    finally:
+        sp.reset_source_policy()
 
 
 def test_reset_clears_the_cache():

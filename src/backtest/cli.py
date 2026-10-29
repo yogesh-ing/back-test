@@ -130,6 +130,106 @@ def compare_command(args):
         print(f"chart={out}")
 
 
+def replay_command(args):
+    """Run the internal options replay harness and export its evidence."""
+    from backtest.replay import ReplayConfig, ReplayDataset, ReplayHarness
+
+    option_paths = list(args.option_csv or [])
+    dataset = ReplayDataset.from_csv(
+        args.underlying_csv,
+        option_paths,
+        options_dir=args.options_dir,
+        underlying_symbol=args.underlying_symbol,
+        timeframe=args.timeframe,
+        timestamp_kind=args.timestamp_kind,
+    )
+    params = _load_json_object(args.strategy_params, "--strategy-params")
+    expression = _load_json_object(args.expression, "--expression")
+    faults = _build_replay_fault_plan(args)
+    config = ReplayConfig(
+        strategy_name=args.strategy,
+        strategy_params=params,
+        expression=expression,
+        initial_capital=args.capital,
+        commission_per_lot=args.commission_per_lot,
+        underlying_symbol=args.underlying_symbol,
+    )
+    harness = ReplayHarness(dataset, config, fault_plan=faults)
+    result = harness.run(verify_no_lookahead=args.verify_no_lookahead)
+    artifact = result.export(args.export)
+    print(
+        f"label=REPLAY run_id={result.run_id} strategy={result.strategy_name} "
+        f"underlying={result.underlying} timeframe={result.timeframe} "
+        f"bars={result.summary['bars_processed']} intents={result.summary['intents']} "
+        f"fills={result.summary['fills']} exits={result.summary['exits']} "
+        f"halts={result.summary['feed_halts']}"
+    )
+    print(f"data_fingerprint={result.data_fingerprint}")
+    if result.no_lookahead:
+        print(
+            "no_lookahead=PASS "
+            f"checkpoints={result.no_lookahead['checkpoints']} "
+            "(full replay vs every closed-bar truncation)"
+        )
+    print(f"artifact={artifact}")
+
+
+def _load_json_object(raw, flag):
+    import json
+
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{flag} must be valid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{flag} must decode to a JSON object")
+    return value
+
+
+def _build_replay_fault_plan(args):
+    from backtest.replay import ReplayFaultPlan
+
+    drop_quotes = set()
+    for item in args.drop_quote or []:
+        token, separator, timestamp = item.partition("@")
+        if not separator or not token or not timestamp:
+            raise ValueError("--drop-quote format is TOKEN@BAR_OPEN_TIMESTAMP")
+        drop_quotes.add((token, timestamp))
+
+    drop_contracts = set()
+    for item in args.drop_contract or []:
+        fields = item.split(";")
+        if len(fields) != 4:
+            raise ValueError("--drop-contract format is TIMESTAMP;EXPIRY;STRIKE;CE|PE")
+        timestamp, expiry, strike, option_type = fields
+        drop_contracts.add((timestamp, expiry, strike, option_type))
+
+    lot_size_overrides = {}
+    for item in args.lot_size_override or []:
+        key, separator, size = item.rpartition("=")
+        token, at, timestamp = key.partition("@")
+        if not separator or not at or not token or not timestamp:
+            raise ValueError("--lot-size-override format is TOKEN@BAR_OPEN_TIMESTAMP=SIZE")
+        lot_size_overrides[(token, timestamp)] = int(size)
+
+    stale_windows = []
+    for item in args.stale_window or []:
+        start, separator, end = item.partition("..")
+        if not separator or not start or not end:
+            raise ValueError("--stale-window format is START_TIMESTAMP..END_TIMESTAMP")
+        stale_windows.append((start, end))
+
+    return ReplayFaultPlan(
+        drop_quotes=drop_quotes,
+        drop_contracts=drop_contracts,
+        lot_size_overrides=lot_size_overrides,
+        reject_entry_bars=set(args.reject_entry or []),
+        stale_windows=stale_windows,
+    )
+
+
 def papertrade_command(args):
     from backtest.forward.paper_runner import run_live_papertrade, run_walkforward
 
@@ -296,6 +396,70 @@ def build_parser():
     papertrade_parser.add_argument("--resume-on-start", action="store_true")
     papertrade_parser.add_argument("--data-root", default="data")
     papertrade_parser.set_defaults(func=papertrade_command)
+
+    replay_parser = sub.add_parser(
+        "replay",
+        parents=[common],
+        help="run the internal deterministic options replay sandbox (no DB writes)",
+    )
+    replay_parser.add_argument("--underlying-csv", required=True)
+    replay_parser.add_argument(
+        "--options-dir",
+        default=None,
+        help="directory containing one option CSV per contract",
+    )
+    replay_parser.add_argument(
+        "--option-csv", action="append", default=[], help="per-contract option CSV; may be repeated"
+    )
+    replay_parser.add_argument(
+        "--underlying-symbol",
+        choices=["NIFTY", "BANKNIFTY"],
+        default="NIFTY",
+    )
+    replay_parser.add_argument("--timeframe", choices=["1min", "5min", "15min"], default="1min")
+    replay_parser.add_argument("--timestamp-kind", choices=["open", "close"], default="open")
+    replay_parser.add_argument("--strategy", default="directional_options")
+    replay_parser.add_argument("--strategy-params", default="{}", help="JSON object")
+    replay_parser.add_argument("--expression", default="{}", help="JSON options expression object")
+    replay_parser.add_argument("--capital", type=float, default=1_000_000.0)
+    replay_parser.add_argument("--commission-per-lot", type=float, default=20.0)
+    replay_parser.add_argument("--export", required=True, help="JSON evidence artifact path")
+    replay_parser.add_argument(
+        "--verify-no-lookahead",
+        action="store_true",
+        help="compare full replay with every closed-bar truncation (O(bars²))",
+    )
+    replay_parser.add_argument(
+        "--drop-quote",
+        action="append",
+        default=[],
+        help="inject missing quote: TOKEN@BAR_OPEN_TIMESTAMP",
+    )
+    replay_parser.add_argument(
+        "--drop-contract",
+        action="append",
+        default=[],
+        help="inject missing contract: TIMESTAMP;EXPIRY;STRIKE;CE|PE",
+    )
+    replay_parser.add_argument(
+        "--lot-size-override",
+        action="append",
+        default=[],
+        help="inject lot-size change: TOKEN@BAR_OPEN_TIMESTAMP=SIZE",
+    )
+    replay_parser.add_argument(
+        "--reject-entry",
+        action="append",
+        default=[],
+        help="inject broker reject at bar open timestamp",
+    )
+    replay_parser.add_argument(
+        "--stale-window",
+        action="append",
+        default=[],
+        help="drop option quotes in START_TIMESTAMP..END_TIMESTAMP",
+    )
+    replay_parser.set_defaults(func=replay_command)
 
     return parser
 

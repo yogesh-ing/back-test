@@ -113,7 +113,12 @@ def test_spawn_returns_config_no_side_effects():
     assert cfg["strategy"] == "directional_options"
     assert cfg["allocated_capital"] == 100000
     assert cfg["instrument"]["type"] == "option"
-    assert "expression" in cfg["instrument"]
+    # Phase 3: directional_options declares a spec, so the playbook
+    # travels as layer-4 selections — no expression in the config; the
+    # legacy expression survives only as the audit snapshot.
+    assert "expression" not in cfg["instrument"]
+    assert "playbook_selections" in cfg
+    assert cfg["playbook_snapshot"]["type"] == {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"}
     # No runner should have been created yet — spawn is side-effect free
     # Check that portfolio still has 0 runners (or at least spawn didn't create via this endpoint)
     # We verify by checking that instance_id is NOT in response (new spec) — old spec returned instance_id
@@ -121,7 +126,7 @@ def test_spawn_returns_config_no_side_effects():
 
 
 def test_spawn_matches_to_runner_config():
-    """Spawn response matches Playbook.to_runner_config()"""
+    """Spawn response matches the playbook's selections (Phase 3 form)."""
     from backtest.playbooks.registry import get_playbook_registry
 
     client = _client()
@@ -136,4 +141,8 @@ def test_spawn_matches_to_runner_config():
     actual = resp.get_json()["runner_config"]
     assert actual["strategy"] == expected["strategy"]
     assert actual["allocated_capital"] == expected["allocated_capital"]
-    assert actual["instrument"] == expected["instrument"]
+    # to_runner_config() still produces the legacy form; the endpoint
+    # translates it for spec'd strategies.
+    assert actual["playbook_selections"] == pb.to_selections()
+    assert actual["playbook_snapshot"] == expected["instrument"]["expression"]
+    assert actual["instrument"] == {"type": "option"}

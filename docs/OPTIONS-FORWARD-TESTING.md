@@ -210,18 +210,27 @@ spawn), and every bar the bridge manages an open structure.
 
 | Rule | Key | Fires when |
 |---|---|---|
+| risk cap | `max_loss_inr` (default off) | mark ≤ −₹X of structure P&L — the platform's hard ceiling on the trade |
+| days to expiry | `min_days_to_expiry` (default **1**) | `(expiry − bar_date).days ≤ N` → squares off with the established `auto_square_off` reason |
 | stop loss | `stop_loss_pct` / `stop_loss_points` | mark ≤ −X% of net premium, or ≤ −₹X |
 | take profit | `take_profit_pct` / `take_profit_points` | mark ≥ +X% of net premium, or ≥ +₹X |
-| days to expiry | `min_days_to_expiry` (default **1**) | `(expiry − bar_date).days ≤ N` → squares off with the established `auto_square_off` reason |
 | time stop | `max_bars` | held ≥ N bars |
 | signal flip | `signal_flip` (default on) | view turns against the structure's direction |
 | signal neutral | `neutral_bars` (default off) | N consecutive bars with no view / a NEUTRAL view |
 | reverse | `reenter` (default off) | a flip-close immediately opens the opposite structure |
+| reversal budget | `max_reentries_per_day` (default **2**) | how many flip re-entries one day may take |
 
-Precedence is risk-before-opinion (stop → target → DTE → time → flip →
-neutral), so a gap-down reports the stop, not the flip. Percent rules are
-skipped for credit structures (a percentage of a negative premium is
+Precedence is the one the builder PRD fixes (§2 "Risk & exits", with the
+emergency flatten owned by the runner, above all of these): **cap → square-off →
+stop → target → time → flip → neutral**, so a gap-down reports the stop and a bar
+that is both near expiry and through the stop reports the square-off. Percent
+rules are skipped for credit structures (a percentage of a negative premium is
 meaningless).
+
+The cap, stop and target read their trigger off the structure's mark
+(`PRICE_MEASURED_REASONS`), so the bridge suppresses exactly those three while a
+mark is stale or failed — a bad price is not a price. The square-off and time
+stop keep firing: they never consulted the mark.
 
 Supporting behaviour, all deliberately conservative:
 
@@ -238,8 +247,9 @@ Supporting behaviour, all deliberately conservative:
 
 **Acceptance criteria.**
 
-- [x] Every rule has a unit test (percent, points, time, DTE, flip, neutral,
-      precedence, credit-structure skip, disabled rules).
+- [x] Every rule has a unit test (cap, percent, points, time, DTE, flip,
+      neutral, precedence, credit-structure skip, disabled rules), including
+      the tier ordering above and the stale-mark suppression set.
 - [x] A bullish→bearish flip closes the bull call spread on that bar;
       `reenter: true` opens the bear put spread on the same bar.
 - [x] `exit_reason` is set on the closed structure (`signal_flip`,

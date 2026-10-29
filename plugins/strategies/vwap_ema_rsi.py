@@ -19,8 +19,9 @@ Contract adaptation
 -------------------
 * Deterministic: pure function of the candles — passes the conformance
   battery (same candles → same view, every time).
-* Exits are NOT here (C2 layering): the playbook/expression layer owns
-  TP/SL/re-entries. This class only speaks direction + confidence.
+* Exits: the declared ``execution`` spec below owns the exit contract
+  (50% stop / 100% target / signal flip). This class speaks direction +
+  confidence; the contract it trades under is stated here, once.
 * On 1-minute bars the strategy emits a view only on crossover bars; the
   runner's re-entry policy decides what happens after an exit.
 """
@@ -29,11 +30,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import DirectionalOptionStrategy
 from backtest.strategy.intent import Direction, MarketView
 
 
-class VwapEmaRsi(Strategy):
+class VwapEmaRsi(DirectionalOptionStrategy):
     """VWAP bias + EMA(9/15) cross trigger + RSI pullback band."""
 
     name = "vwap_ema_rsi"
@@ -45,8 +46,62 @@ class VwapEmaRsi(Strategy):
         "trigger, RSI(14) 45–60 pullback filter. Long calls above VWAP on "
         "a bullish cross, long puts below VWAP on a bearish cross."
     )
+    description_sections = {
+        'overview': (
+            'Intraday trend stack: VWAP sets the bias, an EMA 9/15 cross pulls the trigger, and'
+            'an RSI 45-60 band filters entries to healthy pullback momentum.'
+        ),
+        'regime': (
+            'Works on intraday trend days where price respects VWAP as support/resistance.'
+            'Struggles in balanced, VWAP-hugging ranges — crosses fire repeatedly with no'
+            'follow-through and premium bleed accumulates.'
+        ),
+        'entry': (
+            'Bullish cross above VWAP with RSI inside 45-60 → long call; bearish cross below VWAP'
+            'with RSI in band → long put. Outside the band or on the wrong side of VWAP: silence.'
+        ),
+        'construction': (
+            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put'
+            "on the underlying's nearest eligible expiry — a defined-risk, single-leg structure."
+            'Size is 1 lot by default (override 1-5 lots where the spawn form allows).'
+        ),
+        'exits_risk': (
+            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit'
+            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst'
+            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long'
+            'option can never lose more than the premium paid.'
+        ),
+        'parameters': (
+            'ema_fast=9, ema_slow=15, rsi_period=14, rsi_low=45.0, rsi_high=60.0,'
+            'underlying=NIFTY. Size defaults to 1 lot; quantity (and, where listed, exit levels)'
+            'can be overridden at spawn within the declared menu.'
+        ),
+    }
     version = "1.0"
     author = "user spec 2026-09-21"
+
+    # Phase 2 rewrite (plan §9.2): the strategy's own execution declaration.
+    # Signal logic below is unchanged from the snapshot; what changed is
+    # that the direction->structure mapping and the exit contract now live
+    # here, once, instead of in UI defaults / bridge fallbacks.
+    execution = {
+        "emits": ["bullish", "bearish", "neutral"],
+        "structures": {
+            "bullish": {"structure": "long_call", "strike_selection": "atm"},
+            "bearish": {"structure": "long_put", "strike_selection": "atm"},
+        },
+        "exit": {
+            "stop_loss_pct": 0.50,
+            "take_profit_pct": 1.0,
+            "signal_flip": True,
+            "min_days_to_expiry": 1,
+        },
+        "quantity": 1,
+        "min_quantity": 1,
+        "max_quantity": 5,
+        "allowed_overrides": ["quantity", "exit"],
+    }
+
 
     params = {
         "ema_fast": {

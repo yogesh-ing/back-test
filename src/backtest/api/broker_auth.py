@@ -24,7 +24,7 @@ bodies are ``400``; unexpected server errors are ``500``.
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
 from backtest.brokers.session_manager import (
     available_brokers,
@@ -422,6 +422,80 @@ def probe_quote() -> tuple:
     except Exception:  # noqa: BLE001
         logger.exception("probe-quote failed")
         return jsonify({"success": False, "error": "probe failed"}), 500
+
+
+# ---------------------------------------------------------------------------
+# Upstox OAuth callback (third broker, 2026-10-13)
+#
+# Upstox's login is a browser OAuth dance: the user signs in ON UPSTOX and
+# Upstox redirects back here with ``?code=<auth-code>&state=<csrf>``. This
+# route hands the code to the pending UpstoxBroker login (state-validated,
+# single-use) so the TOTP step can exchange it. The code itself is never
+# logged, echoed in the page, or returned as JSON.
+# ---------------------------------------------------------------------------
+
+_OAUTH_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Upstox authorization</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; background:#0f1115; color:#e6e8eb;
+         display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }}
+  .card {{ background:#171a21; border:1px solid #2a2f3a; border-radius:12px;
+           padding:28px 32px; max-width:460px; text-align:center; }}
+  h1 {{ font-size:18px; margin:0 0 10px; }}
+  p {{ font-size:14px; line-height:1.5; color:#aab1bd; margin:0 0 16px; }}
+  a {{ color:#6ea8fe; }} .fail {{ color:#ff8787; }}
+</style></head>
+<body><div class="card"><h1>{title}</h1><p>{body}</p>
+<p><a href="/">← Back to the app</a></p></div></body></html>"""
+
+
+def _oauth_page(title: str, body: str) -> Response:
+    # CSS braces are doubled in the template (str.format escaping); the
+    # {title}/{body} holes are the only substitutions.
+    return Response(_OAUTH_PAGE.format(title=title, body=body), mimetype="text/html")
+
+
+@broker_auth_bp.get("/api/broker/upstox/callback")
+def upstox_oauth_callback() -> Response:
+    """Upstox redirect target — park the auth code for the pending login.
+
+    Success shows a small page telling the user to return to the app and
+    press Continue; a state mismatch (or no login in progress) falls back to
+    that message instead of parking anything (fail-closed).
+    """
+    error = (request.args.get("error") or "").strip()
+    if error:
+        logger.info("upstox oauth callback: provider error=%s", error[:80])
+        return _oauth_page(
+            "Upstox sign-in not completed",
+            "Upstox returned an error instead of an authorization code. "
+            "Return to the app and start the login again.",
+        )
+    code = (request.args.get("code") or "").strip()
+    state = (request.args.get("state") or "").strip()
+    try:
+        from backtest.brokers.session_manager import get_session_manager
+
+        broker = get_session_manager().get_broker("upstox")
+        ok, message = broker.park_auth_code(code, state)
+    except Exception:  # noqa: BLE001 — a callback must render, never 500 with detail
+        logger.exception("upstox oauth callback failed")
+        ok, message = False, "Internal error while saving the code — check the server log"
+    if ok:
+        logger.info("upstox oauth callback: authorization code received")
+        return _oauth_page(
+            "✅ Authorization received",
+            "Return to the app and press <strong>Continue</strong> in the Upstox "
+            "login window — the session is completed there.",
+        )
+    logger.info("upstox oauth callback rejected: %s", message)
+    return _oauth_page(
+        "Code not accepted",
+        f"{message}. You can also paste the <code>code</code> value from this "
+        "page's address into the app's code field.",
+    )
 
 
 @broker_auth_bp.post("/api/broker/logout")

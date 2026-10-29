@@ -12,9 +12,9 @@ Four seams, one story:
    the SAME provider to every runner on the underlying (refcounted, evicted
    at zero); a live acquire without a broker raises.
 3. Runner wiring — an option runner with ``source="mstock"`` + authenticated
-   session gets a bridge whose ``quote_source`` reads ``live:mstock``; stop()
-   releases the LIVE refcount (symmetric with acquire); no session → the
-   labelled synthetic fallback.
+   session gets a bridge whose ``quote_source`` reads ``live:mstock+bidask``
+   (the bus's spread-crossing wrapper); stop() releases the LIVE refcount
+   (symmetric with acquire); no session → the labelled synthetic fallback.
 4. Engine quote seam (U2 fix) — ``_resolve_quote_source`` in live mode now
    returns a ``LiveQuoteProvider`` (the QUOTE contract) gated on a session
    check that actually exists; previously it returned a BAR feed behind a
@@ -233,7 +233,9 @@ class TestChainBusLive:
         cb = get_chain_bus()
         p1 = cb.acquire("NIFTY", source="mstock", broker=broker)
         p2 = cb.acquire("NIFTY", source="mstock", broker=FakeBroker())
-        assert p1 is p2 and isinstance(p1, LiveChainProvider)
+        assert p1 is p2, "one shared feed object — and one API budget"
+        assert isinstance(p1, BidAskQuoteProvider), "the bus wraps the live feed (§4.1)"
+        assert isinstance(p1.inner, LiveChainProvider)
         assert cb.subscriber_count("NIFTY", source="mstock") == 2
 
     def test_live_release_evicts_at_zero(self, bus):
@@ -246,7 +248,8 @@ class TestChainBusLive:
         cb = get_chain_bus()
         live = cb.acquire("NIFTY", source="mstock", broker=FakeBroker(CHAIN))
         synthetic = cb.acquire("NIFTY")
-        assert isinstance(live, LiveChainProvider)
+        assert isinstance(live, BidAskQuoteProvider)
+        assert isinstance(live.inner, LiveChainProvider)
         assert isinstance(synthetic, SyntheticChainGenerator)
         assert cb.generator_count() == 2
 
@@ -273,7 +276,15 @@ def _option_runner(source: str) -> RunnerConfig:
         source=source,
         instrument={
             "type": "option",
-            "expression": {"type": "bull_call_spread", "strike_selection": "atm", "quantity": 1},
+            "expression": {
+                "expression_version": 2,
+                "type": {
+                    "BULLISH": {"structure": "long_call", "strike_selection": "atm"},
+                    "BEARISH": {"structure": "long_put", "strike_selection": "atm"},
+                },
+                "quantity": 1,
+                "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+            },
         },
     )
 
@@ -301,9 +312,22 @@ class TestRunnerWiring:
         runner = _runner(_option_runner("mstock"))
         try:
             assert runner.options_bridge is not None
-            assert runner.options_bridge.quote_provider.source_name == "live:mstock"
+            assert runner.options_bridge.quote_provider.source_name == "live:mstock+bidask"
             assert runner._chain_source == "mstock"
             assert get_chain_bus().subscriber_count("NIFTY", source="mstock") == 1
+        finally:
+            runner.stop()
+
+    def test_mstock_runner_marks_and_fills_cross_the_spread(self, bus, authenticated):
+        """The live provider the bridge trades against implements §4.1/§4.2."""
+        runner = _runner(_option_runner("mstock"))
+        try:
+            provider = runner.options_bridge.quote_provider
+            token = "TOK-NIFTY-24800-CE"  # ltp 112.5, bid 111.0, ask 114.0
+            assert provider.execution_quote(token, "BUY")["ltp"] == 114.0  # ask
+            assert provider.mark_quote(token, "BUY")["ltp"] == 111.0  # bid
+            assert provider.get_quote(token)["ltp"] == 112.5, "dashboard keeps LTP"
+            assert provider.generator is provider.inner, "strike selection still resolves"
         finally:
             runner.stop()
 
@@ -359,8 +383,9 @@ class TestProviderFor:
         provider, label = option_quote_provider_for(
             "mstock", "NIFTY", quote_broker=FakeBroker(CHAIN)
         )
-        assert label == "live:mstock"
-        assert isinstance(provider, LiveChainProvider)
+        assert label == "live:mstock+bidask"
+        assert isinstance(provider, BidAskQuoteProvider)
+        assert isinstance(provider.inner, LiveChainProvider)
 
     def test_live_without_session_falls_back_labelled(self, bus, monkeypatch):
         import backtest.forward.feed_registry as fr
@@ -434,7 +459,10 @@ def test_register_contract_binds_numeric_token_to_trading_symbol():
 
     assert "error" not in quote
     assert quote["ltp"] == pytest.approx(148.75)
-    assert broker.quote_calls == 1
+    # Two lookups are allowed now: the numeric token is tried first because it
+    # is the only key the WebSocket depth cache understands, and the symbol row
+    # answers when it has nothing (2026-10-22 one-sided-quote fix).
+    assert broker.quote_calls <= 2
 
 
 class TestQuoteProviderRegisterContractConformance:
@@ -497,7 +525,16 @@ class TestQuoteProviderRegisterContractConformance:
         broken = _BrokenProvider()
         assert not callable(getattr(broken, "register_contract", None))
 
-        bridge = OptionsBridge(capital=100_000, quote_provider=broken)
+        bridge = OptionsBridge(
+            capital=100_000,
+            expression={
+                "expression_version": 2,
+                "type": "long_call",
+                "quantity": 1,
+                "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+            },
+            quote_provider=broken,
+        )
         leg = OptionPosition(
             position_id="p1",
             structure_id="s1",

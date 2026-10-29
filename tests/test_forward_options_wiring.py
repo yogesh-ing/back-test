@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import pytest
 
-from backtest.forward.options_bridge import DEFAULT_EXPRESSION, OptionsBridge
+from backtest.forward.options_bridge import OptionsBridge
 from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRunner
 from backtest.forward.portfolio_manager import PortfolioManager
 from backtest.forward.risk_supervisor import GlobalRiskConfig
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
+from backtest.strategy.intent import Direction
+from options_support import research_profile, wide_gate
 
 
 # ---------------------------------------------------------------------------
@@ -49,8 +52,16 @@ def _option_config(**overrides):
         timeframe="1day",
         instrument={
             "type": "option",
+            # End-state: the runner expression is the strategy spec's own
+            # resolution (directional_options declares long premium only).
             "expression": {
-                "type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"}
+                "expression_version": 2,
+                "type": {
+                    "BULLISH": {"structure": "long_call", "strike_selection": "atm"},
+                    "BEARISH": {"structure": "long_put", "strike_selection": "atm"},
+                },
+                "quantity": 1,
+                "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
             },
         },
     )
@@ -111,9 +122,12 @@ class TestOptionRunnerFlow:
     def _runner(self, config=None):
         runner = StrategyRunner(config or _option_config(), ledger=OrderLedger())
         runner.start()
+        research_profile(runner)
+        if runner.options_bridge is not None:
+            runner.options_bridge.risk_gate = wide_gate()
         return runner
 
-    def test_rally_opens_bull_call_spread(self):
+    def test_rally_opens_long_call(self):
         """DirectionalOptionsStrategy auto-trades when NIFTY rises."""
         runner = self._runner()
         _feed(runner, RISING)
@@ -121,11 +135,11 @@ class TestOptionRunnerFlow:
         summary = runner.options_summary()
         assert summary is not None
         assert summary["open_structures"] == 1
-        assert summary["open_positions"] == 2  # spread = 2 legs
+        assert summary["open_positions"] == 1  # single long leg
         assert summary["executed_count"] == 1
 
         entries = [s for s in runner.signal_log if s["kind"] == "OPTION_ENTRY"]
-        assert entries and "bull_call_spread" in entries[-1]["reason"]
+        assert entries and "long_call" in entries[-1]["reason"]
 
     def test_slide_opens_bear_structure(self):
         runner = self._runner()
@@ -134,7 +148,7 @@ class TestOptionRunnerFlow:
         summary = runner.options_summary()
         assert summary["open_structures"] == 1
         entries = [s for s in runner.signal_log if s["kind"] == "OPTION_ENTRY"]
-        assert "bear_put_spread" in entries[-1]["reason"]
+        assert "long_put" in entries[-1]["reason"]
 
     def test_flat_market_trades_nothing(self):
         runner = self._runner()
@@ -155,11 +169,17 @@ class TestOptionRunnerFlow:
                 instrument={
                     "type": "option",
                     "expression": {
+                        "expression_version": 2,
                         "type": {
-                            "BULLISH": "bull_call_spread",
-                            "BEARISH": "bear_put_spread",
+                            "BULLISH": {"structure": "long_call", "strike_selection": "atm"},
+                            "BEARISH": {"structure": "long_put", "strike_selection": "atm"},
                         },
-                        "exit": {"signal_flip": False, "min_days_to_expiry": None},
+                        "quantity": 1,
+                        "exit": {
+                            "stop_loss_points": 10_000.0,
+                            "signal_flip": False,
+                            "min_days_to_expiry": None,
+                        },
                     },
                 }
             )
@@ -217,7 +237,14 @@ class TestCoexistence:
             auto_start_feed=False,
         )
         try:
+            # (Gate scaffolding: the unsigned ₹25k ceiling sits below one
+            # ATM premium on the synthetic chain; see options_support.)
+            # before any bar reaches it (entry is refused on the first signal).
             opt_id = manager.add_runner(_option_config(), start=True)
+            research_profile(manager.get_runner(opt_id))
+            _opt_runner = manager.get_runner(opt_id)
+            if _opt_runner.options_bridge is not None:
+                _opt_runner.options_bridge.risk_gate = wide_gate()
             eq_id = manager.add_runner(
                 RunnerConfig(
                     name="eq-runner", strategy_name="sma_crossover",
@@ -244,26 +271,50 @@ class TestCoexistence:
 # ---------------------------------------------------------------------------
 
 
+_V2_LONG_CALL = {
+    "expression_version": 2,
+    "type": "long_call",
+    "quantity": 1,
+    "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+}
+
+
 class TestOptionsBridge:
-    def test_default_expression_is_direction_aware(self):
-        assert DEFAULT_EXPRESSION["type"]["BULLISH"] == "bull_call_spread"
-        assert DEFAULT_EXPRESSION["type"]["BEARISH"] == "bear_put_spread"
+    def test_no_default_expression_remains(self):
+        # Phase 4: DEFAULT_EXPRESSION is deleted. The direction-aware
+        # defaults live in the strategy's execution spec now.
+        import backtest.forward.options_bridge as bridge_module
+        from backtest.strategy.registry import get_strategy
+
+        assert not hasattr(bridge_module, "DEFAULT_EXPRESSION")
+        spec = get_strategy("directional_options").execution_spec()
+        assert spec.direction_rule_for(Direction.BULLISH).structure == "long_call"
+        assert spec.direction_rule_for(Direction.BEARISH).structure == "long_put"
 
     def test_none_view_is_a_noop(self):
-        bridge = OptionsBridge(capital=100_000)
+        bridge = OptionsBridge(
+            capital=100_000, expression=_V2_LONG_CALL,
+            allowed_structures=RESEARCH_STRUCTURES,
+        )
         assert bridge.on_market_view(None, "s") is None
 
-    def test_fixed_structure_type_overrides_direction(self):
+    def test_intent_names_the_structure_regardless_of_direction(self):
+        # End-state: the intent is complete — a BULLISH view carrying a
+        # long_put intent opens a long put. The bridge looks nothing up.
         from backtest.strategy.intent import Direction, MarketView
 
         bridge = OptionsBridge(
-            capital=1_000_000, expression={"type": "long_put"}
+            capital=1_000_000,
+            expression={**_V2_LONG_CALL, "type": "long_put"},
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         view = MarketView(
             direction=Direction.BULLISH, confidence=0.9,
             underlying="NIFTY", spot_price=None,
         )
-        result = bridge.on_market_view(view, "s")
+        result = bridge.on_intent(
+            {"structure": "long_put", "strike_selection": "atm"}, view, "s"
+        )
         assert result is not None and result["structure_type"] == "long_put"
 
     def test_view_spot_moves_the_synthetic_market(self):
@@ -271,12 +322,17 @@ class TestOptionsBridge:
 
         from backtest.strategy.intent import Direction, MarketView
 
-        bridge = OptionsBridge(capital=1_000_000)
+        bridge = OptionsBridge(
+            capital=1_000_000, expression=_V2_LONG_CALL,
+            allowed_structures=RESEARCH_STRUCTURES,
+        )
         view = MarketView(
             direction=Direction.BULLISH, confidence=0.9,
             underlying="NIFTY", spot_price=Decimal("25100"),
         )
-        result = bridge.on_market_view(view, "s")
+        result = bridge.on_intent(
+            {"structure": "long_call", "strike_selection": "atm"}, view, "s"
+        )
         assert result is not None
         # Strikes were built around the view's spot, not the default 24800.
         assert all(abs(int(s) - 25100) <= 500 for s in result["strikes"])

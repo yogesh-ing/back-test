@@ -48,6 +48,7 @@ from typing import Any, Callable, Mapping
 import pandas as pd
 
 from backtest.instruments.option import OptionContract
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.expiry import ExpiryManager
 from backtest.options.paper_trading import (
     InsufficientMarginError,
@@ -512,6 +513,12 @@ class OptionBacktestDriver:
             capital=self.config.capital,
             slippage_pct=self.config.slippage_pct,
             commission_per_lot=self.config.commission_per_lot,
+            # Research profile, deliberately: this is the synthetic-chain
+            # mechanics loop, not the V1 forward path. It prices multi-leg
+            # structures the execution gate (options/execution_gate.py) refuses
+            # for a real runner, and its output is never performance evidence —
+            # historical options backtests stay disabled in the API.
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         self.strategy = strategy or DirectionalOptions(**dict(self.config.strategy_params))
         self.expiry_manager = expiry_manager or ExpiryManager(

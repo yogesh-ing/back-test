@@ -23,6 +23,7 @@ import pytest
 
 from backtest.instruments.option import OptionContract
 from backtest.instruments.base import ExerciseType, SettlementType
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.strategy.intent import (
     Direction,
     MarketView,
@@ -44,6 +45,13 @@ from backtest.options.paper_trading import (
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+def _research_broker(**kwargs) -> OptionPaperBroker:
+    """Broker widened to the research profile — multi-leg mechanics tests need
+    spreads, which the V1 execution gate refuses by design."""
+    kwargs.setdefault("capital", 1_000_000.0)
+    kwargs.setdefault("allowed_structures", RESEARCH_STRUCTURES)
+    return OptionPaperBroker(**kwargs)
 
 def _make_view(spot: int = 24800) -> MarketView:
     return MarketView(
@@ -277,8 +285,9 @@ class TestOptionPaperBrokerExecution:
         assert positions[0].quantity == 1
 
     def test_execute_bull_call_spread(self):
+        broker = _research_broker()
         intent = _make_bull_call_spread_intent()
-        positions = self.broker.execute_structure(intent, self.quotes)
+        positions = broker.execute_structure(intent, self.quotes)
 
         assert len(positions) == 2
         long_pos = [p for p in positions if p.side == "BUY"][0]
@@ -353,7 +362,7 @@ class TestInsufficientMargin:
 
     def test_rejects_for_expensive_spread(self):
         # Use a very expensive spread where even with SELL leg, net cost exceeds capital
-        broker = OptionPaperBroker(capital=500.0)
+        broker = _research_broker(capital=500.0)
         quotes = FakeQuoteProvider(default_price=10000.0)
 
         intent = _make_bull_call_spread_intent()
@@ -416,7 +425,7 @@ class TestPositionClosing:
         assert positions[0].status == PositionStatus.CLOSED
 
     def test_close_spread(self):
-        broker = OptionPaperBroker(capital=1_000_000.0)
+        broker = _research_broker()
         quotes = FakeQuoteProvider(default_price=100.0)
 
         intent = _make_bull_call_spread_intent()
@@ -445,7 +454,7 @@ class TestPositionClosing:
 class TestIntegrationSpreadLifecycle:
     def test_full_lifecycle(self):
         """T3.11: Open → hold (MTM update) → close bull call spread."""
-        broker = OptionPaperBroker(capital=1_000_000.0)
+        broker = _research_broker()
         quotes = FakeQuoteProvider(default_price=100.0)
 
         # Open
@@ -496,8 +505,13 @@ class TestIntegrationSpreadLifecycle:
 # ---------------------------------------------------------------------------
 
 class TestQueries:
+    def setup_method(self):
+        # These queries run over a mixed book (single leg + spread), so the
+        # broker takes the research profile.
+        self.broker = _research_broker()
+
     def test_get_open_positions(self):
-        broker = OptionPaperBroker(capital=1_000_000.0)
+        broker = self.broker
         quotes = FakeQuoteProvider()
 
         broker.execute_structure(_make_long_call_intent(), quotes)
@@ -507,7 +521,7 @@ class TestQueries:
         assert len(open_pos) == 3  # 1 + 2
 
     def test_get_open_structures(self):
-        broker = OptionPaperBroker(capital=1_000_000.0)
+        broker = self.broker
         quotes = FakeQuoteProvider()
 
         broker.execute_structure(_make_long_call_intent(), quotes)
@@ -517,7 +531,7 @@ class TestQueries:
         assert len(structures) == 2
 
     def test_positions_by_structure(self):
-        broker = OptionPaperBroker(capital=1_000_000.0)
+        broker = self.broker
         quotes = FakeQuoteProvider()
 
         positions = broker.execute_structure(_make_bull_call_spread_intent(), quotes)
@@ -527,7 +541,7 @@ class TestQueries:
         assert len(by_structure) == 2
 
     def test_total_margin_used(self):
-        broker = OptionPaperBroker(capital=1_000_000.0)
+        broker = self.broker
         quotes = FakeQuoteProvider(default_price=100.0)
 
         broker.execute_structure(_make_bull_call_spread_intent(), quotes)
@@ -550,3 +564,67 @@ class TestFakeQuoteProvider:
         qp.set_price("T24800", 200.0)
         quote = qp.get_quote("T24800")
         assert quote["ltp"] == 200.0
+
+
+# ---------------------------------------------------------------------------
+# Leg-fill observer (the Orders tab's option rows)
+# ---------------------------------------------------------------------------
+
+class TestLegFillObserver:
+    """``on_leg_fill`` is how an option leg reaches the shared order ledger.
+
+    The observer records ONE row per leg on entry and one per leg on exit, with
+    the lot count the desk thinks in, the price it was asked at and the price it
+    actually got.
+    """
+
+    def _broker(self, records, **kwargs):
+        kwargs.setdefault("capital", 1_000_000.0)
+        kwargs.setdefault("allowed_structures", RESEARCH_STRUCTURES)
+        kwargs["on_leg_fill"] = records.append
+        return OptionPaperBroker(**kwargs)
+
+    def test_entry_and_exit_each_fire_one_record_per_leg(self):
+        records = []
+        broker = self._broker(records)
+        quotes = FakeQuoteProvider(default_price=100.0)
+
+        positions = broker.execute_structure(_make_bull_call_spread_intent(), quotes)
+        assert [(r["phase"], r["side"]) for r in records] == [
+            ("entry", "BUY"),
+            ("entry", "SELL"),
+        ]
+
+        quotes.set_price("T24700", 120.0)
+        quotes.set_price("T25000", 80.0)
+        records.clear()
+        broker.close_structure(positions[0].structure_id, quotes, reason="manual")
+        assert [(r["phase"], r["side"]) for r in records] == [("exit", "SELL"), ("exit", "BUY")]
+
+    def test_record_carries_lots_units_and_the_two_prices(self):
+        records = []
+        broker = self._broker(records)
+        quotes = FakeQuoteProvider(default_price=100.0)
+
+        broker.execute_structure(_make_long_call_intent(), quotes)
+        rec = records[0]
+        structure_id = broker.get_open_structures()[0].structure_id
+
+        assert rec["lots"] == 1 and rec["lot_size"] == 25
+        assert rec["quantity"] == 25  # contracts, not lots
+        assert rec["structure_id"] == structure_id
+        assert rec["structure_type"] == "long_call"
+        assert rec["underlying"] == "NIFTY"
+        assert rec["symbol"] == "NIFTY26SEP24800CE"
+        # Asked at the quote, filled after slippage — the ledger's slippage pair.
+        assert Decimal(str(rec["requested_price"])) == Decimal("100.0")
+        assert Decimal(str(rec["price"])) > Decimal("100.0")
+
+    def test_a_failing_observer_never_blocks_the_fill(self):
+        def explode(_record):
+            raise RuntimeError("observer is broken")
+
+        broker = self._broker([], on_leg_fill=explode)
+        positions = broker.execute_structure(_make_long_call_intent(), FakeQuoteProvider())
+        assert len(positions) == 1
+        assert broker.get_open_structures()[0].structure_id == positions[0].structure_id

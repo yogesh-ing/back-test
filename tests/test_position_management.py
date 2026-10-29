@@ -43,9 +43,11 @@ from backtest.forward.paper_runner import (
     RunnerConfig,
     StrategyRunner,
 )
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.exit_policy import EXIT_MANUAL_STOP, EXIT_MANUAL_TARGET
 from backtest.simulator.execution import free_executor
 from backtest.strategy.intent import Direction, MarketView
+from options_support import research_profile
 
 BASE_DAY = date(2026, 9, 10)  # mid-month: no expiry rule fires by accident
 
@@ -93,6 +95,7 @@ def _equity_runner(**overrides) -> StrategyRunner:
     kwargs.update(overrides)
     runner = StrategyRunner(RunnerConfig(**kwargs), ledger=OrderLedger())
     runner.start()
+    research_profile(runner)
     return runner
 
 
@@ -111,10 +114,11 @@ def _long_equity_runner(entry_price: float = 100.0) -> StrategyRunner:
 
 def _option_runner(**overrides) -> StrategyRunner:
     expression = {
+        "expression_version": 2,
         "type": "bull_call_spread",
         "quantity": 1,
         # Entry allowed on the bar; nothing else closes it unless we say so.
-        "exit": {"min_days_to_expiry": 1},
+        "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": 1},
     }
     kwargs = dict(
         name="NIFTY-BCS",
@@ -129,12 +133,17 @@ def _option_runner(**overrides) -> StrategyRunner:
     kwargs.update(overrides)
     runner = StrategyRunner(RunnerConfig(**kwargs), ledger=OrderLedger())
     runner.start()
+    research_profile(runner)
     return runner
 
 
 def _open_option_structure(runner: StrategyRunner, spot: float = 24_800.0):
     bridge = runner.options_bridge
     assert bridge is not None
+    # These fixtures drive a bull call spread through the position-management
+    # surface, which the V1 whitelist refuses — opt the runner into the
+    # research profile so the multi-leg mechanics stay reachable in tests.
+    research_profile(runner)
     # Anchor the bridge's bar clock to the fixture's replay day BEFORE the
     # entry. The bridge selects the expiry "as of the bar clock (falls back
     # to today)" — without this anchor the first entry (no bar seen yet)
@@ -149,7 +158,12 @@ def _open_option_structure(runner: StrategyRunner, spot: float = 24_800.0):
     bar_dt = datetime.combine(BASE_DAY, _time(9, 15))
     bridge._bar_dt = bar_dt
     bridge._sync_market("NIFTY", spot, bar_dt.isoformat())
-    result = bridge.on_market_view(_view(spot=spot), runner.config.strategy_name)
+    rule = next(iter(bridge._strict_rules.values()))
+    result = bridge.on_intent(
+        {"structure": rule.structure, "strike_selection": "atm"},
+        _view(spot=spot),
+        runner.config.strategy_name,
+    )
     assert result and not result.get("rejected"), result
     return bridge.option_broker.get_open_structures()[0]
 
@@ -347,6 +361,25 @@ class TestEquityManualLevels:
         exit_order = runner.ledger.snapshot(statuses=[ORDER_FILLED])[0]
         assert exit_order["tag"]["reason"] == "manual_stop_loss"
 
+    def test_a_closed_equity_trade_keeps_its_size_and_direction(self):
+        """A closed position's ``quantity`` is zero, so the trade row cannot read it.
+
+        The deep-dive Trades tab used to show qty 0 / side LONG for every
+        round trip; the size and direction come from the stamp taken at the
+        final fill.
+        """
+        runner = _long_equity_runner(entry_price=100.0)
+        held_qty = runner.positions["RELIANCE"]["qty"]
+        assert held_qty > 0
+
+        runner.set_position_rule("RELIANCE", RULE_TARGET, 120.0)
+        _feed(runner, "RELIANCE", [121.0], start_day=20)
+
+        trade = runner.closed_trades[-1]
+        assert trade["kind"] == "equity"
+        assert trade["qty"] == pytest.approx(held_qty)
+        assert trade["side"] == "LONG"
+
     def test_the_target_fires_too(self):
         runner = _long_equity_runner(entry_price=100.0)
         runner.set_position_rule("RELIANCE", RULE_TARGET, 120.0)
@@ -495,7 +528,16 @@ class TestOptionStructureControl:
     def test_no_implied_vol_means_no_invented_greeks(self):
         """Greeks need a vol: use the chain's when there is one, and report
         nothing (not zeros) when there is not."""
-        bridge = OptionsBridge(capital=100_000)
+        bridge = OptionsBridge(
+            capital=100_000,
+            expression={
+                "expression_version": 2,
+                "type": "long_call",
+                "quantity": 1,
+                "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+            },
+            allowed_structures=RESEARCH_STRUCTURES,
+        )
 
         class Leg:
             instrument_token = "MISSING"
@@ -510,7 +552,16 @@ class TestOptionStructureControl:
         assert bridge._leg_vol(Known()) == pytest.approx(0.12)
 
     def test_the_bridge_refuses_levels_with_nothing_open(self):
-        bridge = OptionsBridge(capital=100_000)
+        bridge = OptionsBridge(
+            capital=100_000,
+            expression={
+                "expression_version": 2,
+                "type": "long_call",
+                "quantity": 1,
+                "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+            },
+            allowed_structures=RESEARCH_STRUCTURES,
+        )
         with pytest.raises(ValueError):
             bridge.set_manual_rule(stop_loss=10.0)
 
@@ -551,7 +602,15 @@ class TestManagerSurfaces:
         _, option = self._add(manager, RunnerConfig(
             name="OPT", strategy_name="directional_options", allocated_capital=500_000,
             symbols=["NIFTY"], timeframe="1day", mode="live", source="synthetic",
-            instrument={"type": "option", "expression": {"type": "bull_call_spread"}},
+            instrument={
+                "type": "option",
+                "expression": {
+                    "expression_version": 2,
+                    "type": "long_call",
+                    "quantity": 1,
+                    "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+                },
+            },
         ))
         _open_option_structure(option)
 
@@ -559,7 +618,7 @@ class TestManagerSurfaces:
         kinds = {r["kind"]: r for r in rows}
         assert set(kinds) == {"equity", "option"}
         assert kinds["equity"]["runner"] == "EQ"
-        assert kinds["option"]["structure_type"] == "bull_call_spread"
+        assert kinds["option"]["structure_type"] == "long_call"
         assert kinds["option"]["can_partial_close"] is False
         assert kinds["option"]["stale"] is False  # both are RUNNING
 
@@ -1263,6 +1322,7 @@ class TestAutoRetry:
         kwargs.update(overrides)
         runner = StrategyRunner(RunnerConfig(**kwargs), ledger=OrderLedger())
         runner.start()
+        research_profile(runner)
         return runner
 
     def test_a_policy_is_off_by_default(self):

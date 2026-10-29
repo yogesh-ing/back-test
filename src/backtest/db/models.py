@@ -137,6 +137,8 @@ class PortfolioSource(StrEnum):
     MSTOCK = "mstock"
     #: Second broker venue (migration 016 widened the DB CHECK to admit it).
     DHAN = "dhan"
+    #: Third broker venue (migration 020 widened the DB CHECK to admit it).
+    UPSTOX = "upstox"
 
 
 class PositionStatus(StrEnum):
@@ -257,9 +259,9 @@ class Portfolio(Base):
     mode: Mapped[str] = mapped_column(
         String(16), nullable=False, default="paper", server_default=text("'paper'")
     )
-    #: Where this run's bars come from (migration 002, widened by 016):
-    #: synthetic = generated, replay = historical DB, mstock | dhan = live
-    #: broker feed.
+    #: Where this run's bars come from (migration 002, widened by 016/020):
+    #: synthetic = generated, replay = historical DB, mstock | dhan | upstox
+    #: = live broker feed.
     source: Mapped[str] = mapped_column(
         String(16), nullable=False, default="synthetic", server_default=text("'synthetic'")
     )
@@ -1141,6 +1143,88 @@ class OptionChainSnapshot(Base):
             f"<OptionChainSnapshot {self.underlying} {self.expiry} "
             f"{self.strike}{self.option_type}>"
         )
+
+
+class OptionIntentKind(StrEnum):
+    """Event classes in the append-only option intent journal."""
+
+    #: The decision layer (bridge, live trader) chose to act.
+    DECIDED = "decided"
+    #: ``place_order`` returned an order id — the broker holds the ticket.
+    SUBMITTED = "submitted"
+    #: A submitted order was seen executed in the order book.
+    FILLED = "filled"
+    #: The broker definitely rejected the order (nothing at the exchange).
+    REJECTED = "rejected"
+    #: Placement timed out / failed at the gateway — the order may exist.
+    UNCERTAIN = "uncertain"
+    #: An uncertain submit was matched against the broker order book.
+    RECONCILED = "reconciled"
+    #: Execution stopped before all legs were placed.
+    HALTED = "halted"
+    #: A paper (simulated) fill was booked. Never used for live orders.
+    EXECUTED = "executed"
+
+
+class OptionIntentEvent(Base):
+    """One event in the append-only option intent journal (PRD decision 8).
+
+    ``intent_id`` is derived from the *decision*, not from a random uuid, so
+    the same decision replayed after a restart hashes to the same id and the
+    ``dedupe_key`` unique index makes a second submit of one leg impossible to
+    record — that is the idempotency key the execution seam reads before
+    calling ``place_order``.
+
+    Append-only: the journal has no update or delete path (see
+    :mod:`backtest.options.intent_journal`), so portfolio state stays derivable
+    by replay and an uncertain submit can be reconciled against the broker
+    rather than blindly retried.
+    """
+
+    __tablename__ = "option_intent_events"
+
+    @classmethod
+    def ensure_schema(cls, manager: Any) -> None:
+        """Create just this table (same convention as the segment audit)."""
+        engine = manager.engine if hasattr(manager, "engine") else manager
+        Base.metadata.create_all(engine, tables=[cls.__table__])
+
+    event_id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    intent_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    #: ``intent_id`` + ``kind`` (+ leg) — the idempotency key. ``None`` for
+    #: events that may legitimately repeat (e.g. ``reconciled`` polls).
+    dedupe_key: Mapped[Optional[str]] = mapped_column(String(160))
+
+    leg_index: Mapped[Optional[int]] = mapped_column(Integer)
+    structure_id: Mapped[Optional[str]] = mapped_column(String(36))
+    strategy_name: Mapped[Optional[str]] = mapped_column(String(64))
+    structure_type: Mapped[Optional[str]] = mapped_column(String(32))
+    underlying: Mapped[Optional[str]] = mapped_column(String(32))
+
+    broker_order_id: Mapped[Optional[str]] = mapped_column(String(64))
+    client_order_id: Mapped[Optional[str]] = mapped_column(String(64))
+
+    #: Anything else the reconciliation needs: quote ts/source, requested vs
+    #: filled lots, exit reason, error text. Never credentials.
+    detail: Mapped[dict[str, Any]] = mapped_column(
+        JSONVariant, nullable=False, server_default=text("'{}'")
+    )
+
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(_in_check("kind", OptionIntentKind), name="ck_opt_intent_kind"),
+        Index("ix_opt_intent_events_dedupe", "dedupe_key", unique=True),
+        Index("ix_opt_intent_events_intent", "intent_id", "event_id"),
+        Index("ix_opt_intent_events_recorded", text("recorded_at DESC")),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<OptionIntentEvent {self.intent_id[:8]} {self.kind}>"
 
 
 # ====================================================================

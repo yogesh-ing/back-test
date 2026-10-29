@@ -57,7 +57,7 @@ curl -X POST localhost:5000/api/portfolio/runner/create -H 'Content-Type: applic
 ```
 
 `mode` (`paper`|`live`, default `paper`) and `source`
-(`synthetic`|`replay`|`mstock`|`dhan`, default `synthetic`) tag the instance
+(`synthetic`|`replay`|`mstock`|`dhan`|`upstox`, default `synthetic`) tag the instance
 (ticket P4.1; `dhan` admitted by migration 016, 2026-10-01). `mode: "live"`
 routes equity fills through `LiveEquityGateway` (F-12 closed).
 
@@ -287,6 +287,7 @@ Equity vs options at a glance:
 |---|---|---|
 | Signal | strategy `generate_signals` (+1/0/−1) | `generate_market_view` → `TradeIntent` |
 | Execution | `PaperBroker.submit_market` (one symbol per order) | `OptionPaperBroker.execute_structure` (all legs or none) |
+| Order ledger (Orders tab) | one row per order, advanced PENDING → FILLED by `apply_fill`, which routes the `FillEvent` to the runner's equity handler | one FILLED row **per leg**, entry and exit, written by `record_filled` (no `FillEvent` routing — the option book owns the accounting). `Lots` column shows the lot count; equity rows read `—` |
 | Grouping | runner bucket | `structure_id` per multi-leg trade |
 | Risk | `RiskSupervisor` (daily loss / drawdown breakers) | `PreTradeRiskCheck` (margin / position / notional caps) + spread margin |
 | Costs | `PAPER_FREE_PROFILE` (zero) | `CommissionCalculator` — full NFO statutory stack (₹20/order + STT + GST + …) |

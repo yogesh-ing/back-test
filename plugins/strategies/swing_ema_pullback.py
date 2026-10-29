@@ -19,16 +19,42 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class SwingEmaPullback(Strategy):
+class SwingEmaPullback(EquityStrategy):
     name = "swing_ema_pullback"
     description = (
         "Daily swing: buy a pullback to the 20-EMA in a confirmed uptrend "
         "(close > 200-SMA, EMA20 > EMA50) when price reclaims the EMA; "
         "exit when the close loses the slow trend EMA."
     )
+    description_sections = {
+        'overview': (
+            'Daily swing pullback: in a confirmed uptrend (close above the 200-SMA, EMA20 above'
+            'EMA50), buy the dip that reclaims the 20-EMA.'
+        ),
+        'regime': (
+            'Works in healthy, stair-stepping uptrends with orderly pullbacks. Struggles when the'
+            "'pullback' is a trend change — the 200-SMA filter exits late, after much of the"
+            'reversal has already happened.'
+        ),
+        'entry': (
+            'Trend filter on (close > 200-SMA and EMA20 > EMA50), then enter when price pulls'
+            'back to and reclaims the 20-EMA.'
+        ),
+        'construction': (
+            'Single-instrument equity position, long only, daily bars, holds of days to weeks.'
+        ),
+        'exits_risk': (
+            'Exits when the close loses the slow trend EMA (EMA50) — the trend-break is the stop.'
+            'Worst case is the distance from the 20-EMA entry to a decisive EMA50 break, widest'
+            'in volatile names; no fixed stop or target.'
+        ),
+        'parameters': (
+            'ema_fast=20, ema_slow=50, sma_trend=200. Daily timeframe intended.'
+        ),
+    }
     version = "1.0"
     author = "quant-workshop"
 

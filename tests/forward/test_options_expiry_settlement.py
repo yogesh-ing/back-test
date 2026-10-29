@@ -32,6 +32,7 @@ import pytest
 
 from backtest.forward.options_bridge import OptionsBridge
 from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRunner
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.exit_policy import EXIT_DTE
 from backtest.options.expiry import EXIT_REASON_SETTLEMENT
 from backtest.options.paper_trading import PositionStatus
@@ -40,6 +41,7 @@ from backtest.options.quote_providers import (
     SyntheticQuoteProvider,
 )
 from backtest.strategy.intent import Direction, MarketView
+from options_support import research_profile
 
 
 # ---------------------------------------------------------------------------
@@ -62,31 +64,81 @@ def _bars(closes, start_day=1):
     ]
 
 
-def _view(direction: Direction, spot: float = 24_800.0) -> MarketView:
+def _view(
+    direction: Direction,
+    spot: float = 24_800.0,
+    bar_timestamp: str | None = None,
+) -> MarketView:
     return MarketView(
         direction=direction,
         confidence=0.9,
         underlying="NIFTY",
         spot_price=Decimal(str(spot)),
+        bar_timestamp=bar_timestamp,
     )
+
+
+def _gate():
+    """Test-scaffold gate: the rulebook's unsigned ₹25k ceiling is below
+    one ATM NIFTY premium on the synthetic chain, and these tests are
+    about settlement mechanics, not the ceiling."""
+    from backtest.options.execution_gate import PreTradeRiskGate
+    from backtest.risk_limits import RiskLimits
+
+    limits = RiskLimits(
+        per_trade_max_loss_inr=1_000_000.0,
+        per_runner_max_lots=100,
+        per_runner_max_order_value_inr=10_000_000.0,
+        entitlement={"paper": frozenset(RESEARCH_STRUCTURES)},
+        kill_switch_engaged_on_boot=False,
+        sha256="x" * 64,
+    )
+    return PreTradeRiskGate(limits, mode="paper")
+
+
+def _v2(expression: dict) -> dict:
+    """Legacy-shaped test expression -> v2 (Phase 4). Tests that declare
+    no hard stop get a far-away points stop (defined-risk spreads cannot
+    use structure_capped at the entry gate)."""
+    expression = dict(expression)
+    exit_cfg = dict(expression.get("exit") or {})
+    hard = ("stop_loss_pct", "stop_loss_points", "stop_loss_price")
+    if not any(k in exit_cfg for k in hard) and not exit_cfg.get("structure_capped"):
+        exit_cfg["stop_loss_points"] = 100_000.0
+    return {
+        "expression_version": 2,
+        "type": expression.get("type", "long_call"),
+        "quantity": expression.get("quantity", 1),
+        "exit": exit_cfg,
+    }
 
 
 def _ride_to_settlement_bridge(capital: float = 1_000_000.0) -> OptionsBridge:
     """A bridge whose policy holds the structure into expiry."""
     return OptionsBridge(
         capital=capital,
-        expression={
-            "type": "long_call",
-            "exit": {"min_days_to_expiry": None, "signal_flip": False},
-        },
+        expression=_v2(
+            {
+                "type": "long_call",
+                "exit": {"min_days_to_expiry": None, "signal_flip": False},
+            }
+        ),
         quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+        allowed_structures=RESEARCH_STRUCTURES,
+        risk_gate=_gate(),
     )
 
 
 def _open_at_bar(bridge: OptionsBridge, day: date, spot: float = 24_800.0):
     """Open a structure on a given bar date and return it."""
-    bridge.on_bar("NIFTY", spot, f"{day.isoformat()}T09:15:00")
-    result = bridge.on_market_view(_view(Direction.BULLISH, spot), "s")
+    bar_timestamp = f"{day.isoformat()}T09:15:00"
+    bridge.on_bar("NIFTY", spot, bar_timestamp)
+    rule = next(iter(bridge._strict_rules.values()))
+    result = bridge.on_intent(
+        {"structure": rule.structure, "strike_selection": "atm"},
+        _view(Direction.BULLISH, spot, bar_timestamp),
+        "s",
+    )
     assert result is not None and not result.get("rejected")
     return bridge.option_broker.get_open_structures()[0]
 
@@ -94,7 +146,7 @@ def _open_at_bar(bridge: OptionsBridge, day: date, spot: float = 24_800.0):
 def _runner(**expression_exit):
     exit_cfg = {"min_days_to_expiry": None, "signal_flip": False}
     exit_cfg.update(expression_exit)
-    expression = {"type": "long_call", "exit": exit_cfg}
+    expression = _v2({"type": "long_call", "exit": exit_cfg})
     runner = StrategyRunner(
         RunnerConfig(
             name="opt-runner",
@@ -107,6 +159,9 @@ def _runner(**expression_exit):
         ledger=OrderLedger(),
     )
     runner.start()
+    research_profile(runner)
+    if runner.options_bridge is not None:
+        runner.options_bridge.risk_gate = _gate()
     return runner
 
 
@@ -160,17 +215,20 @@ class TestExpirySettlement:
         units = structure.legs[0].total_quantity
         expiry = structure.expiry
 
-        # Settle 300 points above a 24,800 ATM strike.
-        bridge.on_bar("NIFTY", 25_100.0, f"{expiry.isoformat()}T09:15:00")
+        # Settle far enough above a 24,800 ATM strike to overcome the
+        # deterministic 22-day historical Black-Scholes entry premium. This
+        # used to depend on wall-clock pricing after the static expiry passed.
+        intrinsic = Decimal("500")
+        bridge.on_bar("NIFTY", 25_300.0, f"{expiry.isoformat()}T09:15:00")
         settled = bridge.option_broker.get_closed_structures()[0]
         pnl = settled.total_realized_pnl
 
         assert pnl > 0
         # ≤ the spread's max payoff (intrinsic × units); and strictly less than
         # gross intrinsic because the premium is netted out.
-        assert pnl < Decimal("300") * Decimal(str(units))
+        assert pnl < intrinsic * Decimal(str(units))
         assert pnl == pytest.approx(
-            (Decimal("300") - entry_premium / Decimal(str(units)))
+            (intrinsic - entry_premium / Decimal(str(units)))
             * Decimal(str(units)),
             rel=1e-3,
         )
@@ -218,8 +276,10 @@ class TestExpirySettlement:
         """
         bridge = OptionsBridge(
             capital=1_000_000.0,
-            expression={"type": "long_call", "exit": {"signal_flip": False}},
+            expression=_v2({"type": "long_call", "exit": {"signal_flip": False}}),
             quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+            allowed_structures=RESEARCH_STRUCTURES,
+            risk_gate=_gate(),
         )
         structure = _open_at_bar(bridge, date(2026, 9, 2))
         expiry = structure.expiry
@@ -261,11 +321,15 @@ class TestRoll:
     def test_next_view_rolls_to_the_next_expiry(self):
         bridge = OptionsBridge(
             capital=1_000_000.0,
-            expression={
-                "type": "bull_call_spread",
-                "exit": {"min_days_to_expiry": None, "signal_flip": False},
-            },
+            expression=_v2(
+                {
+                    "type": "bull_call_spread",
+                    "exit": {"min_days_to_expiry": None, "signal_flip": False},
+                }
+            ),
             quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+            allowed_structures=RESEARCH_STRUCTURES,
+            risk_gate=_gate(),
         )
         first = _open_at_bar(bridge, date(2026, 9, 2))
         first_id, first_expiry = first.structure_id, first.expiry
@@ -276,7 +340,11 @@ class TestRoll:
 
         after = first_expiry + timedelta(days=1)
         bridge.on_bar("NIFTY", 24_900.0, f"{after.isoformat()}T09:15:00")
-        result = bridge.on_market_view(_view(Direction.BULLISH, 24_900.0), "s")
+        result = bridge.on_intent(
+            {"structure": "bull_call_spread", "strike_selection": "atm"},
+            _view(Direction.BULLISH, 24_900.0),
+            "s",
+        )
 
         assert result is not None and not result.get("rejected")
         rolled = bridge.option_broker.get_open_structures()[0]

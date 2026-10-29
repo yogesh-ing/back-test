@@ -4,8 +4,10 @@ Spec (user request, 2026-09-18)
 -------------------------------
 Enter IMMEDIATELY on deployment/market open — no signal needed:
 sell OTM call (+2%..3% above spot) + sell OTM put (2%..3% below spot),
-same weekly expiry, 1 lot each. Exits: ₹100 take-profit / ₹100 stop-loss
-(configured in the runner expression, not here).
+same weekly expiry, 1 lot each. Exits: a fee-aware bracket (₹1,000 take-profit /
+₹2,000 stop-loss of structure P&L, configured in the runner expression / ExitPlan,
+not here) — widened off the old ±₹100 because ±₹100 sat inside the ₹193
+round-trip fee the engine itself charges, so every "win" was a net loss (BUG-02).
 
 Contract adaptation
 -------------------
@@ -40,14 +42,14 @@ from __future__ import annotations
 import pandas as pd
 
 from backtest.alerts.types import AlertType
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import StructureStrategy
 from backtest.strategy.intent import Direction, MarketView
 
 #: Contribution share above which ``alert_response="exit"`` requests a close.
 EXIT_SHARE_MIN = 0.5
 
 
-class ImmediateStrangle(Strategy):
+class ImmediateStrangle(StructureStrategy):
     """Sell the 2%-OTM strangle the moment the runner is deployed."""
 
     name = "immediate_strangle"
@@ -58,8 +60,85 @@ class ImmediateStrangle(Strategy):
         "Immediate short strangle: unconditional NEUTRAL view on deploy; "
         "expression maps every direction to short_strangle (~2% OTM legs)."
     )
+    description_sections = {
+        'overview': (
+            'Immediate short strangle: on deploy it sells a strangle (~2% OTM call and put) to'
+            'harvest premium from a range-bound underlying. It is a volatility-selling structure,'
+            'not a directional view.'
+        ),
+        'regime': (
+            'Works in calm, range-bound markets where realised volatility stays below what the'
+            'sold premium priced in. Struggles violently in trending or event-driven markets — a'
+            'fast one-sided move runs through a short leg and losses accelerate.'
+        ),
+        'entry': (
+            'Unconditional: the entry intent fires on the first bar after deploy, with no signal'
+            "condition. Timing the market regime is entirely the operator's job."
+        ),
+        'construction': (
+            'Short strangle: simultaneously sold OTM call and OTM put (~2% away) on the same'
+            'expiry, 1 lot by default (max 3). Short options carry margin requirements and'
+            'theoretically uncapped risk on the call side.'
+        ),
+        'exits_risk': (
+            'Fee-aware declared plan: combined stop at 2000 points adverse, target '
+            'at 1000 points favourable (₹ of structure P&L). The old ±100 bracket was '
+            'inside the ₹193 round-trip fee this 2-leg structure is charged, so every '
+            'target was a net loss (BUG-02); the new bracket clears the spread bounce '
+            'and the fee floor the bridge gate enforces. IMPORTANT: a short strangle\'s '
+            'true worst case is far larger than the stop if price gaps through it — the '
+            'pre-trade risk gate requires a declared worst case and the strangle '
+            'entitlement before it will fill, and this strategy should only run where '
+            'that entitlement is granted.'
+        ),
+        'parameters': (
+            "underlying=NIFTY; alert_response='pause' (how the runner reacts to risk alerts)."
+            'Quantity 1-3 lots via override.'
+        ),
+    }
     version = "1.1"
     author = "strategy-plan spec 2026-09-18"
+
+    # Phase 2 rewrite (plan §9.2): the opening trade is stated explicitly
+    # here — a short strangle ~2% OTM each side — instead of being smuggled
+    # through an unconditional NEUTRAL view + expression mapping. NEUTRAL
+    # remains the strategy's (non-)opinion; this intent, by name, is what
+    # opens. The stop/target live in the strategy's ExitPlan below (widened
+    # off the old ±₹100 to a fee-aware bracket — see BUG-02 note there).
+    opening_structure = {
+        "structure": "strangle",
+        "strike_selection": "fixed_distance",
+        "distance_pct": 2.0,
+        "expiry_policy": "nearest",
+    }
+    execution = {
+        "emits": [],
+        "structures": {},
+        "exit": {
+            # BUG-02 (QA 2026-10-28): the old ±₹100 bracket was *inside* the
+            # ₹193 round-trip fee the engine charges this structure, so every
+            # "target" hit was a net loss and every stop fired on quote bounce.
+            # A short strangle is a net-CREDIT structure: its net premium is
+            # negative, and ``ExitPolicy`` deliberately skips percentage
+            # stops/targets when the premium base is not positive (a percent of
+            # a negative credit has no meaning). The plan's
+            # ``stop_loss_pct 0.35 / take_profit_pct 0.50`` is therefore inert
+            # for THIS structure — the only form that fires is an absolute ₹
+            # bracket, so the resize is expressed in points (≥ ₹1,000 on a
+            # 65-lot NIFTY leg ≈ 15 pts, which clears the ~₹9/leg 5-minute
+            # spread bounce and the ₹193 round trip). The take-profit also has
+            # to clear the bridge fee-floor gate (≤ 1.2× round-trip fees is
+            # refused at entry), so the target sits well above ₹231.
+            "stop_loss_points": 2000,
+            "take_profit_points": 1000,
+            "signal_flip": False,
+            "min_days_to_expiry": None,
+        },
+        "quantity": 1,
+        "min_quantity": 1,
+        "max_quantity": 3,
+        "allowed_overrides": ["quantity", "exit"],
+    }
     # Portfolio Intelligence: designed for a calm (LOW-VIX) market.
     regime_vix_range = (10.0, 15.0)
     subscribed_alerts = (

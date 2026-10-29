@@ -173,6 +173,49 @@ def conformance_errors(cls: type, *, run_behaviour: bool = True) -> ConformanceR
 
     check("params-ui-labels", _params_ui_ok)
 
+    # 5b. execution contract (Phase 2, plan §5.4): a strategy that declares
+    # an execution spec must be template-derived (option strategies), and
+    # a StructureStrategy may not hide behind structure_capped alone.
+    def _execution_ok() -> None:
+        if getattr(cls, "execution", None) is None:
+            return
+        from backtest.strategy.registry import signal_kind
+        from backtest.strategy.templates import StructureStrategy, TemplateBase
+
+        spec = cls.execution_spec()  # raises on a malformed spec
+        if signal_kind(cls) == "option" and not issubclass(cls, TemplateBase):
+            raise AssertionError(
+                "option strategy with an execution spec must derive from a "
+                "strategy template (plan §5.2)"
+            )
+        if issubclass(cls, StructureStrategy) and spec is not None:
+            plan_ = spec.exit_plan
+            opening = getattr(cls, "opening_structure", None) or {}
+            opening_struct = str(opening.get("structure", "")).strip().lower()
+            defined_risk = {
+                "long_call",
+                "long_put",
+                "bull_call_spread",
+                "bear_put_spread",
+                "long_straddle",
+            }
+            declared_all = {r.structure for r in spec.structures.values()}
+            if opening_struct:
+                declared_all.add(opening_struct)
+            has_undefined_risk = not declared_all or bool(declared_all - defined_risk)
+            if has_undefined_risk and plan_.structure_capped and not (
+                plan_.stop_loss_pct is not None
+                or plan_.stop_loss_points is not None
+                or plan_.max_loss_inr is not None
+            ):
+                raise AssertionError(
+                    "StructureStrategy needs an explicit hard stop "
+                    "(stop_loss_pct / stop_loss_points / max_loss_inr): "
+                    "structure_capped alone does not cap a short structure"
+                )
+
+    check("execution-contract", _execution_ok)
+
     # 6–8. behavioural (need candles; skipped for abstract/abstract-ish cases)
     if run_behaviour and not getattr(cls, "__abstractmethods__", None):
         candles = _candles()

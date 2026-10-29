@@ -26,6 +26,7 @@ const OptionView = (function () {
     manual: "Manual",
     signal_flip: "View flipped",
     signal_neutral: "View went neutral",
+    risk_cap: "Risk cap",
     stop_loss: "Stop loss",
     take_profit: "Take profit",
     time_stop: "Time stop",

@@ -62,12 +62,30 @@ const BrokerAuthUI = (() => {
     // broker selector (2026-09-25): which broker's login flow to run.
     const brokerSelect       = () => document.getElementById("broker-auth-broker-select");
     const usernameLabel      = () => document.getElementById("broker-auth-username-label");
+    const totpLabel          = () => document.getElementById("broker-auth-totp-label");
+    const totpHint           = () => document.getElementById("broker-auth-totp-hint");
+    // OAuth brokers return an authorize URL with the login response — the
+    // TOTP step renders it as an "open the sign-in page" link.
+    let pendingAuthUrl = null;
 
     // Per-broker step-1 wording (field labels + placeholders). A new broker
     // only needs an entry here once it's registered server-side.
     const BROKER_FIELDS = {
         mstock: { display: "mStock", userLabel: "Username", userPlaceholder: "Enter username", passLabel: "Password" },
         dhan:   { display: "Dhan", userLabel: "Client ID", userPlaceholder: "Enter Dhan client ID", passLabel: "PIN" },
+        // Upstox is OAuth: step 1 takes the app's API key + secret (never the
+        // user's Upstox password — that stays on upstox.com), and step 2 takes
+        // the long authorization code, so the TOTP input must WIDEN for it.
+        upstox: {
+            display: "Upstox",
+            userLabel: "API Key",
+            userPlaceholder: "Enter Upstox API key (client_id)",
+            passLabel: "API Secret",
+            codeLabel: "Authorization Code",
+            codePlaceholder: "Paste the Upstox auth code",
+            codeHint: "Open the Upstox sign-in page, sign in there, then paste the code from the redirect URL.",
+            step2Title: "🔐 Upstox Login — Authorization Code",
+        },
     };
 
     // The broker whose credentials flow is currently in progress (kept across
@@ -183,6 +201,7 @@ const BrokerAuthUI = (() => {
         if (credError()) credError().textContent = "";
         applyBrokerFields();
         selectedBroker = null; // next login uses the selector's current value
+        pendingAuthUrl = null; // a fresh login mints a fresh authorize URL
         if (usernameInput()) usernameInput().focus();
         syncRememberToggle();
     }
@@ -212,6 +231,7 @@ const BrokerAuthUI = (() => {
             const result = await postJSON("/api/broker/login", { broker, username, password });
             if (result.success && result.requires_totp) {
                 selectedBroker = broker;
+                pendingAuthUrl = result.auth_url || null;
                 showTotp();
             } else if (result.success) {
                 // login succeeded but no TOTP required — go straight to authenticated
@@ -233,14 +253,57 @@ const BrokerAuthUI = (() => {
 
     function showTotp() {
         const name = currentBroker();
-        const display = (name && BROKER_FIELDS[name] && name.charAt(0).toUpperCase() + name.slice(1)) || "Broker";
-        setTitle(`🔐 ${display} Login — TOTP`);
+        const fields = (name && BROKER_FIELDS[name]) || null;
+        const display = (name && name.charAt(0).toUpperCase() + name.slice(1)) || "Broker";
+        setTitle((fields && fields.step2Title) || `🔐 ${display} Login — TOTP`);
         showView("totp");
         if (totpError()) totpError().textContent = "";
+        // Per-broker step-2 wording: OAuth brokers take a long auth CODE, so
+        // the label/placeholder change AND the 6-digit maxlength is dropped
+        // (otherwise the browser truncates a pasted code on insert).
         const t = totpInput();
         if (t) {
+            if (fields && fields.codePlaceholder) {
+                t.placeholder = fields.codePlaceholder;
+                t.removeAttribute("maxlength");
+                t.removeAttribute("inputmode");
+                t.removeAttribute("pattern");
+            } else {
+                t.placeholder = "Enter 6-digit code";
+                t.setAttribute("maxlength", "6");
+                t.setAttribute("inputmode", "numeric");
+                t.setAttribute("pattern", "[0-9]*");
+            }
             t.value = "";
             t.focus();
+        }
+        if (totpLabel()) totpLabel().textContent = (fields && fields.codeLabel) || "TOTP Verification";
+        const hint = totpHint();
+        if (hint) {
+            if (pendingAuthUrl) {
+                hint.innerHTML = "";
+                // Button, not a link — buttons don't navigate, so the modal stays
+                // open in this tab while the Upstox sign-in page opens in a new tab.
+                const btn = document.createElement("button");
+                btn.type = "button";
+                btn.className = "btn btn-primary btn-block";
+                btn.textContent = "Open the Upstox sign-in page in a new tab ↗";
+                btn.addEventListener("click", () => {
+                    window.open(pendingAuthUrl, "_blank", "noopener,noreferrer");
+                });
+                hint.appendChild(btn);
+                const note = document.createElement("p");
+                note.className = "broker-auth-remember-hint";
+                note.textContent = "Sign in there, then come back to THIS tab and paste the authorization code below.";
+                hint.appendChild(note);
+                hint.style.display = "block";
+            } else if (fields && fields.codeHint && name === "upstox") {
+                hint.textContent = fields.codeHint;
+                hint.style.display = "block";
+            } else {
+                hint.style.display = "none";
+                hint.innerHTML = "";
+            }
         }
     }
 
@@ -249,7 +312,13 @@ const BrokerAuthUI = (() => {
         if (!t) return;
         const code = t.value.trim();
         if (!code) {
-            if (totpError()) totpError().textContent = "Enter the 6-digit code";
+            const name = currentBroker();
+            const fields = (name && BROKER_FIELDS[name]) || null;
+            if (totpError()) {
+                totpError().textContent = (fields && fields.codeLabel)
+                    ? `Paste the ${fields.codeLabel}`
+                    : "Enter the 6-digit code";
+            }
             return;
         }
 
@@ -361,10 +430,107 @@ const BrokerAuthUI = (() => {
         // success state is always visible even if the timer fires immediately
         // (e.g. a test harness that executes setTimeout synchronously).
         showAuthenticated();
+        
+        // CRITICAL: After successful broker login, auto-subscribe to required instruments
+        // and resume paused strategies (only if market is open)
+        try {
+            const marketResp = await fetch("/api/market/status");
+            const marketData = await marketResp.json();
+            if (marketData.is_open && marketData.session_state === "OPEN") {
+                console.log("[BrokerAuth] Market open - triggering auto-subscription and strategy resume");
+                triggerAutoSubscription();
+            }
+        } catch (err) {
+            console.error("[BrokerAuth] Auto-subscription check failed:", err);
+        }
+        
         // Auto-close modal after a brief delay so the user sees success, then
         // returns to the page. `resetView=false` keeps the authenticated view
         // mounted; a later open() re-initialises the step from session state.
         setTimeout(() => close(false), 1500);
+    }
+    
+    async function triggerAutoSubscription() {
+        /**
+         * After broker authentication:
+         * 1. Scan all paused runners to identify required symbols/instruments
+         * 2. Subscribe mStock feed to indices (NIFTY, BANKNIFTY, etc.)
+         * 3. Fetch option chains for option runners
+         * 4. Resume all paused paper runners once subscriptions confirmed
+         */
+        try {
+            // Get current portfolio state to find paused runners
+            const summaryResp = await fetch("/api/portfolio/summary");
+            const summaryData = await summaryResp.json();
+            
+            if (!summaryData.success || !summaryData.portfolio) {
+                console.warn("[AutoSubscribe] Could not get portfolio summary");
+                return;
+            }
+            
+            const pausedRunners = (summaryData.portfolio.runners || [])
+                .filter(r => r.status === "PAUSED" && r.mode === "paper");
+            
+            if (pausedRunners.length === 0) {
+                console.log("[AutoSubscribe] No paused runners to resume");
+                return;
+            }
+            
+            console.log(`[AutoSubscribe] Found ${pausedRunners.length} paused runners`);
+            
+            // Collect unique symbols and option underlyings
+            const symbols = new Set();
+            const optionUnderlyings = new Set();
+            
+            for (const runner of pausedRunners) {
+                if (runner.symbols) {
+                    runner.symbols.forEach(s => symbols.add(s));
+                }
+                if (runner.instrument?.type === "option" && runner.symbols?.length > 0) {
+                    optionUnderlyings.add(runner.symbols[0]);
+                }
+            }
+            
+            console.log(`[AutoSubscribe] Symbols: ${Array.from(symbols).join(", ")}`);
+            console.log(`[AutoSubscribe] Option underlyings: ${Array.from(optionUnderlyings).join(", ")}`);
+            
+            // For each option underlying, trigger chain fetch by resuming one runner at a time
+            // The LiveChainProvider will automatically fetch chains on first use
+            console.log("[AutoSubscribe] Resuming paused runners...");
+            
+            let resumedCount = 0;
+            for (const runner of pausedRunners) {
+                try {
+                    const resumeResp = await fetch(`/api/portfolio/runner/${runner.instance_id}/control`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ action: "resume" })
+                    });
+                    
+                    if (resumeResp.ok) {
+                        resumedCount++;
+                        console.log(`[AutoSubscribe] Resumed: ${runner.name}`);
+                    } else {
+                        console.warn(`[AutoSubscribe] Failed to resume ${runner.name}`);
+                    }
+                } catch (err) {
+                    console.error(`[AutoSubscribe] Error resuming ${runner.name}:`, err);
+                }
+                
+                // Small delay between resumes to avoid overwhelming the API
+                await new Promise(resolve => setTimeout(resolve, 200));
+            }
+            
+            console.log(`[AutoSubscribe] Successfully resumed ${resumedCount}/${pausedRunners.length} runners`);
+            
+            // Show toast notification
+            if (window.showToast) {
+                window.showToast(`✅ Auto-resumed ${resumedCount} strategies with live data`);
+            }
+            
+        } catch (err) {
+            console.error("[AutoSubscribe] Auto-subscription failed:", err);
+        }
     }
 
     // ---- logout ------------------------------------------------------------

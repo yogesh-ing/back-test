@@ -26,6 +26,8 @@ VALID_STRUCTURES = frozenset(
         "bull_call_spread",
         "bear_put_spread",
         "straddle",
+        "long_straddle",
+        "short_straddle",
         "strangle",
         "iron_condor",
         "calendar_spread",
@@ -228,6 +230,46 @@ class Playbook:
             "playbook_snapshot": expression,
             "params": {},
         }
+
+    def to_selections(self) -> Dict[str, Any]:
+        """This playbook as v2 *field selections* (plan §7, layer 4).
+
+        Playbooks are bundles of selections, not expressions: for a
+        strategy that declares an execution spec, the playbook may only
+        select fields inside that strategy's menus — resolution refuses
+        anything outside them at spawn, loudly. ``to_expression()`` remains
+        the legacy form for unmigrated strategies.
+        """
+        selections: Dict[str, Any] = {}
+        if isinstance(self.structure_type, dict):
+            type_map = dict(self.structure_type)
+        elif self.structure_type == "direction_aware":
+            type_map = {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"}
+        else:
+            type_map = {}
+            selections["type"] = self.structure_type
+        if type_map:
+            rules: Dict[str, Any] = {}
+            for direction, structure in type_map.items():
+                rule: Dict[str, Any] = {
+                    "structure": structure,
+                    "strike_selection": self.strike_selection,
+                }
+                if self.strike_selection == "delta":
+                    rule["delta_target"] = self.delta_target
+                rules[str(direction)] = rule
+            selections["type"] = rules
+        selections["quantity"] = int(self.quantity)
+        exit_selections = dict(self.exit_config)
+        if self.max_loss_per_trade is not None:
+            # The playbook's per-trade rupee cap has exactly one enforced
+            # home in v2: the ExitPlan's max_loss_inr, which the Risk Gate
+            # prices the worst case against at entry. Translating it there
+            # keeps the cap binding; carrying the legacy top-level key
+            # would resolve into an expression field nothing enforces.
+            exit_selections.setdefault("max_loss_inr", float(self.max_loss_per_trade))
+        selections["exit"] = exit_selections
+        return selections
 
     def risk_envelope(self, spot_price: float, lot_size: int = 50) -> Dict[str, Any]:
         """₹ max-loss normalization; returns estimated: true (C4).

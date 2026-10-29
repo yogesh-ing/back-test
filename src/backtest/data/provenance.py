@@ -151,6 +151,7 @@ SOURCE_LABELS: dict[str, str] = {
     "db": "Real (PostgreSQL)",
     "mstock": "Live (mStock)",
     "dhan": "Live (Dhan)",
+    "upstox": "Live (Upstox)",
     "synthetic": "Synthetic",
     "csv": "CSV",
 }

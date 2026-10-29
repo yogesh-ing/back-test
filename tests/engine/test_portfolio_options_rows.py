@@ -16,6 +16,7 @@ from backtest.options.quote_providers import SyntheticChainGenerator, SyntheticQ
 from backtest.strategy.intent import Direction, MarketView
 from backtest.forward.portfolio_manager import reset_portfolio_manager
 from backtest.forward.paper_runner import RunnerConfig
+from options_support import research_profile, wide_gate
 
 
 def _view(direction, underlying="NIFTY", spot=25000):
@@ -34,22 +35,34 @@ def test_runner_options_rows_visible():
 
     config = RunnerConfig(
         name="test option runner",
-        strategy_name="rsi_reversion",
+        strategy_name="directional_options",
         allocated_capital=100000,
         symbols=["NIFTY"],
         target_type="SINGLE_SYMBOL",
-        instrument={"type": "option", "expression": {"type": "bull_call_spread", "strike_selection": "atm", "quantity": 1}},
+        instrument={
+            "type": "option",
+            "expression": {
+                "expression_version": 2,
+                "type": {"BULLISH": {"structure": "long_call", "strike_selection": "atm"}},
+                "quantity": 1,
+                "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+            },
+        },
         mode="paper",
     )
     instance_id = mgr.add_runner(config, start=False)
     runner = mgr.get_runner(instance_id)
+    research_profile(runner)
+    runner.options_bridge.risk_gate = wide_gate()
 
     assert runner.options_bridge is not None
 
     # Simulate opening a structure via bridge
     view = _view(Direction.BULLISH)
     runner.options_bridge.on_bar("NIFTY", 25000, ts="2026-09-16T09:15:00")
-    result = runner.options_bridge.on_market_view(view, "test")
+    result = runner.options_bridge.on_intent(
+        {"structure": "long_call", "strike_selection": "atm"}, view, "test"
+    )
 
     # Should have opened
     assert runner.options_bridge._has_open_structure()
@@ -114,19 +127,30 @@ def test_runner_detail_includes_options_trades():
     mgr = reset_portfolio_manager(auto_start_feed=False)
     config = RunnerConfig(
         name="test option runner 2",
-        strategy_name="rsi_reversion",
+        strategy_name="directional_options",
         allocated_capital=100000,
         symbols=["NIFTY"],
         target_type="SINGLE_SYMBOL",
-        instrument={"type": "option", "expression": {"type": "long_call", "strike_selection": "atm", "quantity": 1}},
+        instrument={
+            "type": "option",
+            "expression": {
+                "expression_version": 2,
+                "type": {"BULLISH": {"structure": "long_call", "strike_selection": "atm"}},
+                "quantity": 1,
+                "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+            },
+        },
         mode="paper",
     )
     instance_id = mgr.add_runner(config, start=False)
     runner = mgr.get_runner(instance_id)
+    runner.options_bridge.risk_gate = wide_gate()
 
     view = _view(Direction.BULLISH)
     runner.options_bridge.on_bar("NIFTY", 25000, ts="2026-09-16T09:15:00")
-    runner.options_bridge.on_market_view(view, "test")
+    runner.options_bridge.on_intent(
+        {"structure": "long_call", "strike_selection": "atm"}, view, "test"
+    )
 
     # Close to have settled
     view2 = _view(Direction.BEARISH)

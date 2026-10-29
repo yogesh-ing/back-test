@@ -32,11 +32,57 @@ from backtest.forward.paper_runner import (
     RunnerConfig,
     StrategyRunner,
 )
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.quote_providers import (
     SyntheticChainGenerator,
     SyntheticQuoteProvider,
 )
 from backtest.strategy.intent import Direction, MarketView
+from backtest.timekeeping import EXCHANGE_TZ
+from options_support import (  # noqa: F401 — market_closed is a pytest fixture
+    market_closed,
+    research_profile,
+    stale_marks,
+    wide_gate,
+)
+
+# The mandatory hard stop is scaffolding here (these tests isolate
+# pricing): ₹900k sits beyond any P&L these books can print, inside the
+# scaffold gate's ceiling, so no exit rule ever fires.
+_V2LC = {
+    "expression_version": 2,
+    "type": "long_call",
+    "quantity": 1,
+    "exit": {"stop_loss_points": 900_000.0, "min_days_to_expiry": None},
+}
+
+_V2_SPREAD = {
+    "expression_version": 2,
+    "type": "bull_call_spread",
+    "quantity": 1,
+    "exit": {"stop_loss_points": 900_000.0, "min_days_to_expiry": None},
+}
+
+
+def _bridge(*args, **kwargs):
+    """OptionsBridge with the scaffold gate (see options_support.wide_gate)."""
+    kwargs.setdefault("risk_gate", wide_gate())
+    return OptionsBridge(*args, **kwargs)
+
+
+def _enter(bridge, view, name="test", structure="long_call"):
+    return bridge.on_intent(
+        {"structure": structure, "strike_selection": "atm"}, view, name
+    )
+
+
+@pytest.fixture(autouse=True)
+def _session_open(monkeypatch):
+    """Freshness is a market-session SLA — pin the clock so results never
+    depend on the wall time the suite runs at."""
+    from options_support import pin_session_clock
+
+    pin_session_clock(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +109,7 @@ def _bars(closes, start_day=1):
     base = _CYCLE_START + timedelta(days=start_day - 1)
     return [
         {
-            "ts": f"{(base + timedelta(days=i)).isoformat()}T09:15:00",
+            "ts": f"{(base + timedelta(days=i)).isoformat()}T09:15:00+05:30",
             "open": close - 10,
             "high": close + 30,
             "low": close - 30,
@@ -85,8 +131,17 @@ def _option_config(**overrides):
             "type": "option",
             # Exits are task B1; these tests isolate pricing, so hold forever.
             "expression": {
-                "type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"},
-                "exit": {"signal_flip": False, "min_days_to_expiry": None},
+                "expression_version": 2,
+                "type": {
+                    "BULLISH": {"structure": "bull_call_spread", "strike_selection": "atm"},
+                    "BEARISH": {"structure": "bear_put_spread", "strike_selection": "atm"},
+                },
+                "quantity": 1,
+                "exit": {
+                    "stop_loss_points": 10_000.0,
+                    "signal_flip": False,
+                    "min_days_to_expiry": None,
+                },
             },
         },
     )
@@ -95,8 +150,16 @@ def _option_config(**overrides):
 
 
 def _running_option_runner(**overrides):
-    runner = StrategyRunner(_option_config(**overrides), ledger=OrderLedger())
+    runner = StrategyRunner(
+        _option_config(**overrides),
+        ledger=OrderLedger(),
+        preserve_candle_timestamps=True,
+    )
     runner.start()
+    # These tests mark a two-leg bull call spread; the V1 gate would refuse it.
+    research_profile(runner)
+    if runner.options_bridge is not None:
+        runner.options_bridge.risk_gate = wide_gate()
     return runner
 
 
@@ -122,7 +185,7 @@ def open_structure_runner():
 
 class TestBridgeOnBar:
     def test_no_open_structure_is_a_noop(self):
-        bridge = OptionsBridge(capital=1_000_000)
+        bridge = _bridge(capital=1_000_000, expression=_V2LC, allowed_structures=RESEARCH_STRUCTURES)
         assert bridge.on_bar("NIFTY", 24800.0, "2026-09-15T09:15:00") is None
 
     def test_entry_bar_starts_at_zero_pnl(self):
@@ -230,10 +293,11 @@ class _ExplodingQuoteProvider:
 
 class TestBarClockTheta:
     def _long_call_bridge(self):
-        bridge = OptionsBridge(
+        bridge = _bridge(
             capital=1_000_000,
-            expression={"type": "long_call"},
+            expression=_V2LC,
             quote_provider=SyntheticQuoteProvider(SyntheticChainGenerator()),
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         view = MarketView(
             direction=Direction.BULLISH,
@@ -241,7 +305,7 @@ class TestBarClockTheta:
             underlying="NIFTY",
             spot_price=Decimal("24800"),
         )
-        result = bridge.on_market_view(view, "directional_options")
+        result = _enter(bridge, view, "directional_options")
         assert result is not None
         return bridge, bridge.option_broker.get_open_structures()[0]
 
@@ -282,14 +346,21 @@ class TestBarClockTheta:
         bridge.on_bar("NIFTY", 24_800.0, f"{bar_day.isoformat()}T09:15:00")
         provider = bridge.quote_provider
         assert provider._reference is not None
-        assert provider._reference.date() == bar_day
-        assert provider._reference.tzinfo is None  # naive → price_contract is happy
+        # A naive bar stamp means EXCHANGE time, so the pinned reference is the
+        # same instant in aware UTC — 09:15 IST on the bar's date (clock policy
+        # 2026-10-27; the pricer no longer needs a naive reference to be happy).
+        assert provider._reference.astimezone(EXCHANGE_TZ).date() == bar_day
+        assert provider._reference.tzinfo is not None
 
     def test_timezone_aware_stamps_are_normalised(self):
         bridge, structure = self._long_call_bridge()
         day = structure.expiry - timedelta(days=5)
         assert bridge.on_bar("NIFTY", 24_800.0, f"{day.isoformat()}T03:45:00Z") is not None
-        assert bridge.quote_provider._reference.tzinfo is None
+        reference = bridge.quote_provider._reference
+        assert reference.tzinfo is not None
+        # "03:45Z" and the naive "09:15" two tests above are the same instant,
+        # so both spellings must normalize to one value.
+        assert reference.astimezone(EXCHANGE_TZ).hour == 9
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +402,8 @@ class TestRunnerWiring:
         for bar in _bars(RISING):
             runner.process_candle_event("NIFTY", bar)
         # Open a structure directly (pool runners don't route views to options).
-        bridge.on_market_view(
+        _enter(
+            bridge,
             MarketView(
                 direction=Direction.BULLISH,
                 confidence=0.9,
@@ -398,6 +470,7 @@ class TestEquityRunnersUnaffected:
         )
         runner = StrategyRunner(config, ledger=OrderLedger())
         runner.start()
+        research_profile(runner)
         for bar in _bars(RISING):
             runner.process_candle_event("NIFTY", bar)
 
@@ -419,6 +492,7 @@ class TestEquityRunnersUnaffected:
         )
         runner = StrategyRunner(config, ledger=OrderLedger())
         runner.start()
+        research_profile(runner)
         for bar in _bars(RISING):
             runner.process_candle_event("NIFTY", bar)
         assert runner.equity() == float(runner.portfolio.calculate_total_equity())
@@ -468,7 +542,7 @@ class TestMtmStalenessObservability:
         # 1. Open a structure on bridge1 with numeric token "49228"
         broker1 = _LiveBroker({"NIFTY261024800CE": 120.0})
         provider1 = LiveChainProvider(broker1)
-        bridge1 = OptionsBridge(capital=500_000, quote_provider=provider1)
+        bridge1 = _bridge(capital=500_000, expression=_V2LC, quote_provider=provider1, allowed_structures=RESEARCH_STRUCTURES)
         from backtest.options.paper_trading import OptionPosition, StructurePosition
 
         leg = OptionPosition(
@@ -502,7 +576,7 @@ class TestMtmStalenessObservability:
         # 2. Simulate process restart: fresh LiveChainProvider (empty registry)
         broker2 = _LiveBroker({"NIFTY261024800CE": 165.0})
         provider2 = LiveChainProvider(broker2)
-        bridge2 = OptionsBridge(capital=500_000, quote_provider=provider2)
+        bridge2 = _bridge(capital=500_000, expression=_V2LC, quote_provider=provider2, allowed_structures=RESEARCH_STRUCTURES)
         restore_bridge(bridge2, snap)
 
         # 3. First bar after resume refreshes leg marks from live quotes
@@ -514,14 +588,17 @@ class TestMtmStalenessObservability:
         assert bridge2.quote_error is None
         assert broker2.quote_calls == [("NIFTY261024800CE", "NFO")]
 
-    def test_mark_stale_after_two_failed_bars_and_clears_on_recovery(self):
-        """AC #2: Quote provider fails for >= 2 bars while RUNNING → payload shows
-        mark_stale: true, quote_error set, mark_ts = last success; clears on next
-        good quote.
+    def test_mark_stale_once_the_mark_ages_past_the_sla(self):
+        """AC #2 (PRD §4.1/§8.1): a held mark older than ``stale_after_seconds``
+        reads stale — with ``quote_error`` set and ``mark_ts`` still the last
+        success — and a good quote clears it.
+
+        The old metric counted failed marks; a feed that stops delivering bars
+        records no failures at all, which is exactly the freeze it had to miss.
         """
-        bridge = OptionsBridge(capital=500_000, expression={"type": "long_call", "quantity": 1})
+        bridge = _bridge(capital=500_000, expression=_V2LC)
         bridge.on_bar("NIFTY", 25_000.0, "2026-10-01T09:15:00")
-        bridge.on_market_view(_bull_view(25_000.0), "test")
+        _enter(bridge, _bull_view(25_000.0))
 
         # Bar 1: healthy quote
         bridge.on_bar("NIFTY", 25_050.0, "2026-10-01T09:16:00")
@@ -530,7 +607,7 @@ class TestMtmStalenessObservability:
         assert bridge.mark_stale is False
         assert bridge.quote_error is None
 
-        # Inject quote failure
+        # Inject quote failure — marks stop advancing, but the SLA has grace.
         good_provider = bridge.quote_provider
 
         class _FailingQuoteProvider:
@@ -544,24 +621,23 @@ class TestMtmStalenessObservability:
                 return {"error": f"unknown option contract {token!r}"}
 
         bridge.quote_provider = _FailingQuoteProvider()
-
-        # Failure #1 (< STALE_AFTER_BARS=2): not yet stale
         bridge.on_bar("NIFTY", 25_060.0, "2026-10-01T09:17:00")
-        assert bridge.mark_stale is False
+        assert bridge.mark_stale is False, "one failed refresh inside the SLA"
         assert bridge.mark_ts == good_mark_ts
-
-        # Failure #2 (>= STALE_AFTER_BARS=2): mark_stale flips to True
-        bridge.on_bar("NIFTY", 25_070.0, "2026-10-01T09:18:00")
-        assert bridge.mark_stale is True
         assert "unknown option contract" in (bridge.quote_error or "")
-        assert bridge.mark_ts == good_mark_ts
+
+        # The last good mark is now older than the SLA → stale.
+        held_price = bridge.option_broker.get_open_positions()[0].current_price
+        stale_marks(bridge, bridge.stale_after_seconds + 1)
+        assert bridge.mark_stale is True
+        assert bridge.mark_age_seconds() > bridge.stale_after_seconds
 
         snap = bridge.summary()
         assert snap["mark_stale"] is True
-        assert snap["mark_ts"] == good_mark_ts
         assert "unknown option contract" in snap["quote_error"]
         s_row = snap["open_structures_detail"][0]
         assert s_row["mark_stale"] is True
+        assert s_row["current_price"] == float(held_price), "stale, not re-priced"
         assert s_row["legs_detail"][0]["mark_stale"] is True
 
         # Recovery: restore good provider → next bar clears mark_stale
@@ -570,12 +646,126 @@ class TestMtmStalenessObservability:
         assert bridge.mark_stale is False
         assert bridge.quote_error is None
 
+    def test_a_silent_feed_trips_the_sla_with_zero_failed_marks(self):
+        """The bar-count metric could only see a feed that answered and errored.
+
+        A frozen session answers nothing: no mark attempt, therefore no failure
+        counter, yet the held price is minutes old. Elapsed time is the only
+        clock that catches it, which is what this asserts.
+        """
+        bridge = _bridge(capital=500_000, expression=_V2LC)
+        bridge.on_bar("NIFTY", 25_000.0, "2026-10-01T09:15:00")
+        _enter(bridge, _bull_view(25_000.0))
+        bridge.on_bar("NIFTY", 25_050.0, "2026-10-01T09:16:00")
+
+        # Nothing further arrives — no on_bar, so no attempt and no error.
+        stale_marks(bridge, bridge.stale_after_seconds + 1)
+        leg = bridge.option_broker.get_open_positions()[0]
+        assert leg.mtm_failures == 0
+        assert bridge.quote_error is None
+        assert bridge.mark_stale is True
+        assert bridge.mark_age_seconds() > bridge.stale_after_seconds
+
+    def test_an_aged_mark_is_not_stale_while_the_session_is_shut(
+        self, market_closed, monkeypatch
+    ):
+        """AC #9: the overnight book ages for hours and must stay honest-but-not-stale."""
+        bridge = _bridge(capital=500_000, expression=_V2LC)
+        bridge.on_bar("NIFTY", 25_000.0, "2026-10-01T09:15:00")
+        _enter(bridge, _bull_view(25_000.0))
+        stale_marks(bridge, bridge.stale_after_seconds + 3600)
+        assert bridge.mark_age_seconds() > bridge.stale_after_seconds
+        assert bridge.mark_stale is False, "market closed: nothing to refresh"
+
+        monkeypatch.setattr(market_closed, "_market_is_open", lambda now=None: True)
+        assert bridge.mark_stale is True
+
+    def test_the_freshness_gate_never_reads_the_holiday_calendar(self, monkeypatch):
+        """Session arithmetic only — a calendar probe here is a database call per mark.
+
+        Found on the live path: with the database unreachable, the equity-curve
+        mark stalled in retrying connects inside ``get_market_day_state``, so the
+        SLA gate itself became the outage.
+        """
+        import backtest.live.market_status as market_status
+        from backtest.forward import options_bridge as bridge_mod
+        from backtest.options.paper_trading import session_is_open
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("staleness gate reached for the database")
+
+        monkeypatch.setattr(market_status, "get_market_day_state", _boom)
+        # Replace the session pin with the real decision path for this test.
+        monkeypatch.setattr(bridge_mod, "_market_is_open", session_is_open)
+
+        bridge = _bridge(capital=500_000, expression=_V2LC)
+        bridge.on_bar("NIFTY", 25_000.0, "2026-10-01T09:15:00")
+        _enter(bridge, _bull_view(25_000.0))
+        stale_marks(bridge, bridge.stale_after_seconds + 1)
+
+        assert bridge.mark_stale is True
+
+    def test_the_sla_scales_with_the_runner_bar_cadence(self):
+        """A 1-day runner cannot be judged on a 1-minute clock.
+
+        ``bar_cadence_seconds`` widens the SLA by one bar, so a daily book halts
+        after a missed daily bar plus the grace, not three minutes into the next
+        session.
+        """
+        from backtest.data.base import TIMEFRAME_MINUTES
+
+        cadence = 60.0 * TIMEFRAME_MINUTES["1day"]
+        daily = _bridge(
+            capital=500_000,
+            expression=_V2LC,
+            bar_cadence_seconds=cadence,
+        )
+        assert daily.stale_after_seconds > 180.0
+
+        # An expression override wins over both defaults.
+        explicit = _bridge(
+            capital=500_000,
+            expression={**_V2LC, "stale_after_seconds": 45},
+            bar_cadence_seconds=cadence,
+        )
+        assert explicit.stale_after_seconds == 45.0
+
+    def test_a_daily_mark_carried_overnight_is_not_stale(self):
+        """Age counts session time (§4.4), so the overnight gap is not staleness.
+
+        Without this the SLA would flag every daily runner each morning — and
+        stale marks suppress stop/target exits, so the false alarm was a safety
+        hole, not a cosmetic one.
+        """
+        from datetime import timezone as _tz
+        from backtest.data.base import TIMEFRAME_MINUTES
+
+        bridge = _bridge(
+            capital=500_000,
+            expression=_V2LC,
+            bar_cadence_seconds=60.0 * TIMEFRAME_MINUTES["1day"],
+        )
+        bridge.on_bar("NIFTY", 25_000.0, "2026-10-02T09:15:00")
+        _enter(bridge, _bull_view(25_000.0))
+        leg = bridge.option_broker.get_open_positions()[0]
+
+        # Friday 14:59 IST; the pinned clock reads Monday 10:00 IST: 31 minutes
+        # of Friday's session plus 45 of Monday's, not ~63 hours of wall time.
+        leg.last_updated = datetime(2026, 10, 2, 9, 29, tzinfo=_tz.utc)
+        assert bridge.mark_age_seconds() == pytest.approx(31 * 60 + 45 * 60)
+        assert bridge.mark_stale is False
+
+        stale_marks(bridge, bridge.stale_after_seconds + 1)
+        assert bridge.mark_stale is True, "a missed daily bar does halt"
+
     def test_paused_or_stopped_runner_never_reports_mark_stale(self):
-        """R1 / §5: Paused or stopped runners report mark_stale: false even if
-        mtm_failures >= STALE_AFTER_BARS.
+        """R1 / §5: Paused or stopped runners report mark_stale: false even when
+        the held mark is older than the SLA.
         """
         runner = StrategyRunner(_option_runner_config(), ledger=OrderLedger())
         runner.start()
+        research_profile(runner)
+        runner.options_bridge.risk_gate = wide_gate()
         for bar in _bars(RISING[:4]):
             runner.process_candle_event("NIFTY", bar)
         assert runner.options_bridge is not None
@@ -592,6 +782,7 @@ class TestMtmStalenessObservability:
                 return {"error": "session expired"}
 
         runner.options_bridge.quote_provider = _DeadQuotes()
+        stale_marks(runner, runner.options_bridge.stale_after_seconds + 1)
         for bar in _bars([25_250, 25_260], start_day=5):
             runner.process_candle_event("NIFTY", bar)
 
@@ -604,9 +795,9 @@ class TestMtmStalenessObservability:
         """AC #3: Quote row with ltp: 0 and NO error key → mark updates to 0,
         mark_stale stays false (genuine deep-OTM zero).
         """
-        bridge = OptionsBridge(capital=500_000, expression={"type": "long_call", "quantity": 1})
+        bridge = _bridge(capital=500_000, expression=_V2LC)
         bridge.on_bar("NIFTY", 25_000.0, "2026-10-01T09:15:00")
-        bridge.on_market_view(_bull_view(25_000.0), "test")
+        _enter(bridge, _bull_view(25_000.0))
 
         class _ZeroQuoteProvider:
             source_name = "live:mstock"
@@ -630,9 +821,9 @@ class TestMtmStalenessObservability:
 
     def test_mtm_failure_warnings_are_rate_limited(self, caplog):
         """R4 / AC #5: 10 consecutive failed MTM cycles produce <= 2 WARNING log lines."""
-        bridge = OptionsBridge(capital=500_000, expression={"type": "long_call", "quantity": 1})
+        bridge = _bridge(capital=500_000, expression=_V2LC)
         bridge.on_bar("NIFTY", 25_000.0, "2026-10-01T09:15:00")
-        bridge.on_market_view(_bull_view(25_000.0), "test")
+        _enter(bridge, _bull_view(25_000.0))
 
         class _FailProvider:
             source_name = "live:mstock"
@@ -681,6 +872,7 @@ class TestMtmStalenessObservability:
             iid = pm.add_runner(_option_runner_config(name="WD-NIFTY"))
             runner = pm.get_runner(iid)
             runner.start()
+            research_profile(runner)
             bridge = runner.options_bridge
             assert bridge is not None
 
@@ -763,6 +955,7 @@ class TestMtmStalenessObservability:
             iid = pm.add_runner(_option_runner_config(name="MANUAL-REFRESH"))
             runner = pm.get_runner(iid)
             runner.start()
+            research_profile(runner)
             bridge = runner.options_bridge
             broker = _CountingBroker()
             provider = LiveChainProvider(broker)
@@ -844,11 +1037,11 @@ class TestMtmStalenessObservability:
         from backtest.alerts.broker import reset_alert_broker
 
         reset_alert_broker()
-        bridge = OptionsBridge(capital=500_000, expression={"type": "long_call", "quantity": 1})
+        bridge = _bridge(capital=500_000, expression=_V2LC)
         bridge.runner_id = "runner-ep1"
         bridge.runner_name = "NIFTY-EPISODE"
         bridge.on_bar("NIFTY", 25_000.0, "2026-10-01T09:15:00")
-        bridge.on_market_view(_bull_view(25_000.0), "test")
+        _enter(bridge, _bull_view(25_000.0))
 
         good_provider = bridge.quote_provider
 
@@ -863,6 +1056,7 @@ class TestMtmStalenessObservability:
                 return {"error": "session expired"}
 
         bridge.quote_provider = _DeadProvider()
+        stale_marks(bridge, bridge.stale_after_seconds + 1)
         # Run 10 consecutive 1-minute bars (10-minute stale episode)
         for i in range(10):
             bridge.on_bar("NIFTY", 25_010.0 + i, f"2026-10-01T09:{16 + i:02d}:00")
@@ -876,6 +1070,7 @@ class TestMtmStalenessObservability:
         assert bridge.mark_stale is False
 
         bridge.quote_provider = _DeadProvider()
+        stale_marks(bridge, bridge.stale_after_seconds + 1)
         for i in range(5):
             bridge.on_bar("NIFTY", 25_060.0 + i, f"2026-10-01T09:{31 + i:02d}:00")
         assert len(bridge.stale_notifications) == 2
@@ -905,6 +1100,7 @@ class TestMtmStalenessObservability:
             iid = pm.add_runner(_option_runner_config(name="OFF-HOURS"))
             runner = pm.get_runner(iid)
             runner.start()
+            research_profile(runner)
             bridge = runner.options_bridge
             spy = _SpyBroker()
             bridge.quote_provider = LiveChainProvider(spy)
@@ -955,16 +1151,13 @@ class TestMtmStalenessObservability:
         succeeds and the sibling leg's quote fails, neither leg overwrites its
         price (preventing a partial-leg 'Frankenstein spread' stop-out).
         """
-        bridge = OptionsBridge(
+        bridge = _bridge(
             capital=500_000,
-            expression={
-                "type": "bull_call_spread",
-                "quantity": 1,
-                "exit": {"stop_loss_pct": 0.20},
-            },
+            expression=_V2_SPREAD,
+            allowed_structures=RESEARCH_STRUCTURES,
         )
         bridge.on_bar("NIFTY", 25_000.0, "2026-10-01T09:15:00")
-        bridge.on_market_view(_bull_view(25_000.0), "test")
+        _enter(bridge, _bull_view(25_000.0), structure="bull_call_spread")
 
         legs = bridge.option_broker.get_open_positions()
         assert len(legs) == 2
@@ -989,6 +1182,7 @@ class TestMtmStalenessObservability:
                 return {"ltp": float(short_entry) * 3.0}
 
         bridge.quote_provider = _PartialFailProvider()
+        stale_marks(bridge, bridge.stale_after_seconds + 1)
         bridge.on_bar("NIFTY", 25_200.0, "2026-10-01T09:16:00")
         bridge.on_bar("NIFTY", 25_250.0, "2026-10-01T09:17:00")
 
@@ -1004,6 +1198,8 @@ class TestMtmStalenessObservability:
         """
         runner = StrategyRunner(_option_runner_config(), ledger=OrderLedger())
         runner.start()
+        research_profile(runner)
+        runner.options_bridge.risk_gate = wide_gate()
         for bar in _bars(RISING[:4]):
             runner.process_candle_event("NIFTY", bar)
 
@@ -1021,6 +1217,7 @@ class TestMtmStalenessObservability:
                 return {"error": "quote feed down"}
 
         runner.options_bridge.quote_provider = _DeadQuotes()
+        stale_marks(runner, runner.options_bridge.stale_after_seconds + 1)
         for bar in _bars([25_300, 25_350, 25_400], start_day=5):
             runner.process_candle_event("NIFTY", bar)
 

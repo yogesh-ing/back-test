@@ -132,6 +132,51 @@ class TestOrderLedger:
         with pytest.raises(ValueError):
             ledger.submit("r", OrderRequest(symbol="X", side=SIDE_BUY, quantity=0))
 
+    def test_record_filled_writes_a_terminal_row_without_routing(self, ledger):
+        """Option legs reach the Orders tab through ``record_filled``, not a fill.
+
+        The row must be visible in the snapshot, and the registered equity
+        handler must never see it — routing an option fill there would open a
+        share position in the simulation portfolio.
+        """
+        received = []
+        ledger.register_handler("opt-runner", received.append)
+
+        order = ledger.record_filled(
+            "opt-runner",
+            symbol="NIFTY26OCT25000CE",
+            side=SIDE_BUY,
+            quantity=75,
+            price=101.0,
+            requested_price=100.0,
+            tag={"kind": "option", "lots": 1, "lot_size": 75, "structure_id": "struct_1"},
+        )
+
+        assert order.status == "FILLED"
+        assert order.filled_qty == 75 and order.avg_fill_price == 101.0
+        assert received == []
+        assert ledger.summary()["filled"] == 1
+        rows = ledger.snapshot(instance_id="opt-runner")
+        assert rows[0]["client_order_id"] == order.client_order_id
+        assert rows[0]["tag"]["kind"] == "option" and rows[0]["tag"]["lots"] == 1
+
+    def test_record_filled_slippage_is_adverse_positive_both_sides(self, ledger):
+        buy = ledger.record_filled(
+            "r1", symbol="CE", side=SIDE_BUY, quantity=75, price=101.0, requested_price=100.0
+        )
+        sell = ledger.record_filled(
+            "r1", symbol="CE", side=SIDE_SELL, quantity=75, price=99.0, requested_price=100.0
+        )
+        flat = ledger.record_filled(
+            "r1", symbol="CE", side=SIDE_BUY, quantity=75, price=100.0, requested_price=100.0
+        )
+        no_request = ledger.record_filled("r1", symbol="CE", side=SIDE_BUY, quantity=75, price=100.0)
+
+        assert buy.slippage == pytest.approx(1.0)
+        assert sell.slippage == pytest.approx(1.0)  # a SELL filled low costs the same
+        assert flat.slippage == 0.0 and flat.slippage_pct == 0.0
+        assert no_request.slippage is None and no_request.slippage_pct is None
+
 
 # ---------------------------------------------------------------------------
 # Phase 2 — Universe registry
@@ -228,8 +273,12 @@ class TestStrategyRunner:
         assert r1.positions["AAA"]["qty"] == 100
         assert "AAA" not in r2.positions
         assert "BBB" not in r1.positions
-        assert r1.cash == pytest.approx(90_000)
-        assert r2.cash == pytest.approx(90_000)
+        # Cash is gross less each book's OWN cost stack (BUG-26): paper pays
+        # real brokerage and statutory charges, and one runner's fees never
+        # land on the other's cash.
+        assert float(r1.portfolio.total_commission) > 0
+        assert r1.cash == pytest.approx(90_000 - float(r1.portfolio.total_commission))
+        assert r2.cash == pytest.approx(90_000 - float(r2.portfolio.total_commission))
 
     def test_trade_round_trip_records_pnl(self, ledger):
         r = self._runner(ledger)
@@ -242,7 +291,10 @@ class TestStrategyRunner:
         assert r.wins == 1
         assert r.win_rate() == 1.0
         assert "AAA" not in r.positions
-        assert r.cash == pytest.approx(101_000.0)
+        # ``realized_pnl`` is the price P&L; the cash shows what the trip
+        # actually left after the venue took its cut.
+        assert r.cash == pytest.approx(101_000.0 - float(r.portfolio.total_commission))
+        assert float(r.portfolio.total_commission) > 0
 
     def test_win_rate_and_equity(self, ledger):
         r = self._runner(ledger)
@@ -256,7 +308,8 @@ class TestStrategyRunner:
         broker.submit_market(r.instance_id, "AAA", SIDE_SELL, 10, 90.0)
         assert r.wins == 1 and r.losses == 1
         assert r.win_rate() == pytest.approx(0.5)
-        assert r.equity() == pytest.approx(100_000.0)  # +100 -100
+        # +100 −100 on price, less the costs both round trips paid.
+        assert r.equity() == pytest.approx(100_000.0 - float(r.portfolio.total_commission))
 
     def test_paused_runner_blocks_new_entries(self, ledger):
         r = self._runner(ledger)

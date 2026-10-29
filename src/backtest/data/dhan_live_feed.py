@@ -83,6 +83,12 @@ class DhanLiveFeed:
         self._base_url_override = base_url
         self._security_ids: dict[str, str] = {}
 
+    @property
+    def emits_minute_bars(self) -> bool:
+        if self.client is not None:
+            return bool(getattr(self.client, "emits_minute_bars", False))
+        return True
+
     # -- credentials (lazy) --------------------------------------------------
 
     def _credentials(self) -> tuple[str, str]:

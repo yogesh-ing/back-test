@@ -80,13 +80,25 @@ def test_runner_spawn_snapshot():
     pb_v1 = Playbook(name="snapshot test", underlying="NIFTY", structure_type="bull_call_spread", strike_selection="atm", quantity=1, max_loss_per_trade=10000)
     registry.save(pb_v1)
     v1 = pb_v1.version
-    expr_v1 = pb_v1.to_expression()
+
+    def _v2_snapshot(pb):
+        # Phase 4 end-state: a spawn snapshot is a resolved v2 expression
+        # (the playbook's legacy to_expression() form no longer spawns).
+        return {
+            "expression_version": 2,
+            "type": pb.structure_type,
+            "quantity": pb.quantity,
+            "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+            "max_loss_per_trade": pb.max_loss_per_trade,
+        }
+
+    expr_v1 = _v2_snapshot(pb_v1)
 
     # Spawn runner from v1
     runner_config_dict = pb_v1.to_runner_config(strategy_name="directional_options", allocated_capital=100000)
     assert runner_config_dict["playbook_id"] == pb_v1.playbook_id
     assert runner_config_dict["playbook_version"] == v1
-    assert runner_config_dict["playbook_snapshot"] == expr_v1
+    assert runner_config_dict["playbook_snapshot"] == pb_v1.to_expression()
 
     config = RunnerConfig(
         name="snapshot runner",
@@ -109,7 +121,7 @@ def test_runner_spawn_snapshot():
     registry.save(pb_v1)  # bumps version
     v2 = registry.get(pb_v1.playbook_id).version
     assert v2 == v1 + 1
-    expr_v2 = registry.get(pb_v1.playbook_id).to_expression()
+    expr_v2 = _v2_snapshot(registry.get(pb_v1.playbook_id))
     assert expr_v2["quantity"] == 2
     assert expr_v1["quantity"] == 1
 

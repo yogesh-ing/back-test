@@ -92,6 +92,16 @@ def signal_kind(cls: type) -> str:
     return "option" if cls.generate_market_view is not _BASE_MARKET_VIEW else "equity"
 
 
+def _execution_block(cls: type) -> "dict[str, Any] | None":
+    try:
+        from .execution import execution_summary
+
+        return execution_summary(cls.execution_spec())
+    except Exception:  # noqa: BLE001 — catalogue must never break on one strategy
+        logger.warning("execution block failed for %s", cls.__name__, exc_info=True)
+        return None
+
+
 def get_all() -> list[dict[str, Any]]:
     """Full strategy catalogue as plain dicts.
 
@@ -99,6 +109,10 @@ def get_all() -> list[dict[str, Any]]:
     where ``params`` is the normalised schema and ``signal_kind`` drives the
     spawn form's target-type lock (U6.1). Invalid strategies are skipped with a
     logged warning rather than raising.
+
+    Includes both built-in strategies from ``backtest.strategies`` and
+    plugin strategies from ``plugins/strategies/*.py`` (already registered
+    in _REGISTRY via discover_plugins at startup).
     """
     _discover()
     catalogue: list[dict[str, Any]] = []
@@ -115,6 +129,13 @@ def get_all() -> list[dict[str, Any]]:
             {
                 "name": cls.name,
                 "description": getattr(cls, "description", "") or "",
+                # Structured long-form card (backtest page, above metrics);
+                # None → the UI falls back to the short description.
+                "description_sections": (
+                    cls.description_card()
+                    if hasattr(cls, "description_card")
+                    else None
+                ),
                 "version": getattr(cls, "version", "") or "",
                 "author": getattr(cls, "author", "") or "",
                 "params": cls.param_schema(),
@@ -129,6 +150,9 @@ def get_all() -> list[dict[str, Any]]:
                 # captured by the Strategy Builder (detected or user-typed);
                 # None for hand-written plugins that never went through it.
                 "readable_criteria": getattr(cls, "readable_criteria", None),
+                # Phase 0 (plan §4.4): strategy-owned execution declaration,
+                # or None for legacy strategies — additive for API clients.
+                "execution": _execution_block(cls),
             }
         )
     logger.info(

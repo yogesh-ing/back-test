@@ -70,11 +70,12 @@ logger = logging.getLogger("backtest.simulator.portfolio")
 
 #: Run classification values, mirroring the CHECK constraints on
 #: ``portfolios.mode`` / ``portfolios.source`` (migration 002, widened by
-#: migration 016 to admit the second broker venue). When a new source tag
-#: joins :data:`backtest.data.source_tags.SOURCE_TAGS`, BOTH must move:
-#: this tuple AND the DB CHECK (``db/migrations/``).
+#: migration 016 for the second broker venue and by 020 for the third). When
+#: a new source tag joins :data:`backtest.data.source_tags.SOURCE_TAGS`,
+#: ALL THREE must move together: this tuple, the DB CHECK (``db/migrations/``),
+#: and ``PortfolioSource`` in ``backtest.db.models``.
 VALID_MODES = ("paper", "live")
-VALID_SOURCES = ("synthetic", "replay", "mstock", "dhan")
+VALID_SOURCES = ("synthetic", "replay", "mstock", "dhan", "upstox")
 
 
 def _utcnow() -> datetime:
@@ -923,6 +924,12 @@ class Portfolio:
                 current_price=fill.fill_price,
                 portfolio_id=self.portfolio_id,
                 commission_total=fill.total_fees,
+                # The OPEN path constructs the position instead of applying the
+                # fill to one, so it carries the cost split here — otherwise a
+                # one-entry-one-exit round trip reports brokerage and statutory
+                # charges for only half its costs (BUG-26).
+                brokerage_total=fill.commission,
+                statutory_fees_total=fill.statutory_fees,
                 strategy_name=getattr(fill, "strategy_name", None),
             )
             self.positions[symbol] = opened

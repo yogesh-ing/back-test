@@ -50,44 +50,81 @@ to market. Without it a runner's legs keep their entry premium forever and
 
 from __future__ import annotations
 
+import copy
 import logging
+import os
 import time
 from collections import deque
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Deque, Optional
+from typing import Any, Deque, Iterable, Optional
 
 from backtest.data.sources_policy import SourceDisabledError, synthetic_chain_generator
+from backtest.timekeeping import (
+    EXCHANGE_TZ,
+    entry_window_refusal,
+    from_market_clock,
+    now_utc,
+    session_date,
+)
+from backtest.options.execution_gate import (
+    PreTradeRiskGate,
+    REASON_EXPIRY_TOO_NEAR,
+    REASON_NO_CONTRACT,
+    REASON_NO_EXPIRY,
+    REASON_NO_FRESH_QUOTE,
+    REASON_NO_LOT_SIZE,
+    REASON_NO_STRIKE,
+    ContractValidityError,
+    check_structure_type,
+)
 from backtest.options.exit_policy import (
     EXIT_DTE,
     EXIT_MANUAL_STOP,
     EXIT_MANUAL_TARGET,
-    EXIT_SIGNAL_FLIP,
+    EXIT_RISK_CAP,
+    EXIT_STOP_LOSS,
+    EXIT_TAKE_PROFIT,
+    PRICE_MEASURED_REASONS,
     RISK_REASONS,
     ExitConfig,
     ExitDecision,
     ExitPolicy,
     _label,
+    take_profit_fee_floor_violation,
+)
+from backtest.options.intent_journal import (
+    KIND_DECIDED,
+    KIND_EXECUTED,
+    KIND_HALTED,
+    KIND_REJECTED,
+    decision_key,
+    intent_key,
 )
 from backtest.options.greeks import BlackScholes
 from backtest.options.expiry import EXIT_REASON_SETTLEMENT, ExpiryManager
-from backtest.options.expiry_policy import NearestExpiryPolicy
+from backtest.options.expiry_policy import NearestExpiryPolicy, create_expiry_policy
+from backtest.options.live_trading import LiveExecutionHaltedError
 from backtest.options.paper_trading import (
-    STALE_AFTER_BARS,
+    STALE_AFTER_SECONDS,
     OptionPaperBroker,
     PositionStatus,
+    session_is_open,
 )
 from backtest.options.quote_providers import (
     SyntheticQuoteProvider,
 )
-from backtest.options.selector import ATMSelector, DeltaSelector
+from backtest.options.selector import create_selector
 from backtest.options.structures import (
     BearPutSpread,
     BullCallSpread,
     LongCall,
     LongPut,
+    LongStraddle,
+    ShortStraddle,
     ShortStrangle,
 )
+from backtest.forward.warmup import bucket_start_ts
 from backtest.strategy.intent import Direction, MarketView
 
 logger = logging.getLogger("backtest.forward.options_bridge")
@@ -96,15 +133,79 @@ logger = logging.getLogger("backtest.forward.options_bridge")
 #: — distinct from an explicit ``None``, which CLEARS the level.
 _UNSET: Any = object()
 
+_NSE_OPEN_TIME = dt_time(9, 15, 0)
+_NSE_CLOSE_MINUTES = 15 * 60 + 30  # 15:30 IST
+
+#: Non-expiry intraday square-off reason (OPT-5 / Recon F5).
+EXIT_INTRADAY_SQUAREOFF = "intraday_squareoff"
+
+#: Carry policy (BUG-39, QA 2026-10-28): how long a structure is *allowed* to
+#: live. Three monthly legs rode into 29-Oct overnight because nothing declared
+#: a carry contract and the square-off knob defaulted to "never".
+CARRY_INTRADAY = "intraday"
+CARRY_POSITIONAL = "positional"
+CARRY_POLICIES = frozenset({CARRY_INTRADAY, CARRY_POSITIONAL})
+#: Timeframes whose runners default to ``intraday`` — the same set the equity
+#: fee segment uses, so "intraday" means one thing across the app.
+INTRADAY_CARRY_TIMEFRAMES = frozenset(
+    {"1min", "3min", "5min", "15min", "30min", "1hour"}
+)
+#: 15:10 IST: 20 minutes clear of the close, so the runner squares off before
+#: broker RMS auto-squareoff (~15:15–15:20) can race it.
+DEFAULT_INTRADAY_SQUAREOFF_MINUTES = 20
+
+#: Protective price/P&L exits evaluated sub-second on ``on_tick`` (Caveat Q-3).
+#: ``max_bars``, ``neutral_bars``, and ``signal_flip`` stay strictly on closed bars.
+TICK_PROTECTIVE_REASONS = frozenset(
+    {EXIT_RISK_CAP, EXIT_STOP_LOSS, EXIT_TAKE_PROFIT}
+)
+
+#: BUG-15 (QA 2026-10-28): deterministic pre-trade refusals. When the same one
+#: fires 3× in a row on the same contract, the runner is not "trading and
+#: losing" — it is stuck, and 205 identical log lines per hour is noise that
+#: hides real failures. We promote the bridge to ``trade_health=BLOCKED_BY_RISK``
+#: and throttle the operator-visible log line.
+_DETERMINISTIC_ENTRY_REJECTIONS = frozenset(
+    {
+        "MAX_LOSS_EXCEEDED",
+        "QUANTITY_ABOVE_CEILING",
+        "ORDER_VALUE_EXCEEDED",
+        # Not a gate code, but the same shape of stuck: a strike/expire the
+        # chain no longer offers will keep coming back the same way every tick.
+        "NO_STRIKE_IN_TOLERANCE",
+        "NO_CHAIN_CONTRACT",
+        "NO_EXPIRY_ON_CALENDAR",
+        "EXPIRY_BELOW_MIN_DAYS",
+        "WORST_CASE_UNPRICEABLE",
+        # Declared TP inside the round-trip fee — refuse and mark blocked,
+        # because a runner configured this way can never produce a net win.
+        "TAKE_PROFIT_BELOW_FEE_FLOOR",
+    }
+)
+_BLOCKED_BY_RISK_THRESHOLD = 3
+_REJECTION_LOG_THROTTLE_SECONDS = 900.0
+
+
+def _market_is_open(now_utc: Optional[datetime] = None) -> bool:
+    """Whether the NSE session is trading right now (marks are only expected then).
+
+    Session arithmetic rather than the holiday calendar: the DB-backed calendar
+    used here put a retrying database connect on every mark, which stalls the
+    runner when the database is unreachable.
+    """
+    return session_is_open(now_utc)
+
+
 #: structure_type → (structure instance, option side of the chain)
 STRUCTURES: dict[str, tuple[Any, str]] = {
     "long_call": (LongCall(), "CE"),
     "long_put": (LongPut(), "PE"),
     "bull_call_spread": (BullCallSpread(), "CE"),
     "bear_put_spread": (BearPutSpread(), "PE"),
-    # Strangles need BOTH sides — the bridge materialises a two-sided
-    # nested chain {strike: {"CE": c, "PE": c}} at execution time (the flat
-    # V1 shape cannot hold two contracts at one strike).
+    # Straddles & strangles need BOTH sides — the bridge materialises a
+    # two-sided nested chain {strike: {"CE": c, "PE": c}} at execution time.
+    "long_straddle": (LongStraddle(), "BOTH"),
+    "short_straddle": (ShortStraddle(), "BOTH"),
     "strangle": (ShortStrangle(), "BOTH"),
 }
 
@@ -112,6 +213,8 @@ STRUCTURES: dict[str, tuple[Any, str]] = {
 _STRICKES_NEEDED = {
     "long_call": 1,
     "long_put": 1,
+    "long_straddle": 1,
+    "short_straddle": 1,
     "bull_call_spread": 2,
     "bear_put_spread": 2,
     "short_strangle": 2,
@@ -120,13 +223,6 @@ _STRICKES_NEEDED = {
 #: Risk-free rate used for the display-only Greeks (a dashboard column, not a
 #: pricing input — premiums come from the quote provider).
 DEFAULT_RISK_FREE_RATE = 0.06
-
-#: Default expression: direction-aware spreads, ATM strikes, one lot.
-DEFAULT_EXPRESSION: dict[str, Any] = {
-    "type": {"BULLISH": "bull_call_spread", "BEARISH": "bear_put_spread"},
-    "strike_selection": "atm",
-    "quantity": 1,
-}
 
 
 class OptionsBridge:
@@ -137,13 +233,31 @@ class OptionsBridge:
     capital:
         Starting capital for the isolated option paper book.
     expression:
-        Structure selection config (see module docstring). ``None`` gives
-        the direction-aware default.
+        The resolved v2 expression (``expression_version: 2``) for this
+        runner — produced server-side from the strategy's declared
+        execution spec plus menu-bounded selections (plan §7). Legacy v1
+        expressions are refused at construction (Phase 4): there is no
+        default expression and no legacy merge to fall back to.
     option_broker / quote_provider:
         Injection points for tests; the broker defaults to a fresh paper book.
         The quote feed has no ungated default: with ``quote_provider=None`` the
         bridge builds a synthetic Black-Scholes feed only while the data-source
         policy enables synthetic, and raises ``SourceDisabledError`` otherwise.
+    allowed_structures:
+        Execution-gate whitelist for this bridge (see
+        ``backtest/options/execution_gate.py``). Defaults to the V1 set: long
+        call / long put. The check runs here *and* again in the broker, so a
+        structure the contract forbids cannot open from either layer.
+    bar_cadence_seconds:
+        Width of one bar in market seconds, passed by the runner. Marks arrive
+        once per bar (plus the 60 s R6 watchdog), so the freshness SLA may never
+        be tighter than the cadence the book is actually marked on — a daily
+        runner would otherwise read as stale minutes after every mark.
+    timeframe:
+        The runner's declared bar timeframe (``"1min"``, ``"1day"``, …), passed
+        by the runner at construction. It sets the default ``carry_policy``
+        (BUG-39): an intraday cadence squares off before the close unless the
+        strategy declares ``carry_policy: "positional"``.
     """
 
     def __init__(
@@ -152,9 +266,96 @@ class OptionsBridge:
         expression: Optional[dict[str, Any]] = None,
         option_broker: Optional[OptionPaperBroker] = None,
         quote_provider: Optional[Any] = None,
+        allowed_structures: Optional[Iterable[str]] = None,
+        bar_cadence_seconds: Optional[float] = None,
+        intent_journal: Optional[Any] = None,
+        fee_calculator: Any | None = None,
+        mode: str = "paper",
+        risk_gate: Optional[PreTradeRiskGate] = None,
+        on_halt: Optional[Any] = None,
+        timeframe: Optional[str] = None,
     ) -> None:
-        self.expression: dict[str, Any] = {**DEFAULT_EXPRESSION, **(expression or {})}
-        self.option_broker = option_broker or OptionPaperBroker(capital=float(capital))
+        # Phase 4 (Plan v2.1 Phase 4): strict mode is unconditional. The
+        # legacy v1 path (default-expression merge, cross-direction and
+        # NEUTRAL fallbacks, tolerant exit parsing) is deleted, not
+        # deprecated: every option runner arrives with a resolved v2
+        # expression or does not arrive at all. ``self.strict`` remains
+        # as a constant True for callers that probe it.
+        self.strict: bool = True
+        self.mode: str = str(mode or "paper").strip().lower()
+        self.on_halt = on_halt
+        self.risk_gate: Optional[PreTradeRiskGate] = None
+        self._strict_rules: dict[Direction, Any] = {}
+        self._active_rule: Any = None
+        self._halted_codes: set[str] = set()
+        self.last_block_code: Optional[str] = None
+        if True:
+            from backtest.strategy.execution import (
+                DirectionRule,
+                ExecutionSpecError,
+                parse_exit_plan_strict,
+                validate_expression,
+            )
+
+            if not isinstance(expression, dict) or int(
+                expression.get("expression_version", 0) or 0
+            ) != 2:
+                raise ExecutionSpecError(
+                    "OptionsBridge requires a resolved v2 expression "
+                    "(expression_version: 2) from a strategy execution "
+                    "spec; legacy v1 expressions were removed in Phase 4 "
+                    "— respawn the runner under the strategy's declared "
+                    "contract"
+                )
+
+            # The gate is permission; constructing it loads the Layer-1
+            # rulebook fail-closed (a broken limits file refuses here,
+            # never permits by default).
+            self.risk_gate = risk_gate or PreTradeRiskGate(mode=self.mode)
+            permitted = self.risk_gate.permitted_structures()
+            if allowed_structures is not None:
+                permitted = permitted & frozenset(allowed_structures)
+            errors = validate_expression(expression, permitted_structures=permitted)
+            if errors:
+                raise ExecutionSpecError(
+                    "strict (v2) expression refused: " + "; ".join(errors)
+                )
+            self.expression = copy.deepcopy(expression or {})
+            self.allowed_structures = permitted
+            type_cfg = self.expression.get("type")
+            if isinstance(type_cfg, dict):
+                for raw_direction, raw_rule in type_cfg.items():
+                    from backtest.strategy.execution import canonical_direction
+
+                    self._strict_rules[canonical_direction(raw_direction)] = (
+                        DirectionRule.parse(raw_rule)
+                    )
+            elif isinstance(type_cfg, str):
+                rule = DirectionRule.parse(type_cfg)
+                self._strict_rules = {
+                    Direction.BULLISH: rule,
+                    Direction.BEARISH: rule,
+                }
+            if self._strict_rules:
+                # The gate's entitlement is a ceiling, not a menu: narrow it
+                # to the structures this strategy actually declared, so the
+                # explicit-intent path cannot trade outside its own spec.
+                declared = {rule.structure for rule in self._strict_rules.values()}
+                self.allowed_structures = permitted & declared
+            # Strict exit parsing: unknown keys or a missing hard stop
+            # refused at construction, so an incomplete contract can
+            # never trade. (The tolerant legacy parser survives only
+            # outside the trading path — see ExitConfig.from_expression.)
+            self._strict_exit_plan = parse_exit_plan_strict(self.expression.get("exit"))
+        #: Append-only intent journal (PRD decision 8). ``None`` records nothing
+        #: — the runner wires it, so a decision is auditable without the paper
+        #: path taking a dependency on a database it may not have.
+        self.intent_journal: Optional[Any] = intent_journal
+        self.option_broker = option_broker or OptionPaperBroker(
+            capital=float(capital),
+            allowed_structures=self.allowed_structures,
+            fee_calculator=fee_calculator,
+        )
         # Policy-gated feed construction (2026-09-30). This used to answer
         # ``quote_provider=None`` with a fresh Black-Scholes book AND attach a
         # generated chain to ANY provider that lacked a generator surface —
@@ -182,7 +383,22 @@ class OptionsBridge:
             if generated is not None:
                 self.quote_provider.generator = generated
         # -- exit policy (task B1) ------------------------------------------
-        self.exit_policy = ExitPolicy(ExitConfig.from_expression(self.expression.get("exit")))
+        plan = self._strict_exit_plan
+        self.exit_policy = ExitPolicy(
+            ExitConfig(
+                signal_flip=plan.signal_flip,
+                neutral_bars=plan.neutral_bars,
+                stop_loss_pct=plan.stop_loss_pct,
+                take_profit_pct=plan.take_profit_pct,
+                stop_loss_points=plan.stop_loss_points,
+                take_profit_points=plan.take_profit_points,
+                max_loss_inr=plan.max_loss_inr,
+                max_bars=plan.max_bars,
+                min_days_to_expiry=plan.min_days_to_expiry,
+                reenter=plan.reenter,
+                max_reentries_per_day=plan.max_reentries_per_day,
+            )
+        )
         #: Minutes before the close at which the canonical expiry pipeline
         #: squares a *same-day* expiry off at market (B2). 0 = never (ride to
         #: cash settlement). Daily forward bars land at 09:15, so this only
@@ -190,12 +406,40 @@ class OptionsBridge:
         self.squareoff_minutes_before: int = int(
             self.expression.get("squareoff_minutes_before", 30) or 0
         )
+        #: Optional non-expiry intraday square-off minutes before 15:30 IST
+        #: (OPT-5 / Recon F5). Enforces a 20-minute floor (<= 15:10 IST) by
+        #: default so broker RMS auto-squareoff (~15:15–15:20 IST) never races.
+        # BUG-39 (QA 2026-10-28): the minutes used to resolve to ``None`` unless
+        # a strategy spelled the knob out, so an intraday runner silently carried
+        # its book overnight. They now come out of a declared ``carry_policy``,
+        # whose default follows the runner's timeframe.
+        self.timeframe: Optional[str] = str(timeframe or "").strip() or None
+        self.carry_policy, self.intraday_squareoff_minutes_before = (
+            self._resolve_carry_policy()
+        )
+        #: Phase 3 tick-cadence entry guards (Caveats Q-4, Q-7).
+        self.reentry_cooldown_seconds: float = self._resolve_float_knob(
+            "reentry_cooldown_seconds",
+            "MSTOCK_REENTRY_COOLDOWN_SECONDS",
+            default=60.0,
+            minimum=0.0,
+        )
+        self.market_open_stabilization_seconds: float = self._resolve_float_knob(
+            "market_open_stabilization_seconds",
+            "MSTOCK_OPEN_STABILIZATION_SECONDS",
+            default=5.0,
+            minimum=0.0,
+        )
+        self.max_bid_ask_spread_pct: Optional[float] = self._resolve_optional_spread_pct()
+        self._last_exit_mono: Optional[float] = None
+        self._last_exit_reason: Optional[str] = None
+        self._pinned_structure_ids: set[str] = set()
         #: Minimum days-to-expiry for ENTRY selection (2026-09-24): the bridge
         #: always picked the NEAREST expiry, so a structure spawned on expiry
         #: day was cash-settled on the very next bar (instant churn). With
         #: ``expression["expiry_min_days"] = N`` entry selects the nearest
-        #: expiry at least N days out (falls back to nearest when none
-        #: qualify, so the knob can never block trading entirely).
+        #: expiry at least N days out; a calendar that offers none halts the
+        #: entry with EXPIRY_BELOW_MIN_DAYS rather than trading the near one.
         try:
             self.expiry_min_days: int = max(0, int(self.expression.get("expiry_min_days", 0) or 0))
         except (TypeError, ValueError):
@@ -234,21 +478,56 @@ class OptionsBridge:
         self._exit_bar_index: Optional[int] = None
         self._bars_without_view: int = 0
         self._bar_dt: Optional[datetime] = None
+        #: The latest market instant seen on ANY path — bars and sub-second
+        #: ticks. ``_bar_dt`` is the *bar* clock and only advances with a bar;
+        #: day/bucket/cooldown rules evaluated on a tick cadence need the tick's
+        #: own stamp, or they fall back to the wall clock and mis-read a replay.
+        self._market_dt: Optional[datetime] = None
+        #: BUG-01 (QA 2026-10-28): tick-cadence entries are latched to the
+        #: runner's declared ``timeframe``. One entry per bucket, whatever the
+        #: tick stream does. ``None`` disables the gate (bar-close cadence, where
+        #: the bar clock already paces entries).
+        self.entry_bucket_timeframe: Optional[str] = None
+        self._last_entry_bucket: Optional[str] = None
+        self._bucket_block_logged: Optional[str] = None
+        #: BUG-18: log a given entry-window refusal once, not once per tick.
+        self._last_window_refusal: Optional[str] = None
+        # -- BUG-02 day-count re-entry cap ---------------------------------
+        # ``max_reentries_per_day`` used to be counted only against signal-
+        # flip re-entries, so a 1-hour session made 205 stop-loss re-entries
+        # with nobody counting. Track every structure closed on the CURRENT
+        # IST session date; the day's entry budget is
+        # ``max_reentries_per_day + 1`` (the first one plus its re-entries).
+        self._entry_day: Optional[date] = None
+        self._closes_today: int = 0
+        #: Last close as measured on the *market* clock, so the cooldown means
+        #: the same thing on the bar path as on the tick path.
+        self._last_exit_bar_dt: Optional[datetime] = None
+        # -- BUG-15 deterministic-rejection health -------------------------
+        # A same-code refusal repeating on the same contract is a stuck
+        # runner, not a trading one. After ``_BLOCKED_BY_RISK_THRESHOLD``
+        # identical refusals, publish ``trade_health=BLOCKED_BY_RISK`` +
+        # ``block_reason`` and throttle the log line so a 205-line-per-hour
+        # wall of noise cannot hide a real failure.
+        self.trade_health: str = "OK"
+        self.block_reason: Optional[str] = None
+        self._rejection_key: Optional[tuple] = None
+        self._rejection_streak: int = 0
+        self._last_rejection_log_mono: Optional[float] = None
+        self._last_attempted_contract: str = ""
         self._structure_direction: Optional[Any] = None
         self._structure_expiry: Optional[Any] = None
         self._entry_premium: Decimal = Decimal("0")
         self._settlement_count: int = 0
         self._expiry_manager: Optional[ExpiryManager] = None
-        # U2.2: re-entry tracking — max_reentries_per_day knob, default 2, next-bar only
-        self._reentries_today: int = 0
-        self._reentry_day: Optional[Any] = None
 
         # -- MTM Staleness Observability (R1, R4, R6) -----------------------
-        try:
-            raw_stale = self.expression.get("stale_after_bars", STALE_AFTER_BARS)
-            self.stale_after_bars: int = max(1, int(raw_stale or STALE_AFTER_BARS))
-        except (TypeError, ValueError):
-            self.stale_after_bars = STALE_AFTER_BARS
+        # Freshness is a market-session SLA (PRD §4.1/§8.1), not a bar count: a
+        # feed that stops delivering bars produces no failed marks at all.
+        # Explicit ``stale_after_seconds`` in the expression wins; otherwise the
+        # runner's bar cadence plus the module grace (which clears the 60 s R6
+        # watchdog pass without ever flagging a healthy book).
+        self.stale_after_seconds = self._resolve_stale_after_seconds(bar_cadence_seconds)
         #: True while the owning runner is RUNNING (default True for standalone
         #: bridge use; StrategyRunner syncs this to ``status == STATUS_RUNNING``
         #: so paused/stopped runners report ``mark_stale=False`` per §5).
@@ -287,58 +566,171 @@ class OptionsBridge:
         * ``None`` when nothing happened.
         """
         if self._has_open_structure():
-            closed = self._manage_open_structure(view, strategy_name)
-            if closed is None:
-                # Still holding: a view against the position is an exit signal,
-                # never an entry one (V1 does not pyramid).
+            # Exit management only. A flip/reverse entry after a close is
+            # the strategy's next explicit intent (next bar at the
+            # earliest — same-bar re-entry remains impossible, U2.2), never
+            # something this view path reopens on its own.
+            return self._manage_open_structure(view, strategy_name)
+
+        # Nothing open: entries arrive only as explicit, complete intents
+        # via on_intent (Phase 4). A view alone — directional, NEUTRAL, or
+        # absent — opens nothing here; NEUTRAL is silence (§4.2) and a
+        # directional view without an intent has no contract to trade.
+        return None
+
+    def on_intent(
+        self,
+        intent: dict[str, Any],
+        view: MarketView | None,
+        strategy_name: str,
+        *,
+        from_tick: bool = False,
+        tick_ts: Any = None,
+    ) -> dict[str, Any] | None:
+        """Consume a strategy's explicit, complete opening intent (Phase 2).
+
+        This is the end-state path for template-derived strategies: the
+        strategy named the trade (structure, strike rule, exit plan) — the
+        bridge does not look anything up and cannot fall back. Strict mode
+        only; with a structure open the call manages it exactly like
+        :meth:`on_market_view` (exits are never blocked by entry rules).
+        """
+        if view is None:
+            return None if from_tick else self.on_market_view(None, strategy_name)
+        if self._has_open_structure():
+            return None if from_tick else self.on_market_view(view, strategy_name)
+        tick_entry_dt: Optional[datetime] = None
+        entry_bucket: Optional[str] = None
+        # The market instant this entry is being judged on. Every entry gate
+        # below — bucket latch, cooldown, day budget — is a market-time rule, so
+        # each reads this stamp rather than ``self._bar_dt``, which only advances
+        # when a bar is processed.
+        probe_ts = tick_ts or getattr(view, "bar_timestamp", None)
+        self._touch_market_clock(probe_ts)
+        if from_tick:
+            if self._in_opening_stabilization_window(probe_ts):
                 return None
-            # U2.2: same-bar re-entry impossible — even flip+reenter must wait to next bar
-            # should_reenter() now returns False on same-bar, so we always return closed here
-            # Re-entry will happen on next bar via normal entry path, counted via _reentries_today
-            if not self._should_reenter(view):
-                return closed
-            # If we reach here, it's next-bar re-entry (should_reenter true and not same-bar)
-            # For safety, still check blocked_reentry
-            if self._blocked_reentry(view):
-                return closed
-            # Flip + reenter → fall through and open the reverse structure (next-bar only).
-            # Counting happens in the entry path below via is_reentry check.
-        elif view is None:
-            # Nothing open and no conviction — nothing to do.
+            if self._blocked_tick_reentry():
+                return None
+            entry_bucket = self._entry_bucket_key(probe_ts)
+            if (
+                entry_bucket is not None
+                and self._last_entry_bucket is not None
+                and entry_bucket == self._last_entry_bucket
+            ):
+                # One entry per timeframe bucket: the deploy entry spends this
+                # bucket, so a stop-out 34 s later must not re-open at the next
+                # tick. The next genuine bar boundary is the next chance.
+                if self._bucket_block_logged != entry_bucket:
+                    self._bucket_block_logged = entry_bucket
+                    logger.info(
+                        "ENTRY_BUCKET_LATCHED strategy=%s timeframe=%s bucket=%s — "
+                        "next entry waits for the next bar boundary",
+                        strategy_name,
+                        self.entry_bucket_timeframe,
+                        entry_bucket,
+                    )
+                return None
+            tick_entry_dt = self._bar_datetime(probe_ts)
+        elif self._bar_dt is not None and self._blocked_reentry(view):
+            # Same-bar re-entry guard (U2.2, end-state form): a structure
+            # that exited on this bar — stop, flip, square-off, settlement —
+            # is not replaced on the same bar. The strategy re-emits its
+            # intent next bar if it still wants the trade; the −₹41,844
+            # churn lesson stands.
             return None
-
-        structure_type = self._structure_type_for(view)
-        if structure_type not in STRUCTURES:
-            logger.warning("[options-bridge] unknown structure type %r", structure_type)
+        elif not from_tick and self._bar_cooldown_active(probe_ts):
+            # BUG-02: ``reentry_cooldown_seconds`` was only consulted on the
+            # tick path, so a 1-min runner could re-open on the very next bar
+            # after a stop-out. Measured on the BAR clock, not monotonic time:
+            # a replay feeds bars seconds apart on the wall clock but a day
+            # apart in market time, and the cooldown is a market-time rule.
             return None
-
-        if self._blocked_reentry(view):
-            logger.debug("[options-bridge] entry suppressed on the exit bar")
+        # BUG-18 (QA 2026-10-28): a bar stamped 15:30:30 IST opened a structure
+        # after the session was over. The exchange clock gates every new entry,
+        # on the bar path and the tick path alike.
+        window_refusal = self._entry_window_block(probe_ts)
+        if window_refusal is not None:
+            self._journal_halt_once("OUTSIDE_ENTRY_WINDOW", window_refusal)
+            if self._last_window_refusal != window_refusal:
+                self._last_window_refusal = window_refusal
+                logger.warning(
+                    "ENTRY_WINDOW_REFUSED strategy=%s — %s", strategy_name, window_refusal
+                )
+            return {
+                "rejected": True,
+                "reason": window_refusal,
+                "code": "OUTSIDE_ENTRY_WINDOW",
+            }
+        # BUG-02: entry budget is per session day, not per signal. Count every
+        # structural close (stop, target, flip, settlement, square-off) against
+        # ``max_reentries_per_day + 1``. Refuse the entry BEFORE the intent is
+        # logged / parsed / priced, so a capped day cannot generate the 205
+        # ``OPTION_BLOCKED`` rows the QA session saw.
+        if self._reentry_cap_reached(probe_ts):
+            self._journal_halt_once(
+                "REENTRY_CAP_REACHED",
+                f"closes today {self._closes_today} >= max entries/day "
+                f"{self._max_entries_per_day()} (max_reentries_per_day="
+                f"{self._strict_exit_plan.max_reentries_per_day})",
+            )
             return None
+        logger.info(
+            "INTENT_RECEIVED strategy=%s structure=%s spot=%s bar=%s quantity=%s",
+            strategy_name,
+            intent.get("structure"),
+            getattr(view, "spot_price", None),
+            self._bar_dt.isoformat() if self._bar_dt is not None else None,
+            intent.get("quantity", 1),
+        )
+        from backtest.strategy.execution import DirectionRule, ExecutionSpecError
 
-        # U2.2: detect re-entry on next bar (last exit flip + reenter true)
-        # and enforce max_reentries_per_day
-        is_reentry = False
         try:
-            is_reentry = self._should_reenter(view)
-        except Exception:
-            is_reentry = False
-        if is_reentry:
-            # Already checked max in _should_reenter, but double-check and count
-            try:
-                self._reentries_today += 1
-            except Exception:
-                self._reentries_today = 1
-
-        dte_block = self._entry_dte_block()
-        if dte_block is not None:
-            return dte_block
-
+            rule = DirectionRule.parse(
+                {
+                    "structure": intent.get("structure"),
+                    "strike_selection": intent.get("strike_selection", "atm"),
+                    "delta_target": intent.get("delta_target"),
+                    "distance_pct": intent.get("distance_pct"),
+                    "expiry_policy": intent.get("expiry_policy", "nearest"),
+                    "expiry_min_days": intent.get("expiry_min_days", 0),
+                }
+            )
+        except ExecutionSpecError as exc:
+            self._journal_halt_once("INVALID_INTENT", str(exc))
+            return {"rejected": True, "reason": str(exc), "code": "INVALID_INTENT"}
+        self._active_rule = rule
         try:
-            return self._execute(view, structure_type, strategy_name)
-        except Exception as exc:  # noqa: BLE001 — a bad bar must not kill the runner
-            logger.warning("[options-bridge] %s execution failed: %s", structure_type, exc)
-            return {"rejected": True, "reason": str(exc)}
+            assert self.risk_gate is not None
+            self.risk_gate.check_opening(
+                rule.structure,
+                quantity=int(intent.get("quantity", 1) or 1),
+                worst_case_loss_inr=(
+                    float(self._strict_exit_plan.max_loss_inr)
+                    if self._strict_exit_plan.max_loss_inr is not None
+                    else None
+                ),
+            )
+            blocked = self._entry_dte_block()
+            if blocked is not None:
+                return blocked
+            result = self._execute(
+                view, rule.structure, strategy_name, entry_dt=tick_entry_dt
+            )
+            if result and not result.get("rejected") and not result.get("halted"):
+                # The bucket is spent only by a fill that actually happened.
+                self._last_entry_bucket = entry_bucket
+            return result
+        except Exception as exc:  # noqa: BLE001 — coded refusal, no trade
+            code = str(getattr(exc, "reason", "") or type(exc).__name__)
+            flags: dict[str, Any] = {}
+            if code in _DETERMINISTIC_ENTRY_REJECTIONS:
+                flags = self._register_entry_rejection(code, str(exc))
+            else:
+                self._rejection_key = None
+                self._rejection_streak = 0
+            self._journal_halt_once(code, str(exc))
+            return {"rejected": True, "reason": str(exc), "code": code, **flags}
 
     def pop_exit_event(self) -> Optional[dict[str, Any]]:
         """Drain one exit produced by the per-bar risk rules.
@@ -347,6 +739,74 @@ class OptionsBridge:
         happens inside the pricing hook and still needs a signal-log entry.
         """
         return self._exit_events.popleft() if self._exit_events else None
+
+    # ------------------------------------------------------------------ #
+    # Intent journal (PRD decision 8)
+    # ------------------------------------------------------------------ #
+
+    def _journal(
+        self,
+        kind: str,
+        *,
+        intent_id: str,
+        structure_id: Optional[str] = None,
+        detail: Optional[dict[str, Any]] = None,
+        strategy_name: Optional[str] = None,
+        structure_type: Optional[str] = None,
+        underlying: Optional[str] = None,
+    ) -> None:
+        """Append one journal event — best-effort, never blocks a decision.
+
+        With no journal wired this is a no-op: the paper path must run the same
+        whether or not the durable record is attached, but a *failed* write is
+        logged, because a missing event is a reconciliation hole.
+        """
+        if self.intent_journal is None:
+            return
+        try:
+            self.intent_journal.append(
+                intent_id=intent_id,
+                kind=kind,
+                structure_id=structure_id,
+                strategy_name=strategy_name or None,
+                structure_type=structure_type,
+                underlying=underlying or self.underlying,
+                detail=detail,
+            )
+        except Exception:  # noqa: BLE001 — journaling must not break trading
+            logger.warning(
+                "[options-bridge] intent journal write failed for %s", kind, exc_info=True
+            )
+
+    def _journal_intent(
+        self,
+        kind: str,
+        intent: Any,
+        *,
+        structure_id: Optional[str] = None,
+        detail: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """Journal an event keyed by the decision itself; return the intent id."""
+        intent_id = intent_key(intent, clock=self._bar_dt)
+        self._journal(
+            kind,
+            intent_id=intent_id,
+            structure_id=structure_id,
+            detail=detail,
+            strategy_name=intent.strategy_name,
+            structure_type=intent.structure_type,
+            underlying=str(intent.view.underlying),
+        )
+        return intent_id
+
+    def _journal_halt(self, reason: Any, code: str = "") -> None:
+        """Journal a pre-trade rejection that never produced an intent."""
+        text = str(reason)
+        self._journal(
+            KIND_HALTED,
+            intent_id=decision_key("halt", text, code=code, clock=self._bar_dt),
+            detail={"code": code, "reason": text},
+        )
 
     @property
     def bars_in_trade(self) -> int:
@@ -497,10 +957,14 @@ class OptionsBridge:
         open_structures = broker.get_open_structures()
         wins = sum(1 for s in closed if s.total_realized_pnl >= 0)
         total_pnl = sum((s.total_realized_pnl for s in closed), Decimal("0"))
+        net_closed_pnl = sum(
+            (getattr(s, "net_pnl", s.total_realized_pnl) for s in closed),
+            Decimal("0"),
+        )
         stale_positions = sum(
             1
             for s in open_structures
-            if self.runner_running and s.is_mark_stale(self.stale_after_bars)
+            if self.runner_running and s.is_mark_stale(self.stale_after_seconds)
         )
         return {
             "open_positions": len(broker.get_open_positions()),
@@ -510,10 +974,16 @@ class OptionsBridge:
             "capital": float(broker.capital),
             "equity": float(broker.total_equity),
             "realized_pnl": float(broker.total_realized_pnl),
+            "gross_realized_pnl": float(broker.total_realized_pnl),
+            "net_realized_pnl": float(net_closed_pnl),
+            "commission_paid": float(broker.total_commission_paid),
+            "statutory_fees_paid": float(broker.total_statutory_fees_paid),
             "unrealized_pnl": float(self.last_unrealized_pnl),
             "last_spot": self.last_spot,
             "last_mtm_ts": self.last_mtm_ts,
             "mark_ts": self.mark_ts,
+            "mark_age_seconds": self.mark_age_seconds(),
+            "stale_after_seconds": self.stale_after_seconds,
             "mark_stale": self.mark_stale,
             "quote_error": self.quote_error,
             "stale_positions": stale_positions,
@@ -522,6 +992,15 @@ class OptionsBridge:
             "quote_source": str(getattr(self.quote_provider, "source_name", "unknown")),
             "last_exit": dict(self.last_exit) if self.last_exit else None,
             "settled_count": self._settlement_count,
+            # -- BUG-02 day-count budget + BUG-15 health --------------------
+            "structures_today": self._closes_today,
+            "max_entries_per_day": self._max_entries_per_day(),
+            # BUG-39: the declared carry contract, visible on the card.
+            "carry_policy": self.carry_policy,
+            "intraday_squareoff_minutes_before": self.intraday_squareoff_minutes_before,
+            "trade_health": self.trade_health,
+            "block_reason": self.block_reason,
+            "rejection_streak": self._rejection_streak,
             # -- closed-structure metrics (task B3) -------------------------
             "closed_structures": len(closed),
             "wins": wins,
@@ -536,6 +1015,14 @@ class OptionsBridge:
             "bars_in_trade": self.bars_in_trade if self.open_structure_id else 0,
         }
 
+    def flatten_all(self, reason: str = "emergency_flatten") -> int:
+        """Emergency-close any open structure at current mark. Returns 0 or 1."""
+        if self.open_structure_id is None:
+            return 0
+        decision = ExitDecision(reason=reason, detail="operator emergency flatten")
+        result = self._exit_structure(decision, ts=None, strategy_name="flatten", queue=False)
+        return 1 if result else 0
+
     # ------------------------------------------------------------------ #
     # Book metrics (task A2) — the runner folds these into its own numbers
     # ------------------------------------------------------------------ #
@@ -547,15 +1034,73 @@ class OptionsBridge:
         stamps = [s.mark_ts for s in open_structures if s.mark_ts]
         return min(stamps) if stamps else None
 
-    @property
-    def mark_stale(self) -> bool:
-        """True when runner is RUNNING and structure has ≥ STALE_AFTER_BARS failed marks (R1)."""
+    def _resolve_stale_after_seconds(self, bar_cadence_seconds: Optional[float]) -> float:
+        """Freshness SLA width: expression override → one bar cadence + grace.
+
+        The grace is the module default, sized for the 60 s R6 watchdog. Adding
+        one bar's *market* width keeps a daily runner from reading stale during
+        the overnight gap its own cadence demands, while still halting it a few
+        minutes into the session after the next daily bar failed to arrive.
+        """
+        grace = float(STALE_AFTER_SECONDS)
+        default = grace + max(0.0, float(bar_cadence_seconds or 0.0))
+        raw = self.expression.get("stale_after_seconds")
+        if raw is None:
+            return default
+        try:
+            return max(1.0, float(raw))
+        except (TypeError, ValueError):
+            logger.warning(
+                "[options-bridge] expression has a non-numeric stale_after_seconds "
+                "(%r) — using %ss",
+                raw,
+                int(default),
+            )
+            return default
+
+    def mark_age_seconds(self, now: Optional[datetime] = None) -> Optional[float]:
+        """Market-session seconds since the oldest mark on the open book (§8.1)."""
+        ages = [
+            age
+            for structure in self.option_broker.get_open_structures()
+            for age in (structure.mark_age_seconds(now),)
+            if age is not None
+        ]
+        return max(ages) if ages else None
+
+    def _mark_untrusted(self, structure: Any) -> bool:
+        """Whether price-driven decisions must not act on this book's marks.
+
+        Either a failed mark (``mtm_failures``) or an SLA-exceeded age: the
+        price the stop/target would compare against is not a price.
+        """
+        return bool(
+            structure.mtm_failures > 0
+            or structure.is_mark_stale(self.stale_after_seconds)
+        )
+
+    def _stale_now(self, now: Optional[datetime] = None) -> bool:
+        """Freshness SLA check — the body of :attr:`mark_stale`, clock-injectable."""
         if not self.runner_running:
             return False
-        return any(
-            s.is_mark_stale(self.stale_after_bars)
-            for s in self.option_broker.get_open_structures()
-        )
+        if not _market_is_open(now):
+            # Marks are only expected while the session is trading: the R6
+            # watchdog goes silent at the close, so a book held overnight is
+            # not a stale book — and flagging it would badge the UI and fire a
+            # staleness episode every evening (MTM-Staleness PRD AC #9).
+            return False
+        age = self.mark_age_seconds(now)
+        return age is not None and age > self.stale_after_seconds
+
+    @property
+    def mark_stale(self) -> bool:
+        """True when a RUNNING runner holds a mark older than the freshness SLA.
+
+        Market-session time, not a count of failed marks (§4.1/§8.1): a quote
+        feed that stops delivering bars records no failures at all, so counting
+        failures never sees the freeze this SLA exists to catch.
+        """
+        return self._stale_now()
 
     @property
     def quote_error(self) -> Optional[str]:
@@ -663,7 +1208,7 @@ class OptionsBridge:
                         # R1: per-leg mark freshness contract
                         "mark_ts": leg.mark_ts,
                         "mark_stale": bool(
-                            self.runner_running and leg.is_mark_stale(self.stale_after_bars)
+                            self.runner_running and leg.is_mark_stale(self.stale_after_seconds)
                         ),
                         "quote_error": leg.last_quote_error,
                         "mtm_failures": leg.mtm_failures,
@@ -679,7 +1224,7 @@ class OptionsBridge:
             current = _net_premium("current_price")
             unrealized = float(structure.total_unrealized_pnl)
             structure_stale = bool(
-                self.runner_running and structure.is_mark_stale(self.stale_after_bars)
+                self.runner_running and structure.is_mark_stale(self.stale_after_seconds)
             )
             rows.append(
                 {
@@ -699,6 +1244,10 @@ class OptionsBridge:
                         round(unrealized / (entry * units), 4) if entry * units else 0.0
                     ),
                     "entry_ts": structure.opened_at.isoformat() if structure.opened_at else None,
+                    # BUG-18: say which session this risk was taken in, and stop
+                    # the reader guessing whether it has been sleeping in it.
+                    "entry_session_date": getattr(structure, "entry_session_date", None),
+                    "carried_overnight": bool(getattr(structure, "carried_overnight", False)),
                     # R1: per-structure mark freshness contract
                     "mark_ts": structure.mark_ts,
                     "mark_stale": structure_stale,
@@ -724,8 +1273,8 @@ class OptionsBridge:
                     # on this row: a structure id is unique for the life of
                     # the structure, unlike a symbol label.
                     "position_key": structure.structure_id,
-                    "stop_loss": self._rule_for(structure.structure_id, self.manual_stop_loss),
-                    "target": self._rule_for(structure.structure_id, self.manual_target),
+                    "stop_loss": self._operator_level_for(structure.structure_id, self.manual_stop_loss),
+                    "target": self._operator_level_for(structure.structure_id, self.manual_target),
                     # Net Greeks for the whole structure (units-scaled), or
                     # None when they cannot be computed honestly.
                     "net_delta": round(net_delta, 2) if greeks_seen else None,
@@ -781,14 +1330,8 @@ class OptionsBridge:
         bar_dt = self._bar_datetime(ts)
         if bar_dt is not None or self._bar_dt is None:
             self._bar_dt = bar_dt
-        # U2.2: reset re-entries per day when day changes
-        try:
-            current_day = self._bar_dt.date() if self._bar_dt else None
-            if current_day and self._reentry_day != current_day:
-                self._reentries_today = 0
-                self._reentry_day = current_day
-        except Exception:
-            pass
+        if bar_dt is not None:
+            self._market_dt = bar_dt
         if not self._has_open_structure():
             return None
 
@@ -821,8 +1364,59 @@ class OptionsBridge:
         # only reason a manual stop can be trusted — it never waits for a
         # strategy view that may never come).
         self._maybe_manual_exit()
+        self._maybe_intraday_squareoff(ts)
         self._maybe_risk_exit(strategy_name="")
         self._maybe_expiry_settlement()
+        self._update_stale_episode_state()
+        return self.last_unrealized_pnl
+
+    def on_tick(
+        self,
+        symbol: str,
+        price: Optional[float] = None,
+        ts: Any = None,
+    ) -> Optional[Decimal]:
+        """Evaluate sub-second MTM and protective exits without advancing bar counters.
+
+        Fixes Recon Finding F3 (the -₹546 overshoot on a -₹100 stop while
+        waiting for bar close) while preserving Caveat Q-3: ``_bar_index``,
+        ``bars_in_trade``, ``_bars_without_view``, ``max_bars``, and
+        ``signal_flip`` NEVER advance or fire intra-bar.
+        """
+        underlying = str(symbol or self.underlying or "NIFTY").upper()
+        self.underlying = underlying
+        self._touch_market_clock(ts)
+        if price is not None and float(price) > 0:
+            self.last_spot = float(price)
+            try:
+                self._sync_market(underlying, float(price), ts)
+            except Exception:  # noqa: BLE001 — spot sync never kills tick
+                logger.debug("[options-bridge] tick spot sync skipped", exc_info=True)
+
+        if not self._has_open_structure():
+            return None
+
+        tick_dt = self._bar_datetime(ts)
+        ts_str = str(ts) if ts else self._bar_ts(tick_dt or self._bar_dt)
+        try:
+            self._rebind_restored_contracts()
+            unrealized = self.option_broker.update_mtm(self.quote_provider, tick_dt)
+            self.last_unrealized_pnl = Decimal(str(unrealized))
+            self.last_mtm_ts = str(ts) if ts else self.last_mtm_ts
+            self._after_mtm_attempt(symbol=underlying)
+        except Exception as exc:  # noqa: BLE001 — pricing must never kill the runner
+            self._log_mtm_failure_throttled(
+                underlying,
+                f"Tick MTM failed for {underlying} @ {price}: {exc}",
+            )
+            self._update_stale_episode_state()
+            return None
+
+        self._maybe_manual_exit(ts_override=ts_str)
+        self._maybe_intraday_squareoff(ts, ts_override=ts_str)
+        self._maybe_tick_protective_exit(ts_override=ts_str)
+        if tick_dt is not None:
+            self._maybe_expiry_settlement(as_of=tick_dt)
         self._update_stale_episode_state()
         return self.last_unrealized_pnl
 
@@ -845,7 +1439,9 @@ class OptionsBridge:
             )
         return self._expiry_manager
 
-    def _maybe_expiry_settlement(self) -> Optional[dict[str, Any]]:
+    def _maybe_expiry_settlement(
+        self, as_of: Optional[datetime] = None
+    ) -> Optional[dict[str, Any]]:
         """Cash-settle a structure whose expiry the bar clock has reached.
 
         Runs on every bar after the mark-to-market, and settles **on** the
@@ -855,7 +1451,8 @@ class OptionsBridge:
         (``min_days_to_expiry: null``) — otherwise the DTE rule has already
         squared the position off the day before.
         """
-        if self._bar_dt is None or not self._has_open_structure():
+        ref_dt = as_of if as_of is not None else self._bar_dt
+        if ref_dt is None or not self._has_open_structure():
             return None
         structure = self.option_broker.get_structure(self.open_structure_id or "")
         if structure is None or structure.expiry is None:
@@ -865,7 +1462,7 @@ class OptionsBridge:
             report = self._expiry().process_expiries(
                 self.quote_provider,
                 _GeneratorSettlementProvider(self._generator(), self.underlying),
-                as_of=self._bar_dt,
+                as_of=ref_dt,
                 include_today=True,
             )
         except Exception as exc:  # noqa: BLE001 — a settlement failure must not kill the runner
@@ -900,11 +1497,17 @@ class OptionsBridge:
             "settled": settled,
         }
 
+        self._unpin_structure_legs(structure)
         self.open_structure_id = None
         self.closed_count += 1
         self._settlement_count += 1
+        # BUG-02: settlement is a structural close too — same day, same entry
+        # budget. Skipping it here is what let the DTE-roll churn run.
+        self._register_close()
         self.last_exit = event
         self._exit_bar_index = self._bar_index
+        self._last_exit_mono = time.monotonic()
+        self._last_exit_reason = str(event["reason"])
         self._entry_bar_index = None
         self._bars_without_view = 0
         self._structure_direction = None
@@ -927,7 +1530,9 @@ class OptionsBridge:
         )
         return event
 
-    def _maybe_manual_exit(self) -> Optional[dict[str, Any]]:
+    def _maybe_manual_exit(
+        self, ts_override: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
         """Fire an operator-set stop/target against the freshly marked book.
 
         Levels are premium-per-unit marks (see :meth:`set_manual_rule`), so
@@ -937,9 +1542,7 @@ class OptionsBridge:
         if self.manual_stop_loss is None and self.manual_target is None:
             return None
         structure = self.option_broker.get_structure(self.open_structure_id or "")
-        if structure is not None and (
-            structure.mtm_failures > 0 or structure.is_mark_stale(self.stale_after_bars)
-        ):
+        if structure is not None and self._mark_untrusted(structure):
             self._log_mtm_failure_throttled(
                 f"{self.underlying}:manual_exit",
                 f"manual stop/target suppressed on {self.underlying} while mark is stale/failed",
@@ -962,12 +1565,13 @@ class OptionsBridge:
             level, reason, label = target, EXIT_MANUAL_TARGET, "manual target"
         if reason is None:
             return None
+        close_ts = ts_override if ts_override is not None else self._bar_ts(self._bar_dt)
         return self._exit_structure(
             ExitDecision(
                 reason=reason,
                 detail=f"{label} {float(level):.2f} hit (mark {mark:.2f})",
             ),
-            self._bar_ts(self._bar_dt),
+            close_ts,
             strategy_name="",
             queue=True,
         )
@@ -978,6 +1582,75 @@ class OptionsBridge:
         if decision is None or decision.reason not in RISK_REASONS:
             return None
         return self._exit_structure(decision, self._bar_ts(self._bar_dt), strategy_name, queue=True)
+
+    def _maybe_tick_protective_exit(
+        self, ts_override: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        """Evaluate protective price/P&L exits intra-bar without advancing bar age (Q-3)."""
+        if not self._has_open_structure():
+            return None
+        decision = self._evaluate_exit(view=None)
+        if decision is None or decision.reason not in TICK_PROTECTIVE_REASONS:
+            return None
+        close_ts = ts_override if ts_override is not None else self._bar_ts(self._bar_dt)
+        return self._exit_structure(decision, close_ts, strategy_name="", queue=True)
+
+    @property
+    def carries_intraday(self) -> bool:
+        """True when this book must be flat before the close (BUG-39)."""
+        return (
+            self.carry_policy == CARRY_INTRADAY
+            and self.intraday_squareoff_minutes_before is not None
+        )
+
+    def eod_squareoff(self, ts: Any = None) -> Optional[dict[str, Any]]:
+        """Square off on the *wall* clock — the portfolio manager's EOD sweep.
+
+        :meth:`_maybe_intraday_squareoff` only ever ran from a bar or a tick, so
+        an illiquid strike that stopped printing at 14:50 carried overnight while
+        the runner stayed ``RUNNING`` (BUG-39, 28-Oct: 3 monthly legs). This is
+        the public seam the 1-second session-clock sweep calls; it is idempotent,
+        because the square-off closes the structure and a closed structure cannot
+        square off again.
+
+        ``ts`` is the market instant to judge — an aware UTC datetime from the
+        manager (default: now). Never trust a tick to arrive at 15:10.
+        """
+        reference = ts if ts is not None else now_utc()
+        return self._maybe_intraday_squareoff(reference)
+
+    def _maybe_intraday_squareoff(
+        self,
+        ts: Any,
+        *,
+        ts_override: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Square off intraday option structures >= 20 min before 15:30 IST close (OPT-5)."""
+        mins_before = self.intraday_squareoff_minutes_before
+        if mins_before is None or mins_before <= 0 or not self._has_open_structure():
+            return None
+        ist_dt = self._ist_clock_from_ts(ts)
+        if ist_dt is None:
+            return None
+        cur_minutes = ist_dt.hour * 60 + ist_dt.minute
+        cutoff_minutes = _NSE_CLOSE_MINUTES - int(mins_before)
+        if cur_minutes < cutoff_minutes or cur_minutes > _NSE_CLOSE_MINUTES:
+            return None
+        close_ts = ts_override if ts_override is not None else (
+            str(ts) if ts else self._bar_ts(self._bar_dt)
+        )
+        return self._exit_structure(
+            ExitDecision(
+                reason=EXIT_INTRADAY_SQUAREOFF,
+                detail=(
+                    f"intraday EOD square-off at {ist_dt:%H:%M:%S} IST "
+                    f"({mins_before}m before close)"
+                ),
+            ),
+            close_ts,
+            strategy_name="",
+            queue=True,
+        )
 
     _restored_contracts_rebound: bool = False
 
@@ -1047,6 +1720,7 @@ class OptionsBridge:
                             settlement_type=SettlementType.CASH,
                         )
                         register(sym_contract)
+                self._pin_structure_legs(structure)
             self._restored_contracts_rebound = True
             return True
         except Exception:  # noqa: BLE001 — recovery must never kill the bar
@@ -1286,11 +1960,11 @@ class OptionsBridge:
                     if is_f:
                         failing_count += 1
                         leg.record_mtm_failure(err_msg)
-                        # Step 3: a watchdog/manual repair that still fails must
-                        # surface mark_stale immediately rather than hiding for
-                        # another bar cycle.
-                        if leg.mtm_failures < self.stale_after_bars:
-                            leg.mtm_failures = self.stale_after_bars
+                        # Step 3: the failure is surfaced now (``quote_error``,
+                        # ``mtm_failures``, throttled log) and the SLA flags the
+                        # mark stale once the last good price is older than
+                        # ``stale_after_seconds`` — the watchdog runs every 60 s,
+                        # so the book never hides a dead feed for a bar cycle.
                     else:
                         leg.last_quote_error = None
             else:
@@ -1336,6 +2010,12 @@ class OptionsBridge:
         if set_reference is not None:
             set_reference(self._bar_datetime(ts))
 
+    def _touch_market_clock(self, ts: Any) -> None:
+        """Remember the latest market instant seen on any path (bar or tick)."""
+        market_dt = self._bar_datetime(ts)
+        if market_dt is not None:
+            self._market_dt = market_dt
+
     @staticmethod
     def _bar_ts(bar_dt: Optional[datetime]) -> Optional[str]:
         """ISO timestamp for the bar clock (``None`` → provider wall clock)."""
@@ -1343,12 +2023,18 @@ class OptionsBridge:
 
     @staticmethod
     def _bar_datetime(ts: Any) -> Optional[datetime]:
-        """Parse a bar timestamp into a **naive UTC** datetime.
+        """Parse a bar timestamp into an **aware UTC** instant.
 
-        Naive because ``SyntheticChainGenerator.price_contract`` builds its
-        expiry as ``datetime.combine(expiry_date, midnight)`` — mixing a
-        tz-aware reference with that would raise. ``None`` (unparseable or
-        missing) tells the provider to fall back to the wall clock.
+        The bar clock is the feed's exchange clock: mStock formats the forming
+        bar as a naive `"%Y-%m-%d %H:%M:%S"` string in IST, so reading that as
+        UTC — which the previous version of this method did — put 5h30 between
+        an entry stamped from it and one stamped from ``utcnow()``. Every
+        consumer now gets one unambiguous instant from
+        :func:`backtest.timekeeping.from_market_clock`, whose declared rule is
+        "naive means exchange time".
+
+        ``None`` (unparseable or missing) tells the provider to fall back to the
+        wall clock.
         """
         if not ts:
             return None
@@ -1356,13 +2042,20 @@ class OptionsBridge:
         if not text:
             return None
         try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return from_market_clock(text)
         except ValueError:
             logger.debug("[options-bridge] unparseable bar timestamp %r", ts)
             return None
-        if parsed.tzinfo is not None:
-            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-        return parsed
+
+    @property
+    def _bar_date(self) -> Optional[date]:
+        """The bar clock's trading-calendar date, in exchange time.
+
+        Never ``_bar_dt.date()``: the bridge's bar clock is UTC, and a session
+        date read off a UTC date is a different day for anything the feed
+        stamps between 00:00 and 05:30 IST.
+        """
+        return session_date(self._bar_dt)
 
     # ------------------------------------------------------------------ #
     # Internals
@@ -1417,13 +2110,13 @@ class OptionsBridge:
                 basis=self._entry_premium,
                 bars_held=self.bars_in_trade,
                 bars_without_view=self._bars_without_view,
-                bar_date=self._bar_dt.date() if self._bar_dt else None,
+                bar_date=self._bar_date,
                 expiry=structure.expiry,
             )
             if (
                 decision is not None
-                and getattr(decision, "reason", None) in ("stop_loss", "target")
-                and (structure.mtm_failures > 0 or structure.is_mark_stale(self.stale_after_bars))
+                and decision.reason in PRICE_MEASURED_REASONS
+                and self._mark_untrusted(structure)
             ):
                 self._log_mtm_failure_throttled(
                     f"{self.underlying}:risk_exit",
@@ -1435,6 +2128,14 @@ class OptionsBridge:
         except Exception as exc:  # noqa: BLE001 — a bad rule must not block trading
             logger.warning("[options-bridge] exit evaluation failed: %s", exc)
             return None
+
+    def _notify_halt(self, reason: str) -> None:
+        """Invoke the runner halt callback when a live execution outcome is uncertain."""
+        if callable(self.on_halt):
+            try:
+                self.on_halt(reason)
+            except Exception:  # noqa: BLE001 — halt callback must never mask journal
+                logger.exception("[options-bridge] on_halt callback failed")
 
     def _exit_structure(
         self,
@@ -1465,9 +2166,56 @@ class OptionsBridge:
                 timestamp=self._bar_datetime(ts),
                 reason=decision.reason,
             )
+        except LiveExecutionHaltedError as exc:
+            logger.error(
+                "[options-bridge] LIVE CLOSE HALTED for %s: %s — pausing runner for reconciliation",
+                structure_id[:8],
+                exc,
+            )
+            self._journal(
+                KIND_HALTED,
+                intent_id=decision_key(
+                    "halt", f"close {structure_id}", code="close_halted", clock=self._bar_dt
+                ),
+                structure_id=structure_id,
+                detail={"code": "close_halted", "reason": str(exc)},
+                structure_type=structure.structure_type,
+                underlying=structure.underlying,
+            )
+            self._notify_halt(f"close_halted ({structure_id[:8]}): {exc}")
+            return None
         except Exception as exc:  # noqa: BLE001 — a failed close must not kill the runner
             logger.warning("[options-bridge] close failed for %s: %s", structure_id[:8], exc)
+            self._journal(
+                KIND_HALTED,
+                intent_id=decision_key(
+                    "halt", f"close {structure_id}", code="close_failed", clock=self._bar_dt
+                ),
+                structure_id=structure_id,
+                detail={"code": "close_failed", "reason": str(exc)},
+                structure_type=structure.structure_type,
+                underlying=structure.underlying,
+            )
             return None
+
+        is_simulated = not bool(getattr(self.option_broker, "is_live_adapter", False))
+        self._journal(
+            KIND_EXECUTED,
+            intent_id=decision_key(
+                "close", structure_id, code=decision.reason, clock=self._bar_dt
+            ),
+            structure_id=structure_id,
+            detail={
+                "simulated": is_simulated,
+                "action": "close",
+                "reason": decision.reason,
+                "pnl": float(realized),
+                "bars_held": bars_held,
+            },
+            strategy_name=strategy_name,
+            structure_type=structure.structure_type,
+            underlying=structure.underlying,
+        )
 
         event = {
             "exited": True,
@@ -1481,10 +2229,18 @@ class OptionsBridge:
             "bars_held": bars_held,
             "strategy_name": strategy_name,
         }
+        self._unpin_structure_legs(structure)
         self.open_structure_id = None
         self.closed_count += 1
+        # BUG-02: stop / target / flip / square-off / manual — every structural
+        # close spends one entry from the day's budget. This is the counter
+        # ``max_reentries_per_day`` was *supposed* to gate before only the
+        # signal-flip re-entry path incremented it.
+        self._register_close()
         self.last_exit = event
         self._exit_bar_index = self._bar_index
+        self._last_exit_mono = time.monotonic()
+        self._last_exit_reason = str(decision.reason)
         self._entry_bar_index = None
         self._bars_without_view = 0
         self._structure_direction = None
@@ -1519,22 +2275,47 @@ class OptionsBridge:
         the relevant expiry is the one then-current, and once the replay clock
         rolls past it the next month's expiry takes over automatically.
         """
-        reference = self._bar_dt.date() if self._bar_dt is not None else None
+        reference = self._bar_date
         try:
             expiries = generator.available_expiries(underlying, reference=reference)
         except TypeError:
             # Custom generators may not accept ``reference`` — keep working.
             expiries = generator.available_expiries(underlying)
             reference = None
-        # expiry_min_days (2026-09-24): skip expiries too close to the bar
-        # clock so an entry on expiry day rides the NEXT expiry instead of
-        # being settled one bar after it opens. Unfiltered fallback keeps
-        # trading alive on calendars that cannot satisfy the knob.
-        if self.expiry_min_days and reference is not None:
-            cutoff = reference + timedelta(days=self.expiry_min_days)
+        # expiry_min_days (2026-09-24): skip expiries too close to the bar clock
+        # so an entry on expiry day does not get settled one bar after it opens.
+        # A calendar that cannot satisfy the knob is a halt, not a licence to
+        # trade the too-near expiry anyway (PRD §4.2 — no substitution).
+        if self._active_rule is not None:
+            floor_days = int(self._active_rule.expiry_min_days)
+        elif self._strict_rules:
+            # No intent has activated a rule yet (e.g. a direct calendar
+            # query): the declared rules are the contract — floor at the
+            # strictest declared minimum.
+            floor_days = max(
+                int(rule.expiry_min_days) for rule in self._strict_rules.values()
+            )
+        else:
+            floor_days = self.expiry_min_days
+        if floor_days and reference is not None:
+            cutoff = reference + timedelta(days=floor_days)
             filtered = [e for e in expiries if e >= cutoff]
-            if filtered:
-                expiries = filtered
+            if not filtered:
+                raise ContractValidityError(
+                    REASON_EXPIRY_TOO_NEAR,
+                    f"{underlying}: no expiry at least {floor_days} days out "
+                    f"on {reference} (calendar offers {expiries})",
+                )
+            expiries = filtered
+        if self._active_rule is not None:
+            rule = self._active_rule
+            kwargs: dict[str, Any] = {}
+            if rule.expiry_policy == "fixed_days":
+                kwargs["target_days"] = int(rule.expiry_min_days or 30)
+            elif rule.expiry_policy == "minimum_days":
+                kwargs["min_days"] = int(rule.expiry_min_days)
+            policy = create_expiry_policy(rule.expiry_policy, **kwargs)
+            return policy.select_expiry(expiries, reference_date=reference)
         return NearestExpiryPolicy().select_expiry(expiries, reference_date=reference)
 
     def _entry_dte_block(self) -> Optional[dict[str, Any]]:
@@ -1550,11 +2331,16 @@ class OptionsBridge:
         generator = self._generator()
         try:
             expiry = self._select_expiry(generator, self.underlying)
+        except ContractValidityError as exc:
+            # A calendar that cannot satisfy expiry_min_days halts the entry —
+            # reporting would otherwise swallow it and the trade would go out on
+            # a contract the exit rule closes on the next bar.
+            return {"rejected": True, "reason": str(exc)}
         except Exception:  # noqa: BLE001 — never block on a calendar hiccup
             return None
         if expiry is None:
             return None
-        days = (expiry - self._bar_dt.date()).days
+        days = (expiry - self._bar_date).days
         if days > min_dte:
             return None
         return {
@@ -1562,46 +2348,49 @@ class OptionsBridge:
             "reason": f"{days}d to expiry {expiry} ≤ {min_dte}d — new entries paused",
         }
 
-    def _should_reenter(self, view: MarketView | None) -> bool:
-        """Flip-close + ``reenter`` → open reverse NEXT bar only (never same-bar) — U2.2."""
-        if view is None or self.last_exit is None:
-            return False
-        if self.last_exit.get("reason") != EXIT_SIGNAL_FLIP:
-            return False
-        # Next-bar only: same-bar re-entry impossible even if reenter=true
-        if self._exit_bar_index is not None and self._exit_bar_index == self._bar_index:
-            return False
-        # V1.1 knob: max_reentries_per_day default 2
-        max_per_day = self.expression.get("exit", {}).get("max_reentries_per_day", 2)
-        if hasattr(self, "_reentries_today") and self._reentries_today >= max_per_day:
-            return False
-        return self.exit_policy.should_reenter(self.last_exit.get("direction"), view)
-
     def _blocked_reentry(self, view: MarketView | None = None) -> bool:
         """True on the bar a rule closed a structure — no same-bar re-entry.
 
         Without this, a stop-out would immediately re-open the same structure
         while the strategy is still bullish, which reads as "the stop did
-        nothing". ``reenter`` only bypasses it for a genuine flip.
+        nothing" (U2.2; the −₹41,844 churn lesson). End-state form: the
+        bridge never auto-reverses — re-entry is a fresh strategy intent,
+        and it is refused on the exit bar itself. The legacy auto-reentry
+        decision (``_should_reenter``, ``reenter``/``max_reentries_per_day``
+        enforcement) is deleted; those ExitPlan fields are now the
+        strategy's own bookkeeping, not bridge policy.
         """
         if self._exit_bar_index is None:
             return False
-        # U2.2: same-bar re-entry impossible, ever — even flip+reenter must wait to next bar
         return self._exit_bar_index == self._bar_index
 
-    def _structure_type_for(self, view: MarketView) -> str:
-        type_cfg = self.expression.get("type", DEFAULT_EXPRESSION["type"])
-        if isinstance(type_cfg, dict):
-            if view.direction == Direction.BEARISH:
-                return str(type_cfg.get("BEARISH", "bear_put_spread"))
-            return str(type_cfg.get("BULLISH", "bull_call_spread"))
-        return str(type_cfg)
+    # Phase 4 end-state (Refactor Plan v2.1 §4.1/§6.2): the transitional
+    # bridge-side direction lookup ``_transitional_direction_rule_for``
+    # and the legacy ``_structure_type_for`` are DELETED. Direction->rule
+    # resolution lives only in ``TemplateBase.direction_rule_for``
+    # (strategy/templates); entries reach this bridge exclusively as
+    # explicit intents via :meth:`on_intent`. Do not reintroduce a
+    # bridge-side ``_rule_for`` variant. The manual level helper remains
+    # ``_operator_level_for``.
+    def _journal_halt_once(self, code: str, reason: str) -> bool:
+        """Edge-triggered halt (plan §6.2): journal once per code per bridge.
+
+        Returns True the first time a code fires; subsequent bars are
+        silent so a standing refusal cannot spam the journal/logs.
+        """
+        if code in self._halted_codes:
+            return False
+        self._halted_codes.add(code)
+        self.last_block_code = code
+        self._journal_halt(reason, code=code)
+        logger.warning("[options-bridge] OPTION_BLOCKED %s: %s", code, reason)
+        return True
 
     # ------------------------------------------------------------------ #
     # Position analytics (Greeks) — Live Order Management
     # ------------------------------------------------------------------ #
 
-    def _rule_for(self, structure_id: str, level: Optional[float]) -> Optional[float]:
+    def _operator_level_for(self, structure_id: str, level: Optional[float]) -> Optional[float]:
         """Report an operator level only against the structure it belongs to."""
         if level is None or self.open_structure_id != structure_id:
             return None
@@ -1623,7 +2412,7 @@ class OptionsBridge:
         vol = self._leg_vol(leg)
         if not spot or not expiry or not vol:
             return None
-        reference = self._bar_dt.date() if self._bar_dt else datetime.now(timezone.utc).date()
+        reference = self._bar_date or session_date(now_utc())
         try:
             years = (expiry - reference).days / 365.0
         except TypeError:  # mixed date/datetime expiry — not worth guessing
@@ -1670,7 +2459,7 @@ class OptionsBridge:
             "spot": float(self.last_spot) if self.last_spot else None,
             "iv": self._leg_vol(leg),
             "expiry": getattr(leg, "expiry", None) or self._structure_expiry,
-            "reference_date": self._bar_dt.date() if self._bar_dt else None,
+            "reference_date": self._bar_date,
         }
 
     def _leg_vol(self, leg: Any) -> Optional[float]:
@@ -1720,9 +2509,17 @@ class OptionsBridge:
             self.quote_provider.generator = generator
         return generator
 
-    def _execute(self, view: MarketView, structure_type: str, strategy_name: str) -> dict[str, Any]:
+    def _execute(
+        self,
+        view: MarketView,
+        structure_type: str,
+        strategy_name: str,
+        *,
+        entry_dt: Optional[datetime] = None,
+    ) -> dict[str, Any]:
         from backtest.options.paper_trading import InsufficientMarginError
 
+        check_structure_type(structure_type, self.allowed_structures)
         structure, option_type = STRUCTURES[structure_type]
         underlying = str(view.underlying or "NIFTY")
         generator = self._generator()
@@ -1738,7 +2535,11 @@ class OptionsBridge:
 
         expiry = self._select_expiry(generator, underlying)
         if expiry is None:
-            raise ValueError(f"no available expiry for {underlying}")
+            raise ContractValidityError(
+                REASON_NO_EXPIRY,
+                f"{underlying}: the chain exposes no expiry as of "
+                f"{self._bar_date or 'today'}",
+            )
         if option_type == "BOTH":
             # Two-sided structure (e.g. short strangle): build a nested
             # {strike: {"CE": c, "PE": c}} map — the flat shape cannot hold
@@ -1768,20 +2569,113 @@ class OptionsBridge:
 
         strikes = self._pick_strikes(structure_type, spot, chain, view.direction)
         if not strikes:
-            raise ValueError("no suitable strike found in the chain")
-
-        intent = structure.build(view, strikes, chain, expiry, strategy_name=strategy_name)
+            raise ContractValidityError(
+                REASON_NO_STRIKE,
+                f"{underlying}: no strike on the {expiry} chain within tolerance of {spot}",
+            )
+        logger.info(
+            "ENTRY_SELECT strategy=%s underlying=%s spot=%s expiry=%s strikes=%s tokens=%s",
+            strategy_name,
+            underlying,
+            spot,
+            expiry,
+            [str(s) for s in strikes],
+            [
+                getattr(chain.get(s, {}), "instrument_token", None)
+                if option_type != "BOTH"
+                else {
+                    side: getattr(chain.get(s, {}).get(side, {}), "instrument_token", None)
+                    for side in ("CE", "PE")
+                }
+                for s in strikes
+            ],
+        )
+        self._validate_entry_contracts(strikes, chain, option_type, structure_type)
+        # A declared fixed distance (strict mode: the DirectionRule the
+        # strategy/spec stated) reaches builders that select their own
+        # strikes (ShortStrangle); the rest ignore it. Legacy v1 passes
+        # none and builders use their own defaults.
+        build_kwargs: dict[str, Any] = {}
+        if self._active_rule is not None and self._active_rule.distance_pct:
+            build_kwargs["distance_pct"] = float(self._active_rule.distance_pct)
+        intent = structure.build(
+            view, strikes, chain, expiry, strategy_name=strategy_name, **build_kwargs
+        )
         quantity = int(self.expression.get("quantity", 1) or 1)
         if quantity > 1:
             intent = self._scale_intent(intent, quantity)
 
+        self._validate_entry_intent(intent)
+        self._gate_check_at_entry(intent, structure_type)
+
+        # Decision first, fill second: the journal must show a halt between the
+        # two if the process dies, and both events share the decision's key so
+        # replaying this bar cannot book the structure twice.
+        self._journal_intent(KIND_DECIDED, intent)
+
         try:
-            positions = self.option_broker.execute_structure(intent, self.quote_provider)
+            # The bar clock stamps BOTH sides of the trade. Passing it only to
+            # close_structure left execute_structure falling back to the wall
+            # clock, so a one-bar scalp was booked as a 5h30 holding period —
+            # the exact offset between the feed's IST bar time and utcnow().
+            # BUG-16 (QA 2026-10-28): a tick entry passes ``entry_dt`` — the
+            # tick's own instant, microseconds and all — because the bar clock
+            # is the floored minute and would book a 34-second hold as 0.
+            positions = self.option_broker.execute_structure(
+                intent, self.quote_provider, timestamp=entry_dt or self._bar_dt
+            )
+        except LiveExecutionHaltedError as exc:
+            logger.error(
+                "[options-bridge] LIVE ENTRY HALTED for %s: %s — pausing runner for reconciliation",
+                strategy_name,
+                exc,
+            )
+            self._journal_intent(
+                KIND_HALTED, intent, detail={"reason": str(exc)}
+            )
+            self._notify_halt(f"entry_halted: {exc}")
+            return {"halted": True, "rejected": True, "reason": str(exc)}
         except InsufficientMarginError as exc:
+            self._journal_intent(
+                KIND_REJECTED, intent, detail={"reason": str(exc)}
+            )
             return {"rejected": True, "reason": str(exc)}
 
         self.open_structure_id = positions[0].structure_id if positions else None
         self.executed_count += 1
+        # BUG-15: a fill clears the deterministic-rejection streak — the
+        # runner is not stuck. Also drop the attempted-contract label so the
+        # NEXT rejection starts its own count.
+        self._reset_blocked_state()
+        self._last_attempted_contract = ""
+        logger.info(
+            "ENTRY_FILLED strategy=%s structure_id=%s fills=%s",
+            strategy_name,
+            self.open_structure_id,
+            [
+                f"{getattr(p, 'trading_symbol', '')} {getattr(p, 'side', '')}"
+                f" x{getattr(p, 'quantity', 0)} @{getattr(p, 'entry_price', '0')}"
+                for p in positions
+            ],
+        )
+        is_simulated = not bool(getattr(self.option_broker, "is_live_adapter", False))
+        self._journal_intent(
+            KIND_EXECUTED,
+            intent,
+            structure_id=self.open_structure_id,
+            detail={
+                "simulated": is_simulated,
+                "fills": [
+                    {
+                        "symbol": getattr(p, "trading_symbol", ""),
+                        "side": getattr(p, "side", ""),
+                        "quantity": getattr(p, "quantity", 0),
+                        "price": str(getattr(p, "entry_price", "0")),
+                    }
+                    for p in positions
+                ],
+            },
+        )
         # Entry bookkeeping for the exit rules (B1): age, direction, and the
         # net premium that percentage stops/targets are measured against.
         self._entry_bar_index = self._bar_index
@@ -1790,6 +2684,8 @@ class OptionsBridge:
         self._structure_direction = view.direction
         self._structure_expiry = expiry
         opened = self.option_broker.get_structure(self.open_structure_id or "")
+        if opened is not None:
+            self._pin_structure_legs(opened)
         self._entry_premium = opened.total_entry_cost if opened is not None else Decimal("0")
         logger.info(
             "[options-bridge] opened %s on %s strikes=%s expiry=%s (view %s conf=%.2f)",
@@ -1810,6 +2706,662 @@ class OptionsBridge:
             "direction": view.direction.value,
         }
 
+    def _validate_entry_contracts(
+        self,
+        strikes: list[Any],
+        chain: Any,
+        option_type: str,
+        structure_type: str = "",
+    ) -> None:
+        """The strikes the selector picked must name chain contracts with real terms.
+
+        Checked before the intent is built: a leg with no lot size cannot even be
+        constructed, and a guessed lot would size the premium outlay and every
+        rupee stop in the book off a number the exchange never published.
+        """
+        require_both = structure_type in ("long_straddle", "short_straddle")
+        for strike in strikes:
+            entry = chain.get(strike)
+            if option_type == "BOTH":
+                if require_both:
+                    sides = [
+                        (entry or {}).get("CE") if isinstance(entry, dict) else None,
+                        (entry or {}).get("PE") if isinstance(entry, dict) else None,
+                    ]
+                    if any(c is None for c in sides):
+                        raise ContractValidityError(
+                            REASON_NO_CONTRACT,
+                            f"{self.underlying} {strike}: straddle requires both CE and PE "
+                            "contracts at this strike",
+                        )
+                    contracts_to_check = sides
+                else:
+                    contract = (entry or {}).get("CE") or (entry or {}).get("PE")
+                    contracts_to_check = [contract] if contract is not None else []
+            else:
+                contracts_to_check = [entry] if entry is not None else []
+            if not contracts_to_check:
+                raise ContractValidityError(
+                    REASON_NO_CONTRACT,
+                    f"{self.underlying} {strike}: the chain has no contract at this strike",
+                )
+            for contract in contracts_to_check:
+                if int(getattr(contract, "lot_size", 0) or 0) <= 0:
+                    raise ContractValidityError(
+                        REASON_NO_LOT_SIZE,
+                        f"{getattr(contract, 'trading_symbol', strike)}: the chain row "
+                        "carries no lot size — refusing to guess one",
+                    )
+
+    def _gate_check_at_entry(self, intent: Any, structure_type: str) -> None:
+        """Wire the dormant Layer-1 ceilings at entry (Phase 1 flag disposition).
+
+        Pre-trade, from live quotes: ``order_value_inr`` = gross premium
+        paid on BUY legs; ``worst_case_loss_inr`` = net debit for debit
+        structures (a long option's worst case is the premium paid). A
+        structure with SELL legs whose worst case cannot be priced from
+        the intent must declare ``max_loss_inr`` in its ExitPlan — if it
+        cannot state its worst case, it cannot trade (plan §4.3).
+        Raises StructureNotAllowedError (coded) on any ceiling breach;
+        the caller journals it as a halt and books nothing.
+
+        BUG-02 fee floor: after the ceiling check, the bridge ALSO refuses an
+        entry whose declared take-profit sits inside 1.2× its own round-trip
+        fee — the ±₹100 strangle bracket against ₹193 of brokerage/STT/exchange
+        charges was mathematically incapable of a net win, and the pre-trade
+        gate (not the API create path) is the only layer that has real leg
+        quotes AND the same fee calculator the engine uses to charge. No quote
+        provider, no fabricated fee — the check is skipped when either number
+        cannot be honestly derived.
+        """
+        assert self.risk_gate is not None
+        # Remember the contract being attempted so a same-contract repeat of a
+        # deterministic refusal can be counted as a streak (BUG-15).
+        self._last_attempted_contract = self._contract_key_from_intent(intent)
+        gross_buy = Decimal("0")
+        net = Decimal("0")
+        has_sell = False
+        leg_quotes: list[tuple[Any, Decimal]] = []
+        for leg in intent.legs:
+            quote = self.quote_provider.get_quote(leg.instrument_token) or {}
+            price = Decimal(str(quote.get("ltp") or quote.get("ask") or quote.get("bid") or "0"))
+            units = Decimal(str(int(leg.quantity) * int(leg.lot_size)))
+            leg_quotes.append((leg, price))
+            if str(leg.side).upper() == "BUY":
+                gross_buy += price * units
+                net += price * units
+            else:
+                has_sell = True
+                net -= price * units
+        if has_sell:
+            # A short structure's stateable worst case is its declared risk
+            # cap: max_loss_inr if set, else stop_loss_points, else
+            # stop_loss_pct × net credit collected (only when net < 0, i.e. a
+            # genuinely priced credit structure).
+            if self._strict_exit_plan.max_loss_inr is not None:
+                worst: float | None = float(self._strict_exit_plan.max_loss_inr)
+            elif self._strict_exit_plan.stop_loss_points is not None:
+                worst = float(self._strict_exit_plan.stop_loss_points)
+            elif self._strict_exit_plan.stop_loss_pct is not None and net < Decimal("0"):
+                worst = float(self._strict_exit_plan.stop_loss_pct) * abs(float(net))
+            else:
+                worst = None
+            if worst is None:
+                from backtest.options.execution_gate import StructureNotAllowedError
+
+                raise StructureNotAllowedError(
+                    "WORST_CASE_UNPRICEABLE",
+                    f"{structure_type}: short legs with no declared max_loss_inr "
+                    "or stop_loss_points in the ExitPlan — an unpriceable worst "
+                    "case cannot trade",
+                )
+        else:
+            worst = float(max(net, Decimal("0")))
+        self.risk_gate.check_opening(
+            structure_type,
+            quantity=int(self.expression.get("quantity", 1) or 1),
+            worst_case_loss_inr=worst,
+            order_value_inr=float(gross_buy),
+        )
+        self._check_take_profit_fee_floor(intent, leg_quotes, net)
+
+    def _check_take_profit_fee_floor(
+        self,
+        intent: Any,
+        leg_quotes: list[tuple[Any, Decimal]],
+        net_premium: Decimal,
+    ) -> None:
+        """BUG-02: refuse an entry whose declared TP is inside 1.2× its own fees.
+
+        Only the bridge knows BOTH sides of the fee — the API create path has
+        no leg quotes and no premium yet, so pricing the floor there would
+        require fabricating market data. Everything here is real: leg quotes
+        the injected provider already returned, the same
+        :class:`CommissionCalculator` the broker will use to charge, and the
+        ExitPlan the strategy declared.
+
+        Silence is safe: no fee calculator, no declared TP, or a fee stack the
+        calculator cannot price → skip the check rather than block a trade on
+        an unknown. Only a *provable* economic violation raises.
+        """
+        if not leg_quotes:
+            return
+        plan = self._strict_exit_plan
+        tp_inr: Optional[float] = None
+        if plan.take_profit_points is not None:
+            tp_inr = float(plan.take_profit_points)
+        elif plan.take_profit_pct is not None and net_premium != 0:
+            # Percent is measured against the premium base — the credit for a
+            # short structure, the debit for a long one. abs() keeps the sign
+            # out of the ₹ comparison.
+            tp_inr = float(plan.take_profit_pct) * abs(float(net_premium))
+        if tp_inr is None:
+            return
+        fee_calc = getattr(self.option_broker, "fee_calculator", None)
+        if fee_calc is None:
+            return
+        entry_legs: list[dict[str, Any]] = []
+        exit_legs: list[dict[str, Any]] = []
+        for leg, price in leg_quotes:
+            if price <= 0:
+                # A leg the provider cannot price is not a fee estimate — bail
+                # out rather than refuse on a phantom fee stack.
+                return
+            side = str(getattr(leg, "side", "BUY") or "BUY").upper()
+            qty = int(getattr(leg, "total_quantity", 0) or 0)
+            if qty <= 0:
+                qty = int(getattr(leg, "quantity", 0) or 0) * int(
+                    getattr(leg, "lot_size", 1) or 1
+                )
+            if qty <= 0:
+                return
+            entry_legs.append({"side": side, "quantity": qty, "price": price})
+            exit_legs.append(
+                {
+                    "side": "SELL" if side == "BUY" else "BUY",
+                    "quantity": qty,
+                    "price": price,  # same-quote estimate; conservative
+                }
+            )
+        try:
+            entry_fees = fee_calc.calculate_structure(
+                entry_legs, track_volume=False
+            )
+            exit_fees = fee_calc.calculate_structure(
+                exit_legs, track_volume=False
+            )
+            round_trip = Decimal(str(entry_fees.total)) + Decimal(str(exit_fees.total))
+        except Exception:  # noqa: BLE001 — a fee model that cannot answer skips the gate
+            logger.debug(
+                "[options-bridge] fee-floor estimate failed; skipping BUG-02 gate",
+                exc_info=True,
+            )
+            return
+        violation = take_profit_fee_floor_violation(
+            tp_inr, float(round_trip) if round_trip > 0 else None
+        )
+        if violation is None:
+            return
+        from backtest.options.execution_gate import StructureNotAllowedError
+
+        raise StructureNotAllowedError("TAKE_PROFIT_BELOW_FEE_FLOOR", violation)
+
+    def _validate_entry_intent(self, intent: Any) -> None:
+        """Ask the market, right now, whether every leg is still quotable.
+
+        A fill off whatever the provider's TTL cache happened to hold is not a
+        decision — a dead broker session answers with zeros that a cache happily
+        replays until the row expires (§4.2).
+        """
+        for leg in intent.legs:
+            token = str(getattr(leg, "instrument_token", "") or "")
+            symbol = str(getattr(leg, "trading_symbol", "") or "")
+            self._require_fresh_quote(
+                token or symbol, str(getattr(leg, "side", "BUY") or "BUY")
+            )
+
+    def _require_fresh_quote(self, token: str, side: str) -> None:
+        """Re-read one leg's quote at decision time instead of filling off a cache.
+
+        ``invalidate`` first: a row that is minutes old is no evidence the market
+        still offers that price, and a dead broker session answers with zeros
+        that a TTL cache happily replays.
+        """
+        invalidate = getattr(self.quote_provider, "invalidate", None)
+        if callable(invalidate):
+            invalidate(token)
+        reader = getattr(self.quote_provider, "execution_quote", None)
+        if callable(reader):
+            # NoExecutableQuoteError when there is no side to cross against is
+            # already a coded halt — let it stand rather than rename it.
+            quote = reader(token, side)
+        else:
+            quote = self.quote_provider.get_quote(token)
+        if not quote or quote.get("error") or float(quote.get("ltp") or 0.0) <= 0:
+            reason = (quote or {}).get("error") or "empty row or zero ltp"
+            raise ContractValidityError(
+                REASON_NO_FRESH_QUOTE,
+                f"{token}: no quote to {side} against ({reason})",
+            )
+        max_spread = self._effective_max_spread_pct()
+        if max_spread is not None and max_spread > 0.0:
+            bid = float(quote.get("bid") or 0.0)
+            ask = float(quote.get("ask") or 0.0)
+            mid = (bid + ask) / 2.0
+            if bid > 0.0 and ask >= bid and mid >= 5.0:
+                spread_pct = (ask - bid) / mid
+                if spread_pct > max_spread:
+                    raise ContractValidityError(
+                        REASON_NO_FRESH_QUOTE,
+                        f"{token}: bid/ask spread {spread_pct:.1%} ({bid:.2f}/{ask:.2f}) "
+                        f"exceeds max_bid_ask_spread_pct {max_spread:.1%}",
+                    )
+
+    # ------------------------------------------------------------------ #
+    # Phase 3 helpers: HotStrikeRing leg pinning & tick-entry guards
+    # ------------------------------------------------------------------ #
+
+    def _resolve_carry_policy(self) -> tuple[str, Optional[int]]:
+        """Resolve ``(carry_policy, intraday_squareoff_minutes_before)``.
+
+        Explicit wins, in this order:
+
+        1. ``expression["carry_policy"]`` — ``"intraday"`` or ``"positional"``.
+           Anything else is a construction-time refusal: a misspelled policy
+           must not silently decide how long the book holds risk.
+        2. The pre-existing knobs (``intraday_squareoff_minutes_before``,
+           ``intraday_squareoff``, ``OPTIONS_INTRADAY_SQUAREOFF_MINUTES``) imply
+           ``"intraday"`` and keep working unchanged.
+        3. ``min_days_to_expiry: null`` **plus** an explicit
+           ``overnight_carry: True`` means the strategy means to hold past the
+           close — an overnight-riding exit policy alone is not consent.
+        4. Otherwise the runner's ``timeframe`` decides: an intraday cadence
+           carries intraday, a swing cadence carries positionally.
+
+        Positional books get ``None`` minutes (no wall-clock square-off; the DTE
+        and expiry rules own the exit). Intraday books get >= 20 minutes before
+        15:30 IST, so the runner always clears out ahead of broker RMS.
+        """
+        from backtest.strategy.execution import ExecutionSpecError
+
+        raw_policy = str(self.expression.get("carry_policy") or "").strip().lower()
+        if raw_policy and raw_policy not in CARRY_POLICIES:
+            raise ExecutionSpecError(
+                f"carry_policy must be one of {sorted(CARRY_POLICIES)}, "
+                f"got {self.expression.get('carry_policy')!r}"
+            )
+        minutes_raw = self.expression.get("intraday_squareoff_minutes_before")
+        legacy_flag = bool(self.expression.get("intraday_squareoff"))
+        env_raw = os.environ.get("OPTIONS_INTRADAY_SQUAREOFF_MINUTES", "").strip()
+        declared_minutes = (
+            minutes_raw is not None
+            or legacy_flag
+            or bool(env_raw)
+        )
+        rides_to_settlement = self._strict_exit_plan.min_days_to_expiry is None
+        policy = raw_policy or (
+            CARRY_INTRADAY
+            if declared_minutes
+            else (
+                CARRY_POSITIONAL
+                if (rides_to_settlement and bool(self.expression.get("overnight_carry")))
+                else (
+                    CARRY_INTRADAY
+                    if (self.timeframe or "") in INTRADAY_CARRY_TIMEFRAMES
+                    else CARRY_POSITIONAL
+                )
+            )
+        )
+        if policy == CARRY_POSITIONAL:
+            if minutes_raw is not None or legacy_flag:
+                raise ExecutionSpecError(
+                    "carry_policy='positional' cannot also declare an intraday "
+                    "square-off — one of them decides whether this book holds "
+                    "past 15:30 IST"
+                )
+            return CARRY_POSITIONAL, None
+        minutes = minutes_raw if minutes_raw is not None else (env_raw or None)
+        if minutes is None:
+            minutes = DEFAULT_INTRADAY_SQUAREOFF_MINUTES
+        try:
+            value = int(minutes)
+        except (TypeError, ValueError):
+            value = DEFAULT_INTRADAY_SQUAREOFF_MINUTES
+        if value <= 0:
+            value = DEFAULT_INTRADAY_SQUAREOFF_MINUTES
+        # OPT-5 floor: never later than 15:10 IST, so the runner cannot race the
+        # broker's own RMS auto-squareoff window.
+        return policy, max(DEFAULT_INTRADAY_SQUAREOFF_MINUTES, value)
+
+    def _resolve_float_knob(
+        self,
+        expr_key: str,
+        env_key: str,
+        *,
+        default: float,
+        minimum: float = 0.0,
+    ) -> float:
+        raw = self.expression.get(expr_key)
+        if raw is None:
+            env_raw = os.environ.get(env_key, "").strip()
+            raw = env_raw if env_raw else default
+        try:
+            return max(minimum, float(raw))
+        except (TypeError, ValueError):
+            return default
+
+    def _resolve_optional_spread_pct(self) -> Optional[float]:
+        raw = self.expression.get("max_bid_ask_spread_pct")
+        if raw is None:
+            env_raw = os.environ.get("MSTOCK_MAX_BID_ASK_SPREAD_PCT", "").strip()
+            raw = env_raw if env_raw else None
+        if raw is None:
+            return None
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return val if val > 0.0 else 0.0
+
+    def _effective_max_spread_pct(self) -> Optional[float]:
+        if self.max_bid_ask_spread_pct is not None:
+            return self.max_bid_ask_spread_pct
+        src = str(getattr(self.quote_provider, "source_name", "") or "")
+        if src.startswith("live:"):
+            return 0.50
+        return None
+
+    @staticmethod
+    def _ist_clock_from_ts(ts: Any) -> Optional[datetime]:
+        if ts is None:
+            return None
+        if isinstance(ts, datetime):
+            parsed = ts
+        else:
+            text = str(ts).strip()
+            if not text:
+                return None
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(EXCHANGE_TZ)
+        return parsed.replace(tzinfo=EXCHANGE_TZ)
+
+    @property
+    def _quotes_are_live(self) -> bool:
+        """Whether this bridge prices off a broker's live feed.
+
+        The provider label is the runner's own evidence (same test
+        :meth:`_effective_max_spread_pct` uses): ``live:mstock`` means the
+        stamps arriving are the exchange clock. A synthetic or history-shaped
+        provider bars on the fixture's clock, and the session entry window is a
+        live-risk rule — it has nothing to police there.
+        """
+        src = str(getattr(self.quote_provider, "source_name", "") or "")
+        return src.startswith("live:")
+
+    def _entry_window_block(self, ts: Any) -> Optional[str]:
+        """BUG-18: why this market instant cannot open a new structure.
+
+        Judged on the *bar/tick's own* clock, not the wall clock, so a live
+        feed that hands over a 15:30:30 bar is refused like the venue would
+        refuse it. An intraday book is refused once its own square-off deadline
+        is past, so it can never open a position it is about to force-flat.
+        """
+        if not self._quotes_are_live:
+            return None
+        reference = self._ist_clock_from_ts(ts) or self._market_dt or self._bar_dt
+        if reference is None:
+            return None
+        return entry_window_refusal(
+            reference,
+            intraday=self.carries_intraday,
+            squareoff_minutes=self.intraday_squareoff_minutes_before,
+        )
+
+    def _in_opening_stabilization_window(self, ts: Any) -> bool:
+        """True during 09:15:00..(09:15:00 + stabilization_s) IST (Caveat Q-7)."""
+        window_s = self.market_open_stabilization_seconds
+        if window_s <= 0.0:
+            return False
+        ist_dt = self._ist_clock_from_ts(ts)
+        if ist_dt is None:
+            return False
+        open_dt = datetime.combine(ist_dt.date(), _NSE_OPEN_TIME, tzinfo=EXCHANGE_TZ)
+        elapsed = (ist_dt - open_dt).total_seconds()
+        return 0.0 <= elapsed < window_s
+
+    def _entry_bucket_key(self, ts: Any) -> Optional[str]:
+        """Bucket key for the BUG-01 entry latch, or ``None`` when unlatched.
+
+        Uses the *same* floor as the bar aggregator (:func:`bucket_start_ts`) so
+        "this bar already traded" means exactly what a sealed bar says — an epoch
+        floor would have been offset 30 minutes from NSE hourly bars. Date-free on
+        purpose? No: the key carries the date, which is what makes it roll over at
+        midnight for free.
+        """
+        if not self.entry_bucket_timeframe:
+            return None
+        text = str(ts or "").strip()
+        if not text:
+            return None
+        try:
+            return bucket_start_ts(text, self.entry_bucket_timeframe)
+        except Exception:  # noqa: BLE001 — an unparseable stamp must not open a trade
+            return None
+
+    def _blocked_tick_reentry(self) -> bool:
+        """Prevent machine-gun re-entry on ticks after a close (Caveat Q-4)."""
+        if (
+            self._last_exit_reason in ("manual", "emergency_flatten", EXIT_INTRADAY_SQUAREOFF)
+            and self._exit_bar_index is not None
+            and self._exit_bar_index == self._bar_index
+        ):
+            return True
+        return self._reentry_cooldown_active()
+
+    def _reentry_cooldown_active(self) -> bool:
+        """True while ``reentry_cooldown_seconds`` has not elapsed since the
+        last close. Extracted from :meth:`_blocked_tick_reentry` for the tick
+        path, which lives on the wall clock: sub-second ticks arrive faster
+        than any bar, so monotonic time is the only honest measure there.
+        """
+        if self._last_exit_mono is not None and self.reentry_cooldown_seconds > 0.0:
+            if (time.monotonic() - self._last_exit_mono) < self.reentry_cooldown_seconds:
+                return True
+        return False
+
+    def _bar_cooldown_active(self, ts: Any = None) -> bool:
+        """The same cooldown measured on the **bar clock** for bar-cadence entries.
+
+        ``_last_exit_mono`` is monotonic wall time, which a replay advances an
+        instant at a time: gating a bar path on it refused every re-entry after
+        the first exit in any backfill or replay, and said nothing about the
+        market gap the knob is meant to express. Bar timestamps are the feed's
+        own clock, so a 1-min runner sits out exactly the declared seconds of
+        *market* time. Falls back to no guard when either stamp is missing
+        (the first entry, or a bridge restored mid-structure).
+        """
+        if self.reentry_cooldown_seconds <= 0.0:
+            return False
+        bar_dt = self._bar_datetime(ts) or self._market_dt or self._bar_dt
+        if self._last_exit_bar_dt is None or bar_dt is None:
+            return False
+        elapsed = (bar_dt - self._last_exit_bar_dt).total_seconds()
+        return elapsed < self.reentry_cooldown_seconds
+
+    # ------------------------------------------------------------------ #
+    # BUG-02 — day-count re-entry cap
+    # ------------------------------------------------------------------ #
+
+    def _session_today(self, ts: Any = None) -> Optional[date]:
+        """The IST calendar date the bridge is trading on.
+
+        Prefers the timestamp of the entry being attempted, then the bar clock,
+        then the wall clock — a live bridge's ``_bar_dt`` only advances when a
+        bar is processed, so gating a day roll on it alone spends yesterday's
+        budget for one extra bar. Uses the project timekeeper's
+        :func:`session_date`, never ``datetime.utcnow()`` or ``.date()`` on a
+        UTC value.
+        """
+        try:
+            return session_date(
+                self._bar_datetime(ts) or self._market_dt or self._bar_dt or now_utc()
+            )
+        except Exception:  # noqa: BLE001 — a bad clock must not open a trade
+            return None
+
+    def _max_entries_per_day(self) -> int:
+        """First entry + ``max_reentries_per_day`` re-entries (``0`` = never)."""
+        try:
+            reentries = max(0, int(self._strict_exit_plan.max_reentries_per_day))
+        except (TypeError, ValueError):
+            reentries = 2
+        return 1 + reentries
+
+    def _roll_entry_day(self, ts: Any = None) -> None:
+        """Reset the day's close counter when the IST date advances."""
+        today = self._session_today(ts)
+        if today is None:
+            return
+        if self._entry_day is None or today != self._entry_day:
+            self._entry_day = today
+            self._closes_today = 0
+
+    def _register_close(self) -> None:
+        """Called from every structural close path so the day's budget is real.
+
+        Settlement, stop, target, flip, square-off, manual — BUG-02's lesson is
+        that a counter fed by only ONE of these (the signal-flip re-entry) is
+        the same as no counter at all.
+        """
+        self._roll_entry_day()
+        self._closes_today += 1
+        self._last_exit_bar_dt = self._market_dt or self._bar_dt
+
+    def _reentry_cap_reached(self, ts: Any = None) -> bool:
+        self._roll_entry_day(ts)
+        return self._closes_today >= self._max_entries_per_day()
+
+    # ------------------------------------------------------------------ #
+    # BUG-15 — deterministic-rejection health tracking
+    # ------------------------------------------------------------------ #
+
+    def _contract_key_from_intent(self, intent: Any) -> str:
+        """A stable identifier for the SAME rejection contract across retries.
+
+        Joined leg symbols are the smallest label that distinguishes "the same
+        refusal" from "one the strategy is trying to move past" — when the
+        strike changes, the streak resets. Falls back to the structure type
+        when symbols have not resolved yet, which is fine because a pre-chain
+        refusal repeats identically anyway.
+        """
+        try:
+            legs = list(getattr(intent, "legs", []) or [])
+        except TypeError:
+            legs = []
+        labels = [str(getattr(leg, "trading_symbol", "") or "").strip() for leg in legs]
+        labels = [label for label in labels if label]
+        if labels:
+            return "|".join(sorted(labels))
+        return str(getattr(intent, "structure_type", "") or "")
+
+    def _register_entry_rejection(
+        self, code: str, reason: str, contract_key: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Update blocked-state after a deterministic refusal; return flags for the payload.
+
+        ``suppress_log`` tells the runner-side logger this repetition is already
+        counted here, so a 205-rejection hour cannot spam the signal log; the
+        bridge emits one warning per :data:`_REJECTION_LOG_THROTTLE_SECONDS`
+        instead.
+        """
+        key = (str(code), str(contract_key or self._last_attempted_contract or ""))
+        if key == self._rejection_key:
+            self._rejection_streak += 1
+        else:
+            self._rejection_key = key
+            self._rejection_streak = 1
+        blocked = self._rejection_streak >= _BLOCKED_BY_RISK_THRESHOLD
+        if blocked:
+            self.trade_health = "BLOCKED_BY_RISK"
+            self.block_reason = (
+                f"{code}×{self._rejection_streak} @ {key[1]}"
+                if key[1]
+                else f"{code}×{self._rejection_streak}"
+            )
+        now_mono = time.monotonic()
+        last = self._last_rejection_log_mono
+        throttle_hit = last is not None and (now_mono - last) < _REJECTION_LOG_THROTTLE_SECONDS
+        if throttle_hit:
+            return {
+                "blocked": blocked,
+                "block_reason": self.block_reason,
+                "suppress_log": True,
+            }
+        self._last_rejection_log_mono = now_mono
+        return {
+            "blocked": blocked,
+            "block_reason": self.block_reason,
+            "suppress_log": False,
+        }
+
+    def _reset_blocked_state(self) -> None:
+        """A successful entry proves the pipeline is not stuck — clear streak + health."""
+        if self._rejection_streak or self._rejection_key is not None:
+            self._rejection_streak = 0
+            self._rejection_key = None
+            self._last_rejection_log_mono = None
+        if self.trade_health == "BLOCKED_BY_RISK":
+            self.trade_health = "OK"
+            self.block_reason = None
+
+    def _pin_structure_legs(self, structure: Any) -> None:
+        sid = getattr(structure, "structure_id", None)
+        if not sid or sid in self._pinned_structure_ids:
+            return
+        if type(self.quote_provider).__module__ == "unittest.mock":
+            return
+        pin_fn = getattr(self.quote_provider, "pin_contracts", None)
+        if not callable(pin_fn):
+            return
+        tokens = [
+            str(leg.instrument_token)
+            for leg in getattr(structure, "legs", [])
+            if getattr(leg, "instrument_token", "")
+        ]
+        if not tokens:
+            return
+        try:
+            pin_fn(tokens)
+            self._pinned_structure_ids.add(str(sid))
+        except Exception:  # noqa: BLE001
+            logger.debug("[options-bridge] pin_contracts failed for %s", sid, exc_info=True)
+
+    def _unpin_structure_legs(self, structure: Any) -> None:
+        sid = getattr(structure, "structure_id", None)
+        if not sid or str(sid) not in self._pinned_structure_ids:
+            return
+        self._pinned_structure_ids.discard(str(sid))
+        if type(self.quote_provider).__module__ == "unittest.mock":
+            return
+        unpin_fn = getattr(self.quote_provider, "unpin_contracts", None)
+        if not callable(unpin_fn):
+            return
+        tokens = [
+            str(leg.instrument_token)
+            for leg in getattr(structure, "legs", [])
+            if getattr(leg, "instrument_token", "")
+        ]
+        if not tokens:
+            return
+        try:
+            unpin_fn(tokens)
+        except Exception:  # noqa: BLE001
+            logger.debug("[options-bridge] unpin_contracts failed for %s", sid, exc_info=True)
+
     def _pick_strikes(
         self,
         structure_type: str,
@@ -1818,12 +3370,22 @@ class OptionsBridge:
         direction: Direction,
     ) -> list[Decimal]:
         strikes_sorted = sorted(chain.keys())
-        selection = str(self.expression.get("strike_selection", "atm")).lower()
-        if selection == "delta":
-            target = float(self.expression.get("delta_target", 0.35))
-            selector: Any = DeltaSelector(delta_target=target)
-        else:
-            selector = ATMSelector()
+        # The active DirectionRule (the strategy's declaration, carried by
+        # the intent) is the only strike logic. There is no silent ATM
+        # fallback: an execution without a declared rule is a bug, and it
+        # refuses loudly instead of inventing a strike.
+        rule = self._active_rule
+        if rule is None:
+            raise ValueError(
+                "strike selection requires the intent's declared "
+                "DirectionRule — no rule, no strike (Phase 4)"
+            )
+        kwargs: dict[str, Any] = {}
+        if rule.strike_selection == "delta":
+            kwargs["delta_target"] = float(rule.delta_target or 0.35)
+        elif rule.strike_selection == "fixed_distance":
+            kwargs["distance_pct"] = float(rule.distance_pct or 0.0)
+        selector = create_selector(rule.strike_selection, **kwargs)
 
         count = _STRICKES_NEEDED.get(structure_type, 1)
         if count == 1:

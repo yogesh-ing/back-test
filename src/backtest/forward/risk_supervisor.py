@@ -125,6 +125,7 @@ class RiskSupervisor:
 
     def __init__(self, config: Optional[GlobalRiskConfig] = None) -> None:
         self.config = config or GlobalRiskConfig()
+        self._last_util_bucket: Optional[int] = None
 
     # -- rule checks ------------------------------------------------------
 
@@ -210,6 +211,26 @@ class RiskSupervisor:
 
         dd_breach = self.check_portfolio_max_drawdown(total_equity, peak_equity)
         loss_breach = self.check_portfolio_daily_loss(daily_pnl)
+
+        # Utilization visibility: log once per 50%/80% crossing toward the
+        # daily-loss limit so "why did the breaker trigger" is answerable
+        # from the log without a post-mortem.
+        limit = abs(self.config.daily_loss_limit)
+        if limit > 0:
+            util = max(0.0, -daily_pnl) / limit
+            bucket = 80 if util >= 0.8 else 50 if util >= 0.5 else 0
+            if bucket != self._last_util_bucket:
+                if bucket:
+                    logger.warning(
+                        "RISK_UTILIZATION %d%% of daily-loss limit (daily_pnl=%.2f, "
+                        "limit=%.2f, equity=%.2f, drawdown=%.2f%%)",
+                        bucket,
+                        daily_pnl,
+                        limit,
+                        total_equity,
+                        report.drawdown_pct * 100,
+                    )
+                self._last_util_bucket = bucket
 
         if dd_breach:
             report.breaches.append(dd_breach)

@@ -129,6 +129,12 @@ class TestParseOptionContract:
         }
         assert MStockBroker._parse_option_contract(row) is None
 
+    def test_a_row_without_a_lot_size_is_skipped(self):
+        """No published lot → no contract: sizing a leg off a guessed lot would
+        size every rupee stop in the book off a number the exchange never gave."""
+        row = self._row(f"NIFTY{_TAG}24500CE", "51201", "CE", lot="")
+        assert MStockBroker._parse_option_contract(row) is None
+
     def test_parse_invalid_symbol_returns_none(self):
         row = {"tradingsymbol": "INVALID", "instrument_token": "X"}
         assert MStockBroker._parse_option_contract(row) is None
@@ -238,6 +244,27 @@ class TestGetOptionQuote:
         assert quote == {}
         # transient-failure retry: two attempts before giving up
         assert mock_get.call_count == 2
+
+    @patch("backtest.brokers.mstock.requests.get")
+    def test_numeric_token_never_reaches_the_http_endpoint(self, mock_get):
+        """A numeric instrument token is a WebSocket key only (2026-10-22).
+
+        The HTTP quote endpoint answers "Invalid symbol" for it, so falling
+        through would burn a request on every option quote and leave the row
+        LTP-only — which is what blocked CE all day on a healthy socket.
+        """
+        broker = _make_broker_with_session()
+        broker._ws_feed = None  # no socket: the WS lookup answers nothing, and HTTP must be skipped
+
+        assert broker.get_option_quote("51338") == {}
+        mock_get.assert_not_called()
+
+        resp = MagicMock()
+        resp.json.return_value = {"data": {"ltp": 150.5}}
+        resp.raise_for_status = MagicMock()
+        mock_get.return_value = resp
+        assert broker.get_option_quote("NFO_NIFTY26SEP24500CE")["ltp"] == 150.5
+        assert mock_get.call_count >= 1, "the trading symbol keeps the HTTP route"
 
 
 # ---------------------------------------------------------------------------

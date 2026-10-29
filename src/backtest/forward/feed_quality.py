@@ -24,9 +24,12 @@ Design rules:
 * monitors are pure observers — they never call an API themselves and never
   block the feed thread (log write is best-effort, failures swallowed);
 * thread-safe (called from the poll thread, read from Flask routes);
-* timestamps: bar ``ts`` is exchange-time (naive IST); ``observed_at`` is
-  converted to naive IST so the delta is a true wall-clock staleness
-  regardless of the server's local timezone.
+* timestamps are aware UTC instants. Bar ``ts`` arrives as exchange time
+  (mStock sends naive IST) and enters through
+  :func:`backtest.timekeeping.from_market_clock`, so a naive-UTC "now" minus a
+  naive-IST bar can no longer report 5h30 of staleness that never happened.
+  Lines written before this change carry naive IST in ``observed_at``; the log
+  readers apply the same declared reading rule so old and new lines compare.
 """
 
 from __future__ import annotations
@@ -36,8 +39,10 @@ import logging
 import os
 import threading
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional
+
+from backtest.timekeeping import from_market_clock, now_utc
 
 logger = logging.getLogger("backtest.forward.feed_quality")
 
@@ -59,26 +64,22 @@ _GAP_THRESHOLD_MINUTES = 1.5
 _TAIL_SIZE = 2000
 
 
-def _now_ist_naive() -> datetime:
-    """Wall clock as naive IST — matches the bars' exchange-time convention."""
-    return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+def _now() -> datetime:
+    """The monitor's clock: one aware UTC instant, compared against aware instants."""
+    return now_utc()
 
 
 def _parse_bar_ts(ts: Any) -> Optional[datetime]:
-    """Bar timestamp (str/int) → naive IST datetime, or None."""
-    if isinstance(ts, (int, float)):
-        if ts > 1_000_000_000_000:
-            dt = datetime.utcfromtimestamp(ts / 1000.0)  # noqa: DTZ006 — epoch ms
-        else:
-            dt = datetime.utcfromtimestamp(ts)  # noqa: DTZ006 — epoch seconds
-        return dt + timedelta(hours=5, minutes=30)
+    """Bar timestamp (str / epoch s / epoch ms) → aware UTC instant.
+
+    Delegates to :func:`backtest.timekeeping.from_market_clock`, whose declared
+    rule is that a naive market timestamp is EXCHANGE time — which is what
+    mStock sends ("%Y-%m-%d %H:%M:%S" in IST).
+    """
     try:
-        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
+        return from_market_clock(ts)
+    except ValueError:
         return None
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
 
 
 class FeedQualityMonitor:
@@ -108,9 +109,7 @@ class FeedQualityMonitor:
 
     def observe_bar(self, bar_ts: Any, observed_at: Optional[datetime] = None) -> Dict[str, Any]:
         """One bar delivered. Returns the computed observation (also logged)."""
-        now = observed_at or _now_ist_naive()
-        if now.tzinfo is not None:
-            now = now.astimezone(timezone.utc).replace(tzinfo=None)
+        now = from_market_clock(observed_at) or _now()
         ts = _parse_bar_ts(bar_ts)
         if ts is None:
             return self.observe_error(f"unparseable bar ts: {bar_ts!r}")
@@ -160,7 +159,7 @@ class FeedQualityMonitor:
             "kind": "no_data",
             "broker": self.broker,
             "symbol": self.symbol,
-            "observed_at": _now_ist_naive().isoformat(),
+            "observed_at": _now().isoformat(),
             "reason": str(reason)[:120],
         }
         self._write(record)
@@ -168,7 +167,7 @@ class FeedQualityMonitor:
 
     def observe_error(self, detail: str = "") -> Dict[str, Any]:
         """One failed poll (network/HTTP/rate-limit)."""
-        now = _now_ist_naive()
+        now = _now()
         with self._lock:
             self.polls_observed += 1
             self.errors_observed += 1
@@ -313,8 +312,10 @@ def _first_observed_at_from_log(path: str, broker: str, symbol: str) -> Optional
                 if not raw:
                     continue
                 try:
-                    dt = datetime.fromisoformat(raw)
+                    dt = from_market_clock(raw)
                 except ValueError:
+                    continue
+                if dt is None:
                     continue
                 if best is None or dt < best:
                     best = dt
@@ -362,9 +363,7 @@ def aggregate_report(path: str = QUALITY_LOG_PATH) -> Dict[str, Any]:
                 obs: Optional[datetime] = None
                 if raw_obs:
                     try:
-                        obs = datetime.fromisoformat(raw_obs)
-                        if obs.tzinfo is not None:
-                            obs = obs.astimezone(timezone.utc).replace(tzinfo=None)
+                        obs = from_market_clock(raw_obs)
                     except ValueError:
                         obs = None
                 if obs is not None:
@@ -425,4 +424,4 @@ def aggregate_report(path: str = QUALITY_LOG_PATH) -> Dict[str, Any]:
             }
         )
 
-    return {"feeds": feeds, "generated_at": _now_ist_naive().isoformat()}
+    return {"feeds": feeds, "generated_at": _now().isoformat()}

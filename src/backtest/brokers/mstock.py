@@ -32,7 +32,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import time
+from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -52,8 +54,9 @@ from backtest.brokers.base import (
 )
 from backtest.instruments.option import OptionContract
 from backtest.instruments.base import ExerciseType, SettlementType
+from backtest.timekeeping import EXCHANGE_TZ, duration_seconds, now_utc
 
-__all__ = ["MStockBroker", "MStockOrderError"]
+__all__ = ["MStockBroker", "MStockOrderError", "OrderOutcomeUnknown"]
 
 logger = logging.getLogger("backtest.brokers.mstock")
 
@@ -98,6 +101,14 @@ _AUTH_RETRY_STATUSES = (502, 503, 504)
 AUTH_RETRY_ATTEMPTS = 4
 AUTH_RETRY_BASE_SLEEP = 0.8  # linear backoff: 0.8, 1.6, 2.4 s between attempts
 
+# Order placement outcomes. A 4xx or an error payload on a 200 is mStock's
+# verdict: the ticket was refused, so nothing exists at the exchange and the
+# caller may act on that. These statuses are not a verdict — the request may
+# have been accepted and only the answer was lost (gateway 5xx, throttled
+# connection, timeout). Retrying one could double-place an order, so they
+# surface as :class:`OrderOutcomeUnknown` and the caller must reconcile.
+_UNCERTAIN_ORDER_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
 # Fallback session lifetime when the API response carries no expiry hint.
 # Defaults to a trading-session length (6.5h); override via
 # MSTOCK_SESSION_TTL_MINUTES in .env.
@@ -121,6 +132,26 @@ class MStockOrderError(RuntimeError):
     Raised when there is no active session, the order has no broker id,
     mStock answers non-2xx, or the payload carries an error reason. The
     message is user-facing (no stack traces or internal details).
+
+    ``status_code`` is the HTTP status when mStock answered one, else ``None``.
+    Callers use it to tell a definite rejection (4xx / error payload — nothing
+    at the exchange) from an outcome that is merely unknown.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class OrderOutcomeUnknown(MStockOrderError):
+    """The call to mStock failed without an answer — the order may exist.
+
+    A gateway 5xx, a rate limit, a connection/timeout failure, or a 2xx that
+    carried no order id all leave the same question: is that ticket at the
+    exchange or not? Nothing may be inferred from the silence, so this is the
+    one error class the execution seam must not retry — it must reconcile
+    against the order book first (Options V1 PRD §6, "never retry an uncertain
+    order blindly").
     """
 
 
@@ -174,6 +205,19 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                 session_ttl_minutes = DEFAULT_SESSION_TTL_MINUTES
         self._session_ttl = timedelta(minutes=max(session_ttl_minutes, 0.0))
         self._http_timeout = http_timeout
+        
+        # WebSocket market depth feed (initialized after auth)
+        self._ws_feed: Any = None
+        self._ws_subscribed_tokens: set[int] = set()
+        self._ws_token_modes: dict[int, str] = {}
+        self._ws_desired_modes: dict[int, str] = {}
+        self._ws_token_pins: dict[int, int] = {}
+        self._ws_reinit_listeners: list[Callable[[], None]] = []
+        self._ws_tick_listeners: list[Callable[[dict[str, dict]], None]] = []
+        self._ws_order_listeners: list[Callable[[dict[str, Any]], None]] = []
+        self._ws_order_cache: dict[str, dict[str, Any]] = {}
+        self._ws_lock = threading.RLock()
+        self._ws_cold_subscribe_wait_s: float = 0.0
 
     # ------------------------------------------------------------------
     # Step 1 — credentials
@@ -272,6 +316,10 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         self._session_token = token
         self._expires_at = expires_at
         self._temp_auth_context = None
+        # Fresh logins must get the depth socket too: without it option
+        # quotes stay LTP-only (bid/ask=0) and BidAskQuoteProvider fails
+        # closed on every entry (2026-10-22: CE/PE runners blocked all day).
+        self._init_websocket_feed(token)
         logger.info("mStock session established (expires at %s)", expires_at.isoformat())
         return {
             "success": True,
@@ -310,6 +358,783 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             "broker": self.broker_name,
         }
 
+    def _init_websocket_feed(self, access_token: str) -> None:
+        """Initialize WebSocket market depth feed after successful TOTP auth.
+        
+        Starts MTicker in background thread, subscribes to instruments on-demand.
+        Falls back gracefully if tradingapi_a.mticker is not available.
+        """
+        try:
+            # Import MTicker from local copy
+            from backtest.data.mticker import MTicker
+            from backtest.data.mstock_ws_wrapper import MStockWebSocketWrapper
+            
+            api_key = self._api_key()
+            if not api_key:
+                logger.warning("Cannot init WebSocket: API key not configured")
+                return
+            
+            socket_url = os.getenv("MSTOCK_WEBSOCKET_URL", "wss://ws.mstock.trade")
+
+            if self._ws_feed is not None:
+                close_old = getattr(self._ws_feed, "close", None)
+                if callable(close_old):
+                    close_old()
+            with self._ws_lock:
+                desired_snapshot = dict(self._ws_desired_modes)
+                self._ws_subscribed_tokens.clear()
+                self._ws_token_modes.clear()
+                pinned_snapshot = sorted(
+                    tok for tok, cnt in self._ws_token_pins.items() if cnt > 0
+                )
+
+            logger.info("Initializing mStock WebSocket feed...")
+            ticker = MTicker(
+                api_key=api_key,
+                access_token=access_token,
+                root=socket_url,
+                debug=False,
+                reconnect=True,
+                reconnect_max_tries=50,
+                reconnect_max_delay=60,
+            )
+            
+            # Wrap MTicker for synchronous quote access
+            self._ws_feed = MStockWebSocketWrapper(ticker)
+            with self._ws_lock:
+                tick_listeners = list(self._ws_tick_listeners)
+            for tick_cb in tick_listeners:
+                try:
+                    self._ws_feed.add_tick_listener(tick_cb)
+                except Exception:  # noqa: BLE001
+                    logger.debug("Could not re-attach WS tick listener", exc_info=True)
+
+            # A brand-new socket holds no server-side subscriptions, so the
+            # registry that survives from the previous socket must be dropped
+            # with it. Left standing, subscribe_to_instrument() answers "already
+            # subscribed" for the indices and every option token, no subscribe
+            # frame is ever sent, and quotes fall back to HTTP LTP-only — the
+            # 2026-10-26 failure: a mid-session re-login silenced the depth
+            # feed for the rest of the day while the socket looked healthy.
+            self._ws_subscribed_tokens = set()
+
+            # The server closes an un-authenticated socket (clean 1000) within
+            # milliseconds of the first data frame — the login text frame must
+            # go down immediately after every handshake, before any subscribe.
+            # send_login_after_connect() shipped uncalled; the probe
+            # (tools/mticker_ws_probe.py, 2026-10-22) confirmed: without this
+            # frame the feed flaps forever and option quotes stay one-sided.
+            # MTicker._on_open resubscribes known tokens before firing this
+            # callback, so reconnects re-login and re-subscribe in order.
+            login_ready = threading.Event()
+            seeded_once = threading.Event()
+
+            def _ws_login(tkr) -> None:
+                try:
+                    tkr.send_login_after_connect()
+                    login_ready.set()
+                    logger.info("mStock WebSocket LOGIN sent (connection maintained)")
+                    if not seeded_once.is_set():
+                        seeded_once.set()
+                        self._resubscribe_session_tokens_ws(
+                            desired_snapshot, pinned_snapshot
+                        )
+                except Exception as exc:  # noqa: BLE001 — next reconnect retries
+                    logger.warning("mStock WebSocket LOGIN failed: %s", exc)
+
+            ticker.on_open = _ws_login
+            ticker.on_order_update = (
+                lambda _ws, payload: self._ingest_ws_order_payload(payload, "order")
+            )
+            ticker.on_trade_update = (
+                lambda _ws, payload: self._ingest_ws_order_payload(payload, "trade")
+            )
+
+            # Start WebSocket in background thread
+            ticker.connect(threaded=True)
+
+            # Wait for connection + LOGIN frame (up to 5 seconds)
+            if self._ws_feed.wait_for_connection(timeout=5.0):
+                login_ready.wait(timeout=1.0)
+                logger.info("mStock WebSocket feed connected and ready")
+                if not seeded_once.is_set():
+                    seeded_once.set()
+                    self._resubscribe_session_tokens_ws(
+                        desired_snapshot, pinned_snapshot
+                    )
+            else:
+                logger.warning("WebSocket connection timeout after 5 seconds")
+            
+        except ImportError as e:
+            logger.warning(
+                "MTicker not available - using HTTP LTP-only quotes. Error: %s", e
+            )
+            self._ws_feed = None
+        except Exception as exc:
+            logger.error("Failed to initialize WebSocket feed: %s", exc)
+            import traceback
+            logger.error(traceback.format_exc())
+            self._ws_feed = None
+
+    DEFAULT_INDEX_TOKENS: frozenset[int] = frozenset({26000, 26009, 26013, 26037})
+    UNDERLYING_INDEX_TOKENS: dict[str, int] = {
+        "NIFTY": 26000,
+        "BANKNIFTY": 26009,
+        "MIDCPNIFTY": 26013,
+        "FINNIFTY": 26037,
+    }
+
+    def ws_subscribed_tokens(self) -> set[int]:
+        """Return a snapshot copy of currently subscribed WS numeric tokens."""
+        with self._ws_lock:
+            return set(self._ws_subscribed_tokens)
+
+    def add_ws_reinit_listener(self, callback: Callable[[], None]) -> None:
+        """Register a callback fired whenever TOTP re-auth creates a new WS feed."""
+        if not callable(callback):
+            raise TypeError("ws reinit listener must be callable")
+        with self._ws_lock:
+            if callback not in self._ws_reinit_listeners:
+                self._ws_reinit_listeners.append(callback)
+
+    def remove_ws_reinit_listener(self, callback: Callable[[], None]) -> None:
+        """Unregister a previously registered WS re-init callback."""
+        with self._ws_lock:
+            if callback in self._ws_reinit_listeners:
+                self._ws_reinit_listeners.remove(callback)
+
+    def add_tick_listener(self, callback: Callable[[dict[str, dict]], None]) -> None:
+        """Register a coalesced WS tick listener preserved across TOTP re-auth."""
+        if not callable(callback):
+            raise TypeError("tick listener must be callable")
+        with self._ws_lock:
+            if callback not in self._ws_tick_listeners:
+                self._ws_tick_listeners.append(callback)
+            ws_feed = self._ws_feed
+        if ws_feed is not None:
+            add_fn = getattr(ws_feed, "add_tick_listener", None)
+            if callable(add_fn):
+                add_fn(callback)
+
+    def remove_tick_listener(
+        self, callback: Callable[[dict[str, dict]], None]
+    ) -> None:
+        """Unregister a coalesced WS tick listener."""
+        with self._ws_lock:
+            if callback in self._ws_tick_listeners:
+                self._ws_tick_listeners.remove(callback)
+            ws_feed = self._ws_feed
+        if ws_feed is not None:
+            rem_fn = getattr(ws_feed, "remove_tick_listener", None)
+            if callable(rem_fn):
+                rem_fn(callback)
+
+    def add_order_listener(
+        self, callback: Callable[[dict[str, Any]], None]
+    ) -> None:
+        """Register a WS order/trade push listener preserved across TOTP re-auth."""
+        if not callable(callback):
+            raise TypeError("order listener must be callable")
+        with self._ws_lock:
+            if callback not in self._ws_order_listeners:
+                self._ws_order_listeners.append(callback)
+
+    def remove_order_listener(
+        self, callback: Callable[[dict[str, Any]], None]
+    ) -> None:
+        """Unregister a WS order/trade push listener."""
+        with self._ws_lock:
+            if callback in self._ws_order_listeners:
+                self._ws_order_listeners.remove(callback)
+
+    def get_ws_order_update(self, broker_order_id: Any) -> dict[str, Any] | None:
+        """Return latest normalized WS push row for ``broker_order_id`` if cached."""
+        oid = str(broker_order_id or "").strip()
+        if not oid:
+            return None
+        with self._ws_lock:
+            row = self._ws_order_cache.get(oid)
+            return dict(row) if row is not None else None
+
+    def find_ws_order_update(
+        self,
+        *,
+        client_order_id: str | None = None,
+        symbol: str | None = None,
+        side: str | None = None,
+        quantity: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Match a cached WS push row by ``client_order_id`` or packet signature."""
+        wanted_coid = (client_order_id or "").strip()
+        wanted_sym = (symbol or "").strip().upper()
+        wanted_side = (side or "").strip().upper()
+        with self._ws_lock:
+            rows = list(self._ws_order_cache.values())
+        for row in reversed(rows):
+            row_coid = str(row.get("client_order_id") or "").strip()
+            if wanted_coid and row_coid and row_coid == wanted_coid:
+                return dict(row)
+            if (
+                wanted_sym
+                and str(row.get("symbol") or "").upper() == wanted_sym
+                and (not wanted_side or str(row.get("side") or "").upper() == wanted_side)
+                and (quantity is None or int(row.get("quantity") or 0) == int(quantity))
+            ):
+                return dict(row)
+        return None
+
+    def _ingest_ws_order_payload(
+        self, payload: Any, event_type: str = "order"
+    ) -> None:
+        """Normalize MTicker text order/trade push frames and fan out to listeners."""
+        raw_items = payload if isinstance(payload, list) else [payload]
+        items: list[dict[str, Any]] = []
+        for entry in raw_items:
+            if not isinstance(entry, dict):
+                continue
+            nested = entry.get("data")
+            if isinstance(nested, dict):
+                items.append(nested)
+            elif isinstance(nested, list):
+                items.extend(d for d in nested if isinstance(d, dict))
+            else:
+                items.append(entry)
+
+        normalized_rows: list[dict[str, Any]] = []
+        with self._ws_lock:
+            listeners = list(self._ws_order_listeners)
+            for raw in items:
+                oid = str(
+                    raw.get("order_id")
+                    or raw.get("orderId")
+                    or raw.get("broker_order_id")
+                    or raw.get("nOrdNo")
+                    or raw.get("norenordno")
+                    or ""
+                ).strip()
+                if not oid:
+                    continue
+                prev = dict(self._ws_order_cache.get(oid) or {})
+                status_raw = (
+                    raw.get("status")
+                    or raw.get("order_status")
+                    or raw.get("orderStatus")
+                    or raw.get("ordSt")
+                    or ""
+                )
+                status = str(status_raw).strip().upper()
+                filled_raw = next(
+                    (
+                        raw.get(k)
+                        for k in (
+                            "filled_quantity",
+                            "filled_shares",
+                            "filledShares",
+                            "fill_quantity",
+                            "trade_quantity",
+                            "fldQty",
+                        )
+                        if raw.get(k) is not None
+                    ),
+                    None,
+                )
+                try:
+                    filled_qty = (
+                        int(float(filled_raw))
+                        if filled_raw is not None
+                        else int(prev.get("filled_quantity") or 0)
+                    )
+                except (TypeError, ValueError):
+                    filled_qty = int(prev.get("filled_quantity") or 0)
+
+                qty_raw = next(
+                    (
+                        raw.get(k)
+                        for k in ("quantity", "order_quantity", "orderQuantity", "qty")
+                        if raw.get(k) is not None
+                    ),
+                    None,
+                )
+                try:
+                    total_qty = (
+                        int(float(qty_raw))
+                        if qty_raw is not None
+                        else int(prev.get("quantity") or 0)
+                    )
+                except (TypeError, ValueError):
+                    total_qty = int(prev.get("quantity") or 0)
+
+                px_raw = next(
+                    (
+                        raw.get(k)
+                        for k in (
+                            "average_price",
+                            "averagePrice",
+                            "average_fill_price",
+                            "avgPrc",
+                            "trade_price",
+                            "tradePrice",
+                            "fill_price",
+                            "price",
+                        )
+                        if raw.get(k) not in (None, "", 0, "0")
+                    ),
+                    None,
+                )
+                try:
+                    avg_px = (
+                        float(px_raw)
+                        if px_raw not in (None, "")
+                        else float(prev.get("average_price") or 0.0)
+                    )
+                except (TypeError, ValueError):
+                    avg_px = float(prev.get("average_price") or 0.0)
+
+                if not status:
+                    if event_type == "trade" and filled_qty > 0 and (
+                        total_qty <= 0 or filled_qty >= total_qty
+                    ):
+                        status = "COMPLETE"
+                    else:
+                        status = str(prev.get("status") or "")
+
+                symbol = str(
+                    raw.get("tradingsymbol")
+                    or raw.get("trading_symbol")
+                    or raw.get("tradingSymbol")
+                    or raw.get("trdSym")
+                    or raw.get("symbol")
+                    or prev.get("symbol")
+                    or ""
+                ).strip()
+                side_raw = str(
+                    raw.get("transaction_type")
+                    or raw.get("transactionType")
+                    or raw.get("trnsTp")
+                    or raw.get("side")
+                    or prev.get("side")
+                    or ""
+                ).strip().upper()
+                side = {"B": "BUY", "S": "SELL"}.get(side_raw, side_raw)
+                coid = str(
+                    raw.get("client_order_id")
+                    or raw.get("clientOrderId")
+                    or raw.get("guiOrderId")
+                    or raw.get("tag")
+                    or raw.get("remarks")
+                    or prev.get("client_order_id")
+                    or ""
+                ).strip()
+
+                merged = {
+                    "order_id": oid,
+                    "status": status,
+                    "filled_quantity": filled_qty,
+                    "quantity": total_qty,
+                    "average_price": avg_px,
+                    "symbol": symbol,
+                    "side": side,
+                    "client_order_id": coid,
+                    "event_type": event_type,
+                    "updated_mono": time.monotonic(),
+                }
+                if oid in self._ws_order_cache:
+                    self._ws_order_cache.pop(oid, None)
+                self._ws_order_cache[oid] = merged
+                while len(self._ws_order_cache) > 512:
+                    oldest_key = next(iter(self._ws_order_cache))
+                    self._ws_order_cache.pop(oldest_key, None)
+                normalized_rows.append(dict(merged))
+
+        for row in normalized_rows:
+            for listener in listeners:
+                try:
+                    listener(dict(row))
+                except Exception:  # noqa: BLE001 — isolate listener errors
+                    logger.debug("WS order listener error", exc_info=True)
+
+    def _resubscribe_session_tokens_ws(
+        self,
+        desired_modes: dict[int, str],
+        pinned_tokens: list[int],
+    ) -> None:
+        """Restore indices, HotStrikeRing tokens, and pinned legs after WS re-init."""
+        self._subscribe_default_indices()
+
+        mode_rank = {"ltp": 1, "quote": 2, "full": 3}
+        merged: dict[int, str] = {}
+        for tok, mode_str in desired_modes.items():
+            if tok in self.DEFAULT_INDEX_TOKENS:
+                continue
+            norm = (mode_str or "full").strip().lower()
+            merged[tok] = norm
+        for tok in pinned_tokens:
+            merged[tok] = "full"
+
+        by_mode: dict[str, list[int]] = {"ltp": [], "quote": [], "full": []}
+        for tok, mode_str in sorted(merged.items()):
+            bucket = mode_str if mode_str in mode_rank else "full"
+            by_mode[bucket].append(tok)
+
+        for bucket in ("ltp", "quote", "full"):
+            if by_mode[bucket]:
+                self.subscribe_tokens_ws(by_mode[bucket], mode=bucket, wait_timeout=1.0)
+
+        with self._ws_lock:
+            listeners = list(self._ws_reinit_listeners)
+        for listener in listeners:
+            try:
+                listener()
+            except Exception:  # noqa: BLE001
+                logger.debug("WS re-init listener failed", exc_info=True)
+
+    def _subscribe_default_indices(self) -> None:
+        """Auto-subscribe to major indices on WebSocket connect."""
+        # NIFTY, BANKNIFTY, MIDCPNIFTY, FINNIFTY tokens
+        try:
+            self.subscribe_tokens_ws(
+                sorted(self.DEFAULT_INDEX_TOKENS),
+                mode="full",
+                wait_timeout=3.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to auto-subscribe to default indices: %s", exc)
+
+    def subscribe_tokens_ws(
+        self,
+        instrument_tokens: Iterable[int | str],
+        mode: str = "full",
+        *,
+        wait_timeout: float = 0.0,
+    ) -> list[int]:
+        """Batch-subscribe tokens on the active MTicker WebSocket feed.
+
+        Non-blocking by default (``wait_timeout=0.0``) so hot paths never stall
+        on a disconnected socket. Sends one ``subscribe`` + ``set_mode`` frame
+        for all newly added or mode-upgraded tokens.
+        """
+        norm_mode = (mode or "full").strip().lower()
+        mode_rank = {"ltp": 1, "quote": 2, "full": 3}
+        requested_rank = mode_rank.get(norm_mode, 3)
+
+        parsed: list[int] = []
+        seen: set[int] = set()
+        for raw_tok in instrument_tokens:
+            try:
+                tok = int(str(raw_tok).strip())
+            except (TypeError, ValueError):
+                continue
+            if tok > 0 and tok not in seen:
+                seen.add(tok)
+                parsed.append(tok)
+        if not parsed:
+            return []
+
+        with self._ws_lock:
+            for tok in parsed:
+                prev_desired = self._ws_desired_modes.get(tok)
+                if (
+                    prev_desired is None
+                    or mode_rank.get(prev_desired, 1) < requested_rank
+                ):
+                    self._ws_desired_modes[tok] = norm_mode
+
+            if not self._ws_feed:
+                return []
+
+            to_send = [
+                tok
+                for tok in parsed
+                if tok not in self._ws_subscribed_tokens
+                or mode_rank.get(self._ws_token_modes.get(tok, "ltp"), 1) < requested_rank
+            ]
+            if not to_send:
+                return []
+
+            ticker = getattr(self._ws_feed, "_ticker", None)
+            if not ticker:
+                logger.error("Cannot access MTicker instance")
+                return []
+
+            is_conn_fn = getattr(self._ws_feed, "is_connected", None)
+            connected = bool(is_conn_fn()) if callable(is_conn_fn) else True
+            if not connected:
+                wait_fn = getattr(self._ws_feed, "wait_for_connection", None)
+                if wait_timeout > 0.0 and callable(wait_fn):
+                    connected = bool(wait_fn(timeout=wait_timeout))
+                if not connected:
+                    logger.debug(
+                        "WebSocket not connected; skipping batch subscribe (%d tokens)",
+                        len(to_send),
+                    )
+                    return []
+
+            try:
+                new_only = [tok for tok in to_send if tok not in self._ws_subscribed_tokens]
+                if new_only:
+                    ticker.subscribe(new_only)
+                mode_map = {
+                    "ltp": getattr(ticker, "MODE_LTP", "ltp"),
+                    "quote": getattr(ticker, "MODE_QUOTE", "quote"),
+                    "full": getattr(ticker, "MODE_FULL", "full"),
+                }
+                ws_mode = mode_map.get(norm_mode, getattr(ticker, "MODE_FULL", "full"))
+                ticker.set_mode(ws_mode, to_send)
+                for tok in to_send:
+                    self._ws_subscribed_tokens.add(tok)
+                    self._ws_token_modes[tok] = norm_mode
+                logger.info(
+                    "Subscribed %d WS token(s) (mode=%s): %s",
+                    len(to_send),
+                    norm_mode,
+                    to_send[:10],
+                )
+                return to_send
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Failed to batch-subscribe WS tokens %s: %s", to_send[:10], exc)
+                return []
+
+    def unsubscribe_tokens_ws(self, instrument_tokens: Iterable[int | str]) -> list[int]:
+        """Batch-unsubscribe tokens from MTicker while protecting indices & pinned legs."""
+        candidates: list[int] = []
+        seen: set[int] = set()
+        for raw_tok in instrument_tokens:
+            try:
+                tok = int(str(raw_tok).strip())
+            except (TypeError, ValueError):
+                continue
+            if tok > 0 and tok not in seen:
+                seen.add(tok)
+                candidates.append(tok)
+        if not candidates:
+            return []
+
+        with self._ws_lock:
+            allowed = [
+                tok
+                for tok in candidates
+                if tok not in self.DEFAULT_INDEX_TOKENS
+                and self._ws_token_pins.get(tok, 0) <= 0
+            ]
+            for tok in allowed:
+                self._ws_desired_modes.pop(tok, None)
+
+            if not self._ws_feed:
+                return []
+
+            removable = [
+                tok for tok in allowed if tok in self._ws_subscribed_tokens
+            ]
+            if not removable:
+                return []
+
+            ticker = getattr(self._ws_feed, "_ticker", None)
+            is_conn_fn = getattr(self._ws_feed, "is_connected", None)
+            connected = bool(is_conn_fn()) if callable(is_conn_fn) else True
+            try:
+                if ticker is not None and connected and hasattr(ticker, "unsubscribe"):
+                    ticker.unsubscribe(removable)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to unsubscribe WS tokens %s: %s", removable[:10], exc)
+                return []
+
+            for tok in removable:
+                self._ws_subscribed_tokens.discard(tok)
+                self._ws_token_modes.pop(tok, None)
+            logger.info("Unsubscribed %d WS token(s): %s", len(removable), removable[:10])
+            return removable
+
+    def pin_ws_tokens(
+        self,
+        instrument_tokens: Iterable[int | str],
+        mode: str = "full",
+    ) -> list[int]:
+        """Increment refcount on held-position tokens and ensure WS subscription."""
+        pinned: list[int] = []
+        with self._ws_lock:
+            for raw_tok in instrument_tokens:
+                try:
+                    tok = int(str(raw_tok).strip())
+                except (TypeError, ValueError):
+                    continue
+                if tok <= 0:
+                    continue
+                self._ws_token_pins[tok] = self._ws_token_pins.get(tok, 0) + 1
+                pinned.append(tok)
+        if pinned:
+            self.subscribe_tokens_ws(pinned, mode=mode, wait_timeout=0.0)
+        return pinned
+
+    def unpin_ws_tokens(self, instrument_tokens: Iterable[int | str]) -> list[int]:
+        """Decrement refcount on closed-position tokens (does not force-unsubscribe)."""
+        released: list[int] = []
+        with self._ws_lock:
+            for raw_tok in instrument_tokens:
+                try:
+                    tok = int(str(raw_tok).strip())
+                except (TypeError, ValueError):
+                    continue
+                cur = self._ws_token_pins.get(tok, 0)
+                if cur <= 1:
+                    if tok in self._ws_token_pins:
+                        self._ws_token_pins.pop(tok, None)
+                        released.append(tok)
+                else:
+                    self._ws_token_pins[tok] = cur - 1
+        return released
+
+    def subscribe_to_instrument(self, instrument_token: int, mode: str = "full") -> bool:
+        """Subscribe to real-time market depth for an instrument."""
+        if not self._ws_feed:
+            logger.debug(
+                "WebSocket not available, skipping subscription for token %d",
+                instrument_token,
+            )
+            return False
+        with self._ws_lock:
+            if int(instrument_token) in self._ws_subscribed_tokens:
+                return True
+        subscribed = self.subscribe_tokens_ws(
+            [int(instrument_token)],
+            mode=mode,
+            wait_timeout=3.0,
+        )
+        return int(instrument_token) in subscribed or (
+            int(instrument_token) in self._ws_subscribed_tokens
+        )
+
+    @staticmethod
+    def _parse_legacy_ws_timestamp_age(ts: Any) -> float | None:
+        """Compute age in seconds for legacy/test quotes lacking ``recv_mono``.
+
+        Feed timestamps go through ``from_market_clock`` (naive means exchange
+        time) so the age never depends on the host's local clock. Time-only
+        stamps carry no date; they are paired with today's exchange session.
+        """
+        if ts is None:
+            return None
+        if isinstance(ts, datetime):
+            return duration_seconds(ts, now_utc())
+        if isinstance(ts, str):
+            text = ts.strip()
+            if not text:
+                return None
+            try:
+                return duration_seconds(text, now_utc())
+            except ValueError:
+                pass
+            for fmt in ("%I:%M:%S%p", "%I:%M:%S %p", "%H:%M:%S"):
+                try:
+                    parsed_t = datetime.strptime(text.upper(), fmt).time()
+                    stamp = datetime.combine(
+                        datetime.now(EXCHANGE_TZ).date(), parsed_t, tzinfo=EXCHANGE_TZ
+                    )
+                    return max(0.0, (now_utc() - stamp).total_seconds())
+                except ValueError:
+                    continue
+        return None
+
+    def get_ws_quote(
+        self,
+        instrument_token: int,
+        max_age_seconds: float = 10.0,
+        *,
+        socket_liveness_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Get latest validated quote from WebSocket cache.
+
+        Distinguishes two regimes using ``recv_mono`` + ``last_any_tick_mono()``:
+        1. **Live socket + quiet OTM strike**: ``is_connected()`` is True and
+           the socket received any index/option frame within
+           ``socket_liveness_seconds`` (defaults to ``max_age_seconds``) — a
+           subscribed OTM leg whose book has not printed in >10s stays valid
+           (preserving live 2-sided Bid/Ask instead of falsely degrading to
+           one-sided HTTP LTP).
+        2. **Disconnected/zombie socket or post-15:30 market close**: socket is
+           closed OR neither the token nor the socket has received frames within
+           their freshness window, OR the cached row carries neither
+           ``recv_mono`` nor a valid ``timestamp`` — rejected immediately
+           (``return {}``), eliminating Finding F5 post-close frozen marks.
+        """
+        if not self._ws_feed:
+            return {}
+
+        try:
+            is_conn_fn = getattr(self._ws_feed, "is_connected", None)
+            if callable(is_conn_fn) and not is_conn_fn():
+                logger.debug(
+                    "WebSocket disconnected; rejecting cached quote for token %d",
+                    instrument_token,
+                )
+                return {}
+
+            quote = self._ws_feed.get_quote(str(instrument_token))
+            if not quote:
+                return {}
+
+            if max_age_seconds is not None and max_age_seconds > 0:
+                now_mono = time.monotonic()
+                recv_mono = quote.get("recv_mono")
+                if recv_mono is not None:
+                    quote_age = max(0.0, now_mono - float(recv_mono))
+                    if quote_age > max_age_seconds:
+                        last_any_fn = getattr(self._ws_feed, "last_any_tick_mono", None)
+                        last_any = (
+                            float(last_any_fn()) if callable(last_any_fn) else 0.0
+                        )
+                        liveness_limit = (
+                            float(max_age_seconds)
+                            if socket_liveness_seconds is None
+                            else float(socket_liveness_seconds)
+                        )
+                        socket_alive = (
+                            last_any > 0.0 and (now_mono - last_any) <= liveness_limit
+                        )
+                        tok_int = int(instrument_token)
+                        with self._ws_lock:
+                            token_subscribed = (
+                                not self._ws_subscribed_tokens
+                                or tok_int in self._ws_subscribed_tokens
+                            )
+                        if not (socket_alive and token_subscribed):
+                            logger.debug(
+                                "Stale WS tick token=%d age=%.1fs alive=%s; rejecting",
+                                instrument_token,
+                                quote_age,
+                                socket_alive,
+                            )
+                            return {}
+                else:
+                    # Legacy/injected dict without recv_mono: fail closed if
+                    # timestamp is missing, unparseable, future-skewed, or stale.
+                    ts = quote.get("timestamp")
+                    if ts is None:
+                        logger.debug(
+                            "WS quote for token %d lacks recv_mono and timestamp; rejecting",
+                            instrument_token,
+                        )
+                        return {}
+                    age = self._parse_legacy_ws_timestamp_age(ts)
+                    if age is None or age < -5.0 or age > max_age_seconds:
+                        logger.debug(
+                            "Stale or unparseable WS timestamp for token %d (%r); rejecting",
+                            instrument_token,
+                            ts,
+                        )
+                        return {}
+
+            out = dict(quote)
+            out.setdefault("source", "ws")
+            return out
+
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Error getting WebSocket quote for token %d: %s",
+                instrument_token,
+                exc,
+            )
+            return {}
+
     def get_session_token(self) -> str | None:
         """Raw session token — backend use only.
 
@@ -342,15 +1167,31 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             expires_at = expires_at.astimezone().replace(tzinfo=None)
         self._session_token = token
         self._expires_at = expires_at
+        
+        # Initialize WebSocket feed for restored sessions too
+        self._init_websocket_feed(token)
+        
+        logger.info("mStock session restored (expires at %s)", expires_at.isoformat() if expires_at else "unknown")
         self._temp_auth_context = None
         logger.info("mStock session restored from remembered token (expires %s)", expires_at)
 
     def logout(self) -> None:
-        """Clear all in-memory session state (token, expiry, temp context)."""
+        """Clear all in-memory session state and tear down the WebSocket feed."""
         had_session = self._session_token is not None
         self._session_token = None
         self._expires_at = None
         self._temp_auth_context = None
+        ws_feed = self._ws_feed
+        self._ws_feed = None
+        if ws_feed is not None:
+            close_fn = getattr(ws_feed, "close", None)
+            if callable(close_fn):
+                close_fn()
+        with self._ws_lock:
+            self._ws_subscribed_tokens.clear()
+            self._ws_token_modes.clear()
+            self._ws_desired_modes.clear()
+            self._ws_order_cache.clear()
         if had_session:
             logger.info("mStock session cleared (logout)")
 
@@ -362,17 +1203,37 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         """Place ``order`` — ``POST /openapi/typea/orders/regular`` (form packet).
 
         Returns the broker's order id (what modify/cancel reference).
+
+        Raises :class:`MStockOrderError` when mStock clearly refused the order,
+        and :class:`OrderOutcomeUnknown` when the call ended without a usable
+        answer — a lost connection, a gateway 5xx / 429, or a 2xx that carried
+        no order id. In that case the ticket may exist at the exchange, so the
+        caller reconciles against the order book instead of placing again.
         """
         token = self._require_session()
-        payload = self._request(
-            "POST",
-            _ORDER_PLACEMENT_PATH,
-            token,
-            form=self._map_order_to_broker_payload(order),
-        )
+        packet = self._map_order_to_broker_payload(order)
+        try:
+            payload = self._request("POST", _ORDER_PLACEMENT_PATH, token, form=packet)
+        except requests.RequestException as exc:
+            # The request may have reached mStock before the socket died. The
+            # exception text carries the URL, so the message stays generic.
+            raise OrderOutcomeUnknown(
+                f"mStock order call got no answer ({exc.__class__.__name__}) "
+                "— the order may still exist"
+            ) from exc
+        except MStockOrderError as exc:
+            code = exc.status_code
+            if code is not None and (code in _UNCERTAIN_ORDER_STATUSES or code >= 500):
+                raise OrderOutcomeUnknown(str(exc), status_code=code) from exc
+            raise
         order_id = self._extract_order_id(payload)
         if order_id is None:
-            raise MStockOrderError("mStock did not return an order id for the placed order")
+            # A 2xx we could not read an id from is still an accepted call as
+            # far as the exchange is concerned — do not treat it as a reject.
+            raise OrderOutcomeUnknown(
+                "mStock did not return an order id for the placed order — "
+                "the order may still exist"
+            )
         logger.info("mStock order placed: %s %s x%s", order.side, order.symbol, order.quantity)
         return BrokerOrderId(order_id)
 
@@ -610,7 +1471,8 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
 
         if not resp.ok:
             raise MStockOrderError(
-                _rejection_reason(payload) or f"mStock {method} failed (HTTP {resp.status_code})"
+                _rejection_reason(payload) or f"mStock {method} failed (HTTP {resp.status_code})",
+                status_code=resp.status_code,
             )
         reason = _rejection_reason(payload)
         if reason:
@@ -828,13 +1690,100 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
     def get_option_quote(self, instrument_token: str) -> dict[str, Any]:
         """Fetch L1 quote for an option contract.
 
-        Uses the LTP endpoint with the instrument token.
+        Tries WebSocket cache first (real bid/ask with market depth),
+        falls back to HTTP LTP-only endpoint if WebSocket unavailable.
 
         Returns
         -------
         dict
             ``{"ltp": float, "bid": float, "ask": float, ...}`` or empty dict.
+            WebSocket provides real 5-level depth; HTTP fallback is LTP-only.
         """
+        # Try WebSocket cache first (real-time market depth)
+        ws_quote = self._try_ws_quote(instrument_token)
+        if ws_quote:
+            return ws_quote
+
+        # A numeric instrument token is a WebSocket key only: the HTTP quote
+        # endpoint rejects it ("Invalid symbol", verified live 2026-09-18), so
+        # falling through would burn a request that cannot ever answer. Return
+        # empty and let the caller re-ask with the trading symbol.
+        if self._is_numeric_key(instrument_token):
+            return {}
+
+        # Fallback to HTTP LTP-only polling
+        return self._http_option_quote(instrument_token)
+
+    @staticmethod
+    def _is_numeric_key(instrument_token: Any) -> bool:
+        """True when the key is (or carries) a numeric instrument token."""
+        token = getattr(instrument_token, "instrument_token", instrument_token)
+        try:
+            int(str(token))
+        except (TypeError, ValueError):
+            return False
+        return True
+    
+    def _try_ws_quote(self, instrument_token: str) -> dict[str, Any]:
+        """Attempt to get quote from WebSocket cache.
+        
+        Auto-subscribes to the instrument if not already subscribed.
+        Returns empty dict if WebSocket not available or no recent tick.
+        """
+        if not self._ws_feed:
+            return {}
+        
+        # Extract numeric token from trading symbol or OptionContract
+        token_str = getattr(instrument_token, "instrument_token", None)
+        if token_str is None:
+            token_str = str(instrument_token)
+        
+        # Try to parse as integer
+        try:
+            # Handle "NFO:SYMBOL" format - need to look up token
+            if ":" in token_str:
+                # This is a symbol string, not a numeric token
+                # For now, skip WebSocket and use HTTP
+                logger.debug("Symbol format '%s' not supported for WebSocket, using HTTP", token_str)
+                return {}
+            
+            numeric_token = int(token_str)
+        except (ValueError, TypeError):
+            logger.debug("Cannot convert '%s' to numeric token, using HTTP", token_str)
+            return {}
+        
+        # Fast path (0 ms): HotStrikeRing pre-subscribes ATM ± 6 CE/PE in MODE_FULL.
+        quote = self.get_ws_quote(numeric_token, max_age_seconds=10.0)
+        if quote:
+            logger.debug(
+                "WebSocket quote for token %d: LTP=%.2f, Bid=%.2f, Ask=%.2f",
+                numeric_token,
+                quote.get("ltp", 0),
+                quote.get("bid", 0),
+                quote.get("ask", 0),
+            )
+            return quote
+
+        # Cold miss: trigger non-blocking WS subscription without stalling the
+        # execution/MTM thread for 500ms per leg.
+        with self._ws_lock:
+            already_sub = numeric_token in self._ws_subscribed_tokens
+        if not already_sub:
+            logger.info(
+                "Auto-subscribing cold instrument %d via WebSocket (non-blocking)",
+                numeric_token,
+            )
+            self.subscribe_tokens_ws([numeric_token], mode="full", wait_timeout=0.0)
+            if self._ws_cold_subscribe_wait_s > 0.0:
+                time.sleep(self._ws_cold_subscribe_wait_s)
+            quote = self.get_ws_quote(numeric_token, max_age_seconds=10.0)
+            if quote:
+                return quote
+
+        return {}
+    
+    def _http_option_quote(self, instrument_token: str) -> dict[str, Any]:
+        """HTTP fallback for option quotes (LTP-only, no bid/ask)."""
         token = self._require_session()
         headers = self._session_token_headers(token)
         url = f"{self._base_url()}{_OPTION_QUOTE_PATH}"
@@ -862,7 +1811,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                     data = payload["data"] if isinstance(payload["data"], dict) else {}
                     inner = data.get(f"NFO:{symbol}", data)
                     if isinstance(inner, dict) and "message" not in inner:
-                        return inner
+                        return dict(inner)
                     return {}
                 return payload if isinstance(payload, dict) else {}
             except requests.RequestException as exc:
@@ -875,6 +1824,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             last_exc,
         )
         return {}
+
 
     @staticmethod
     def _parse_option_contract(row: dict[str, Any]) -> OptionContract | None:
@@ -935,7 +1885,16 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                     return default
                 return value if value == value else default  # NaN check
 
-            lot_size = int(_num("lot_size", _num("contract_size", 50.0)))
+            # Lot size comes from the master or nothing. Guessing one would size
+            # the position (and every stop in rupees) off a number the exchange
+            # never published for this contract.
+            lot_size = int(_num("lot_size", _num("contract_size", 0.0)))
+            if lot_size <= 0:
+                logger.warning(
+                    "option contract %s has no lot size on the instrument master — skipped",
+                    symbol,
+                )
+                return None
             tick = Decimal(str(_num("tick_size", 0.05)))
 
             return OptionContract(

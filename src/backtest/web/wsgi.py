@@ -12,7 +12,7 @@ Boots exactly what ``run_app`` boots, minus ``app.run``: ``create_app`` from
 environment variables, then the portfolio-intelligence evaluator + alert
 persistence. Environment honoured (same variables as the dev entry point):
 
-* ``BACKTEST_SOURCE`` — synthetic | csv | mstock | dhan | db (default synthetic)
+* ``BACKTEST_SOURCE`` — synthetic | csv | mstock | dhan | upstox | db (default synthetic)
 * ``BACKTEST_LOG_LEVEL`` / ``BACKTEST_LOG_FILE``
 * ``BACKTEST_CURRENCY`` / ``FORWARD_REPLAY_SPEED``
 * ``PORTFOLIO_INTELLIGENCE`` — 0/false/no/off disables the alert evaluator

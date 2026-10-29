@@ -13,12 +13,12 @@ import logging
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
+from backtest.timekeeping import EXCHANGE_TZ as IST
+from backtest.timekeeping import MARKET_CLOSE_TIME, MARKET_OPEN_TIME
+
 logger = logging.getLogger("backtest.live.market_status")
 
-IST = timezone(timedelta(hours=5, minutes=30))
 PRE_OPEN_TIME = time(9, 0)
-MARKET_OPEN_TIME = time(9, 15)
-MARKET_CLOSE_TIME = time(15, 30)
 
 # Verbatim 2026 NSE equity trading holiday seed (weekday trading holidays)
 NSE_HOLIDAYS_2026: list[tuple[str, str, str]] = [

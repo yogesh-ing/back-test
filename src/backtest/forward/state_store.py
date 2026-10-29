@@ -41,6 +41,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from backtest.timekeeping import from_stored_utc, now_utc
+
 logger = logging.getLogger("backtest.forward.state_store")
 
 __all__ = [
@@ -127,6 +129,38 @@ class PortfolioStateStore:
         except OSError:  # pragma: no cover
             logger.warning("could not remove state file %s", self.path)
 
+    #: Boot backups kept before the oldest is pruned (bounded cruft).
+    KEEP_BOOT_BACKUPS = 10
+
+    def boot_backup(self) -> Optional[Path]:
+        """Copy the file aside before this process gets a chance to rewrite it.
+
+        Every save rebuilds the runner list from live memory, so a boot that
+        restores less than the file held would otherwise overwrite history —
+        the 2026-10-27 loss of five option runners. Parked snapshots cover the
+        refusal case; this covers the rest (a restore that raised and booted
+        clean, a runner that cannot be re-created at all). One call per boot.
+        """
+        if not self.path.exists():
+            return None
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        target = self.path.with_name(f"{self.path.name}.boot_{stamp}")
+        try:
+            target.write_bytes(self.path.read_bytes())
+        except OSError as exc:  # pragma: no cover — a backup must not block boot
+            logger.warning("boot backup of %s failed: %s", self.path, exc)
+            return None
+        backups = sorted(
+            self.path.parent.glob(f"{self.path.name}.boot_*"),
+            key=lambda p: p.name,
+        )
+        for stale in backups[: max(0, len(backups) - self.KEEP_BOOT_BACKUPS)]:
+            try:
+                stale.unlink()
+            except OSError:  # pragma: no cover
+                pass
+        return target
+
 
 # ---------------------------------------------------------------------------
 # Config round-trip
@@ -181,24 +215,18 @@ def _opt_position_to_snapshot(p: Any) -> Dict[str, Any]:
     }
 
 
+def _restore_ts(raw: Any) -> Optional[datetime]:
+    """State-file timestamp → aware UTC (see
+    :func:`backtest.timekeeping.from_stored_utc` for the rule)."""
+    return from_stored_utc(raw)
+
+
 def _opt_position_from_snapshot(payload: Dict[str, Any]) -> Any:
     from backtest.options.paper_trading import OptionPosition, PositionStatus
 
-    opened_at = (
-        datetime.fromisoformat(payload["opened_at"])
-        if payload.get("opened_at")
-        else datetime.utcnow()
-    )
-    closed_at = (
-        datetime.fromisoformat(payload["closed_at"])
-        if payload.get("closed_at")
-        else None
-    )
-    last_updated = (
-        datetime.fromisoformat(payload["last_updated"])
-        if payload.get("last_updated")
-        else opened_at
-    )
+    opened_at = _restore_ts(payload.get("opened_at")) or now_utc()
+    closed_at = _restore_ts(payload.get("closed_at"))
+    last_updated = _restore_ts(payload.get("last_updated")) or opened_at
     return OptionPosition(
         position_id=payload["position_id"],
         structure_id=payload.get("structure_id", ""),
@@ -229,6 +257,11 @@ def _opt_position_from_snapshot(payload: Dict[str, Any]) -> Any:
 
 
 def _structure_to_snapshot(s: Any) -> Dict[str, Any]:
+    from backtest.options.paper_trading import _ist_session_date
+
+    entry_session = getattr(s, "entry_session_date", None) or (
+        _ist_session_date(s.opened_at) if s.opened_at else None
+    )
     return {
         "structure_id": s.structure_id,
         "structure_type": s.structure_type,
@@ -238,12 +271,29 @@ def _structure_to_snapshot(s: Any) -> Dict[str, Any]:
         "opened_at": s.opened_at.isoformat() if s.opened_at else None,
         "closed_at": s.closed_at.isoformat() if s.closed_at else None,
         "exit_reason": s.exit_reason,
+        "session_date": getattr(s, "session_date", None),
+        # BUG-18: both ends of the trip survive a restart, or an overnight
+        # carry loses the session it was actually opened in. The anchor pair
+        # goes with them: a mid-session restart that re-derives it from the
+        # current mark would credit today's whole move to yesterday.
+        "entry_session_date": entry_session,
+        "last_mark_session": getattr(s, "last_mark_session", None),
+        "last_mark_net_pnl": str(getattr(s, "last_mark_net_pnl", 0) or 0),
+        "prior_close_net_pnl": str(getattr(s, "prior_close_net_pnl", 0) or 0),
+        "statutory_fees": str(getattr(s, "statutory_fees", 0) or 0),
         "legs": [_opt_position_to_snapshot(leg) for leg in s.legs],
     }
 
 
 def _structure_from_snapshot(payload: Dict[str, Any]) -> Any:
-    from backtest.options.paper_trading import StructurePosition
+    from backtest.options.paper_trading import StructurePosition, _ist_session_date
+
+    closed_at = _restore_ts(payload.get("closed_at"))
+    session_date = payload.get("session_date")
+    if not session_date and closed_at is not None:
+        session_date = _ist_session_date(closed_at)
+    opened_at = _restore_ts(payload.get("opened_at")) or now_utc()
+    entry_session_date = payload.get("entry_session_date") or _ist_session_date(opened_at)
 
     return StructurePosition(
         structure_id=payload["structure_id"],
@@ -254,17 +304,18 @@ def _structure_from_snapshot(payload: Dict[str, Any]) -> Any:
             date.fromisoformat(payload["expiry"]) if payload.get("expiry") else date.today()
         ),
         legs=[_opt_position_from_snapshot(leg) for leg in payload.get("legs", [])],
-        opened_at=(
-            datetime.fromisoformat(payload["opened_at"])
-            if payload.get("opened_at")
-            else datetime.utcnow()
-        ),
-        closed_at=(
-            datetime.fromisoformat(payload["closed_at"])
-            if payload.get("closed_at")
-            else None
-        ),
+        opened_at=opened_at,
+        closed_at=closed_at,
         exit_reason=payload.get("exit_reason"),
+        session_date=session_date,
+        entry_session_date=entry_session_date,
+        # Written by ``_structure_to_snapshot`` since BUG-18; a snapshot from
+        # before that leaves them ``None`` and ``restore_structure`` re-derives
+        # the anchor instead of pretending today started at zero.
+        last_mark_session=payload.get("last_mark_session"),
+        last_mark_net_pnl=Decimal(str(payload.get("last_mark_net_pnl", "0") or "0")),
+        prior_close_net_pnl=Decimal(str(payload.get("prior_close_net_pnl", "0") or "0")),
+        statutory_fees=Decimal(str(payload.get("statutory_fees", "0") or "0")),
     )
 
 
@@ -285,8 +336,6 @@ _BRIDGE_SCALARS = (
     "_structure_expiry",
     "_entry_premium",
     "_settlement_count",
-    "_reentries_today",
-    "_reentry_day",
     "last_unrealized_pnl",
     "last_spot",
     "last_mtm_ts",
@@ -467,8 +516,33 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
     if gateway_state and callable(restore_gateway):
         restore_gateway(gateway_state)
 
+    # Phase 1 (Plan §8): a spawn snapshot freezes configuration, not code.
+    # If the strategy bundle (strategy file + template chain) changed while
+    # we were down, the runner must not trade new code under old paperwork:
+    # it comes back PAUSED with STRATEGY_CODE_CHANGED until an operator
+    # resumes it (resume() restamps the bundle — a conscious migration).
+    runner.strategy_code_changed = False
+    _bundle = getattr(runner.config, "strategy_bundle", None)
+    if isinstance(_bundle, dict) and _bundle.get("bundle_files"):
+        try:
+            from backtest.strategy.bundle import bundle_matches
+            from backtest.strategy.execution import STRATEGY_CODE_CHANGED
+            from backtest.strategy.registry import get_strategy
+
+            _cls = get_strategy(runner.config.strategy_name)
+            if not bundle_matches(_cls, _bundle["bundle_files"]):
+                runner.strategy_code_changed = True
+                runner.error = (
+                    f"{STRATEGY_CODE_CHANGED}: strategy/template code changed "
+                    "since this runner was spawned; resume to migrate consciously"
+                )
+        except Exception:  # noqa: BLE001 — an unverifiable bundle must not crash restore
+            runner.strategy_code_changed = False
+
     saved_status = snapshot.get("status", STATUS_STOPPED)
-    if saved_status == STATUS_RUNNING:
+    if runner.strategy_code_changed:
+        runner.status = STATUS_PAUSED
+    elif saved_status == STATUS_RUNNING:
         runner.status = STATUS_PAUSED
     else:
         runner.status = (
@@ -483,4 +557,5 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat()
+    """``saved_at`` — aware UTC, so a state file states its own clock."""
+    return now_utc().isoformat()

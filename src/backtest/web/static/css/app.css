@@ -338,6 +338,12 @@ textarea.input { line-height: 1.7; }
 .cell-name { font-weight: 600; }
 .cell-sub { font-size: .75rem; color: var(--muted); font-weight: 400; margin-top: 2px; }
 .cell-error { color: var(--warning); }
+.badge-warmup-pending { color: var(--info); font-weight: 500; }
+.badge-warmup-degraded { color: var(--warning-text, var(--warning)); font-weight: 500; }
+.dd-warmup-banner {
+    padding: 8px 12px; border-radius: 6px; font-size: .82rem;
+    background: rgba(59,130,246,.14); border: 1px solid rgba(59,130,246,.35); color: var(--info);
+}
 .status-cell { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; }
 .badge-single { background: rgba(59,130,246,.18); color: var(--info); }
 /* Option runners (C2): a structure badge, distinct from Single/Pool. */

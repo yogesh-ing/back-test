@@ -134,8 +134,28 @@ class Position:
     current_price: Decimal | None = None
     realized_pnl: Decimal = ZERO
     commission_total: Decimal = ZERO
+    #: BUG-26 — the split behind ``commission_total``: what the broker kept
+    #: (:attr:`brokerage_total`) versus what the venue and the statutory
+    #: charges took (:attr:`statutory_fees_total`). ``commission_total`` alone
+    #: cannot answer "did this trade lose money to STT or to brokerage?", which
+    #: is the first question a trader asks a cost-aware P&L.
+    brokerage_total: Decimal = ZERO
+    statutory_fees_total: Decimal = ZERO
+    exit_reason: str | None = None
+    """Why the position was closed, stamped by the fill that closed it.
+
+    ``None`` for an open position and for books written before the runner
+    started tagging its exit orders — an absent reason is never guessed at.
+    """
     opened_at: datetime = field(default_factory=_utcnow)
     closed_at: datetime | None = None
+    closed_quantity: Decimal | None = None
+    """Signed quantity at the moment the position fully closed.
+
+    ``quantity`` is zero for a closed position, which makes the round trip's
+    size and direction unreadable in history (both ``qty`` and ``side`` came
+    out as 0/LONG). Stamped by :meth:`reduce_shares` on the final fill.
+    """
     last_updated: datetime = field(default_factory=_utcnow)
     strategy_name: str | None = None
     cost_basis_method: str = CostBasisMethod.AVERAGE
@@ -153,6 +173,10 @@ class Position:
         self.average_entry_price = to_price(self.average_entry_price, "average_entry_price")
         self.realized_pnl = money(self.realized_pnl, "realized_pnl")
         self.commission_total = money(self.commission_total, "commission_total")
+        self.brokerage_total = money(self.brokerage_total, "brokerage_total")
+        self.statutory_fees_total = money(
+            self.statutory_fees_total, "statutory_fees_total"
+        )
         if self.current_price is not None:
             self.current_price = to_price(self.current_price, "current_price")
 
@@ -292,6 +316,22 @@ class Position:
         self.last_updated = _utcnow()
         return self.unrealized_pnl
 
+    def note_fee_split(self, brokerage: Any, statutory: Any) -> None:
+        """Accumulate one fill's cost split alongside ``commission_total``.
+
+        Called by :meth:`backtest.simulator.fill.Fill.apply_to_position` with
+        the components the fee engine charged. ``brokerage + statutory`` is the
+        same money ``commission_total`` already carries, so the pair never
+        changes the cash or the net P&L — it only says who took it.
+        """
+        broker_part = money(brokerage or ZERO, "brokerage")
+        statutory_part = money(statutory or ZERO, "statutory_fees")
+        for name, value in (("brokerage", broker_part), ("statutory", statutory_part)):
+            if value < ZERO:
+                raise ValidationError(f"{name} must not be negative", code="invalid_commission")
+        self.brokerage_total = quantize_money(self.brokerage_total + broker_part)
+        self.statutory_fees_total = quantize_money(self.statutory_fees_total + statutory_part)
+
     def add_shares(self, quantity: Any, at_price: Any, commission: Any = ZERO) -> Decimal:
         """Increase exposure in the current direction, re-averaging entry price.
 
@@ -415,6 +455,7 @@ class Position:
         if fully_closed:
             self.quantity = ZERO
             self.closed_at = self.last_updated
+            self.closed_quantity = qty if was_long else -qty
 
         # Long: receive proceeds. Short: pay to buy back.
         cash_delta = quantize_money((qty * px if was_long else -qty * px) - fee)
@@ -670,8 +711,13 @@ class Position:
             "realized_pnl": str(self.realized_pnl),
             "unrealized_pnl": str(self.unrealized_pnl),
             "commission_total": str(self.commission_total),
+            "brokerage_total": str(self.brokerage_total),
+            "statutory_fees_total": str(self.statutory_fees_total),
+            "exit_reason": self.exit_reason,
             "opened_at": self.opened_at.isoformat(),
             "closed_at": self.closed_at.isoformat() if self.closed_at else None,
+            "closed_quantity": str(self.closed_quantity)
+            if self.closed_quantity is not None else None,
             "last_updated": self.last_updated.isoformat(),
             "status": self.status,
             "strategy_name": self.strategy_name,
@@ -702,12 +748,18 @@ class Position:
             current_price=payload.get("current_price"),
             realized_pnl=payload.get("realized_pnl", ZERO),
             commission_total=payload.get("commission_total", ZERO),
+            brokerage_total=payload.get("brokerage_total", ZERO),
+            statutory_fees_total=payload.get("statutory_fees_total", ZERO),
+            exit_reason=payload.get("exit_reason"),
             strategy_name=payload.get("strategy_name"),
             cost_basis_method=payload.get("cost_basis_method", CostBasisMethod.AVERAGE),
             lot_book=book,
         )
         if is_zero(raw_qty):
             pos.quantity = ZERO
+        raw_closed = payload.get("closed_quantity")
+        if raw_closed is not None:
+            pos.closed_quantity = to_decimal(raw_closed, "closed_quantity")
         for key in ("opened_at", "closed_at", "last_updated"):
             value = payload.get(key)
             if value:

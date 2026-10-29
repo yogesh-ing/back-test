@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class MacdTrend(Strategy):
+class MacdTrend(EquityStrategy):
     """MACD trend — long while the MACD line leads its signal line."""
 
     name = "macd_trend"
@@ -28,6 +28,33 @@ class MacdTrend(Strategy):
         "MACD trend-following — long while the MACD line is above its signal "
         "line, flat once it crosses back under."
     )
+    description_sections = {
+        'overview': (
+            'MACD trend state machine: long while the MACD line is above its signal line, flat'
+            'when it crosses back under.'
+        ),
+        'regime': (
+            'Works in trending conditions where momentum persists after the crossover. Struggles'
+            'in flat markets — MACD hovers around its signal line and generates whipsaw entries'
+            'and exits.'
+        ),
+        'entry': (
+            'Goes long when the MACD line crosses above the signal line and stays long for as'
+            'long as it remains above.'
+        ),
+        'construction': (
+            'Single-instrument equity/index position, long only, fully invested while the signal'
+            'is on.'
+        ),
+        'exits_risk': (
+            'Exits on the opposite MACD crossover. No fixed stop or target; worst case is the'
+            'adverse drift between crossovers, largest at sharp V-shaped reversals.'
+        ),
+        'parameters': (
+            'fast=12, slow=26, signal=9 — the classic MACD settings. Shorter windows react faster'
+            'with more whipsaw; longer ones lag.'
+        ),
+    }
     version = "1.0"
     author = "Trading Bot"
     params = {

@@ -23,6 +23,7 @@ from decimal import Decimal
 from typing import Any
 
 from backtest.data.sources_policy import default_broker_source
+from backtest.timekeeping import from_stored_utc, now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -148,10 +149,20 @@ class LiveTradePersister:
         from backtest.db.models import Trade as TradeRow
 
         entry_ts = _parse_ts(t.get("entry_ts"))
-        exit_ts = _parse_ts(t.get("exit_ts")) or datetime.utcnow()
+        exit_ts = _parse_ts(t.get("exit_ts")) or now_utc()
         if entry_ts is None:
             entry_ts = exit_ts
-        pnl = Decimal(str(t.get("pnl") or 0))
+        # The runner's book is the truth for a round trip: it knows the price
+        # P&L, the brokerage and the venue/statutory charges separately. Until
+        # BUG-26 the equity flow reported only one number, which the writer had
+        # to copy into both P&L columns — so a costed loss read as a gross one.
+        gross_raw = t.get("gross_pnl")
+        gross = Decimal(str(gross_raw if gross_raw is not None else t.get("pnl") or 0))
+        commission = Decimal(str(t.get("commission") or 0))
+        statutory = Decimal(str(t.get("statutory_fees") or 0))
+        costs = commission + statutory
+        net_raw = t.get("net_pnl")
+        net = Decimal(str(net_raw)) if net_raw is not None else gross - costs
         qty = Decimal(str(t.get("units") or t.get("qty") or 1))
         entry_px = Decimal(str(t.get("entry_price") or 0))
         exit_px = Decimal(str(t.get("exit_price") or 0))
@@ -170,9 +181,9 @@ class LiveTradePersister:
                     exit_price=abs(exit_px),
                     entry_time=entry_ts,
                     exit_time=exit_ts,
-                    gross_pnl=pnl,
-                    net_pnl=pnl,
-                    commission_total=Decimal(str(t.get("commission") or 0)),
+                    gross_pnl=gross,
+                    net_pnl=net,
+                    commission_total=costs,
                     holding_period_minutes=holding_min,
                     exit_reason=exit_reason,
                 )
@@ -180,15 +191,22 @@ class LiveTradePersister:
 
 
 def _parse_ts(value: Any) -> datetime | None:
-    """ISO string / datetime → naive datetime (DB column is tz-aware-capable)."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.replace(tzinfo=None)
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "")).replace(tzinfo=None)
-    except ValueError:
-        return None
+    """Trade-record timestamp → aware UTC.
+
+    The previous version parsed any ISO string and then *deleted* its offset
+    with ``replace(tzinfo=None)``. The ``trades`` columns are ``TIMESTAMPTZ``
+    and this deployment's session timezone is ``Asia/Calcutta``, so Postgres
+    reinterpreted every naive value as IST: a UTC entry silently lost 5h30
+    while an IST bar exit stayed put. That is what wrote the 330-minute
+    "holding periods" of 2026-10-27.
+
+    Aware values pass through as the instants they are. A naive one is read as
+    UTC via :func:`from_stored_utc` — the door for stamps this application wrote
+    with ``utcnow()`` — rather than refused, because losing a closed trade from
+    the permanent history is worse for a trader than having its clock labelled;
+    ``tests/test_timekeeping_policy.py`` is what keeps new writers aware.
+    """
+    return from_stored_utc(value)
 
 
 def _map_exit_reason(raw: Any) -> str | None:
@@ -202,6 +220,11 @@ def _map_exit_reason(raw: Any) -> str | None:
     r = str(raw or "").strip().lower()
     if not r:
         return None
+    # BUG-39: the wall-clock square-off books ``intraday_squareoff``, which matched
+    # none of the tokens below and landed in the history as "signal" — a risk
+    # control showing up as a strategy exit.
+    if "squareoff" in r or "square_off" in r or "square off" in r:
+        return "eod_flat"
     if "target" in r or "profit" in r:
         return "take_profit"
     if "stop" in r or "sl" in r:

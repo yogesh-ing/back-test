@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.strategy.base import Strategy
+from backtest.strategy.templates import EquityStrategy
 
 
-class PriceMove(Strategy):
+class PriceMove(EquityStrategy):
     """Threshold-based price movement signal."""
 
     name = "price_move"
@@ -26,6 +26,34 @@ class PriceMove(Strategy):
         "points over `lookback` bars, flat (or short, if allowed) when it falls "
         "by the same amount."
     )
+    description_sections = {
+        'overview': (
+            'Threshold momentum gauge: long after a sufficiently large points rise over a short'
+            'lookback, flat after a symmetric fall.'
+        ),
+        'regime': (
+            'Works in fast, directional intraday moves where a burst predicts continuation.'
+            'Struggles in quiet or mean-reverting tape — the threshold is either never hit (no'
+            'trades) or hit at the top of a spike that immediately fades.'
+        ),
+        'entry': (
+            'Enters long when the close has risen more than the threshold (in points) over the'
+            'lookback window.'
+        ),
+        'construction': (
+            'Single-instrument equity/index position, long only by default (shorting only where'
+            'the instrument/run allows it).'
+        ),
+        'exits_risk': (
+            'Exits when the move over the lookback window falls back through the negative'
+            'threshold. No fixed stop or target; worst case is the reversal between the entry bar'
+            'and the exit signal.'
+        ),
+        'parameters': (
+            'threshold=100.0 points, lookback=5 bars. The threshold is in absolute points — scale'
+            "it to the instrument's price level."
+        ),
+    }
     version = "1.0"
     author = "Trading Bot"
     params = {

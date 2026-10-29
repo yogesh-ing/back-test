@@ -89,10 +89,17 @@ class TestFlush:
         written = p.flush_runner(runner)
         assert written == 1
 
-        rows = db.fetch_all("SELECT symbol, net_pnl, exit_reason FROM trades")
+        rows = db.fetch_all(
+            "SELECT symbol, gross_pnl, net_pnl, commission_total, exit_reason FROM trades"
+        )
         assert len(rows) == 1
         assert "long_call" in rows[0]["symbol"]
-        assert float(rows[0]["net_pnl"]) == pytest.approx(58.5)
+        # A record that names its costs but not its net is netted, never
+        # copied: BUG-26 was exactly one number written into both columns.
+        assert float(rows[0]["gross_pnl"]) == pytest.approx(58.5)
+        assert float(rows[0]["net_pnl"]) == pytest.approx(38.5)
+        assert float(rows[0]["commission_total"]) == pytest.approx(20.0)
+        assert rows[0]["exit_reason"] == "take_profit"
 
     def test_synthetic_source_runner_never_persists(self, db):
         """Owner decision 2026-09-22: fake-data fills stay OUT of the permanent

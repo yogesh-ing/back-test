@@ -30,13 +30,13 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from flask import Flask, jsonify, request
 
 from backtest.data.sources_policy import require_synthetic
+from backtest.timekeeping import iso_utc, now_utc
 from backtest.options.paper_trading import InsufficientMarginError, OptionPaperBroker
 from backtest.options.persistence import StructurePersistence
 from backtest.options.portfolio_greeks import PortfolioGreeksCalculator
@@ -240,7 +240,7 @@ def _live_chain_generator(underlying: str) -> Any | None:
         from backtest.forward.feed_registry import _default_quote_broker, get_chain_bus
 
         name = None
-        for candidate in ("mstock", "dhan"):
+        for candidate in ("mstock", "dhan", "upstox"):
             if _default_quote_broker(candidate) is not None:
                 name = candidate
                 break
@@ -653,7 +653,7 @@ def register_options_routes(app: Flask) -> None:
                     "structure_id": structure_id,
                     "realized_pnl": float(pnl),
                     "quote_source": quote_source_name(quotes),
-                    "closed_at": datetime.utcnow().isoformat(),
+                    "closed_at": iso_utc(now_utc()),
                 }
             ),
             200,

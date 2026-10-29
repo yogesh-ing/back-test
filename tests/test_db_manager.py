@@ -306,6 +306,69 @@ class TestLifecycle:
         assert "pw" not in repr(m)
 
 
+class TestFromEnvSharesOnePool:
+    """Regression pin for the 2026-10-22 connection leak.
+
+    Every call site that only needed a session built its own manager, and each
+    manager owns a connection pool. The market-status poll inside the
+    portfolio-intelligence loop did that on every pass: 200 Postgres
+    connections in 8 minutes, ``max_connections`` exhausted, the loop wedged in
+    ``DatabaseManager._retrying`` (caught by a live stack dump), and bar flow to
+    the option runners frozen behind it.
+    """
+
+    @staticmethod
+    def _key(**over):
+        cfg = {"path": str(CONFIG_FILE), "profile": "testing", "url": "sqlite:///:memory:"}
+        cfg.update(over)
+        return cfg
+
+    def test_same_configuration_reuses_one_manager(self):
+        first = DatabaseManager.from_env(**self._key())
+        try:
+            assert DatabaseManager.from_env(**self._key()) is first
+        finally:
+            first.disconnect()
+
+    def test_disconnected_manager_is_never_handed_out_again(self):
+        first = DatabaseManager.from_env(**self._key())
+        first.disconnect()
+
+        second = DatabaseManager.from_env(**self._key())
+        try:
+            assert second is not first
+            assert not second._closed
+        finally:
+            second.disconnect()
+
+    def test_different_configuration_builds_its_own_manager(self):
+        shared = DatabaseManager.from_env(**self._key())
+        try:
+            other = DatabaseManager.from_env(**self._key(url="sqlite:///:memory:?cache=shared"))
+            try:
+                assert other is not shared, "a different config must not get the old pool"
+            finally:
+                other.disconnect()
+        finally:
+            shared.disconnect()
+
+    def test_same_url_with_different_overrides_builds_its_own_manager(self):
+        # 2026-10-23: a URL-only key made the statement-timeout test see the
+        # pool manager cached by the test that ran before it on the same URL.
+        base = self._key(url="postgresql+psycopg2://u@h/d")
+        first = DatabaseManager.from_env(**base, statement_timeout_ms=1111)
+        try:
+            second = DatabaseManager.from_env(**base, statement_timeout_ms=2222)
+            try:
+                assert second is not first
+                args = second._engine_kwargs()["connect_args"]
+                assert "statement_timeout=2222" in args["options"]
+            finally:
+                second.disconnect()
+        finally:
+            first.disconnect()
+
+
 # ===========================================================================
 # Pooling
 # ===========================================================================

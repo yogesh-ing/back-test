@@ -17,6 +17,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from backtest.forward.options_bridge import OptionsBridge
+from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.exit_policy import ExitConfig, ExitPolicy
 from backtest.options.paper_trading import OptionPaperBroker
 from backtest.options.quote_providers import SyntheticChainGenerator, SyntheticQuoteProvider
@@ -37,8 +38,29 @@ def _view(direction, underlying="NIFTY", spot=25000):
 def _bridge_with_config(exit_cfg, capital=1000000):
     gen = SyntheticChainGenerator()
     provider = SyntheticQuoteProvider(chain_generator=gen)
-    broker = OptionPaperBroker(capital=capital)
-    return OptionsBridge(capital=capital, expression={"type": "bull_call_spread", "strike_selection": "atm", "quantity": 1, "exit": exit_cfg}, option_broker=broker, quote_provider=provider)
+    # Re-entry is exercised on two-leg spreads — these bridges take the
+    # research profile. Phase 4: expressions are v2; a declared points
+    # stop (₹10k, inside the rulebook ceiling, beyond a 50-point spread's
+    # maximum loss) supplies the mandatory hard stop.
+    broker = OptionPaperBroker(capital=capital, allowed_structures=RESEARCH_STRUCTURES)
+    exit_cfg = {"stop_loss_points": 10_000.0, **dict(exit_cfg)}
+    expression = {
+        "expression_version": 2,
+        "type": {
+            "BULLISH": {"structure": "bull_call_spread", "strike_selection": "atm"},
+            "BEARISH": {"structure": "bear_put_spread", "strike_selection": "atm"},
+        },
+        "quantity": 1,
+        "exit": exit_cfg,
+    }
+    return OptionsBridge(capital=capital, expression=expression, option_broker=broker, quote_provider=provider, allowed_structures=RESEARCH_STRUCTURES)
+
+
+def _enter(bridge, view):
+    rule = bridge._strict_rules[view.direction]
+    return bridge.on_intent(
+        {"structure": rule.structure, "strike_selection": "atm"}, view, "directional_options"
+    )
 
 
 def test_stop_beats_target():
@@ -115,96 +137,82 @@ def test_emergency_overrides_all():
 
 
 def test_reentry_same_bar_impossible():
-    """Same-bar re-entry impossible, regardless of reenter flag."""
-    # Create bridge with reenter=True
+    """Same-bar re-entry impossible (U2.2): the exit bar takes no intent."""
     exit_cfg = {"signal_flip": True, "reenter": True, "min_days_to_expiry": None}
     bridge = _bridge_with_config(exit_cfg)
-    # Simulate: open structure, then flip view same bar → should close but NOT re-enter same bar
-    # We need to open first
     view_bull = _view(Direction.BULLISH)
-    # First bar: open
-    result_open = bridge.on_market_view(view_bull, "directional_options")
-    assert result_open is not None
-    assert "structure_id" in result_open or "exited" not in result_open
+    bridge.on_bar("NIFTY", 25000, ts="2026-09-16T09:15:00")
+    result_open = _enter(bridge, view_bull)
+    assert result_open is not None and not result_open.get("rejected")
 
-    # Same bar index: flip to bearish — should close, but not re-enter same bar
+    # Same bar: flip view closes via exit management…
     view_bear = _view(Direction.BEARISH)
-    # Don't increment bar index — same bar
     result_close = bridge.on_market_view(view_bear, "directional_options")
     assert result_close is not None
     assert result_close.get("exited") is True
     assert result_close.get("reason") == "signal_flip"
 
-    # Same bar, try to open again — should be blocked by _blocked_reentry
-    # _blocked_reentry should be True on exit bar
+    # …but an intent on the same bar is refused (silence, no trade).
     assert bridge._blocked_reentry(view_bear) is True
-    # _should_reenter should be False on same bar (next-bar only)
-    assert bridge._should_reenter(view_bear) is False
+    assert _enter(bridge, view_bear) is None
+    assert not bridge._has_open_structure()
+    assert bridge.executed_count == 1
 
 
-def test_reentry_next_bar_allowed_when_reenter_true():
-    """Re-entry happens on next bar only when reenter=true."""
+def test_reentry_next_bar_is_a_fresh_strategy_intent():
+    """Phase 4: the bridge never auto-reverses. Next bar, a fresh intent
+    from the strategy opens the reverse structure — ``reenter`` in the
+    ExitPlan no longer moves the bridge."""
     exit_cfg = {"signal_flip": True, "reenter": True, "min_days_to_expiry": None}
     bridge = _bridge_with_config(exit_cfg)
     view_bull = _view(Direction.BULLISH)
     view_bear = _view(Direction.BEARISH)
 
-    # Bar 0: open bullish
     bridge.on_bar("NIFTY", 25000, ts="2026-09-16T09:15:00")
-    bridge.on_market_view(view_bull, "directional_options")
+    _enter(bridge, view_bull)
     assert bridge._has_open_structure()
 
-    # Bar 1: flip to bearish → close
     bridge.on_bar("NIFTY", 24900, ts="2026-09-16T10:15:00")
     closed = bridge.on_market_view(view_bear, "directional_options")
-    assert closed is not None
-    assert closed.get("exited") is True
-    # Same bar: blocked
+    assert closed is not None and closed.get("exited") is True
+    # A bare opposite view is not an entry any more.
+    assert bridge.on_market_view(view_bear, "directional_options") is None
     assert bridge._blocked_reentry(view_bear) is True
-    assert bridge._should_reenter(view_bear) is False
 
-    # Bar 2: next bar, still bearish → should allow re-entry (next-bar only)
+    # Next bar: the guard lifts and the strategy's intent opens the reverse.
     bridge.on_bar("NIFTY", 24800, ts="2026-09-16T11:15:00")
     assert bridge._blocked_reentry(view_bear) is False
-    # Now should_reenter should be True (next bar, flip, reenter true, direction differs)
-    assert bridge._should_reenter(view_bear) is True
-
-    # Opening on next bar should increment reentries_today
-    result = bridge.on_market_view(view_bear, "directional_options")
-    # Should open new structure
-    assert result is not None
-    assert result.get("exited") is None or "structure_id" in result
-    assert bridge._reentries_today >= 1
+    result = _enter(bridge, view_bear)
+    assert result is not None and not result.get("rejected")
+    opens = bridge.option_broker.get_open_structures()
+    assert len(opens) == 1 and opens[0].structure_type == "bear_put_spread"
 
 
-def test_max_reentries_per_day_honoured():
-    """max_reentries_per_day knob honoured (V1.1, default 2)."""
+def test_bridge_imposes_no_reentry_cap():
+    """Phase 4: ``max_reentries_per_day`` is strategy bookkeeping now.
+
+    The bridge deleted its per-day reversal counter with the auto-reentry
+    machinery; how often to re-enter is the strategy's decision, bounded
+    per trade by the one Pre-Trade Risk Gate like every other entry.
+    """
     exit_cfg = {"signal_flip": True, "reenter": True, "min_days_to_expiry": None, "max_reentries_per_day": 1}
     bridge = _bridge_with_config(exit_cfg)
     view_bull = _view(Direction.BULLISH)
     view_bear = _view(Direction.BEARISH)
 
-    # Day 1: open bull
     bridge.on_bar("NIFTY", 25000, ts="2026-09-16T09:15:00")
-    bridge.on_market_view(view_bull, "directional_options")
-
-    # Flip to bear → close
+    _enter(bridge, view_bull)
     bridge.on_bar("NIFTY", 24900, ts="2026-09-16T10:15:00")
-    bridge.on_market_view(view_bear, "directional_options")
-
-    # Next bar: re-enter bear (1st re-entry)
+    bridge.on_market_view(view_bear, "directional_options")  # flip close
     bridge.on_bar("NIFTY", 24800, ts="2026-09-16T11:15:00")
-    bridge.on_market_view(view_bear, "directional_options")
-    assert bridge._reentries_today == 1
-
-    # Flip back to bull → close bear
+    _enter(bridge, view_bear)  # reversal 1
+    assert bridge._has_open_structure()
     bridge.on_bar("NIFTY", 24900, ts="2026-09-16T12:15:00")
-    bridge.on_market_view(view_bull, "directional_options")
-
-    # Next bar: try to re-enter bull — should be blocked by max_reentries_per_day=1
+    bridge.on_market_view(view_bull, "directional_options")  # flip close
     bridge.on_bar("NIFTY", 25000, ts="2026-09-16T13:15:00")
-    # should_reenter should now be False due to max per day
-    assert bridge._should_reenter(view_bull) is False
+    result = _enter(bridge, view_bull)  # reversal 2 — no bridge cap
+    assert result is not None and not result.get("rejected")
+    assert bridge.executed_count == 3
 
 
 def test_engine_exit_precedence_constants():

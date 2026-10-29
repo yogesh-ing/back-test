@@ -50,9 +50,10 @@ DEFAULT_DESCRIPTIONS = {
         "NIFTY scalping strategy. Quick entries/exits on small price movements. "
         "Requires low latency and tight spreads."
     ),
-    "banknifty_straddle": (
-        "BANKNIFTY short straddle options strategy. Sells ATM call and put, "
-        "profits from time decay and IV crush."
+    "banknifty_ema_momentum": (
+        "BANKNIFTY EMA momentum options strategy. Buys ATM calls/puts on "
+        "EMA trend direction (renamed from banknifty_straddle, which never "
+        "traded a straddle)."
     ),
     "option_directional": (
         "Directional options strategy based on underlying momentum. Buys OTM "

@@ -20,6 +20,7 @@ from backtest.data.db_source import DbSource
 from backtest.data.dhan_live_feed import DhanLiveFeed
 from backtest.data.mstock_live_feed import MStockLiveFeed
 from backtest.data.synthetic import SyntheticSource
+from backtest.data.upstox_live_feed import UpstoxLiveFeed
 
 __all__ = [
     "SOURCE_TAGS",
@@ -27,6 +28,7 @@ __all__ = [
     "source_tag_for",
     "DEFAULT_SOURCE_TAG",
     "APP_SOURCE_TAGS",
+    "LIVE_FEED_TAGS",
     "app_source_tag",
 ]
 
@@ -39,12 +41,22 @@ SOURCE_TAGS: dict[type, str] = {
     DbSource: "replay",
     MStockLiveFeed: "mstock",
     DhanLiveFeed: "dhan",
+    UpstoxLiveFeed: "upstox",
 }
 
 #: The tag VALUES of :data:`SOURCE_TAGS` — the canonical set for validating a
 #: run's ``source`` classification (state files, portfolio rows, configs).
 #: Derive from the map; never re-declare the strings.
 SOURCE_TAG_VALUES: frozenset[str] = frozenset(SOURCE_TAGS.values())
+
+#: The tags a broker's *live* feed owns — everything but generated history.
+#: Stamps from these feeds are the exchange clock, so a rule about the trading
+#: session (entry window, square-off) governs them. ``synthetic``/``replay``
+#: stamps are scaffolding: a fixture that bars a run at 04:15 is not asking the
+#: venue for a fill.
+LIVE_FEED_TAGS: frozenset[str] = frozenset(
+    tag for tag in SOURCE_TAG_VALUES if tag not in ("synthetic", "replay")
+)
 
 #: Fallback used when a source class is not (yet) in the canonical map.
 DEFAULT_SOURCE_TAG = "synthetic"
@@ -66,6 +78,9 @@ APP_SOURCE_TAGS: dict[str, str] = {
     # another venue's name. The mapping's job is to stop silent re-tagging,
     # not to rename venues.
     "dhan": "dhan",
+    # Third live venue (2026-10-13): UpstoxLiveFeed owns its own tag for the
+    # same reason dhan does — a runner must never wear another venue's name.
+    "upstox": "upstox",
     "db": "replay",
 }
 

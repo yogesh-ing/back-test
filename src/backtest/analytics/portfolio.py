@@ -491,6 +491,8 @@ class AnalyticsService:
                 )
                 for r in rows:
                     symbol = str(r.symbol or "")
+                    gross = float(r.gross_pnl or 0)
+                    net = float(r.net_pnl or 0)
                     trade = {
                         "symbol": symbol,
                         "kind": "option" if _OPTION_SYMBOL_RE.search(symbol) else "equity",
@@ -500,8 +502,19 @@ class AnalyticsService:
                         "exit_price": float(r.exit_price or 0),
                         "entry_ts": r.entry_time.isoformat() if r.entry_time else None,
                         "exit_ts": r.exit_time.isoformat() if r.exit_time else None,
-                        "pnl": round(float(r.net_pnl or 0), 2),
-                        "win": float(r.net_pnl or 0) >= 0,
+                        # Same convention as the in-memory book: ``pnl`` is the
+                        # gross price P&L and ``net_pnl`` is after costs. A
+                        # merged list that mixed the two would make one trade
+                        # read as a win in one tab and a loss in another.
+                        "pnl": round(gross, 2),
+                        "gross_pnl": round(gross, 2),
+                        "net_pnl": round(net, 2),
+                        # The ``trades`` table keeps one combined cost column —
+                        # brokerage and statutory charges split only live on the
+                        # in-memory position.
+                        "commission": round(float(r.commission_total or 0), 2),
+                        "win": gross >= 0,
+                        "exit_reason": r.exit_reason,
                         "persisted": True,
                     }
                     out.append(trade)
