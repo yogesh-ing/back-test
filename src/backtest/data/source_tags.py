@@ -28,6 +28,7 @@ __all__ = [
     "source_tag_for",
     "DEFAULT_SOURCE_TAG",
     "APP_SOURCE_TAGS",
+    "LIVE_FEED_TAGS",
     "app_source_tag",
 ]
 
@@ -47,6 +48,15 @@ SOURCE_TAGS: dict[type, str] = {
 #: run's ``source`` classification (state files, portfolio rows, configs).
 #: Derive from the map; never re-declare the strings.
 SOURCE_TAG_VALUES: frozenset[str] = frozenset(SOURCE_TAGS.values())
+
+#: The tags a broker's *live* feed owns — everything but generated history.
+#: Stamps from these feeds are the exchange clock, so a rule about the trading
+#: session (entry window, square-off) governs them. ``synthetic``/``replay``
+#: stamps are scaffolding: a fixture that bars a run at 04:15 is not asking the
+#: venue for a fill.
+LIVE_FEED_TAGS: frozenset[str] = frozenset(
+    tag for tag in SOURCE_TAG_VALUES if tag not in ("synthetic", "replay")
+)
 
 #: Fallback used when a source class is not (yet) in the canonical map.
 DEFAULT_SOURCE_TAG = "synthetic"

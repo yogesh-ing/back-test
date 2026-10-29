@@ -172,12 +172,21 @@ class TestEquityIncludesOptionBook:
         )
 
     def test_daily_pnl_uses_the_combined_equity(self, holding_runner):
+        """The day column books this session's move; equity books the whole trip.
+
+        BUG-18 split what used to be one number: ``daily_pnl()`` no longer
+        equals ``equity() - _day_start_equity`` when the book spans sessions —
+        the carried slice (``prior_close_net_pnl``) is the difference, and the
+        two added back together must still reproduce the combined equity.
+        """
         baseline = holding_runner._day_start_equity
         _feed(holding_runner, _bars(CRASH, start_day=21))
-        assert holding_runner.daily_pnl() == pytest.approx(
-            holding_runner.equity() - baseline
-        )
-        assert holding_runner.daily_pnl() < 0
+        structure = holding_runner.options_bridge.option_broker.get_open_structures()[0]
+        combined = holding_runner.equity() - baseline
+        assert holding_runner.daily_pnl() + float(
+            structure.prior_close_net_pnl
+        ) == pytest.approx(combined)
+        assert combined < 0
 
     def test_realized_pnl_zero_while_open(self, holding_runner):
         assert holding_runner.realized_pnl == 0.0

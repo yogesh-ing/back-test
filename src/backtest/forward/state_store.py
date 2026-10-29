@@ -257,6 +257,11 @@ def _opt_position_from_snapshot(payload: Dict[str, Any]) -> Any:
 
 
 def _structure_to_snapshot(s: Any) -> Dict[str, Any]:
+    from backtest.options.paper_trading import _ist_session_date
+
+    entry_session = getattr(s, "entry_session_date", None) or (
+        _ist_session_date(s.opened_at) if s.opened_at else None
+    )
     return {
         "structure_id": s.structure_id,
         "structure_type": s.structure_type,
@@ -267,6 +272,14 @@ def _structure_to_snapshot(s: Any) -> Dict[str, Any]:
         "closed_at": s.closed_at.isoformat() if s.closed_at else None,
         "exit_reason": s.exit_reason,
         "session_date": getattr(s, "session_date", None),
+        # BUG-18: both ends of the trip survive a restart, or an overnight
+        # carry loses the session it was actually opened in. The anchor pair
+        # goes with them: a mid-session restart that re-derives it from the
+        # current mark would credit today's whole move to yesterday.
+        "entry_session_date": entry_session,
+        "last_mark_session": getattr(s, "last_mark_session", None),
+        "last_mark_net_pnl": str(getattr(s, "last_mark_net_pnl", 0) or 0),
+        "prior_close_net_pnl": str(getattr(s, "prior_close_net_pnl", 0) or 0),
         "statutory_fees": str(getattr(s, "statutory_fees", 0) or 0),
         "legs": [_opt_position_to_snapshot(leg) for leg in s.legs],
     }
@@ -279,6 +292,8 @@ def _structure_from_snapshot(payload: Dict[str, Any]) -> Any:
     session_date = payload.get("session_date")
     if not session_date and closed_at is not None:
         session_date = _ist_session_date(closed_at)
+    opened_at = _restore_ts(payload.get("opened_at")) or now_utc()
+    entry_session_date = payload.get("entry_session_date") or _ist_session_date(opened_at)
 
     return StructurePosition(
         structure_id=payload["structure_id"],
@@ -289,10 +304,17 @@ def _structure_from_snapshot(payload: Dict[str, Any]) -> Any:
             date.fromisoformat(payload["expiry"]) if payload.get("expiry") else date.today()
         ),
         legs=[_opt_position_from_snapshot(leg) for leg in payload.get("legs", [])],
-        opened_at=_restore_ts(payload.get("opened_at")) or now_utc(),
+        opened_at=opened_at,
         closed_at=closed_at,
         exit_reason=payload.get("exit_reason"),
         session_date=session_date,
+        entry_session_date=entry_session_date,
+        # Written by ``_structure_to_snapshot`` since BUG-18; a snapshot from
+        # before that leaves them ``None`` and ``restore_structure`` re-derives
+        # the anchor instead of pretending today started at zero.
+        last_mark_session=payload.get("last_mark_session"),
+        last_mark_net_pnl=Decimal(str(payload.get("last_mark_net_pnl", "0") or "0")),
+        prior_close_net_pnl=Decimal(str(payload.get("prior_close_net_pnl", "0") or "0")),
         statutory_fees=Decimal(str(payload.get("statutory_fees", "0") or "0")),
     )
 

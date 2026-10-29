@@ -28,6 +28,11 @@ from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional
 
 from backtest.data.sources_policy import policy_key, synthetic_enabled
+from backtest.timekeeping import (
+    EXCHANGE_TZ,
+    in_eod_squareoff_window,
+    now_utc,
+)
 from backtest.forward.feed import SyntheticFeed
 from backtest.forward.feed_registry import get_chain_bus, get_feed_registry
 from backtest.forward.warmup import (
@@ -293,6 +298,9 @@ class PortfolioManager:
         self._refresh_marks_cooldown_s: float = 10.0
         self._last_manual_refresh_mono: Dict[str, float] = {}
         self.mtm_watchdog_interval_s: float = 60.0
+        #: BUG-39: the session clock is read once a second so the EOD
+        #: square-off cannot depend on a tick arriving at 15:10.
+        self.eod_sweep_interval_s: float = 1.0
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None
         if auto_start_feed and "PYTEST_CURRENT_TEST" not in os.environ:
@@ -1325,8 +1333,19 @@ class PortfolioManager:
 
         return bool(_market_open(now_utc))
 
+    @staticmethod
+    def _is_eod_sweep_enabled() -> bool:
+        """True unless ``EOD_SQUAREOFF_SWEEP`` disables the session-clock sweep.
+
+        Separate from ``MTM_WATCHDOG`` on purpose: switching off the mark-repair
+        pass is a broker-budget decision, switching off the end-of-day square-off
+        is turning off a risk control.
+        """
+        flag = os.environ.get("EOD_SQUAREOFF_SWEEP", "on").strip().lower()
+        return flag not in ("off", "0", "false", "no", "disabled")
+
     def _start_mtm_watchdog(self) -> None:
-        if not self._is_mtm_watchdog_enabled():
+        if not (self._is_mtm_watchdog_enabled() or self._is_eod_sweep_enabled()):
             return
         if self._watchdog_thread is not None and self._watchdog_thread.is_alive():
             return
@@ -1340,11 +1359,86 @@ class PortfolioManager:
         thread.start()
 
     def _mtm_watchdog_loop(self) -> None:
-        while not self._watchdog_stop.wait(timeout=max(1.0, float(self.mtm_watchdog_interval_s))):
+        # One thread, two cadences. The mark-repair pass stays on its 60 s broker
+        # budget, but the session clock has to be read every second: BUG-39 was a
+        # square-off that only ever ran when a tick arrived, and an illiquid
+        # strike stops printing long before 15:10.
+        interval = max(1.0, float(self.mtm_watchdog_interval_s))
+        next_mtm_pass = 0.0
+        while not self._watchdog_stop.wait(timeout=self.eod_sweep_interval_s):
+            now_mono = time.monotonic()
+            try:
+                self.run_eod_squareoff_sweep()
+            except Exception:  # noqa: BLE001 — watchdog must never crash
+                logger.exception("[session-clock] EOD square-off sweep failed")
+            if now_mono < next_mtm_pass:
+                continue
+            next_mtm_pass = now_mono + interval
             try:
                 self.run_mtm_watchdog()
             except Exception:  # noqa: BLE001 — watchdog must never crash
                 logger.exception("[mtm-watchdog] periodic pass failed")
+
+    def run_eod_squareoff_sweep(
+        self, now: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """Square off every RUNNING intraday option book on the wall clock.
+
+        BUG-39 (QA 2026-10-28): three monthly legs rode into the next session
+        because the only path to ``_maybe_intraday_squareoff`` was a bar or a
+        tick. This is the clock-driven seam — it runs once a second inside
+        15:10:00–15:29:59 IST (``in_eod_squareoff_window``) and does nothing at
+        any other minute, so it costs nothing for 96% of the day.
+
+        A positional carry is never touched: holding past the close has to be a
+        declared ``carry_policy``, not an accident of a quiet quote feed.
+        """
+        reference = now or now_utc()
+        if not self._is_eod_sweep_enabled():
+            return {"skipped": True, "reason": "sweep_disabled", "squared_off": []}
+        if not in_eod_squareoff_window(reference):
+            return {"skipped": True, "reason": "outside_squareoff_window", "squared_off": []}
+        with self._lock:
+            runners = [
+                r
+                for r in self._runners.values()
+                if r.status == STATUS_RUNNING
+                and r.options_bridge is not None
+                and r.options_bridge.carries_intraday
+            ]
+        squared: List[Dict[str, Any]] = []
+        for runner in runners:
+            try:
+                event = runner.eod_squareoff(reference)
+            except Exception:  # noqa: BLE001 — one stuck book cannot stop the sweep
+                logger.exception(
+                    "[session-clock] EOD square-off failed for %s", runner.config.name
+                )
+                continue
+            if event is None:
+                continue
+            squared.append(
+                {
+                    "instance_id": runner.instance_id,
+                    "name": runner.config.name,
+                    "structure_id": event.get("structure_id"),
+                    "reason": event.get("reason"),
+                    "pnl": event.get("pnl"),
+                }
+            )
+            self._audit_log(
+                "EOD_SQUAREOFF",
+                scope=self._runner_bucket(runner),
+                instance_id=runner.instance_id,
+                detail=(
+                    f"{event.get('structure_type')} {str(event.get('structure_id') or '')[:8]} "
+                    f"closed at {reference.astimezone(EXCHANGE_TZ):%H:%M:%S} IST — "
+                    f"pnl ₹{float(event.get('pnl') or 0.0):,.2f}"
+                ),
+            )
+        if squared:
+            self._persist_state()
+        return {"skipped": False, "squared_off": squared}
 
     def _repair_runner_marks_internal(
         self,

@@ -338,6 +338,16 @@ class StructurePosition:
     #: IST calendar date (``YYYY-MM-DD``) stamped when the structure closes so
     #: ``StrategyRunner.daily_pnl()`` rolls options at ``00:00 IST`` (OPT-6).
     session_date: str | None = None
+    #: IST calendar date the structure was OPENED on (BUG-18). Attribution needs
+    #: both ends: a monthly leg entered on the 24th and closed on the 29th has a
+    #: lifetime P&L that belongs to four different sessions.
+    entry_session_date: str | None = None
+    #: Session date of the last mark, and the net open P&L booked at that mark.
+    #: Together they give ``prior_close_net_pnl`` — the anchor that keeps an
+    #: overnight gap out of the next session's ``daily_pnl`` (BUG-18).
+    last_mark_session: str | None = None
+    last_mark_net_pnl: Decimal = ZERO
+    prior_close_net_pnl: Decimal = ZERO
     #: Entry + exit statutory charges attributed to this structure (Recon F4).
     statutory_fees: Decimal = ZERO
 
@@ -387,6 +397,58 @@ class StructurePosition:
         if self.closed_at is not None:
             return _ist_session_date(self.closed_at)
         return None
+
+    @property
+    def exit_session_date(self) -> str | None:
+        """The session the structure left the book on — BUG-18's other half."""
+        return self.effective_session_date
+
+    @property
+    def carried_overnight(self) -> bool:
+        """True when this structure has held across at least one session boundary.
+
+        A deliberate positional carry says so on the row; the trader is not left
+        to infer an overnight hold from a settlement number that moved while the
+        market was shut.
+        """
+        if not self.entry_session_date:
+            return False
+        current = self.last_mark_session or _ist_session_date(_now_utc())
+        return self.entry_session_date != current
+
+    @property
+    def net_open_pnl(self) -> Decimal:
+        """Unrealized P&L net of the charges this structure has already incurred."""
+        return self.total_unrealized_pnl - self.total_commission - self.statutory_fees
+
+    @property
+    def net_open_pnl_today(self) -> Decimal:
+        """Today's slice of :attr:`net_open_pnl` (BUG-18).
+
+        The overnight gap belongs to the session that booked it as open MTM
+        yesterday, so subtracting the prior-close anchor keeps the sum of the
+        two sessions equal to the lifetime P&L — no double count, no gap.
+        """
+        return self.net_open_pnl - self.prior_close_net_pnl
+
+    def record_session_mark(self, session: str | None) -> None:
+        """Roll the prior-close anchor when the IST session date advances.
+
+        Called once per mark pass. The FIRST mark of a new session promotes the
+        last mark of the previous session into ``prior_close_net_pnl``, which is
+        exactly the number today's P&L must start from. A mark for an *older*
+        session (a repair reaching back to a stale leg) must not move it: the
+        anchor tracks the newest session the book has seen, or today's slice
+        would silently inherit yesterday's number.
+        """
+        if session is None:
+            return
+        if self.last_mark_session is not None and session > self.last_mark_session:
+            self.prior_close_net_pnl = self.last_mark_net_pnl
+        if self.last_mark_session is not None and session < self.last_mark_session:
+            return
+        self.last_mark_session = session
+        self.last_mark_net_pnl = self.net_open_pnl
 
     @property
     def mark_ts(self) -> str | None:
@@ -974,6 +1036,7 @@ class OptionPaperBroker:
             expiry=intent.expiry,
             legs=positions,
             opened_at=ts,
+            entry_session_date=_ist_session_date(ts),
             statutory_fees=statutory_fees,
         )
         self._structures[structure_id] = structure
@@ -1220,6 +1283,14 @@ class OptionPaperBroker:
                 for position, _, price, _ in leg_outcomes:
                     total_unrealized += position.update_mtm(price)
 
+        # BUG-18: roll the prior-close anchor for every open structure. The
+        # first mark that lands in a new IST session promotes yesterday's last
+        # mark into the anchor, so ``daily_pnl`` can book only today's move.
+        mark_session = _ist_session_date(timestamp if timestamp is not None else _now_utc())
+        for structure in self._structures.values():
+            if structure.is_open:
+                structure.record_session_mark(mark_session)
+
         if raised_exc is not None:
             raise raised_exc
 
@@ -1289,6 +1360,21 @@ class OptionPaperBroker:
         self._structures[structure.structure_id] = structure
         for leg in structure.legs:
             self._positions[leg.position_id] = leg
+        # BUG-18: a restored book must start today from the number yesterday
+        # ended on, not from zero. A snapshot that remembers its own last mark
+        # rolls forward through the same rule a mark pass uses — which also
+        # keeps a mid-session restart from re-booking the morning's P&L as the
+        # overnight gap. A pre-BUG-18 snapshot has no memory, so fall back to
+        # the entry session and treat everything before today as carried.
+        entry_session = structure.entry_session_date or _ist_session_date(structure.opened_at)
+        structure.entry_session_date = entry_session
+        today = _ist_session_date(_now_utc())
+        if structure.last_mark_session is not None:
+            structure.record_session_mark(today)
+        elif entry_session is not None and today is not None and entry_session != today:
+            structure.prior_close_net_pnl = structure.net_open_pnl
+            structure.last_mark_session = today
+            structure.last_mark_net_pnl = structure.net_open_pnl
         debit = structure.total_entry_cost + structure.total_commission + Decimal(str(fees_paid))
         self.available_cash -= debit
         logger.info(

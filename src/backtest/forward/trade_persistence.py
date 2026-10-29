@@ -220,6 +220,11 @@ def _map_exit_reason(raw: Any) -> str | None:
     r = str(raw or "").strip().lower()
     if not r:
         return None
+    # BUG-39: the wall-clock square-off books ``intraday_squareoff``, which matched
+    # none of the tokens below and landed in the history as "signal" — a risk
+    # control showing up as a strategy exit.
+    if "squareoff" in r or "square_off" in r or "square off" in r:
+        return "eod_flat"
     if "target" in r or "profit" in r:
         return "take_profit"
     if "stop" in r or "sl" in r:

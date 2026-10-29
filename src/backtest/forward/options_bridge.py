@@ -60,7 +60,13 @@ from decimal import Decimal
 from typing import Any, Deque, Iterable, Optional
 
 from backtest.data.sources_policy import SourceDisabledError, synthetic_chain_generator
-from backtest.timekeeping import EXCHANGE_TZ, from_market_clock, now_utc, session_date
+from backtest.timekeeping import (
+    EXCHANGE_TZ,
+    entry_window_refusal,
+    from_market_clock,
+    now_utc,
+    session_date,
+)
 from backtest.options.execution_gate import (
     PreTradeRiskGate,
     REASON_EXPIRY_TOO_NEAR,
@@ -132,6 +138,21 @@ _NSE_CLOSE_MINUTES = 15 * 60 + 30  # 15:30 IST
 
 #: Non-expiry intraday square-off reason (OPT-5 / Recon F5).
 EXIT_INTRADAY_SQUAREOFF = "intraday_squareoff"
+
+#: Carry policy (BUG-39, QA 2026-10-28): how long a structure is *allowed* to
+#: live. Three monthly legs rode into 29-Oct overnight because nothing declared
+#: a carry contract and the square-off knob defaulted to "never".
+CARRY_INTRADAY = "intraday"
+CARRY_POSITIONAL = "positional"
+CARRY_POLICIES = frozenset({CARRY_INTRADAY, CARRY_POSITIONAL})
+#: Timeframes whose runners default to ``intraday`` — the same set the equity
+#: fee segment uses, so "intraday" means one thing across the app.
+INTRADAY_CARRY_TIMEFRAMES = frozenset(
+    {"1min", "3min", "5min", "15min", "30min", "1hour"}
+)
+#: 15:10 IST: 20 minutes clear of the close, so the runner squares off before
+#: broker RMS auto-squareoff (~15:15–15:20) can race it.
+DEFAULT_INTRADAY_SQUAREOFF_MINUTES = 20
 
 #: Protective price/P&L exits evaluated sub-second on ``on_tick`` (Caveat Q-3).
 #: ``max_bars``, ``neutral_bars``, and ``signal_flip`` stay strictly on closed bars.
@@ -232,6 +253,11 @@ class OptionsBridge:
         once per bar (plus the 60 s R6 watchdog), so the freshness SLA may never
         be tighter than the cadence the book is actually marked on — a daily
         runner would otherwise read as stale minutes after every mark.
+    timeframe:
+        The runner's declared bar timeframe (``"1min"``, ``"1day"``, …), passed
+        by the runner at construction. It sets the default ``carry_policy``
+        (BUG-39): an intraday cadence squares off before the close unless the
+        strategy declares ``carry_policy: "positional"``.
     """
 
     def __init__(
@@ -247,6 +273,7 @@ class OptionsBridge:
         mode: str = "paper",
         risk_gate: Optional[PreTradeRiskGate] = None,
         on_halt: Optional[Any] = None,
+        timeframe: Optional[str] = None,
     ) -> None:
         # Phase 4 (Plan v2.1 Phase 4): strict mode is unconditional. The
         # legacy v1 path (default-expression merge, cross-direction and
@@ -382,8 +409,13 @@ class OptionsBridge:
         #: Optional non-expiry intraday square-off minutes before 15:30 IST
         #: (OPT-5 / Recon F5). Enforces a 20-minute floor (<= 15:10 IST) by
         #: default so broker RMS auto-squareoff (~15:15–15:20 IST) never races.
-        self.intraday_squareoff_minutes_before: Optional[int] = (
-            self._resolve_intraday_squareoff_minutes()
+        # BUG-39 (QA 2026-10-28): the minutes used to resolve to ``None`` unless
+        # a strategy spelled the knob out, so an intraday runner silently carried
+        # its book overnight. They now come out of a declared ``carry_policy``,
+        # whose default follows the runner's timeframe.
+        self.timeframe: Optional[str] = str(timeframe or "").strip() or None
+        self.carry_policy, self.intraday_squareoff_minutes_before = (
+            self._resolve_carry_policy()
         )
         #: Phase 3 tick-cadence entry guards (Caveats Q-4, Q-7).
         self.reentry_cooldown_seconds: float = self._resolve_float_knob(
@@ -458,6 +490,8 @@ class OptionsBridge:
         self.entry_bucket_timeframe: Optional[str] = None
         self._last_entry_bucket: Optional[str] = None
         self._bucket_block_logged: Optional[str] = None
+        #: BUG-18: log a given entry-window refusal once, not once per tick.
+        self._last_window_refusal: Optional[str] = None
         # -- BUG-02 day-count re-entry cap ---------------------------------
         # ``max_reentries_per_day`` used to be counted only against signal-
         # flip re-entries, so a 1-hour session made 205 stop-loss re-entries
@@ -612,6 +646,22 @@ class OptionsBridge:
             # a replay feeds bars seconds apart on the wall clock but a day
             # apart in market time, and the cooldown is a market-time rule.
             return None
+        # BUG-18 (QA 2026-10-28): a bar stamped 15:30:30 IST opened a structure
+        # after the session was over. The exchange clock gates every new entry,
+        # on the bar path and the tick path alike.
+        window_refusal = self._entry_window_block(probe_ts)
+        if window_refusal is not None:
+            self._journal_halt_once("OUTSIDE_ENTRY_WINDOW", window_refusal)
+            if self._last_window_refusal != window_refusal:
+                self._last_window_refusal = window_refusal
+                logger.warning(
+                    "ENTRY_WINDOW_REFUSED strategy=%s — %s", strategy_name, window_refusal
+                )
+            return {
+                "rejected": True,
+                "reason": window_refusal,
+                "code": "OUTSIDE_ENTRY_WINDOW",
+            }
         # BUG-02: entry budget is per session day, not per signal. Count every
         # structural close (stop, target, flip, settlement, square-off) against
         # ``max_reentries_per_day + 1``. Refuse the entry BEFORE the intent is
@@ -945,6 +995,9 @@ class OptionsBridge:
             # -- BUG-02 day-count budget + BUG-15 health --------------------
             "structures_today": self._closes_today,
             "max_entries_per_day": self._max_entries_per_day(),
+            # BUG-39: the declared carry contract, visible on the card.
+            "carry_policy": self.carry_policy,
+            "intraday_squareoff_minutes_before": self.intraday_squareoff_minutes_before,
             "trade_health": self.trade_health,
             "block_reason": self.block_reason,
             "rejection_streak": self._rejection_streak,
@@ -1191,6 +1244,10 @@ class OptionsBridge:
                         round(unrealized / (entry * units), 4) if entry * units else 0.0
                     ),
                     "entry_ts": structure.opened_at.isoformat() if structure.opened_at else None,
+                    # BUG-18: say which session this risk was taken in, and stop
+                    # the reader guessing whether it has been sleeping in it.
+                    "entry_session_date": getattr(structure, "entry_session_date", None),
+                    "carried_overnight": bool(getattr(structure, "carried_overnight", False)),
                     # R1: per-structure mark freshness contract
                     "mark_ts": structure.mark_ts,
                     "mark_stale": structure_stale,
@@ -1537,6 +1594,30 @@ class OptionsBridge:
             return None
         close_ts = ts_override if ts_override is not None else self._bar_ts(self._bar_dt)
         return self._exit_structure(decision, close_ts, strategy_name="", queue=True)
+
+    @property
+    def carries_intraday(self) -> bool:
+        """True when this book must be flat before the close (BUG-39)."""
+        return (
+            self.carry_policy == CARRY_INTRADAY
+            and self.intraday_squareoff_minutes_before is not None
+        )
+
+    def eod_squareoff(self, ts: Any = None) -> Optional[dict[str, Any]]:
+        """Square off on the *wall* clock — the portfolio manager's EOD sweep.
+
+        :meth:`_maybe_intraday_squareoff` only ever ran from a bar or a tick, so
+        an illiquid strike that stopped printing at 14:50 carried overnight while
+        the runner stayed ``RUNNING`` (BUG-39, 28-Oct: 3 monthly legs). This is
+        the public seam the 1-second session-clock sweep calls; it is idempotent,
+        because the square-off closes the structure and a closed structure cannot
+        square off again.
+
+        ``ts`` is the market instant to judge — an aware UTC datetime from the
+        manager (default: now). Never trust a tick to arrive at 15:10.
+        """
+        reference = ts if ts is not None else now_utc()
+        return self._maybe_intraday_squareoff(reference)
 
     def _maybe_intraday_squareoff(
         self,
@@ -2880,24 +2961,77 @@ class OptionsBridge:
     # Phase 3 helpers: HotStrikeRing leg pinning & tick-entry guards
     # ------------------------------------------------------------------ #
 
-    def _resolve_intraday_squareoff_minutes(self) -> Optional[int]:
-        raw = self.expression.get("intraday_squareoff_minutes_before")
-        if raw is None and bool(self.expression.get("intraday_squareoff")):
-            raw = 20
-        if raw is None:
-            env_raw = os.environ.get("OPTIONS_INTRADAY_SQUAREOFF_MINUTES", "").strip()
-            raw = env_raw if env_raw else None
-        if raw is None:
-            return None
+    def _resolve_carry_policy(self) -> tuple[str, Optional[int]]:
+        """Resolve ``(carry_policy, intraday_squareoff_minutes_before)``.
+
+        Explicit wins, in this order:
+
+        1. ``expression["carry_policy"]`` — ``"intraday"`` or ``"positional"``.
+           Anything else is a construction-time refusal: a misspelled policy
+           must not silently decide how long the book holds risk.
+        2. The pre-existing knobs (``intraday_squareoff_minutes_before``,
+           ``intraday_squareoff``, ``OPTIONS_INTRADAY_SQUAREOFF_MINUTES``) imply
+           ``"intraday"`` and keep working unchanged.
+        3. ``min_days_to_expiry: null`` **plus** an explicit
+           ``overnight_carry: True`` means the strategy means to hold past the
+           close — an overnight-riding exit policy alone is not consent.
+        4. Otherwise the runner's ``timeframe`` decides: an intraday cadence
+           carries intraday, a swing cadence carries positionally.
+
+        Positional books get ``None`` minutes (no wall-clock square-off; the DTE
+        and expiry rules own the exit). Intraday books get >= 20 minutes before
+        15:30 IST, so the runner always clears out ahead of broker RMS.
+        """
+        from backtest.strategy.execution import ExecutionSpecError
+
+        raw_policy = str(self.expression.get("carry_policy") or "").strip().lower()
+        if raw_policy and raw_policy not in CARRY_POLICIES:
+            raise ExecutionSpecError(
+                f"carry_policy must be one of {sorted(CARRY_POLICIES)}, "
+                f"got {self.expression.get('carry_policy')!r}"
+            )
+        minutes_raw = self.expression.get("intraday_squareoff_minutes_before")
+        legacy_flag = bool(self.expression.get("intraday_squareoff"))
+        env_raw = os.environ.get("OPTIONS_INTRADAY_SQUAREOFF_MINUTES", "").strip()
+        declared_minutes = (
+            minutes_raw is not None
+            or legacy_flag
+            or bool(env_raw)
+        )
+        rides_to_settlement = self._strict_exit_plan.min_days_to_expiry is None
+        policy = raw_policy or (
+            CARRY_INTRADAY
+            if declared_minutes
+            else (
+                CARRY_POSITIONAL
+                if (rides_to_settlement and bool(self.expression.get("overnight_carry")))
+                else (
+                    CARRY_INTRADAY
+                    if (self.timeframe or "") in INTRADAY_CARRY_TIMEFRAMES
+                    else CARRY_POSITIONAL
+                )
+            )
+        )
+        if policy == CARRY_POSITIONAL:
+            if minutes_raw is not None or legacy_flag:
+                raise ExecutionSpecError(
+                    "carry_policy='positional' cannot also declare an intraday "
+                    "square-off — one of them decides whether this book holds "
+                    "past 15:30 IST"
+                )
+            return CARRY_POSITIONAL, None
+        minutes = minutes_raw if minutes_raw is not None else (env_raw or None)
+        if minutes is None:
+            minutes = DEFAULT_INTRADAY_SQUAREOFF_MINUTES
         try:
-            mins = int(raw)
+            value = int(minutes)
         except (TypeError, ValueError):
-            return None
-        if mins <= 0:
-            return None
-        # OPT-5: enforce >= 20 min before 15:30 IST (<= 15:10 IST) so runner
-        # square-off never collides with broker RMS auto-squareoff (~15:15–15:20).
-        return max(20, mins)
+            value = DEFAULT_INTRADAY_SQUAREOFF_MINUTES
+        if value <= 0:
+            value = DEFAULT_INTRADAY_SQUAREOFF_MINUTES
+        # OPT-5 floor: never later than 15:10 IST, so the runner cannot race the
+        # broker's own RMS auto-squareoff window.
+        return policy, max(DEFAULT_INTRADAY_SQUAREOFF_MINUTES, value)
 
     def _resolve_float_knob(
         self,
@@ -2954,6 +3088,38 @@ class OptionsBridge:
         if parsed.tzinfo is not None:
             return parsed.astimezone(EXCHANGE_TZ)
         return parsed.replace(tzinfo=EXCHANGE_TZ)
+
+    @property
+    def _quotes_are_live(self) -> bool:
+        """Whether this bridge prices off a broker's live feed.
+
+        The provider label is the runner's own evidence (same test
+        :meth:`_effective_max_spread_pct` uses): ``live:mstock`` means the
+        stamps arriving are the exchange clock. A synthetic or history-shaped
+        provider bars on the fixture's clock, and the session entry window is a
+        live-risk rule — it has nothing to police there.
+        """
+        src = str(getattr(self.quote_provider, "source_name", "") or "")
+        return src.startswith("live:")
+
+    def _entry_window_block(self, ts: Any) -> Optional[str]:
+        """BUG-18: why this market instant cannot open a new structure.
+
+        Judged on the *bar/tick's own* clock, not the wall clock, so a live
+        feed that hands over a 15:30:30 bar is refused like the venue would
+        refuse it. An intraday book is refused once its own square-off deadline
+        is past, so it can never open a position it is about to force-flat.
+        """
+        if not self._quotes_are_live:
+            return None
+        reference = self._ist_clock_from_ts(ts) or self._market_dt or self._bar_dt
+        if reference is None:
+            return None
+        return entry_window_refusal(
+            reference,
+            intraday=self.carries_intraday,
+            squareoff_minutes=self.intraday_squareoff_minutes_before,
+        )
 
     def _in_opening_stabilization_window(self, ts: Any) -> bool:
         """True during 09:15:00..(09:15:00 + stabilization_s) IST (Caveat Q-7)."""

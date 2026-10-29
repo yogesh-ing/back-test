@@ -53,7 +53,13 @@ import pandas as pd
 
 from backtest.data.base import CANONICAL_TIMEFRAMES, TIMEFRAME_MINUTES, DataSource
 from backtest.data.frame_source import FrameSource
-from backtest.data.source_tags import SOURCE_TAG_VALUES, SOURCE_TAGS, source_tag_for
+from backtest.data.source_tags import (
+    LIVE_FEED_TAGS,
+    SOURCE_TAG_VALUES,
+    SOURCE_TAGS,
+    app_source_tag,
+    source_tag_for,
+)
 from backtest.data.sources_policy import (
     default_broker_source,
     policy_key,
@@ -70,6 +76,12 @@ from backtest.simulator.portfolio import Portfolio, PortfolioLimits
 from backtest.simulator.position_sizing import all_in_size
 from backtest.strategy.base import Strategy
 from backtest.strategy.registry import get_strategy
+from backtest.timekeeping import (
+    entry_window_refusal,
+    from_market_clock,
+    from_stored_utc,
+    now_utc,
+)
 
 __all__ = [
     # paper run
@@ -285,6 +297,30 @@ def _as_ist_date(moment: datetime) -> str:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     return moment.astimezone(_IST).date().isoformat()
+
+
+def _ist_date_of(value: Any) -> Optional[str]:
+    """The IST calendar date of a stored or feed stamp, or ``None`` when unreadable.
+
+    Naive means the format this app writes (aware UTC with ``isoformat()``) lost
+    its offset in transit, so it reads as UTC — the market-clock door would
+    relabel 03:45 UTC as 09:15 IST and shift a post-midnight stamp onto the
+    wrong calendar day.
+    """
+    if isinstance(value, datetime):
+        instant = from_stored_utc(value)
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        instant = from_market_clock(value)
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        instant = (
+            from_stored_utc(text)
+            if text.endswith("Z") or "+00:00" in text
+            else from_market_clock(text)
+        )
+    return _as_ist_date(instant) if instant is not None else None
 
 
 #: Timeframes that trade a same-session round trip, so the fee engine has to
@@ -1414,6 +1450,7 @@ class StrategyRunner:
                     ),
                     fee_calculator=fee_calc,
                     on_halt=self._on_option_execution_halt,
+                    timeframe=config.timeframe,
                 )
                 self.options_bridge.entry_bucket_timeframe = config.timeframe
             except Exception:
@@ -1600,6 +1637,13 @@ class StrategyRunner:
         session_date = getattr(structure, "effective_session_date", None)
         if not session_date and getattr(structure, "closed_at", None) is not None:
             session_date = _as_ist_date(structure.closed_at)
+        entry_session = getattr(structure, "entry_session_date", None)
+        if not entry_session and getattr(structure, "opened_at", None) is not None:
+            entry_session = _as_ist_date(structure.opened_at)
+        carried = bool(
+            getattr(structure, "carried_overnight", False)
+            or (entry_session and session_date and entry_session != session_date)
+        )
         return {
             "symbol": f"{structure.underlying} {structure.structure_type}",
             "label": (
@@ -1620,6 +1664,9 @@ class StrategyRunner:
             "entry_ts": structure.opened_at.isoformat() if structure.opened_at else None,
             "exit_ts": structure.closed_at.isoformat() if structure.closed_at else None,
             "session_date": session_date,
+            "entry_session_date": entry_session,
+            "exit_session_date": session_date,
+            "carried_overnight": carried,
             "pnl": round(gross_pnl, 2),
             "gross_pnl": round(gross_pnl, 2),
             "net_pnl": round(net_pnl, 2),
@@ -1666,6 +1713,17 @@ class StrategyRunner:
                     "entry_ts": pos.opened_at.isoformat() if pos.opened_at else None,
                     "exit_ts": pos.closed_at.isoformat() if pos.closed_at else None,
                     "session_date": _as_ist_date(pos.closed_at) if pos.closed_at else None,
+                    "entry_session_date": (
+                        _as_ist_date(pos.opened_at) if pos.opened_at else None
+                    ),
+                    "exit_session_date": (
+                        _as_ist_date(pos.closed_at) if pos.closed_at else None
+                    ),
+                    "carried_overnight": bool(
+                        pos.opened_at
+                        and pos.closed_at
+                        and _as_ist_date(pos.opened_at) != _as_ist_date(pos.closed_at)
+                    ),
                     "pnl": round(pnl, 2),
                     "gross_pnl": round(pnl, 2),
                     "net_pnl": round(float(pos.net_pnl), 2),
@@ -2201,6 +2259,7 @@ class StrategyRunner:
         ``unrealized_pnl``, ``stop_loss``, ``target``, ``can_partial_close``.
         """
         rows: List[Dict[str, Any]] = []
+        today_session = _ist_date_of(now_utc())
         with self._lock:
             for sym, pos in self.positions.items():
                 qty = float(pos["qty"])
@@ -2223,6 +2282,13 @@ class StrategyRunner:
                         "unrealized_pnl": round(pnl, 2),
                         "pnl_pct": round(pnl / (entry * qty), 4) if entry and qty else 0.0,
                         "entry_ts": pos.get("entry_ts"),
+                        # BUG-18: a carried book must say it is carried, on both
+                        # forwards, instead of leaving the trader to infer it.
+                        "entry_session_date": _ist_date_of(pos.get("entry_ts")),
+                        "carried_overnight": bool(
+                            _ist_date_of(pos.get("entry_ts"))
+                            not in (None, today_session)
+                        ),
                         "stop_loss": rules.get(RULE_STOP_LOSS),
                         "target": rules.get(RULE_TARGET),
                         # Scaling out needs more than one unit to scale.
@@ -3223,6 +3289,36 @@ class StrategyRunner:
         except Exception:  # noqa: BLE001 — a bad row must never kill the bar
             pass
 
+    def eod_squareoff(self, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+        """Square off an intraday option book on the wall clock (BUG-39).
+
+        Called by the portfolio manager's session-clock sweep, not by a bar: the
+        28-Oct session carried three monthly legs overnight because the
+        square-off could only fire when a tick happened to arrive at 15:10. An
+        illiquid strike stops printing. This seam does not need one.
+
+        Returns the exit event, or ``None`` when there was nothing to do
+        (positional carry, no open structure, or outside the cutoff window).
+        """
+        bridge = self.options_bridge
+        if bridge is None or not bridge.carries_intraday:
+            return None
+        if self.status != STATUS_RUNNING:
+            return None
+        self._sync_bridge_runner_state()
+        event = bridge.eod_squareoff(now)
+        if event is None:
+            return None
+        symbol = str(event.get("underlying") or bridge.underlying or "")
+        price = float(self.last_price.get(symbol) or bridge.last_spot or 0.0)
+        while True:
+            drained = bridge.pop_exit_event()
+            if drained is None:
+                break
+            self._log_option_exit(symbol, drained, price)
+        self.error = None
+        return event
+
     def _log_option_exit(self, symbol: str, event: Dict[str, Any], price: float) -> None:
         """Record a structure close in the signal log (task B1/B3).
 
@@ -3553,6 +3649,16 @@ class StrategyRunner:
         now = time.time()
         if now - float(pending["last_ts"]) < float(pending["cooldown_s"]):
             return
+        if pending["kind"] == "entry":
+            window_refusal = self._entry_window_block(ts)
+            if window_refusal is not None:
+                # The session moved on without this retry: an entry that cannot
+                # be exited today is not worth another attempt (BUG-18).
+                self._retries.pop(symbol, None)
+                self._log_signal(
+                    symbol, "BLOCKED", 1, price, f"entry retry dropped — {window_refusal}"
+                )
+                return
         pending["bar_ts"] = ts
 
         attempt = int(pending["attempts"]) + 1
@@ -3615,6 +3721,23 @@ class StrategyRunner:
             + (f" @ {fill.price:.2f}" if placed else " (placed at the venue)"),
         )
 
+    def _entry_window_block(self, ts: Any) -> Optional[str]:
+        """BUG-18: why this market instant cannot open an equity position.
+
+        Only a live broker feed's stamps are the exchange clock, so only they
+        are governed: an entry the session cannot exit is a live-risk rule, not
+        an accounting one, and a synthetic or replay bar carries the fixture's
+        own clock. Equity paper has no square-off contract of its own, so it
+        gets the session cut-off (15:25 IST) — the auction that follows is
+        settlement, not a place to build risk a runner cannot exit.
+        """
+        if app_source_tag(str(self.config.source or "")) not in LIVE_FEED_TAGS:
+            return None
+        instant = from_market_clock(ts)
+        if instant is None:
+            return None
+        return entry_window_refusal(instant)
+
     def _emit_entry(
         self,
         symbol: str,
@@ -3626,6 +3749,10 @@ class StrategyRunner:
         if self._retry_owns(symbol, "entry"):
             # A retry for this exact intent is already queued; sending again
             # here would duplicate the order the pump is about to re-send.
+            return
+        window_refusal = self._entry_window_block(ts)
+        if window_refusal is not None:
+            self._log_signal(symbol, "BLOCKED", 1, price, window_refusal)
             return
         qty = self._position_size(price)
         if qty <= 0:
@@ -3907,34 +4034,40 @@ class StrategyRunner:
 
         total = float(realized_today) + float(self.portfolio.unrealized_pnl)
 
-        # Add option book contribution if present (OPT-6: closed structures
-        # stamp IST session_date so options roll at 00:00 IST and survive
-        # mid-day restarts identically to equities, net of commissions/fees;
-        # open structures also net entry brokerage + statutory fees so open MTM
-        # reconciles with OptionPaperBroker.total_equity).
+        # Option book contribution (OPT-6: closes stamp IST session_date, so
+        # options roll at 00:00 IST and survive a mid-day restart exactly like
+        # equities, net of brokerage + statutory fees).
+        #
+        # BUG-18: a structure that carried in from an earlier session books only
+        # TODAY'S move here. Yesterday's mark was already that session's daily
+        # number, so re-booking the overnight gap today would double-count it,
+        # while booking the whole trip today would hide where it actually
+        # happened. Lifetime ``realized_pnl``/``equity()`` still carry the full
+        # trade; only this daily slice is attributed.
         if self.options_bridge is not None:
             book = self.options_bridge.option_broker
-            option_realized_today = Decimal("0")
+            option_today = Decimal("0")
             for structure in book.get_closed_structures():
                 s_date = getattr(structure, "effective_session_date", None)
                 if not s_date and getattr(structure, "closed_at", None) is not None:
                     s_date = _as_ist_date(structure.closed_at)
-                if s_date == today:
-                    option_realized_today += getattr(
-                        structure,
-                        "net_pnl",
-                        structure.total_realized_pnl - structure.total_commission,
+                if s_date != today:
+                    continue
+                lifetime = getattr(
+                    structure,
+                    "net_pnl",
+                    structure.total_realized_pnl - structure.total_commission,
+                )
+                option_today += lifetime - getattr(structure, "prior_close_net_pnl", Decimal("0"))
+            for structure in book.get_open_structures():
+                today_slice = getattr(structure, "net_open_pnl_today", None)
+                if today_slice is None:
+                    costs = getattr(structure, "total_commission", Decimal("0")) + getattr(
+                        structure, "statutory_fees", Decimal("0")
                     )
-            open_option_costs = sum(
-                (
-                    getattr(s, "total_commission", Decimal("0"))
-                    + getattr(s, "statutory_fees", Decimal("0"))
-                    for s in book.get_open_structures()
-                ),
-                Decimal("0"),
-            )
-            total += float(option_realized_today)
-            total += float(self.options_bridge.unrealized_pnl - open_option_costs)
+                    today_slice = structure.total_unrealized_pnl - costs
+                option_today += today_slice
+            total += float(option_today)
 
         return total
 

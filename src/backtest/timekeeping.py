@@ -41,6 +41,12 @@ EXCHANGE_TZ = timezone(timedelta(hours=5, minutes=30), name="IST")
 #: NSE regular-session bounds, in exchange time.
 MARKET_OPEN_TIME = time(9, 15)
 MARKET_CLOSE_TIME = time(15, 30)
+#: Last minute a *positional* book may still open a new position. The 15:25–15:30
+#: auction is settlement, not a place to build a risk you then cannot exit.
+ENTRY_CUTOFF_TIME = time(15, 25)
+#: First minute of the end-of-day square-off sweep. 20 minutes clear of the close
+#: so a runner flattens itself before broker RMS auto-squareoff (~15:15–15:20).
+EOD_SQUAREOFF_WINDOW_START = time(15, 10)
 
 
 class AmbiguousTimeError(ValueError):
@@ -221,6 +227,63 @@ def market_is_open(value: Optional[datetime] = None) -> bool:
     return MARKET_OPEN_TIME <= reference.time() <= MARKET_CLOSE_TIME
 
 
+def in_eod_squareoff_window(value: Optional[datetime] = None) -> bool:
+    """Whether ``value`` (default: now) sits in the 15:10:00–15:29:59 IST sweep.
+
+    The window an intraday book must be flat inside (BUG-39). It starts at the
+    20-minute square-off floor and stops at the close, so a sweep can never
+    square off after the session it belongs to has ended.
+    """
+    reference = _as_exchange(value if value is not None else now_utc())
+    return EOD_SQUAREOFF_WINDOW_START <= reference.time() < MARKET_CLOSE_TIME
+
+
+def entry_window_refusal(
+    value: Optional[datetime] = None,
+    *,
+    intraday: bool = False,
+    squareoff_minutes: Optional[int] = None,
+) -> Optional[str]:
+    """Why ``value`` may NOT open a new position — ``None`` means it may.
+
+    BUG-18 (QA 2026-10-28): a bar stamped 15:30:30 IST opened a fresh structure
+    after the market had closed, so the paper book traded against a session that
+    was over. The exchange clock, not the wall clock, decides: a position opened
+    at HH:MM has to be exitable in the same session.
+
+    ``intraday`` + ``squareoff_minutes`` narrow the deadline to the runner's own
+    EOD square-off (15:30 − N), so a structure cannot be opened *inside* the
+    window where the book is already flattening itself.
+    """
+    reference = _as_exchange(value if value is not None else now_utc())
+    moment = reference.time()
+    if moment < MARKET_OPEN_TIME:
+        return (
+            f"{reference:%H:%M:%S} IST is before the 09:15:00 open — "
+            "no entry outside market hours"
+        )
+    if moment > MARKET_CLOSE_TIME:
+        return (
+            f"{reference:%H:%M:%S} IST is after the 15:30:00 close — "
+            "no entry outside market hours"
+        )
+    deadline = ENTRY_CUTOFF_TIME
+    if intraday and squareoff_minutes:
+        cutoff = (
+            MARKET_CLOSE_TIME.hour * 60
+            + MARKET_CLOSE_TIME.minute
+            - int(squareoff_minutes)
+        )
+        deadline = time(cutoff // 60, cutoff % 60)
+    if moment > deadline:
+        label = "intraday square-off" if intraday and squareoff_minutes else "entry cut-off"
+        return (
+            f"{reference:%H:%M:%S} IST is after the {deadline:%H:%M} {label} — "
+            "an entry here cannot be exited in this session"
+        )
+    return None
+
+
 def _as_exchange(value: datetime) -> datetime:
     """Aware → IST; naive → read as exchange time (already IST wall clock)."""
     if value.tzinfo is None:
@@ -249,6 +312,8 @@ def _parse(text: str) -> datetime:
 
 __all__ = [
     "AmbiguousTimeError",
+    "ENTRY_CUTOFF_TIME",
+    "EOD_SQUAREOFF_WINDOW_START",
     "EXCHANGE_TZ",
     "MARKET_CLOSE_TIME",
     "MARKET_OPEN_TIME",
@@ -256,7 +321,9 @@ __all__ = [
     "duration_seconds",
     "ensure_exchange",
     "ensure_utc",
+    "entry_window_refusal",
     "from_market_clock",
+    "in_eod_squareoff_window",
     "from_stored_utc",
     "iso_exchange",
     "iso_utc",
