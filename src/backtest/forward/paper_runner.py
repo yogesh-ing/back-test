@@ -1032,11 +1032,12 @@ class OrderLedger:
 class PaperBroker:
     """Simulated execution gateway for command-center buckets.
 
-    Market orders fill immediately at the supplied price, routed through
-    the owning runner's :class:`~backtest.simulator.execution.OrderExecutor`
-    (zero-cost profile — see :func:`free_executor`). Every order is tagged
-    by the ledger and every fill is dispatched back through it, exactly as
-    a live gateway would.
+    Market orders fill immediately at the supplied price, routed through the
+    owning runner's :class:`~backtest.simulator.execution.OrderExecutor` —
+    which is the **costed** engine the runner binds with
+    :meth:`StrategyRunner.bind_executor`, so a paper fill carries the venue's
+    real fee stack (BUG-26). Every order is tagged by the ledger and every fill
+    is dispatched back through it, exactly as a live gateway would.
     """
 
     def __init__(self, ledger: OrderLedger, slippage_pct: float = 0.0) -> None:
@@ -1408,11 +1409,7 @@ class StrategyRunner:
             # runner bars from — normalised above, so it is never empty.
             source=str(config.source),
         )
-        self.executor = equity_costed_executor(self.portfolio, config)
-        # What the cost engine actually charged, so a closed trade can name its
-        # own segment and profile instead of being re-derived later.
-        self.fee_segment = str(self.executor.config.segment)
-        self.fee_profile = str(getattr(self.executor.fees.broker, "name", "") or "")
+        self.executor = self.bind_executor(self.portfolio)
         self.closed_trades_cache: List[Dict[str, Any]] = []
 
         # -- options bridge (Gap G3.2) --------------------------------------
@@ -1628,6 +1625,28 @@ class StrategyRunner:
         self._lock = threading.RLock()
         self.ledger.register_handler(self.instance_id, self.on_fill)
         self.ledger.register_runner(self.instance_id, self)
+
+    # -- fill engine --------------------------------------------------------
+
+    def bind_executor(self, portfolio: Portfolio) -> OrderExecutor:
+        """Attach this book's costed fill engine, and publish what it charges.
+
+        Two sites need it: the constructor, and the snapshot restore — which
+        replaces the whole :class:`Portfolio`, so the executor that was built
+        against the old one must be rebuilt against the new. Before BUG-26 was
+        landed the restore rebound to :func:`free_executor`, which quietly
+        un-deployed the cost fix for **every runner that survived a restart** —
+        the normal production case, so a paper book kept booking zero-cost
+        round trips on a build that could price them.
+
+        ``fee_segment`` / ``fee_profile`` are set here rather than read back
+        later, so a closed trade can name the cost model that actually charged
+        it and the two can never drift apart.
+        """
+        self.executor = equity_costed_executor(portfolio, self.config)
+        self.fee_segment = str(self.executor.config.segment)
+        self.fee_profile = str(getattr(self.executor.fees.broker, "name", "") or "")
+        return self.executor
 
     # -- accounting views (over the simulator portfolio) --------------------
 

@@ -464,13 +464,16 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
     restart until a human resumes); PAUSED/STOPPED → as saved.
     """
     from backtest.forward.paper_runner import STATUS_PAUSED, STATUS_RUNNING, STATUS_STOPPED
-    from backtest.simulator.execution import free_executor
     from backtest.simulator.portfolio import Portfolio
 
     # Book — full round-trip (positions, closed, equity history, orders).
     restored = Portfolio.from_dict(snapshot["portfolio"])
     runner.portfolio = restored
-    runner.executor = free_executor(restored)
+    # Rebind the runner's OWN costed engine to the new book. This site used to
+    # install ``free_executor``, so every runner that survived a restart traded
+    # zero-fee regardless of the BUG-26 cost fix — and a restored book is the
+    # normal case, not the exception.
+    runner.bind_executor(restored)
 
     runner.bars_processed = int(snapshot.get("bars_processed", 0))
     runner.created_ts = snapshot.get("created_ts", runner.created_ts)
