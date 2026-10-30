@@ -1505,6 +1505,17 @@ class StrategyRunner:
         if self.options_bridge is not None:
             book = self.options_bridge.option_broker
             self._option_session_start_realized = float(book.total_realized_pnl)
+
+        # -- BUG-04 session anchors ------------------------------------------
+        # The NET contract's day boundary: the last (realized, open) pair
+        # captured inside the previous session. ``daily_pnl`` is the move of
+        # their SUM since that capture, so a mark booked yesterday can never
+        # be re-booked today.
+        self._pnl_session: Optional[str] = None
+        self._last_session_realized: float = 0.0
+        self._last_session_open: float = 0.0
+        self._prev_close_realized_net: float = 0.0
+        self._prev_close_open_pnl: float = 0.0
         
         #: PnL-vs-spot watch series (2026-09-24): one row per closed bar while
         #: an option structure is open — feeds the end-of-day chart export
@@ -1564,8 +1575,50 @@ class StrategyRunner:
         return float(self.portfolio.current_cash)
 
     @property
-    def realized_pnl(self) -> float:
+    def gross_realized_pnl(self) -> float:
+        """Lifetime realized P&L **before** any cost — both books (BUG-04)."""
         return float(self.portfolio.realized_pnl) + self._option_realized_pnl()
+
+    @property
+    def total_fees_paid(self) -> float:
+        """Lifetime brokerage + statutory charges, equity book and option book.
+
+        The cash truth: each book's own accumulator, not a sum over positions,
+        so a fee charged outside a position object cannot hide in this column.
+        """
+        fees = float(self.portfolio.total_commission)
+        bridge = self.options_bridge
+        if bridge is not None:
+            broker = bridge.option_broker
+            fees += float(broker.total_costs_paid)
+        return fees
+
+    def _open_fees(self) -> float:
+        """The part of :attr:`total_fees_paid` sitting on books still open.
+
+        Those charges have not cost a *closed* trade anything yet — they are
+        the price of the position that is still on the book — so they are
+        attributed to :meth:`open_pnl`, which keeps :attr:`realized_pnl` at
+        zero for a runner that has opened but not yet closed anything.
+        """
+        fees = sum(float(p.commission_total) for p in self.portfolio.positions.values())
+        bridge = self.options_bridge
+        if bridge is not None:
+            for structure in bridge.option_broker.get_open_structures():
+                fees += float(structure.total_commission)
+                fees += float(structure.statutory_fees or 0)
+        return fees
+
+    @property
+    def realized_pnl(self) -> float:
+        """Lifetime realized P&L, **net** of the costs it belongs to (BUG-04).
+
+        ``gross_realized_pnl − (total_fees_paid − fees on open books)``. The
+        split is chosen so :meth:`open_pnl` and this property add up to exactly
+        ``equity() − allocated_capital`` — the invariant every card, row and
+        snapshot on the portfolio is bound to.
+        """
+        return self.gross_realized_pnl - (self.total_fees_paid - self._open_fees())
 
     @property
     def positions(self) -> Dict[str, Dict[str, Any]]:
@@ -3961,10 +4014,11 @@ class StrategyRunner:
     def _option_realized_pnl(self) -> float:
         """Booked option P&L from closed/expired legs (gross of costs).
 
-        Matches the options dashboard's convention: ``realized_pnl`` is what
-        the legs booked, while the commission + statutory fee stack lives in
-        :meth:`option_pnl` / :meth:`equity` — netting fees here would make a
-        runner show a *negative* realized P&L the instant it opened anything.
+        Feeds :attr:`gross_realized_pnl` only — the GROSS half of the contract.
+        The option book keeps its fee stack in
+        :meth:`backtest.forward.options_bridge.OptionsBridge.summary` /
+        :meth:`option_pnl`, so this stays the legs' price P&L and the netting
+        happens once, in :attr:`realized_pnl`.
         """
         bridge = self.options_bridge
         if bridge is None:
@@ -3984,10 +4038,20 @@ class StrategyRunner:
         return float(bridge.net_pnl)
 
     def unrealized_pnl(self) -> float:
+        """Open legs' raw mark-to-market, before any cost (both books)."""
         unrealized = float(self.portfolio.unrealized_pnl)
         if self.options_bridge is not None:
             unrealized += float(self.options_bridge.unrealized_pnl)
         return unrealized
+
+    def open_pnl(self) -> float:
+        """Current NET open P&L (BUG-04).
+
+        ``unrealized_pnl() − the charges the still-open books have already
+        paid``: what would be banked if everything marked out at today's price.
+        Pairs with :attr:`realized_pnl` to close the equity identity exactly.
+        """
+        return self.unrealized_pnl() - self._open_fees()
 
     def equity(self) -> float:
         """Equity portfolio + this runner's option book (task A2).
@@ -4005,71 +4069,96 @@ class StrategyRunner:
             deployed += float(self.options_bridge.premium_at_risk)
         return deployed
 
-    def daily_pnl(self) -> float:
-        """Daily PnL: round trips whose IST session date is today + open MTM.
+    def _pnl_session_now(self) -> str:
+        """The session this book is attributed to: newest bar, else wall clock.
 
-        Day rolls at 00:00 IST — the 2026-10-22 anchor check found nothing
-        that rolls at 09:15 (``reset_daily_anchors()`` fires only from
-        ``stress_test``), and calendar dates were the chosen semantics.
-        Realized comes from ``portfolio.closed_positions``, not the
-        ``_closed_trades`` audit list: the book round-trips across restarts
-        and the list does not, so a runner restarted mid-day would otherwise
-        lose the day's realized losses from the fuse (guard: the 00:00–05:30
-        IST UTC/IST seam is resolved once, via ``_as_ist_date``).
-        ``Position.net_pnl`` is net of every commission on the round trip.
-
-        Both closed and open option structures stamp IST ``session_date`` and
-        net out brokerage + statutory fees so ``daily_pnl()`` reconciles with
-        ``equity() - _day_start_equity`` and rolls cleanly at 00:00 IST.
+        The bar clock, not the wall clock, because a replay reaches a session
+        the machine is not standing in — the option book already rolls its
+        BUG-18 anchor on the bar clock, and the two must roll together.
         """
-        today = datetime.now(_IST).date().isoformat()
-        realized_today = sum(
-            (
-                p.net_pnl
-                for p in self.portfolio.closed_positions
-                if p.closed_at is not None and _as_ist_date(p.closed_at) == today
-            ),
-            Decimal("0"),
+        newest = max(self._last_bar_ts.values(), default="") or ""
+        return _ist_date_of(newest) or datetime.now(_IST).date().isoformat()
+
+    def _capture_pnl_session(self) -> None:
+        """Roll the BUG-04 day anchors: store the current (realized, open) pair.
+
+        Called on every mark and before every read of the daily fields. The
+        promotion into ``_prev_close_*`` fires only when the session date
+        advances, and takes the pair captured at the END of the previous
+        session — so the stored anchor is never today's number. Because
+        ``realized_pnl + open_pnl == equity − allocated`` holds at every
+        instant, the difference of those two sums is exactly today's move:
+        yesterday's mark cannot be re-booked today (BUG-18 parity for the
+        equity book, which had no per-position anchor) and a partial scale-out
+        is counted the day it books, not the day the ticket finally closes
+        (BUG-04 defect #2).
+        """
+        today = self._pnl_session_now()
+        realized = self.realized_pnl
+        open_pnl = self.open_pnl()
+        if self._pnl_session is None:
+            self._pnl_session = today
+            self._last_session_realized = realized
+            self._last_session_open = open_pnl
+            return
+        if today > self._pnl_session:
+            self._prev_close_realized_net = self._last_session_realized
+            self._prev_close_open_pnl = self._last_session_open
+        if today >= self._pnl_session:
+            self._pnl_session = today
+            self._last_session_realized = realized
+            self._last_session_open = open_pnl
+
+    @property
+    def prev_close_open_pnl(self) -> float:
+        """NET open P&L as of the previous session's last capture (BUG-04)."""
+        self._capture_pnl_session()
+        return self._prev_close_open_pnl
+
+    def baseline_pnl_anchors(self) -> None:
+        """Start the BUG-04 day anchors for a book that has no anchor history.
+
+        A state file written before the NET contract carries no session, so the
+        restored lifetime numbers cannot be dated. A runner created inside the
+        current session has no past to hide — its lifetime IS today, so the
+        anchors stay at zero and a mid-day restart cannot lose the day's losses.
+        An older book is baselined at the restore, which makes ``daily_pnl()``
+        measure the new session instead of re-claiming the lifetime.
+        """
+        created_session = _ist_date_of(self.created_ts)
+        current_session = self._pnl_session_now()
+        if created_session is not None and created_session >= current_session:
+            return
+        self._prev_close_realized_net = self.realized_pnl
+        self._prev_close_open_pnl = self.open_pnl()
+        self._last_session_realized = self.realized_pnl
+        self._last_session_open = self.open_pnl()
+
+    @property
+    def realized_pnl_today(self) -> float:
+        """NET realized P&L booked inside the current session (BUG-04)."""
+        self._capture_pnl_session()
+        return self.realized_pnl - self._prev_close_realized_net
+
+    def daily_pnl(self) -> float:
+        """Today's move: NET realized booked today plus the move in open P&L.
+
+        ``realized_pnl_today + (open_pnl − prev_close_open_pnl)`` — the single
+        contract (BUG-04), and by construction equal to
+        ``equity() − <equity at the previous session's close>``.
+
+        Day rolls at 00:00 IST, matching the option book's BUG-18 attribution.
+        The old version filtered ``portfolio.closed_positions`` on
+        ``closed_at`` and added the whole open MTM, which (a) dropped a partial
+        scale-out's realized half until the ticket finally closed — possibly on
+        a later session — and (b) re-booked yesterday's open mark inside
+        today's number.
+        """
+        self._capture_pnl_session()
+        return (
+            self.realized_pnl - self._prev_close_realized_net
+            + self.open_pnl() - self._prev_close_open_pnl
         )
-
-        total = float(realized_today) + float(self.portfolio.unrealized_pnl)
-
-        # Option book contribution (OPT-6: closes stamp IST session_date, so
-        # options roll at 00:00 IST and survive a mid-day restart exactly like
-        # equities, net of brokerage + statutory fees).
-        #
-        # BUG-18: a structure that carried in from an earlier session books only
-        # TODAY'S move here. Yesterday's mark was already that session's daily
-        # number, so re-booking the overnight gap today would double-count it,
-        # while booking the whole trip today would hide where it actually
-        # happened. Lifetime ``realized_pnl``/``equity()`` still carry the full
-        # trade; only this daily slice is attributed.
-        if self.options_bridge is not None:
-            book = self.options_bridge.option_broker
-            option_today = Decimal("0")
-            for structure in book.get_closed_structures():
-                s_date = getattr(structure, "effective_session_date", None)
-                if not s_date and getattr(structure, "closed_at", None) is not None:
-                    s_date = _as_ist_date(structure.closed_at)
-                if s_date != today:
-                    continue
-                lifetime = getattr(
-                    structure,
-                    "net_pnl",
-                    structure.total_realized_pnl - structure.total_commission,
-                )
-                option_today += lifetime - getattr(structure, "prior_close_net_pnl", Decimal("0"))
-            for structure in book.get_open_structures():
-                today_slice = getattr(structure, "net_open_pnl_today", None)
-                if today_slice is None:
-                    costs = getattr(structure, "total_commission", Decimal("0")) + getattr(
-                        structure, "statutory_fees", Decimal("0")
-                    )
-                    today_slice = structure.total_unrealized_pnl - costs
-                option_today += today_slice
-            total += float(option_today)
-
-        return total
 
     def win_rate(self) -> float:
         total = self.wins + self.losses
@@ -4077,6 +4166,7 @@ class StrategyRunner:
 
     def _mark_to_market(self, record: bool = False) -> None:
         equity = self.equity()
+        self._capture_pnl_session()
         is_stale = bool(self.options_bridge is not None and self.options_bridge.mark_stale)
         # §8 Q4: freeze peak_equity / max_drawdown_pct updates while option
         # marks are stale so a frozen mark cannot corrupt drawdown breakers.
@@ -4225,7 +4315,15 @@ class StrategyRunner:
                 "allocated_capital": round(self.config.allocated_capital, 2),
                 "equity": round(equity, 2),
                 "deployed_capital": round(self.deployed_capital(), 2),
-                "open_pnl": round(self.unrealized_pnl(), 2),
+                # BUG-04 — one NET contract, same keys on every row and card:
+                # gross realized and the lifetime fee stack are shown next to
+                # the net numbers so a reader can check the netting, and
+                # ``equity == allocated_capital + realized_pnl + open_pnl``.
+                "gross_realized_pnl": round(self.gross_realized_pnl, 2),
+                "total_fees_paid": round(self.total_fees_paid, 2),
+                "open_pnl": round(self.open_pnl(), 2),
+                "realized_pnl_today": round(self.realized_pnl_today, 2),
+                "prev_close_open_pnl": round(self.prev_close_open_pnl, 2),
                 "daily_pnl": round(self.daily_pnl(), 2),
                 "realized_pnl": round(self.realized_pnl, 2),
                 "win_rate": round(self.win_rate(), 4),
@@ -4868,25 +4966,49 @@ class PaperRunner:
     def equity(self) -> float:
         """Current equity = cash + position value."""
         return float(self.portfolio.calculate_total_equity())
-    
-    def daily_pnl(self) -> float:
-        """Daily PnL: round trips closed today (00:00 IST roll) + open MTM.
 
-        Mirrors :meth:`StrategyRunner.daily_pnl`. The old version filtered
-        ``_closed_trades`` — which this class never populates — on a
-        ``net_pnl`` key nobody wrote, so realized was structurally 0 while
-        the entire lifetime's commission was subtracted every call.
+    @property
+    def gross_realized_pnl(self) -> float:
+        """Lifetime realized P&L before any cost (BUG-04 contract)."""
+        return float(self.portfolio.realized_pnl)
+
+    @property
+    def total_fees_paid(self) -> float:
+        """Lifetime brokerage + statutory charges on this run's book."""
+        return float(self.portfolio.total_commission)
+
+    def _open_fees(self) -> float:
+        """Charges sitting on positions that are still open."""
+        return sum(float(p.commission_total) for p in self.portfolio.positions.values())
+
+    @property
+    def realized_pnl(self) -> float:
+        """Lifetime realized P&L, net of the costs of the closed round trips."""
+        return self.gross_realized_pnl - (self.total_fees_paid - self._open_fees())
+
+    def open_pnl(self) -> float:
+        """NET open P&L: mark-to-market less the open book's own charges."""
+        return float(self.portfolio.unrealized_pnl) - self._open_fees()
+
+    @property
+    def realized_pnl_today(self) -> float:
+        """One run is one session: today's NET realized is the lifetime number."""
+        return self.realized_pnl
+
+    @property
+    def prev_close_open_pnl(self) -> float:
+        """``0.0`` — a run starts flat, so nothing carried in from before."""
+        return 0.0
+
+    def daily_pnl(self) -> float:
+        """This run's P&L: realized (net) + open (net) == equity − initial.
+
+        Mirrors :meth:`StrategyRunner.daily_pnl`, single session. The old
+        version filtered ``_closed_trades`` — which this class never populates
+        — on a ``net_pnl`` key nobody wrote, so realized was structurally 0
+        while the entire lifetime's commission was subtracted every call.
         """
-        today = datetime.now(_IST).date().isoformat()
-        realized_today = sum(
-            (
-                p.net_pnl
-                for p in self.portfolio.closed_positions
-                if p.closed_at is not None and _as_ist_date(p.closed_at) == today
-            ),
-            Decimal("0"),
-        )
-        return float(realized_today) + float(self.portfolio.unrealized_pnl)
+        return self.realized_pnl + self.open_pnl()
 
     @property
     def wins(self) -> int:

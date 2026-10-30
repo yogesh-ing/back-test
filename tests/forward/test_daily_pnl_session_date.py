@@ -13,13 +13,17 @@ seams made its realized portion structurally zero (2026-10-22 recon):
 
 Architecture decision (2026-10-22): the day resets at **00:00 IST calendar
 date** — nothing in the system rolls at 09:15, so no Trading-Session-Date
-mapping is needed. The realized reader sources
-``portfolio.closed_positions`` (the book round-trips across restarts; the
-legacy ``_closed_trades`` list does not), and the writer stamps the audit
-record with tz-aware ``exit_time``, ``session_date`` and Decimal ``net_pnl``.
+mapping is needed. The writer stamps the audit record with tz-aware
+``exit_time``, ``session_date`` and Decimal ``net_pnl``.
 
 Sign convention (writer docstring is the contract): ``net_pnl`` > 0 is a
 profit, < 0 a loss, net of every commission charged on the round trip.
+
+Update (BUG-04, 2026-10-30): the *audit writer* still stamps ``session_date``
+from the close instant, but the daily READER no longer filters those stamps.
+``daily_pnl()`` is now the NET move of (realized + open) between session
+anchors, rolled on the bar clock — see ``tests/forward/test_net_pnl_contract.py``
+for the contract and its invariants.
 """
 
 from __future__ import annotations
@@ -87,8 +91,8 @@ def _long_then_close(runner: StrategyRunner, exit_price: float):
     return closed[-1]
 
 
-def _feed(runner: StrategyRunner, closes) -> None:
-    for bar in _bars(closes):
+def _feed(runner: StrategyRunner, closes, start_day: int = 0) -> None:
+    for bar in _bars(closes, start_day=start_day):
         runner.process_candle_event("RELIANCE", bar)
 
 
@@ -169,7 +173,7 @@ class TestClosedTradeWriter:
 
 
 # ---------------------------------------------------------------------------
-# Reader: daily_pnl realized portion = trades whose session date is today
+# Reader: today's P&L is the NET move of the book, rolled on the session clock
 # ---------------------------------------------------------------------------
 
 
@@ -180,48 +184,49 @@ class TestDailyPnlSessionDate:
         closed = _long_then_close(runner, exit_price=80.0)
         expected = float(closed.net_pnl)
         assert expected < 0
-        assert runner.daily_pnl() == pytest.approx(expected, rel=1e-6)
+        # BUG-04: the reader is the NET half, and ``daily_pnl`` is the move of
+        # (realized + open) between session captures — the entry brokerage was
+        # already counted on the bar that paid it, so ``daily_pnl`` and
+        # ``realized_pnl_today`` differ by exactly that fee.
+        assert runner.realized_pnl_today == pytest.approx(expected, rel=1e-6)
         assert runner.daily_pnl() != 0.0
+        assert runner.daily_pnl() == pytest.approx(
+            runner.realized_pnl_today + runner.open_pnl() - runner.prev_close_open_pnl,
+            abs=0.02,
+        )
 
-    @pytest.mark.parametrize(
-        "moment_utc,hour_ist,minute_ist,expected_included",
-        [
-            # (UTC instant, IST clock to combine onto the IST-today date)
-            (None, 15, 30, True),   # NSE close: same UTC calendar date
-            (None, 0, 20, True),    # after-midnight fill: UTC date is yesterday
-            ("yesterday", 23, 30, False),  # last night's close: not today's loss
-        ],
-        ids=["nse_close_1530_ist", "after_midnight_0020_ist", "prev_day_2330_ist"],
-    )
-    def test_day_rolls_at_midnight_ist(
-        self, moment_utc, hour_ist, minute_ist, expected_included
-    ):
+    def test_day_rolls_on_the_next_session_bar(self):
+        """Yesterday's banked P&L leaves today when the session advances.
+
+        BUG-04 moved the roll from a ``closed_at`` date filter to the runner's
+        own session anchors, so it rolls on the same bar clock the option book
+        uses (BUG-18). Between midnight and the first new bar yesterday's
+        number is still shown — deliberately fail-safe for the daily-loss
+        breaker, which must not get a free reset before the session starts.
+        """
         runner = _equity_runner()
         closed = _long_then_close(runner, exit_price=80.0)
-        ist_now = _ist_today()
-        if moment_utc == "yesterday":
-            stamp = datetime.combine(ist_now - timedelta(days=1), time(23, 30), tzinfo=IST)
-        else:
-            stamp = datetime.combine(ist_now, time(hour_ist, minute_ist), tzinfo=IST)
-        closed.closed_at = stamp
-        realized = float(closed.net_pnl)
-        got = runner.daily_pnl()
-        if expected_included:
-            assert got == pytest.approx(realized, rel=1e-6)
-        else:
-            assert got == pytest.approx(0.0, abs=1e-9)
+        assert runner.realized_pnl_today == pytest.approx(
+            float(closed.net_pnl), rel=1e-6
+        )
 
-    def test_paper_runner_reader_uses_closed_positions(self):
+        _feed(runner, [80.0], start_day=14)
+        assert runner.realized_pnl_today == pytest.approx(0.0, abs=1e-9)
+        # Nothing banked carries over: what the new session shows is the move
+        # of its own book (the strategy re-entered, so its entry cost is
+        # today's, charged against the mark — not yesterday's loss).
+        assert runner.prev_close_open_pnl == pytest.approx(0.0, abs=0.02)
+        assert runner.daily_pnl() == pytest.approx(runner.open_pnl(), abs=0.02)
+
+    def test_paper_runner_reader_uses_the_book_not_closed_trades(self):
         """PaperRunner has no _closed_trades producer — its reader must not rely on it."""
         from backtest.forward.paper_runner import PaperRunner
-        from backtest.simulator.portfolio import Portfolio
 
         runner = _equity_runner()
         closed = _long_then_close(runner, exit_price=80.0)
 
         replay = PaperRunner.__new__(PaperRunner)  # bypass the bar-replay __init__
-        replay.portfolio = Portfolio(name="t", initial_capital=100_000)
-        replay.portfolio.closed_positions = [closed]
+        replay.portfolio = runner.portfolio  # the book StrategyRunner actually traded
         assert replay.daily_pnl() == pytest.approx(float(closed.net_pnl), rel=1e-6)
 
 

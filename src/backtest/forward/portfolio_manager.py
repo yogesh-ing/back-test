@@ -405,8 +405,36 @@ class PortfolioManager:
         return sum(r.daily_pnl() for r in self._bucket_runners(mode))
 
     def _bucket_realized_pnl(self, mode: str) -> float:
-        """Derive realized P&L for a bucket from its runners."""
+        """Derive NET realized P&L for a bucket from its runners (BUG-04).
+
+        ``runner.realized_pnl`` is the net half of the contract — lifetime
+        realized less the costs that belong to closed round trips.
+        """
         return sum(r.realized_pnl for r in self._bucket_runners(mode))
+
+    def _bucket_sum(self, mode: str, attr: str, call: bool = False) -> float:
+        """Sum one BUG-04 contract field across a bucket's runners."""
+        total = 0.0
+        for r in self._bucket_runners(mode):
+            value = getattr(r, attr, 0.0)
+            total += float(value() if call else value)
+        return total
+
+    def _bucket_gross_realized(self, mode: str) -> float:
+        """Lifetime realized before any cost — see BUG-04 contract."""
+        return self._bucket_sum(mode, "gross_realized_pnl")
+
+    def _bucket_fees(self, mode: str) -> float:
+        """Lifetime brokerage + statutory charges paid by this bucket."""
+        return self._bucket_sum(mode, "total_fees_paid")
+
+    def _bucket_realized_today(self, mode: str) -> float:
+        """NET realized booked in the current session, all runners."""
+        return self._bucket_sum(mode, "realized_pnl_today")
+
+    def _bucket_open_pnl(self, mode: str) -> float:
+        """NET mark-to-market on books still open."""
+        return self._bucket_sum(mode, "open_pnl", call=True)
 
     def _bucket_deployed(self, mode: str) -> float:
         """Derive deployed capital for a bucket from its runners."""
@@ -569,6 +597,13 @@ class PortfolioManager:
                 "daily_pnl": round(daily, 2),
                 "daily_pnl_pct": round(daily / pct_denominator, 6),
                 "realized_pnl": round(self._bucket_realized_pnl(mode), 2),
+                # BUG-04: the full NET contract, per bucket. Rows and cards
+                # must be able to reconcile gross − fees = net without opening
+                # a runner detail.
+                "gross_realized_pnl": round(self._bucket_gross_realized(mode), 2),
+                "total_fees_paid": round(self._bucket_fees(mode), 2),
+                "realized_pnl_today": round(self._bucket_realized_today(mode), 2),
+                "open_pnl": round(self._bucket_open_pnl(mode), 2),
                 "deployed_capital": round(self._bucket_deployed(mode), 2),
                 "open_positions": self._bucket_open_positions(mode),
                 "halted": self._bucket_halted.get(mode, False),
@@ -677,7 +712,10 @@ class PortfolioManager:
                 "open_positions": 0,
                 "open_structures": 0,
                 "equity": 0.0,
+                "gross_realized_pnl": 0.0,
+                "total_fees_paid": 0.0,
                 "realized_pnl": 0.0,
+                "open_pnl": 0.0,
                 "unrealized_pnl": 0.0,
                 "capital": 0.0,
                 "positions": [],
@@ -697,12 +735,28 @@ class PortfolioManager:
             open_positions = broker.get_open_positions()
             open_structures = broker.get_open_structures()
 
+            # BUG-04: this row is runner-shaped, so it owes the same contract.
+            # ``total_realized_pnl`` is gross and ``total_costs_paid`` is the
+            # lifetime stack; the part still sitting on open books belongs to
+            # the mark, the rest to realized — the same attribution the runners
+            # use, so gross − fees = net here and there alike.
+            gross_realized = float(broker.total_realized_pnl)
+            fees_paid = float(broker.total_costs_paid)
+            open_fees = sum(
+                float(s.total_commission) + float(s.statutory_fees or 0)
+                for s in open_structures
+            )
+            net_open = float(broker.total_unrealized_pnl) - open_fees
+
             return {
                 "exists": True,
                 "open_positions": len(open_positions),
                 "open_structures": len(open_structures),
                 "equity": float(broker.total_equity),
-                "realized_pnl": float(broker.total_realized_pnl),
+                "gross_realized_pnl": gross_realized,
+                "total_fees_paid": fees_paid,
+                "realized_pnl": gross_realized - (fees_paid - open_fees),
+                "open_pnl": net_open,
                 "unrealized_pnl": float(broker.total_unrealized_pnl),
                 "capital": float(broker.capital),
                 "available_cash": float(broker.available_cash),
@@ -3176,6 +3230,13 @@ class PortfolioManager:
             deployed = sum(s["deployed_capital"] for s in states)
             daily = sum(s["daily_pnl"] for s in states)
             realized = sum(s["realized_pnl"] for s in states)
+            # BUG-04: the NET contract rows travel with every runner state, so
+            # the aggregate views can publish gross, fees and the day's slice
+            # without re-deriving them.
+            gross_realized = sum(s.get("gross_realized_pnl") or 0.0 for s in states)
+            fees = sum(s.get("total_fees_paid") or 0.0 for s in states)
+            realized_today = sum(s.get("realized_pnl_today") or 0.0 for s in states)
+            open_pnl = sum(s.get("open_pnl") or 0.0 for s in states)
             open_positions = sum(s["open_positions"] for s in states)
             running = sum(1 for s in states if s["status"] == STATUS_RUNNING)
             paused = sum(1 for s in states if s["status"] == STATUS_PAUSED)
@@ -3244,7 +3305,9 @@ class PortfolioManager:
                 dashboard_book.get("equity", 0.0) if dashboard_book.get("exists") else 0.0
             )
             dashboard_daily = (
-                dashboard_book.get("unrealized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
+                # BUG-04: fold the NET mark, not gross MTM — the gross half
+                # would overstate today by every rupee of fee this book paid.
+                dashboard_book.get("open_pnl", 0.0) if dashboard_book.get("exists") else 0.0
             )
             dashboard_realized = (
                 dashboard_book.get("realized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
@@ -3274,6 +3337,22 @@ class PortfolioManager:
             combined_daily = daily + (dashboard_daily if fold_dashboard else 0.0)
             combined_realized = realized + (dashboard_realized if fold_dashboard else 0.0)
             combined_positions = open_positions + (dashboard_positions if fold_dashboard else 0)
+            # BUG-04: the rest of the NET contract on the combined/scoped view.
+            # Each is the same sum the runners made, plus the dashboard book
+            # when its money genuinely belongs in this scope.
+            combined_gross = gross_realized + (
+                float(dashboard_book.get("gross_realized_pnl") or 0.0)
+                if fold_dashboard
+                else 0.0
+            )
+            combined_fees = fees + (
+                float(dashboard_book.get("total_fees_paid") or 0.0)
+                if fold_dashboard
+                else 0.0
+            )
+            combined_open = open_pnl + (
+                float(dashboard_book.get("open_pnl") or 0.0) if fold_dashboard else 0.0
+            )
             stale_marks_count = sum(int(s.get("stale_positions") or 0) for s in states)
 
             return {
@@ -3285,6 +3364,10 @@ class PortfolioManager:
                 "daily_pnl": round(combined_daily, 2),
                 "daily_pnl_pct": round(combined_daily / pct_denominator, 6),
                 "realized_pnl": round(combined_realized, 2),
+                "gross_realized_pnl": round(combined_gross, 2),
+                "total_fees_paid": round(combined_fees, 2),
+                "realized_pnl_today": round(realized_today, 2),
+                "open_pnl": round(combined_open, 2),
                 "open_positions": combined_positions,
                 "stale_marks_count": stale_marks_count,
                 "runner_count": len(states),
@@ -3400,6 +3483,11 @@ class PortfolioManager:
                     "mode": state["mode"],
                     "equity": state["equity"],
                     "realized_pnl": state["realized_pnl"],
+                    # BUG-04: the row that quotes a NET realized must also show
+                    # the gross it came from and the fees taken off it.
+                    "gross_realized_pnl": state.get("gross_realized_pnl", 0.0),
+                    "total_fees_paid": state.get("total_fees_paid", 0.0),
+                    "realized_pnl_today": state.get("realized_pnl_today", 0.0),
                     "daily_pnl": state["daily_pnl"],
                     "open_pnl": state["open_pnl"],
                     "win_rate": state["win_rate"],
