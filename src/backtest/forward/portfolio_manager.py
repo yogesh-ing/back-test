@@ -94,6 +94,7 @@ class PortfolioManager:
         enable_broker_warmup: Optional[bool] = None,
         async_warmup: Optional[bool] = None,
         reject_duplicate_runners: bool = False,
+        persist_trades: bool = True,
     ) -> None:
         self.ledger = OrderLedger()
         self.broker = PaperBroker(self.ledger)
@@ -272,16 +273,22 @@ class PortfolioManager:
         # GAP-4 (2026-09-21): permanent trade history in PostgreSQL. Fail-soft:
         # a missing/unreachable DB degrades to the JSON snapshot only.
         self._trade_persister: Optional[Any] = None
-        try:
-            from backtest.forward.trade_persistence import LiveTradePersister
+        # Ticket 2.4: ``persist_trades=False`` is the seam a hermetic test asks
+        # for. Without it the manager resolves a DB URL through the environment
+        # and survives only because the pytest firewall rewrites a live URL to
+        # ``sqlite:///:memory:`` — a backstop, not isolation by construction.
+        # With no persister, the boot reap below is a no-op as well.
+        if persist_trades:
+            try:
+                from backtest.forward.trade_persistence import LiveTradePersister
 
-            from backtest.db import DatabaseManager
+                from backtest.db import DatabaseManager
 
-            self._trade_persister = LiveTradePersister(DatabaseManager.from_env())
-            # B3: the execution ledger becomes durable at the transition itself.
-            self._trade_persister.attach_order_ledger(self.ledger)
-        except Exception:  # noqa: BLE001 — persistence is best-effort
-            logger.info("trade persistence disabled (no reachable database)", exc_info=True)
+                self._trade_persister = LiveTradePersister(DatabaseManager.from_env())
+                # B3: the execution ledger becomes durable at the transition itself.
+                self._trade_persister.attach_order_ledger(self.ledger)
+            except Exception:  # noqa: BLE001 — persistence is best-effort
+                logger.info("trade persistence disabled (no reachable database)", exc_info=True)
         self._restoring = False  # suppress saves while rehydrating
         # Portfolio Intelligence (2026-09-26): read-only aggregate analytics +
         # alert rules. Built before the restore so restored runners register

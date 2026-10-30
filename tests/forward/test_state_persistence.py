@@ -42,6 +42,11 @@ def _manager(state_path=None) -> PortfolioManager:
         warmup_bars=5,
         auto_start_feed=False,
         state_path=state_path,
+        # This file's own promise is "SQLite-free". Leaving the seam unset meant
+        # keeping it only because the pytest firewall rewrites a live DB URL to
+        # ``sqlite:///:memory:`` — the persister still attached the ledger and the
+        # boot reap still queried real rows. Ticket 2.4: ask for none of it.
+        persist_trades=False,
     )
 
 
@@ -310,6 +315,7 @@ class TestOptionBookRestore:
             warmup_bars=30,
             auto_start_feed=False,
             state_path=state_path,
+            persist_trades=False,  # same promise as ``_manager`` above
         )
 
     def test_open_structure_and_bridge_scalars_round_trip(self, tmp_path):
@@ -635,3 +641,83 @@ class TestRefusedRestoreKeepsSnapshot:
         assert store.boot_backup() is not None
         remaining = list(tmp_path.glob("state.json.boot_*"))
         assert len(remaining) == keep, "oldest pruned, newest kept"
+
+
+# ---------------------------------------------------------------------------
+# Ticket 2.4 — the hermetic seam itself
+# ---------------------------------------------------------------------------
+
+
+class TestNoPersistenceSeam:
+    """``persist_trades=False`` must mean *never resolved*, not *sandboxed*.
+
+    Under pytest the DB firewall rewrites a live URL to ``sqlite:///:memory:``,
+    so a manager that resolves one still passes every test — while the ledger
+    seam is attached, real rows are queried by the boot reap, and the isolation
+    depends on a guard nobody reads. These two pin the difference.
+    """
+
+    def test_a_hermetic_manager_never_resolves_a_database_url(self, tmp_path, monkeypatch):
+        from backtest.db import manager as db_manager
+
+        resolved = []
+
+        def _boom(*args, **kwargs):
+            # Counted, not only raised: GAP-4 is fail-soft, so an exception out
+            # of ``from_env`` would be swallowed and still leave a nil persister.
+            resolved.append(True)
+            raise AssertionError("a hermetic manager must not resolve a DB URL")
+
+        monkeypatch.setattr(db_manager.DatabaseManager, "from_env", staticmethod(_boom))
+
+        mgr = _manager(tmp_path / "state.json")
+        try:
+            assert resolved == [], "persist_trades=False must not reach for a DB URL"
+            assert mgr._trade_persister is None
+            # BUG-37's boot reap is a DB write; with no seam it is a no-op.
+            mgr._reap_orphan_portfolio_rows()
+        finally:
+            mgr.shutdown()
+
+    def test_the_default_still_opens_the_gap_4_seam_and_attaches_the_ledger(
+        self, tmp_path, monkeypatch
+    ):
+        """The flag is what turns persistence off — not a missing database.
+
+        Same spy, opposite answer: the manager hands the persister this
+        process's ``OrderLedger`` (B3), which is exactly what the hermetic
+        manager must not do.
+        """
+        from backtest.db import manager as db_manager
+
+        built = []
+
+        class _FakeDB:
+            def session(self):  # pragma: no cover — never used by these asserts
+                raise AssertionError("no DB work in this test")
+
+        monkeypatch.setattr(
+            db_manager.DatabaseManager, "from_env", staticmethod(lambda *a, **k: _FakeDB())
+        )
+        import backtest.forward.trade_persistence as tp_mod
+
+        real_persister = tp_mod.LiveTradePersister
+
+        def _spy(db_manager):
+            persister = real_persister(db_manager)
+            built.append(persister)
+            return persister
+
+        monkeypatch.setattr(tp_mod, "LiveTradePersister", _spy)
+
+        mgr = PortfolioManager(
+            risk_config=GlobalRiskConfig(daily_loss_limit=1_000_000, max_drawdown_pct=0.9),
+            auto_start_feed=False,
+            state_path=tmp_path / "state.json",
+        )
+        try:
+            assert built, "the default must keep GAP-4 trade history"
+            assert mgr._trade_persister is built[0]
+            assert built[0]._ledger is mgr.ledger, "B3: the ledger rides the seam"
+        finally:
+            mgr.shutdown()

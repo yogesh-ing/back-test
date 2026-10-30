@@ -891,7 +891,7 @@ class TestLiveMinuteBarBuilderAndPortfolioTickFanout:
         assert all("/quote/ohlc" not in u for u in urls)
 
     def test_portfolio_manager_ws_tick_batch_dispatches_spot_and_held_option_leg_ticks(
-        self, monkeypatch
+        self, monkeypatch, tmp_path
     ):
         contracts = _make_chain_contracts(center=24500, half_steps=20, lot_size=65)
         stub = _LiveWSBrokerStub(contracts)
@@ -906,6 +906,11 @@ class TestLiveMinuteBarBuilderAndPortfolioTickFanout:
             enable_broker_warmup=False,
             async_warmup=False,
             live_broker=stub,
+            # Ticket 2.4: isolated by construction, not by the pytest DB
+            # firewall — this book writes no ledger rows, cannot reap the real
+            # one on boot, and its snapshot lands in this test's own directory.
+            state_path=tmp_path / "portfolio_state.json",
+            persist_trades=False,
         )
         try:
             spec = get_strategy("immediate_strangle").execution_spec().to_expression()
