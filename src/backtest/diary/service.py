@@ -34,6 +34,7 @@ from backtest.diary.ledger import (
     normalize_db_trade_row,
     normalize_memory_trade_dict,
 )
+from backtest.diary.payoff import build_payoff_and_drag_report
 from backtest.diary.regimes import (
     build_regime_matrices,
     validate_regime_clock,
@@ -727,6 +728,53 @@ class DiaryService:
             available_strategies=loaded["available_strategies"],
             trades=trades,
             clock=norm_clock,
+            group_by=norm_group,
+            duplicates_collapsed=loaded["duplicates_collapsed"],
+        )
+        payload["ledger_health"] = self._ledger_health(
+            loaded["duplicates_collapsed"], mismatches
+        )
+        return payload
+
+    # ------------------------------------------------------------------
+    # Public Slice 4 Views: Hold-Duration Drag & Payoff Breakeven Quadrant
+    # ------------------------------------------------------------------
+
+    def get_edge_payoff(
+        self,
+        *,
+        mode: str = "paper",
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        strategy: Optional[str] = None,
+        group_by: str = "instance",
+        today_ist: Optional[date] = None,
+    ) -> dict[str, Any]:
+        """Return Hold-Duration friction table + Win % vs Payoff Quadrant."""
+        book_mode = validate_diary_mode(mode)
+        norm_group = validate_regime_group_by(group_by)
+        resolved_today = today_ist or current_session_date()
+        start_d, end_d = parse_ist_date_range(
+            from_date, to_date, default_span="today", today_ist=resolved_today
+        )
+        strat_filter = _normalize_strategy_filter(strategy)
+
+        loaded = self.load_book_trades(
+            mode=book_mode,
+            start_date=start_d,
+            end_date=end_d,
+            strategy=strat_filter,
+        )
+        trades = loaded["trades"]
+        mismatches = sum(1 for t in trades if not t.get("reconcile_ok", True))
+        payload = build_payoff_and_drag_report(
+            book_mode=book_mode,
+            start_d=start_d,
+            end_d=end_d,
+            today_ist=resolved_today,
+            selected_strategy=strat_filter,
+            available_strategies=loaded["available_strategies"],
+            trades=trades,
             group_by=norm_group,
             duplicates_collapsed=loaded["duplicates_collapsed"],
         )

@@ -953,4 +953,137 @@
     border-left: 2px solid var(--border);
 }
 
+/* Slice 4 — Commission Drag Meter & Win % vs Payoff Breakeven Quadrant */
+.diary-drag-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    justify-content: flex-end;
+}
+
+.diary-drag-bar {
+    width: 64px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--surface-3);
+    overflow: hidden;
+}
+
+.diary-drag-fill {
+    height: 100%;
+    border-radius: 3px;
+}
+
+.diary-drag-fill[data-band="healthy"] { background: var(--success); }
+.diary-drag-fill[data-band="warning"] { background: var(--warning); }
+.diary-drag-fill[data-band="critical"] { background: var(--danger); }
+
+.diary-rx-pill {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: .03em;
+}
+
+.diary-rx-pill[data-severity="positive"] {
+    background: var(--success-tint);
+    color: var(--success-text);
+    border: 1px solid var(--success-shade);
+}
+
+.diary-rx-pill[data-severity="warning"] {
+    background: var(--warning-tint);
+    color: var(--warning-text);
+    border: 1px solid var(--warning-shade);
+}
+
+.diary-rx-pill[data-severity="critical"] {
+    background: var(--danger-tint);
+    color: var(--danger-text);
+    border: 1px solid var(--danger-shade);
+}
+
+.diary-rx-pill[data-severity="neutral"] {
+    background: var(--surface-3);
+    color: var(--muted);
+    border: 1px solid var(--border);
+}
+
+.diary-quadrant-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.55fr) minmax(260px, 1fr);
+    gap: 12px;
+    align-items: stretch;
+}
+
+@media (max-width: 980px) {
+    .diary-quadrant-layout {
+        grid-template-columns: 1fr;
+    }
+}
+
+.diary-quadrant-chart-card,
+.diary-quadrant-inspector {
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border-soft);
+    background: var(--surface-2);
+}
+
+.diary-quadrant-svg {
+    width: 100%;
+    height: auto;
+    max-height: 310px;
+    display: block;
+}
+
+.diary-qbubble {
+    cursor: pointer;
+    transition: opacity .13s ease;
+}
+
+.diary-qbubble:hover circle {
+    stroke-width: 2.6;
+}
+
+.diary-qbubble.is-selected circle {
+    stroke: var(--text-strong);
+    stroke-width: 3;
+}
+
+.diary-inspector-stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin: 10px 0;
+}
+
+.diary-inspector-stat {
+    padding: 7px 9px;
+    border-radius: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border-soft);
+}
+
+.diary-inspector-stat span {
+    display: block;
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.diary-inspector-stat strong {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 13px;
+    color: var(--text-strong);
+}
+
+.diary-payoff-row.is-selected {
+    background: var(--primary-tint) !important;
+}
+
+
 

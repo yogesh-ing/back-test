@@ -180,10 +180,13 @@
     attrSort: 'net_asc',
     regimeClock: 'entry',
     regimeGroupBy: 'strategy',
+    payoffGroupBy: 'instance',
+    selectedPayoffKey: '',
     calendarDays: [],
     calendarWeeks: [],
     attributionData: null,
     regimesData: null,
+    payoffData: null,
     expandedStrategies: {},
     expandedInstances: {},
     hasAutoExpanded: false
@@ -238,7 +241,7 @@
   }
 
   function switchTab(tabName) {
-    var allowed = { attribution: true, regimes: true, sessions: true };
+    var allowed = { attribution: true, regimes: true, payoff: true, sessions: true };
     state.activeTab = allowed[tabName] ? tabName : 'attribution';
     var tabs = document.querySelectorAll('.diary-tab-btn');
     for (var i = 0; i < tabs.length; i++) {
@@ -248,9 +251,11 @@
     }
     var pAttr = document.getElementById('diary-panel-attribution');
     var pReg = document.getElementById('diary-panel-regimes');
+    var pPay = document.getElementById('diary-panel-payoff');
     var pSess = document.getElementById('diary-panel-sessions');
     if (pAttr) pAttr.hidden = state.activeTab !== 'attribution';
     if (pReg) pReg.hidden = state.activeTab !== 'regimes';
+    if (pPay) pPay.hidden = state.activeTab !== 'payoff';
     if (pSess) pSess.hidden = state.activeTab !== 'sessions';
   }
 
@@ -986,6 +991,321 @@
     });
   }
 
+  function renderDragMeterHtml(row) {
+    if (!row || !row.trade_count || Number(row.commission || 0) <= 0.005) {
+      return '<span class="muted">—</span>';
+    }
+    var band = row.drag_band || 'none';
+    var pctVal = row.profit_drag_pct != null
+      ? Number(row.profit_drag_pct)
+      : (row.commission_drag_pct != null ? Number(row.commission_drag_pct) : 100);
+    var fillW = row.gross_pnl <= 0.005 ? 100 : Math.min(100, Math.max(4, Math.round(pctVal)));
+    var textLbl = row.gross_pnl > 0.005
+      ? pctVal.toFixed(1) + '%'
+      : 'Gross ≤ ₹0';
+    var textCls = band === 'critical' ? 'diary-neg' : (band === 'warning' ? 'diary-warn' : 'diary-pos');
+    return '<div class="diary-drag-cell">' +
+      '<span class="' + textCls + '">' + textLbl + '</span>' +
+      '<span class="diary-drag-bar"><span class="diary-drag-fill" data-band="' +
+      escapeHtml(band) + '" style="width:' + fillW + '%"></span></span>' +
+      '</div>';
+  }
+
+  function buildHoldDurationTableHtml(holdBuckets, holdTotals, modeLabel) {
+    var rows = Array.isArray(holdBuckets) ? holdBuckets : [];
+    var tot = holdTotals || {};
+    if (!tot.trade_count) {
+      return '<div class="diary-empty">No closed trades in this IST window for the ' +
+        escapeHtml(modeLabel || 'selected') + ' book.</div>';
+    }
+    var html = '<table class="diary-table">' +
+      '<thead><tr>' +
+      '<th>Hold Window</th>' +
+      '<th class="num">Trades (Share)</th>' +
+      '<th class="num">Net Win %</th>' +
+      '<th class="num">Gross P&amp;L</th>' +
+      '<th class="num">Commission</th>' +
+      '<th class="num">Fee Hurdle / Tr</th>' +
+      '<th class="num">Commission Drag</th>' +
+      '<th class="num">Net P&amp;L</th>' +
+      '<th class="num">Expectancy</th>' +
+      '</tr></thead><tbody>';
+
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      html += '<tr>' +
+        '<td><strong>' + escapeHtml(r.label) + '</strong> ' +
+        '<span class="muted" style="font-size:11px;">' + escapeHtml(r.subtitle || '') + '</span></td>' +
+        '<td class="num">' + r.trade_count + ' <span class="muted">(' + Number(r.trade_share_pct || 0).toFixed(0) + '%)</span></td>' +
+        '<td class="num">' + (r.trade_count ? Number(r.win_rate_pct || 0).toFixed(1) + '%' : '—') + '</td>' +
+        '<td class="num ' + pnlToneClass(r.gross_pnl) + '">' + (r.trade_count ? fmtInrSigned(r.gross_pnl) : '—') + '</td>' +
+        '<td class="num">' + (r.trade_count ? fmtInrAbs(r.commission) : '—') + '</td>' +
+        '<td class="num">' + (r.trade_count ? fmtInrAbs(r.avg_commission_per_trade) : '—') + '</td>' +
+        '<td class="num">' + renderDragMeterHtml(r) + '</td>' +
+        '<td class="num ' + pnlToneClass(r.net_pnl) + '"><strong>' + (r.trade_count ? fmtInrSigned(r.net_pnl) : '—') + '</strong></td>' +
+        '<td class="num ' + pnlToneClass(r.expectancy_net) + '">' + (r.trade_count ? fmtInrSigned(r.expectancy_net) : '—') + '</td>' +
+        '</tr>';
+    }
+
+    html += '<tr class="diary-row-strategy" style="border-top:2px solid var(--border);">' +
+      '<td><strong>Book Window Total (' + escapeHtml(modeLabel || '') + ')</strong></td>' +
+      '<td class="num"><strong>' + tot.trade_count + ' (100%)</strong></td>' +
+      '<td class="num"><strong>' + Number(tot.win_rate_pct || 0).toFixed(1) + '%</strong></td>' +
+      '<td class="num ' + pnlToneClass(tot.gross_pnl) + '"><strong>' + fmtInrSigned(tot.gross_pnl) + '</strong></td>' +
+      '<td class="num"><strong>' + fmtInrAbs(tot.commission) + '</strong></td>' +
+      '<td class="num"><strong>' + fmtInrAbs(tot.avg_commission_per_trade) + '</strong></td>' +
+      '<td class="num">' + renderDragMeterHtml(tot) + '</td>' +
+      '<td class="num ' + pnlToneClass(tot.net_pnl) + '"><strong>' + fmtInrSigned(tot.net_pnl) + '</strong></td>' +
+      '<td class="num ' + pnlToneClass(tot.expectancy_net) + '"><strong>' + fmtInrSigned(tot.expectancy_net) + '</strong></td>' +
+      '</tr></tbody></table>';
+    return html;
+  }
+
+  function buildPayoffQuadrantSvg(entities, curvePoints, selectedKey, maxY) {
+    var list = Array.isArray(entities) ? entities : [];
+    var capY = Number(maxY || 4.0);
+    var W = 560, H = 270;
+    var padL = 48, padR = 18, padT = 16, padB = 34;
+    var plotW = W - padL - padR;
+    var plotH = H - padT - padB;
+
+    function xOf(winPct) {
+      var clamped = Math.max(0, Math.min(100, Number(winPct || 0)));
+      return +(padL + (clamped / 100) * plotW).toFixed(1);
+    }
+    function yOf(rVal) {
+      var clamped = Math.max(0, Math.min(capY, Number(rVal || 0)));
+      return +(padT + plotH - (clamped / capY) * plotH).toFixed(1);
+    }
+
+    var pts = Array.isArray(curvePoints) && curvePoints.length > 0 ? curvePoints : [];
+    var pathD = '';
+    var areaD = '';
+    if (pts.length > 0) {
+      for (var p = 0; p < pts.length; p++) {
+        var px = xOf(pts[p].win_rate_pct);
+        var py = yOf(pts[p].payoff_ratio);
+        pathD += (p === 0 ? 'M ' : ' L ') + px + ' ' + py;
+      }
+      areaD = pathD + ' L ' + xOf(100) + ' ' + yOf(capY) + ' L ' + xOf(pts[0].win_rate_pct) + ' ' + yOf(capY) + ' Z';
+    }
+
+    var svg = '<svg class="diary-quadrant-svg" viewBox="0 0 ' + W + ' ' + H + '" role="img" ' +
+      'aria-label="Net Win % vs Payoff Ratio breakeven scatter">' +
+      '<rect x="' + padL + '" y="' + padT + '" width="' + plotW + '" height="' + plotH + '" ' +
+      'fill="rgba(241,132,145,0.04)" stroke="var(--border)" stroke-width="1"/>';
+
+    if (areaD) {
+      svg += '<path d="' + areaD + '" fill="rgba(101,208,165,0.09)"/>';
+    }
+
+    // Reference crosshairs: W = 50% and R = 1.0x
+    var x50 = xOf(50);
+    var y1 = yOf(1.0);
+    svg += '<line x1="' + x50 + '" y1="' + padT + '" x2="' + x50 + '" y2="' + (padT + plotH) + '" ' +
+      'stroke="var(--border)" stroke-dasharray="3,3" stroke-width="1"/>';
+    svg += '<line x1="' + padL + '" y1="' + y1 + '" x2="' + (padL + plotW) + '" y2="' + y1 + '" ' +
+      'stroke="var(--border)" stroke-dasharray="3,3" stroke-width="1"/>';
+
+    if (pathD) {
+      svg += '<path class="diary-be-curve" d="' + pathD + '" fill="none" ' +
+        'stroke="var(--warning)" stroke-width="1.8" stroke-dasharray="5,3"/>';
+    }
+
+    // Axis ticks & labels
+    var xTicks = [0, 25, 50, 75, 100];
+    for (var xt = 0; xt < xTicks.length; xt++) {
+      var tx = xOf(xTicks[xt]);
+      svg += '<text x="' + tx + '" y="' + (H - 16) + '" fill="var(--muted)" font-size="10" text-anchor="middle">' +
+        xTicks[xt] + '%</text>';
+    }
+    var yTicks = [0, 1, 2, 3, 4];
+    for (var yt = 0; yt < yTicks.length; yt++) {
+      if (yTicks[yt] > capY) continue;
+      var ty = yOf(yTicks[yt]);
+      svg += '<text x="' + (padL - 6) + '" y="' + (ty + 3) + '" fill="var(--muted)" font-size="10" text-anchor="end">' +
+        (yTicks[yt] === capY ? capY + '×+' : yTicks[yt] + '×') + '</text>';
+    }
+
+    svg += '<text x="' + (padL + plotW / 2) + '" y="' + (H - 3) + '" fill="var(--muted)" font-size="10.5" text-anchor="middle">' +
+      'Net Win Rate (W)</text>';
+    svg += '<text x="13" y="' + (padT + plotH / 2) + '" fill="var(--muted)" font-size="10.5" text-anchor="middle" ' +
+      'transform="rotate(-90 13 ' + (padT + plotH / 2) + ')">Payoff Ratio (AvgW / |AvgL|)</text>';
+    svg += '<text x="' + (padL + plotW - 6) + '" y="' + (padT + 14) + '" fill="var(--success-text)" font-size="10" text-anchor="end">' +
+      'Positive Expectancy Zone (E &gt; 0)</text>';
+
+    // Plot entity bubbles
+    for (var e = 0; e < list.length; e++) {
+      var ent = list[e];
+      var cx = xOf(ent.win_rate_pct);
+      var cy = yOf(ent.plot_payoff_ratio);
+      var rad = Math.min(16, Math.max(6, Math.round(4 + Math.sqrt(Number(ent.trade_count || 1)) * 2.1)));
+      var isSel = ent.entity_key === selectedKey;
+      var fillCol = ent.prescription_severity === 'positive'
+        ? 'rgba(101,208,165,0.72)'
+        : ent.prescription_severity === 'warning'
+          ? 'rgba(230,185,112,0.72)'
+          : ent.prescription_severity === 'critical'
+            ? 'rgba(241,132,145,0.74)'
+            : 'rgba(145,161,175,0.55)';
+      var strokeCol = ent.prescription_code === 'CHURN_FRICTION_DRAG'
+        ? 'var(--warning)'
+        : 'var(--bg)';
+
+      svg += '<g class="diary-qbubble' + (isSel ? ' is-selected' : '') + '" data-entity-key="' +
+        escapeHtml(ent.entity_key) + '">' +
+        '<title>' + escapeHtml(ent.entity_label) + ' · W=' + Number(ent.win_rate_pct).toFixed(1) +
+        '% · R=' + (ent.unbounded_payoff ? '∞' : Number(ent.payoff_ratio || 0).toFixed(2) + '×') +
+        ' · Net ' + fmtInrSigned(ent.net_pnl) + '</title>' +
+        '<circle cx="' + cx + '" cy="' + cy + '" r="' + rad + '" fill="' + fillCol + '" ' +
+        'stroke="' + strokeCol + '" stroke-width="1.6"/>' +
+        '</g>';
+    }
+
+    svg += '</svg>';
+    return svg;
+  }
+
+  function renderPayoffInspector(ent) {
+    var box = document.getElementById('diary-quadrant-inspector');
+    if (!box) return;
+    if (!ent) {
+      box.innerHTML = '<div class="muted" style="font-size:12px;">No closed trades in this window to evaluate payoff coordinates.</div>';
+      return;
+    }
+    var rStr = ent.unbounded_payoff ? '∞ (0 losses)' : Number(ent.payoff_ratio || 0).toFixed(2) + '×';
+    var beStr = ent.breakeven_payoff_ratio == null
+      ? '∞ (0% W)'
+      : Number(ent.breakeven_payoff_ratio).toFixed(2) + '×';
+
+    box.innerHTML =
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">' +
+      '<strong style="font-size:13.5px;color:var(--text-strong);">' + escapeHtml(ent.entity_label) + '</strong>' +
+      '<span class="diary-rx-pill" data-severity="' + escapeHtml(ent.prescription_severity) + '">' +
+      escapeHtml(ent.prescription_label) + '</span>' +
+      '</div>' +
+      '<div class="diary-inspector-stats">' +
+      '<div class="diary-inspector-stat"><span>Net Win Rate (W)</span><strong>' +
+      Number(ent.win_rate_pct || 0).toFixed(1) + '% (' + ent.win_count + 'W/' + ent.loss_count + 'L)</strong></div>' +
+      '<div class="diary-inspector-stat"><span>Payoff vs Breakeven</span><strong>' +
+      rStr + ' vs ' + beStr + '</strong></div>' +
+      '<div class="diary-inspector-stat"><span>Net Expectancy / Tr</span><strong class="' +
+      pnlToneClass(ent.expectancy_net) + '">' + fmtInrSigned(ent.expectancy_net) + '</strong></div>' +
+      '<div class="diary-inspector-stat"><span>Fee Hurdle · Med Hold</span><strong>' +
+      fmtInrAbs(ent.avg_commission_per_trade) + ' · ' + escapeHtml(ent.median_hold_display || '—') + '</strong></div>' +
+      '</div>' +
+      '<div class="diary-callout-detail">' + escapeHtml(ent.prescription_detail) + '</div>';
+  }
+
+  function renderPayoffPanel() {
+    var holdWrap = document.getElementById('diary-hold-table-wrap');
+    var svgWrap = document.getElementById('diary-quadrant-svg-wrap');
+    var tableWrap = document.getElementById('diary-payoff-table-wrap');
+    var data = state.payoffData;
+    var modeLabel = state.mode === 'live' ? 'Live' : 'Paper';
+
+    if (!data) {
+      if (holdWrap) holdWrap.innerHTML = '<div class="diary-empty">No payoff diagnostics loaded.</div>';
+      if (svgWrap) svgWrap.innerHTML = '';
+      if (tableWrap) tableWrap.innerHTML = '';
+      renderPayoffInspector(null);
+      return;
+    }
+
+    if (holdWrap) {
+      holdWrap.innerHTML = buildHoldDurationTableHtml(data.hold_buckets, data.hold_totals, modeLabel);
+    }
+
+    var entities = data.entities || [];
+    if (entities.length === 0) {
+      if (svgWrap) {
+        svgWrap.innerHTML = '<div class="diary-empty">No closed trades in this IST window for the ' +
+          modeLabel + ' book.</div>';
+      }
+      if (tableWrap) tableWrap.innerHTML = '';
+      renderPayoffInspector(null);
+      return;
+    }
+
+    var selected = null;
+    for (var s = 0; s < entities.length; s++) {
+      if (entities[s].entity_key === state.selectedPayoffKey) {
+        selected = entities[s];
+        break;
+      }
+    }
+    if (!selected) {
+      selected = entities[0];
+      state.selectedPayoffKey = selected.entity_key;
+    }
+
+    if (svgWrap) {
+      svgWrap.innerHTML = buildPayoffQuadrantSvg(
+        entities,
+        data.breakeven_curve,
+        state.selectedPayoffKey,
+        data.plot_payoff_cap || 4.0
+      );
+    }
+    renderPayoffInspector(selected);
+
+    if (tableWrap) {
+      var colHdr = data.group_by === 'strategy' ? 'Strategy' : 'Spawned Instance';
+      var tHtml = '<table class="diary-table">' +
+        '<thead><tr>' +
+        '<th>' + colHdr + '</th>' +
+        '<th class="num">Trades</th>' +
+        '<th class="num">Med Hold</th>' +
+        '<th class="num">Net Win %</th>' +
+        '<th class="num">Payoff R (BE)</th>' +
+        '<th class="num">Fee Hurdle</th>' +
+        '<th class="num">Expectancy</th>' +
+        '<th class="num">Net P&amp;L</th>' +
+        '<th>Edge Prescription</th>' +
+        '</tr></thead><tbody>';
+
+      for (var i = 0; i < entities.length; i++) {
+        var ent = entities[i];
+        var isRowSel = ent.entity_key === state.selectedPayoffKey;
+        var rTxt = ent.unbounded_payoff ? '∞' : Number(ent.payoff_ratio || 0).toFixed(2) + '×';
+        var beTxt = ent.breakeven_payoff_ratio == null
+          ? '∞'
+          : Number(ent.breakeven_payoff_ratio).toFixed(2) + '×';
+
+        tHtml += '<tr class="is-clickable diary-payoff-row' + (isRowSel ? ' is-selected' : '') + '" ' +
+          'data-entity-key="' + escapeHtml(ent.entity_key) + '">' +
+          '<td><strong>' + escapeHtml(ent.entity_label) + '</strong></td>' +
+          '<td class="num">' + ent.trade_count + ' (' + ent.win_count + 'W/' + ent.loss_count + 'L)</td>' +
+          '<td class="num">' + escapeHtml(ent.median_hold_display || '—') + '</td>' +
+          '<td class="num">' + Number(ent.win_rate_pct || 0).toFixed(1) + '%</td>' +
+          '<td class="num">' + rTxt + ' <span class="muted">(' + beTxt + ')</span></td>' +
+          '<td class="num">' + fmtInrAbs(ent.avg_commission_per_trade) + '</td>' +
+          '<td class="num ' + pnlToneClass(ent.expectancy_net) + '">' + fmtInrSigned(ent.expectancy_net) + '</td>' +
+          '<td class="num ' + pnlToneClass(ent.net_pnl) + '"><strong>' + fmtInrSigned(ent.net_pnl) + '</strong></td>' +
+          '<td><span class="diary-rx-pill" data-severity="' + escapeHtml(ent.prescription_severity) + '">' +
+          escapeHtml(ent.prescription_label) + '</span></td>' +
+          '</tr>';
+      }
+      tHtml += '</tbody></table>';
+      tableWrap.innerHTML = tHtml;
+    }
+  }
+
+  function loadPayoffOnly() {
+    var payQs = buildQuery({
+      mode: state.mode,
+      from: state.selFrom,
+      to: state.selTo,
+      strategy: state.strategy,
+      group_by: state.payoffGroupBy
+    });
+    return fetchJson('/api/diary/edge/payoff?' + payQs).then(function (payData) {
+      state.payoffData = payData;
+      state.selectedPayoffKey = '';
+      renderPayoffPanel();
+    });
+  }
+
   function renderSessionBreakdownTable(daysInWindow) {
     var wrap = document.getElementById('diary-sessions-table-wrap');
     if (!wrap) return;
@@ -1119,6 +1439,13 @@
       clock: state.regimeClock,
       group_by: state.regimeGroupBy
     });
+    var payQs = buildQuery({
+      mode: state.mode,
+      from: state.selFrom,
+      to: state.selTo,
+      strategy: state.strategy,
+      group_by: state.payoffGroupBy
+    });
     var winCalPromise = (state.selFrom >= mb.from && state.selTo <= mb.to)
       ? null
       : fetchJson('/api/diary/calendar?' + winQs);
@@ -1128,13 +1455,15 @@
       fetchJson('/api/diary/summary?' + winQs),
       fetchJson('/api/diary/attribution?' + winQs),
       fetchJson('/api/diary/edge/regimes?' + regQs),
+      fetchJson('/api/diary/edge/payoff?' + payQs),
       winCalPromise
     ]).then(function (res) {
       var calData = res[0];
       var sumData = res[1];
       var attrData = res[2];
       var regData = res[3];
-      var winCal = res[4];
+      var payData = res[4];
+      var winCal = res[5];
 
       if (calData.today_ist) {
         state.todayIst = calData.today_ist;
@@ -1143,12 +1472,14 @@
       state.calendarWeeks = calData.weeks || [];
       state.attributionData = attrData;
       state.regimesData = regData;
+      state.payoffData = payData;
 
       populateStrategies(sumData.available_strategies || calData.available_strategies || []);
       renderSummary(sumData);
       renderCalendarGrid();
       renderAttributionTree();
       renderRegimesPanel();
+      renderPayoffPanel();
 
       var windowDays = [];
       var sourceDays = winCal ? (winCal.days || []) : state.calendarDays;
@@ -1279,6 +1610,36 @@
       });
     }
 
+    var payGroupEl = document.getElementById('diary-payoff-groupby');
+    if (payGroupEl) {
+      payGroupEl.addEventListener('change', function () {
+        state.payoffGroupBy = payGroupEl.value === 'strategy' ? 'strategy' : 'instance';
+        loadPayoffOnly();
+      });
+    }
+
+    var svgWrapEl = document.getElementById('diary-quadrant-svg-wrap');
+    if (svgWrapEl) {
+      svgWrapEl.addEventListener('click', function (ev) {
+        var g = ev.target && ev.target.closest ? ev.target.closest('[data-entity-key]') : null;
+        if (g) {
+          state.selectedPayoffKey = g.getAttribute('data-entity-key') || '';
+          renderPayoffPanel();
+        }
+      });
+    }
+
+    var payTableWrapEl = document.getElementById('diary-payoff-table-wrap');
+    if (payTableWrapEl) {
+      payTableWrapEl.addEventListener('click', function (ev) {
+        var tr = ev.target && ev.target.closest ? ev.target.closest('[data-entity-key]') : null;
+        if (tr) {
+          state.selectedPayoffKey = tr.getAttribute('data-entity-key') || '';
+          renderPayoffPanel();
+        }
+      });
+    }
+
     var expBtn = document.getElementById('diary-expand-all');
     if (expBtn) expBtn.addEventListener('click', function () { expandOrCollapseAll(true); });
     var colBtn = document.getElementById('diary-collapse-all');
@@ -1398,6 +1759,8 @@
     computeHeatClass: computeHeatClass,
     computeMatrixCellHeat: computeMatrixCellHeat,
     buildMatrixHtml: buildMatrixHtml,
+    buildHoldDurationTableHtml: buildHoldDurationTableHtml,
+    buildPayoffQuadrantSvg: buildPayoffQuadrantSvg,
     monthBounds: monthBounds,
     mondayOfWeekIso: mondayOfWeekIso,
     sortAttributionStrategies: sortAttributionStrategies,

@@ -183,6 +183,17 @@
           type="button"
           class="diary-tab-btn"
           role="tab"
+          id="diary-tab-btn-payoff"
+          aria-selected="false"
+          aria-controls="diary-panel-payoff"
+          data-tab="payoff"
+        >
+          Hold &amp; Payoff Edge
+        </button>
+        <button
+          type="button"
+          class="diary-tab-btn"
+          role="tab"
           id="diary-tab-btn-sessions"
           aria-selected="false"
           aria-controls="diary-panel-sessions"
@@ -263,7 +274,51 @@
       </div>
     </div>
 
-    <!-- Tab 3: Daily Session Ledger Breakdown (IST) -->
+    <!-- Tab 3: Slice 4 Institutional Edge Diagnostics II — Hold-Duration Drag & Payoff Quadrant -->
+    <div id="diary-panel-payoff" role="tabpanel" aria-labelledby="diary-tab-btn-payoff" hidden>
+      <div class="diary-matrix-block" style="margin-top:6px;">
+        <div class="diary-section-head">
+          <h2 id="diary-hold-title">Hold-Duration &amp; Commission-Drag Analyzer</h2>
+          <span class="muted" style="font-size:11.5px;">Drag bands: &lt;30% Healthy · 30–50% Warning · &gt;50% or Gross &le; 0 Critical</span>
+        </div>
+        <div class="diary-table-wrap" id="diary-hold-table-wrap">
+          <div class="diary-empty">Loading hold-duration friction breakdown…</div>
+        </div>
+      </div>
+
+      <div class="diary-matrix-block" style="margin-top:16px;">
+        <div class="diary-attr-toolbar" style="padding-top:0;">
+          <div class="diary-attr-toolbar-left">
+            <h2 id="diary-quadrant-title" style="margin:0;font-size:15px;font-weight:700;color:var(--text-strong);">
+              Net Win % vs Payoff Breakeven Quadrant
+            </h2>
+            <span class="diary-cfg-pill">Breakeven Curve: R = (1 &minus; W) / W</span>
+          </div>
+          <div class="diary-attr-toolbar-right">
+            <label for="diary-payoff-groupby" class="muted" style="font-size:11.5px;font-weight:600;">Bubbles</label>
+            <select id="diary-payoff-groupby" class="diary-select" style="min-width:178px;height:30px;font-size:12px;">
+              <option value="instance">By Spawned Instance</option>
+              <option value="strategy">By Strategy</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="diary-quadrant-layout">
+          <div class="diary-quadrant-chart-card" id="diary-quadrant-svg-wrap">
+            <div class="diary-empty">Loading payoff quadrant…</div>
+          </div>
+          <div class="diary-quadrant-inspector" id="diary-quadrant-inspector" aria-live="polite">
+            <div class="muted" style="font-size:12px;">Select a bubble or table row to inspect its payoff prescription.</div>
+          </div>
+        </div>
+
+        <div class="diary-table-wrap" id="diary-payoff-table-wrap" style="margin-top:10px;">
+          <div class="diary-empty">Loading edge prescriptions…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 4: Daily Session Ledger Breakdown (IST) -->
     <div id="diary-panel-sessions" role="tabpanel" aria-labelledby="diary-tab-btn-sessions" hidden>
       <div class="diary-section-head" style="margin-bottom:8px;">
         <h2 id="diary-sessions-title">Session Ledger Breakdown (IST)</h2>
