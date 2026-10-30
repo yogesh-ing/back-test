@@ -446,3 +446,103 @@ class TestAnchorsAcrossARestart:
         revived = _runner(name="EQ")
         restore_runner(revived, snapshot)
         assert revived.realized_pnl_today == pytest.approx(expected, abs=TOLERANCE)
+
+
+# ---------------------------------------------------------------------------
+# B5: the read surfaces publish the same money the contract defines
+# ---------------------------------------------------------------------------
+
+
+def _manager_with_a_costed_round_trip():
+    """A live manager holding one paper book that closed one trip, at a fee.
+
+    The fixture has to cost the round trip, or every assertion below is
+    vacuous: gross and net would be the same number and a gross-summed tab
+    would pass.
+    """
+    from backtest.forward.feed_registry import reset_data_bus
+    from backtest.forward.portfolio_manager import PortfolioManager
+    from backtest.forward.risk_supervisor import GlobalRiskConfig
+
+    reset_data_bus()
+    manager = PortfolioManager(
+        risk_config=GlobalRiskConfig(daily_loss_limit=1_000_000, max_drawdown_pct=0.9),
+        tick_seconds=1.0,
+        warmup_bars=5,
+        auto_start_feed=False,
+    )
+    pid = manager.add_runner(
+        RunnerConfig(
+            name="SURFACE",
+            strategy_name="buy_and_hold",
+            allocated_capital=100_000,
+            symbols=["AAA"],
+            timeframe="1hour",
+            mode="paper",
+            source="synthetic",
+        ),
+        start=False,
+    )
+    runner = manager.get_runner(pid)
+    manager.broker.submit_market(pid, "AAA", SIDE_BUY, 100, 100.0)
+    runner.last_price["AAA"] = 120.0
+    manager.broker.submit_market(pid, "AAA", SIDE_SELL, 100, 120.0)
+    return manager, runner
+
+
+def _api_client():
+    from flask import Flask
+
+    from backtest.api.portfolio import portfolio_bp
+
+    app = Flask(__name__)
+    app.register_blueprint(portfolio_bp)
+    app.config["TESTING"] = True
+    return app.test_client()
+
+
+class TestRealizedPnlOnTheReadSurfaces:
+    def test_trade_history_tab_sums_net_not_gross(self, monkeypatch):
+        """The header summed NET ``realized_pnl``; the tab summed GROSS ``pnl``.
+
+        Measured on live paper on 2026-10-30: -₹2,98,230 on the bucket header
+        against -₹1,60,753.68 on the trade-history tab of the same page. Both
+        described "realized P&L", neither was wrong arithmetic, and the gap was
+        the fee stack one of them never subtracted.
+        """
+        from backtest.forward.paper_runner import MAX_TRADE_LOG
+
+        manager, runner = _manager_with_a_costed_round_trip()
+        monkeypatch.setattr("backtest.api.portfolio._manager", lambda: manager)
+        try:
+            closed = runner.closed_trades
+            gross = sum(t["gross_pnl"] for t in closed)
+            net = sum(t["net_pnl"] for t in closed)
+            assert gross > net, "fixture must cost the trip for this to prove anything"
+
+            body = _api_client().get(
+                "/api/portfolio/trades/aggregated?mode=paper"
+            ).get_json()
+            assert body["summary"]["total_pnl"] == pytest.approx(net, abs=0.01)
+            assert body["summary"]["total_pnl"] != pytest.approx(gross, abs=0.01)
+            # Rows and headline share one basis, so the table can be added up to
+            # the number printed above it.
+            assert sum(t["net_pnl"] for t in body["trades"]) == pytest.approx(net, abs=0.01)
+            # And the window is on the label: this list is each book's last
+            # MAX_TRADE_LOG closes, not its whole life.
+            assert body["summary"]["per_runner_cap"] == MAX_TRADE_LOG
+        finally:
+            manager.shutdown()
+
+    def test_risk_board_trade_stats_are_the_same_net_money(self, monkeypatch):
+        manager, runner = _manager_with_a_costed_round_trip()
+        monkeypatch.setattr("backtest.api.portfolio._manager", lambda: manager)
+        try:
+            closed = runner.closed_trades
+            net = sum(t["net_pnl"] for t in closed)
+            gross = sum(t["gross_pnl"] for t in closed)
+            risk = _api_client().get("/api/portfolio/risk?mode=paper").get_json()["risk"]
+            assert risk["trade_stats"]["total_pnl"] == pytest.approx(net, abs=0.01)
+            assert risk["trade_stats"]["total_pnl"] != pytest.approx(gross, abs=0.01)
+        finally:
+            manager.shutdown()

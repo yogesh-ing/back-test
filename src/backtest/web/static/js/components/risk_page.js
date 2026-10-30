@@ -477,15 +477,20 @@
     if (summaryEl) {
       const s = data.summary || {};
       const trades = data.trades || [];
-      const pnls = trades.map(t => t.pnl || 0);
+      // NET, over the rows actually listed. The server's summary covers every
+      // book's last ``per_runner_cap`` closes; this card is about the slice on
+      // screen, so it sums that slice instead of borrowing a headline that
+      // describes different trades.
+      const pnls = trades.map(t => t.net_pnl || 0);
+      const netShown = pnls.reduce((a, b) => a + b, 0);
       const wins = pnls.filter(p => p >= 0).length;
       const total = pnls.length;
       const best = total ? Math.max(...pnls) : 0;
       const worst = total ? Math.min(...pnls) : 0;
-      const avg = total ? pnls.reduce((a,b)=>a+b,0)/total : 0;
+      const avg = total ? netShown / total : 0;
       summaryEl.innerHTML = `
         <div class="perf-stat"><div class="label">Total Trades</div><div class="value">${s.total||total}</div></div>
-        <div class="perf-stat"><div class="label">Total P&L</div><div class="value ${s.total_pnl>=0?"pnl-pos":"pnl-neg"}">${fmtSigned(s.total_pnl||0)}</div></div>
+        <div class="perf-stat"><div class="label">Net P&L (shown)</div><div class="value ${netShown>=0?"pnl-pos":"pnl-neg"}">${fmtSigned(netShown)}</div></div>
         <div class="perf-stat"><div class="label">Win Rate</div><div class="value">${((s.win_rate||0)*100).toFixed(1)}%</div></div>
         <div class="perf-stat"><div class="label">Wins / Losses</div><div class="value">${wins} / ${total-wins}</div></div>
         <div class="perf-stat"><div class="label">Avg P&L</div><div class="value ${avg>=0?"pnl-pos":"pnl-neg"}">${fmtSigned(avg)}</div></div>
@@ -508,19 +513,19 @@
       groups[day].push(t);
     });
     groupedEl.innerHTML = Object.entries(groups).sort((a,b)=>b[0].localeCompare(a[0])).map(([day, dayTrades]) => {
-      const dayPnl = dayTrades.reduce((s,t)=>s+(t.pnl||0),0);
+      const dayPnl = dayTrades.reduce((s,t)=>s+(t.net_pnl||0),0);
       return `<div class="trade-group">
         <div class="trade-group-head">📅 ${day} — ${dayTrades.length} trades — <span class="${dayPnl>=0?"pnl-pos":"pnl-neg"}">${fmtSigned(dayPnl)}</span></div>
         <div class="trade-group-body">
           ${dayTrades.map(t => {
-            const icon = t.pnl >= 0 ? "✅" : "❌";
+            const icon = t.net_pnl >= 0 ? "✅" : "❌";
             const kindIcon = t.kind === "option" ? "📝" : "📈";
             return `<div class="trade-row">
               <span>${icon} ${kindIcon}</span>
               <span><strong>${t.symbol||t.underlying||""}</strong> <span class="muted">${t.runner_name||""}</span></span>
               <span class="${t.side==="BUY"?"pnl-pos":"pnl-neg"}">${t.side||""}</span>
               <span class="num">${t.qty||""}</span>
-              <span class="num ${t.pnl>=0?"pnl-pos":"pnl-neg"}">${fmtSigned(t.pnl||0)}</span>
+              <span class="num ${t.net_pnl>=0?"pnl-pos":"pnl-neg"}">${fmtSigned(t.net_pnl||0)}</span>
             </div>`;
           }).join("")}
         </div>
