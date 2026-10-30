@@ -349,6 +349,57 @@ class PortfolioManager:
             sum(r.config.allocated_capital for r in self._runners.values()), 2
         )
 
+    def _anchor_keys(self, runner: StrategyRunner, bucket: str) -> List[str]:
+        """Every bucket key this runner's money sits inside."""
+        keys = [bucket]
+        segment = getattr(runner.config, "segment", None)
+        if bucket == "live" and segment:
+            keys.append(self._segment_key(str(segment).strip().lower()))
+        return keys
+
+    def _record_capital_flow(self, runner: StrategyRunner, delta: float) -> None:
+        """Move the day/peak anchors with money entering or leaving a book.
+
+        BUG-33: ``daily_pnl = equity - day_start`` only measures trading while
+        the anchor and the book see the same money. A runner spawned mid-session
+        put its allocated capital into equity without touching the anchor, so
+        the fuse saw a large phantom *gain* — which is worse than a phantom
+        loss, because the bucket's daily-loss limit is then spent masking real
+        losses instead of tripping on them. Deleting a book subtracted its
+        equity and read as a loss against a peak it had just inflated.
+
+        So every anchor and high-water mark the runner belongs to (the manager
+        baseline, its bucket, its live segment) shifts by the same flow: money
+        in at ``allocated_capital``, money out at the book's ``equity()``, which
+        leaves the surviving books' measured P&L exactly where it was.
+
+        An anchor of 0 means the session baseline has not been taken yet — the
+        first bar takes it from current equity, which already contains the flow,
+        so those keys are skipped. That is also what keeps a boot-time restore
+        (which zeroes every anchor) from double-counting its own runners.
+
+        Callers hold ``self._lock``.
+        """
+        if not delta:
+            return
+        for key in self._anchor_keys(runner, self._runner_bucket(runner)):
+            anchor = self._bucket_day_start.get(key, 0.0)
+            if anchor > 0:
+                self._bucket_day_start[key] = round(anchor + delta, 2)
+            peak = self._bucket_peak.get(key, 0.0)
+            if peak > 0:
+                self._bucket_peak[key] = round(max(peak + delta, 0.0), 2)
+        if self._day_start_equity > 0:
+            self._day_start_equity = round(self._day_start_equity + delta, 2)
+        if self.peak_equity > 0:
+            self.peak_equity = round(max(self.peak_equity + delta, 0.0), 2)
+        logger.info(
+            "[ledger] capital flow %+.2f applied to anchors (runner=%s bucket=%s)",
+            delta,
+            runner.config.name,
+            self._runner_bucket(runner),
+        )
+
     def _bucket_daily_pnl(self, mode: str) -> float:
         """Derive daily P&L for a bucket from its runners."""
         return sum(r.daily_pnl() for r in self._bucket_runners(mode))
@@ -506,6 +557,9 @@ class PortfolioManager:
             daily = self._bucket_daily_pnl(mode)
             counts = self._bucket_runner_counts(mode)
             limit = abs(self.supervisor.config.daily_loss_limit)
+            # BUG-33: the percentage is quoted against the money in the bucket,
+            # never against a smaller stale anchor.
+            pct_denominator = max(day_start, capital, 1.0)
 
             buckets[mode] = {
                 "equity": round(equity, 2),
@@ -513,7 +567,7 @@ class PortfolioManager:
                 "peak_equity": round(peak, 2),
                 "drawdown_pct": round(self._bucket_drawdown(mode), 4),
                 "daily_pnl": round(daily, 2),
-                "daily_pnl_pct": (round(daily / day_start, 6) if day_start else 0.0),
+                "daily_pnl_pct": round(daily / pct_denominator, 6),
                 "realized_pnl": round(self._bucket_realized_pnl(mode), 2),
                 "deployed_capital": round(self._bucket_deployed(mode), 2),
                 "open_positions": self._bucket_open_positions(mode),
@@ -1054,6 +1108,8 @@ class PortfolioManager:
             # Per-bucket state initialization (idempotent)
             bucket = self._runner_bucket(runner)
             self._ensure_bucket_state(bucket)
+            # BUG-33: the money this book brings in is not trading profit.
+            self._record_capital_flow(runner, float(config.allocated_capital))
 
             # Feed + anchors — subscriptions accounted in the shared bus
             # (U6.2). Bar-feed subscriptions are taken here; the chain-bus
@@ -1137,6 +1193,10 @@ class PortfolioManager:
                     return True
                 return False
             bucket = self._runner_bucket(runner)
+            # BUG-33: the money leaving is this book's equity, measured while
+            # the book is still intact — taken before stop() and the anchor
+            # shift so the surviving books' day P&L does not jump.
+            self._record_capital_flow(runner, -float(runner.equity()))
             if self.intelligence is not None:
                 try:
                     self.intelligence.unregister_runner(instance_id, runner)
@@ -3146,6 +3206,10 @@ class PortfolioManager:
                 bucket_halted_ts = self.halted_ts
             drawdown = ((peak_equity - equity) / peak_equity) if peak_equity > 0 else 0.0
             limit = abs(self.supervisor.config.daily_loss_limit)
+            # BUG-33: quote the percentage against the larger of the
+            # flow-adjusted anchor and the capital in scope, so a stale or
+            # tiny anchor cannot inflate a return.
+            pct_denominator = max(day_start, total_capital, 1.0)
 
             warnings = self.last_report.get("warnings", []) if self.last_report else []
 
@@ -3219,7 +3283,7 @@ class PortfolioManager:
                 "deployed_capital": round(deployed, 2),
                 "deployed_pct": (round(deployed / total_capital, 4) if total_capital > 0 else 0.0),
                 "daily_pnl": round(combined_daily, 2),
-                "daily_pnl_pct": (round(combined_daily / day_start, 6) if day_start else 0.0),
+                "daily_pnl_pct": round(combined_daily / pct_denominator, 6),
                 "realized_pnl": round(combined_realized, 2),
                 "open_positions": combined_positions,
                 "stale_marks_count": stale_marks_count,
