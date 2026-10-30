@@ -333,8 +333,21 @@ class PortfolioManager:
         return sum(r.equity() for r in self._bucket_runners(mode))
 
     def _bucket_capital(self, mode: str) -> float:
-        """Derive total allocated capital for a bucket."""
+        """Derive total allocated capital for a bucket from its runners."""
         return sum(r.config.allocated_capital for r in self._bucket_runners(mode))
+
+    def _sync_total_capital(self) -> None:
+        """Re-derive ``total_capital`` from the runners that actually exist.
+
+        BUG-03: it was an accumulator, added to on spawn and subtracted from on
+        delete. A refused restore, a re-spawn, or any path that removed a
+        runner without paying the subtraction left it drifting away from the
+        money on the books — and the state file then faithfully re-saved the
+        drift. Callers must run this *after* mutating ``_runners``.
+        """
+        self.total_capital = round(
+            sum(r.config.allocated_capital for r in self._runners.values()), 2
+        )
 
     def _bucket_daily_pnl(self, mode: str) -> float:
         """Derive daily P&L for a bucket from its runners."""
@@ -1036,7 +1049,7 @@ class PortfolioManager:
                     config.mode,
                 )
             self._runners[runner.instance_id] = runner
-            self.total_capital += config.allocated_capital
+            self._sync_total_capital()
 
             # Per-bucket state initialization (idempotent)
             bucket = self._runner_bucket(runner)
@@ -1145,7 +1158,7 @@ class PortfolioManager:
                 feed = self.mstock_feed
             feed.remove_symbols(runner.config.symbols)
             self._sync_mstock_thread()
-            self.total_capital -= runner.config.allocated_capital
+            self._sync_total_capital()
             self._refresh_anchors()
             # If this was the last runner in the bucket, reset bucket state
             if not self._bucket_runners(bucket):
@@ -2578,7 +2591,10 @@ class PortfolioManager:
             restored += 1
 
         manager = payload.get("manager", {})
-        self.total_capital = float(manager.get("total_capital", 0.0))
+        # BUG-03: never re-adopt the saved scalar — it is whatever the
+        # accumulator had drifted to when the file was written. The runners
+        # restored above are the capital.
+        self._sync_total_capital()
         self.peak_equity = float(manager.get("peak_equity", 0.0))
         # CRITICAL FIX 2026-10-15: Do NOT restore day_start_equity from state —
         # it's a GHOST from a previous session and causes false daily-loss breaches.
@@ -3106,6 +3122,9 @@ class PortfolioManager:
             stopped = sum(1 for s in states if s["status"] == STATUS_STOPPED)
             errors = sum(1 for s in states if s["status"] == "ERROR")
 
+            # C4: embed per-bucket aggregates in the single stream
+            buckets = self.get_bucket_aggregates()
+
             # C2: Use per-bucket peak when scoped; manager-level when combined
             if mode is not None:
                 total_capital = round(sum(s["allocated_capital"] for s in states), 2)
@@ -3116,7 +3135,9 @@ class PortfolioManager:
                 bucket_halt_mode = self._bucket_halt_mode.get(mode)
                 bucket_halted_ts = self._bucket_halted_ts.get(mode)
             else:
-                total_capital = self.total_capital
+                # BUG-03: the unscoped ledger is the buckets summed, not the
+                # manager scalar — so capital cannot drift from the books.
+                total_capital = round(sum(b["capital"] for b in buckets.values()), 2)
                 peak_equity = self.peak_equity
                 day_start = self._day_start_equity
                 bucket_halted = self.halted
@@ -3127,9 +3148,6 @@ class PortfolioManager:
             limit = abs(self.supervisor.config.daily_loss_limit)
 
             warnings = self.last_report.get("warnings", []) if self.last_report else []
-
-            # C4: embed per-bucket aggregates in the single stream
-            buckets = self.get_bucket_aggregates()
 
             # C6: capability flag — drives the REAL MONEY / Simulated fills banner.
             # broker_connected is a process-level property (is the broker session active?).
@@ -3171,11 +3189,27 @@ class PortfolioManager:
                 dashboard_book.get("open_positions", 0) if dashboard_book.get("exists") else 0
             )
 
-            # Combined totals include dashboard book so flatten/emergency is honest
-            combined_equity = equity + dashboard_equity
-            combined_daily = daily + dashboard_daily
-            combined_realized = realized + dashboard_realized
-            combined_positions = open_positions + dashboard_positions
+            # Include the dashboard book in the combined totals — but only
+            # where it belongs. Its ``equity`` is capital + P&L, so folding it
+            # in unconditionally booked ₹10,00,000 of capital the ledger never
+            # carried (BUG-03), and did so on scoped paper/live calls too, where
+            # the singleton belongs to neither bucket. On an unscoped read of a
+            # book that actually holds money, its capital and margin join the
+            # totals as well, so total_equity - total_capital stays exactly P&L.
+            dashboard_in_use = dashboard_book.get("exists") and (
+                dashboard_positions > 0 or abs(dashboard_realized) >= 0.005
+            )
+            fold_dashboard = mode is None and bool(dashboard_in_use)
+            if fold_dashboard:
+                total_capital = round(
+                    total_capital + float(dashboard_book.get("capital") or 0.0), 2
+                )
+                deployed = deployed + float(dashboard_book.get("margin_used") or 0.0)
+
+            combined_equity = equity + (dashboard_equity if fold_dashboard else 0.0)
+            combined_daily = daily + (dashboard_daily if fold_dashboard else 0.0)
+            combined_realized = realized + (dashboard_realized if fold_dashboard else 0.0)
+            combined_positions = open_positions + (dashboard_positions if fold_dashboard else 0)
             stale_marks_count = sum(int(s.get("stale_positions") or 0) for s in states)
 
             return {
@@ -3183,9 +3217,7 @@ class PortfolioManager:
                 "total_capital": round(total_capital, 2),
                 "total_equity": round(combined_equity, 2),
                 "deployed_capital": round(deployed, 2),
-                "deployed_pct": (
-                    round(deployed / self.total_capital, 4) if self.total_capital > 0 else 0.0
-                ),
+                "deployed_pct": (round(deployed / total_capital, 4) if total_capital > 0 else 0.0),
                 "daily_pnl": round(combined_daily, 2),
                 "daily_pnl_pct": (round(combined_daily / day_start, 6) if day_start else 0.0),
                 "realized_pnl": round(combined_realized, 2),
