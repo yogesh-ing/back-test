@@ -13,15 +13,17 @@ what had happened.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from backtest.forward.paper_runner import (
     OrderLedger,
     OrderRequest,
+    RunnerConfig,
     SIDE_BUY,
     SIDE_SELL,
+    StrategyRunner,
 )
 from backtest.forward.trade_persistence import (
     LiveTradePersister,
@@ -30,11 +32,21 @@ from backtest.forward.trade_persistence import (
 from backtest.timekeeping import from_stored_utc
 
 INSTANCE = "1a2b3c4d-0000-4000-8000-000000000001"
+BASE_DAY = date(2026, 10, 30)
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_environment(monkeypatch):
+    """Pin fee resolution and plugins — these tests trade, so they pay costs."""
+    from backtest.plugins import discover_plugins
+
+    monkeypatch.setenv("BACKTEST_DATA_PROFILE", "testing")
+    discover_plugins()
 
 
 @pytest.fixture()
@@ -343,3 +355,258 @@ class TestLedgerOrderValues:
         order = self._order()
         order.status = "SOMETHING_NEW"
         assert self._values(order)["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# The executed book: positions, orders, fills, and the trade that joins them
+# ---------------------------------------------------------------------------
+
+
+def _bars(closes, symbol="RELIANCE"):
+    return [
+        {
+            "ts": f"{(BASE_DAY + timedelta(days=i)).isoformat()}T09:15:00",
+            "open": close - 1,
+            "high": close + 5,
+            "low": close - 5,
+            "close": float(close),
+            "volume": 1000,
+        }
+        for i, close in enumerate(closes)
+    ]
+
+
+def _equity_runner(source="mstock") -> StrategyRunner:
+    """A real runner that has opened one share position through its broker."""
+    runner = StrategyRunner(
+        RunnerConfig(
+            name="EQ",
+            strategy_name="buy_and_hold",
+            allocated_capital=1_000_000,
+            symbols=["RELIANCE"],
+            timeframe="1min",
+            mode="paper",
+            source=source,
+        ),
+        ledger=OrderLedger(),
+    )
+    runner.start()
+    for bar in _bars([100.0] * 14):
+        runner.process_candle_event("RELIANCE", bar)
+    assert runner.positions, "fixture failed to open a position"
+    return runner
+
+
+def _counts(db):
+    return {
+        table: db.fetch_one(f"SELECT count(*) AS n FROM {table}")["n"]
+        for table in ("positions", "orders", "fills", "trades")
+    }
+
+
+class TestExecutedBookIsDurable:
+    def test_an_open_position_lands_before_any_trade_closes(
+        self, db
+    ):
+        """The entry leg of a round trip is an execution. Waiting for the exit
+        to write it would leave the fills unjoinable for the whole life of the
+        trade — and nothing at all if the process died holding the book."""
+        runner = _equity_runner()
+        LiveTradePersister(db).flush_runner(runner)
+
+        counts = _counts(db)
+        assert counts["positions"] == 1
+        assert counts["orders"] == 1 and counts["fills"] == 1
+        assert counts["trades"] == 0
+        row = db.fetch_one("SELECT symbol, status, quantity FROM positions")
+        assert (row["symbol"], row["status"]) == ("RELIANCE", "open")
+        assert float(row["quantity"]) > 0
+
+    def test_a_closed_round_trip_joins_its_trade_to_its_position(self, db):
+        runner = _equity_runner()
+        runner.last_price["RELIANCE"] = 112.0
+        runner.close_position("RELIANCE", reason="manual_target")
+        written = LiveTradePersister(db).flush_runner(runner)
+        assert written == 1
+
+        row = db.fetch_one(
+            "SELECT t.trade_id, t.position_id, p.symbol, p.status, p.closed_at"
+            " FROM trades t JOIN positions p ON p.position_id = t.position_id"
+        )
+        assert row is not None, "the trade names no position row"
+        assert row["symbol"] == "RELIANCE"
+        assert row["status"] == "closed"
+        assert row["closed_at"] is not None
+
+    def test_both_legs_are_rows_with_the_fees_the_book_charged(self, db):
+        runner = _equity_runner()
+        runner.last_price["RELIANCE"] = 112.0
+        runner.close_position("RELIANCE", reason="manual_target")
+        LiveTradePersister(db).flush_runner(runner)
+
+        rows = db.fetch_all("SELECT side, status, client_order_id FROM orders ORDER BY side")
+        assert [r["side"] for r in rows] == ["buy", "sell"]
+        assert {r["status"] for r in rows} == {"filled"}
+        # The same client order id the Orders tab shows, now in the table.
+        assert all(str(r["client_order_id"]).startswith("PRT-") for r in rows)
+
+        fills = db.fetch_all("SELECT commission, exchange_fees, regulatory_fees FROM fills")
+        assert len(fills) == 2
+        for fill in fills:
+            # BUG-26's costed executor: a paper equity leg is never free.
+            assert float(fill["commission"]) + float(fill["exchange_fees"]) + float(
+                fill["regulatory_fees"]
+            ) > 0
+
+    def test_a_repeated_sweep_and_a_restart_both_write_nothing_new(self, db):
+        runner = _equity_runner()
+        runner.last_price["RELIANCE"] = 112.0
+        runner.close_position("RELIANCE", reason="manual_target")
+
+        persister = LiveTradePersister(db)
+        persister.flush_runner(runner)
+        first = _counts(db)
+        persister.flush_runner(runner)  # same process, next sweep
+        assert _counts(db) == first
+
+        # A new process: no key set, only the durable rows. The upserts land on
+        # the same primary keys, so a resume cannot duplicate the ledger.
+        LiveTradePersister(db).flush_runner(runner)
+        assert _counts(db) == first
+
+    def test_the_book_adopts_the_identity_the_database_knows(self, db):
+        runner = _equity_runner()
+        persister = LiveTradePersister(db)
+        persister.flush_runner(runner)
+
+        portfolio_id = db.fetch_one("SELECT portfolio_id FROM portfolios")["portfolio_id"]
+        assert runner.portfolio.portfolio_id == portfolio_id
+        # Every child row hangs off that one id, which is what makes the Orders
+        # and Positions tabs one book's history rather than two orphan sets.
+        assert db.fetch_one("SELECT portfolio_id FROM positions")["portfolio_id"] == portfolio_id
+        assert db.fetch_one("SELECT portfolio_id FROM orders")["portfolio_id"] == portfolio_id
+
+    def test_a_synthetic_book_stays_out_of_the_durable_ledger(self, db):
+        runner = _equity_runner(source="synthetic")
+        LiveTradePersister(db).flush_runner(runner)
+        assert _counts(db) == {
+            "positions": 0,
+            "orders": 0,
+            "fills": 0,
+            "trades": 0,
+        }
+
+
+class TestSliceOrdering:
+    """The graph rules that only a slice has to respect, on the real schema."""
+
+    #: The slice never writes the ``portfolios`` row, so the book under test has
+    #: to hang off a portfolio that is already there — exactly how the live
+    #: persister finds it.
+    PORTFOLIO_ID = "portfolio-id"
+
+    @pytest.fixture()
+    def book_db(self, db):
+        from decimal import Decimal
+
+        from backtest.db.models import Portfolio as PortfolioRow
+
+        with db.session() as session:
+            session.add(
+                PortfolioRow(
+                    portfolio_id=self.PORTFOLIO_ID,
+                    name="EQ",
+                    initial_capital=Decimal(1_000_000),
+                    current_cash=Decimal(1_000_000),
+                    source="mstock",
+                )
+            )
+        return db
+
+    def _book(self):
+        from backtest.simulator.fill import Fill
+        from backtest.simulator.order import Order
+        from backtest.simulator.portfolio import Portfolio
+
+        book = Portfolio(
+            name="EQ",
+            initial_capital=1_000_000,
+            portfolio_id=self.PORTFOLIO_ID,
+            mode="paper",
+        )
+        order = Order(symbol="RELIANCE", side="buy", quantity=10, portfolio_id=book.portfolio_id)
+        order.validate()
+        order.submit()
+        # The executor stamps the order id onto the fill it produces; fills are
+        # born knowing which order they answer, and ``fills.order_id`` is NOT NULL.
+        fill = Fill(
+            symbol="RELIANCE",
+            side="buy",
+            quantity=10,
+            fill_price=100,
+            commission=20,
+            order_id=order.order_id,
+        )
+        book.apply_fill(fill)
+        order.add_fill(fill)
+        book.add_order(order)
+        return book
+
+    def test_a_symbol_closed_and_reopened_keeps_one_open_row(self, book_db):
+        """uq_positions_one_open_per_symbol rejects two open rows for one
+        symbol. The hazard is the re-trade: the closing row is already in the
+        table as ``open``, so the slice must flip it before inserting the new
+        open row — same transaction, same sweep."""
+        from backtest.simulator.position import Position
+
+        book = self._book()
+        written: set[str] = set()
+        book.save_ledger_slice_to_db(book_db, written)
+        assert book_db.fetch_one("SELECT count(*) AS n FROM positions")["n"] == 1
+
+        closed = book.positions.pop("RELIANCE")
+        closed.reduce_shares(10, 110)
+        book.closed_positions.append(closed)
+
+        reopened = Position(symbol="RELIANCE", quantity=5, average_entry_price=115)
+        book.positions["RELIANCE"] = reopened
+        assert reopened.position_id != closed.position_id
+
+        book.save_ledger_slice_to_db(book_db, written)
+
+        assert book_db.fetch_one("SELECT count(*) AS n FROM positions")["n"] == 2
+        rows = book_db.fetch_all("SELECT position_id, status FROM positions")
+        by_status = {r["status"]: r["position_id"] for r in rows}
+        assert by_status["closed"] == closed.position_id
+        assert by_status["open"] == reopened.position_id
+
+    def test_the_key_set_makes_the_next_slice_free(self, book_db):
+        book = self._book()
+        written: set[str] = set()
+        first = book.save_ledger_slice_to_db(book_db, written)
+        assert first > 0 and written
+
+        assert book.save_ledger_slice_to_db(book_db, written) == 0
+
+    def test_a_rolled_back_slice_stays_retryable(self, book_db, monkeypatch):
+        """Keys are only recorded once the transaction commits, so a failed
+        sweep retries instead of quietly deciding the rows were sent."""
+        book = self._book()
+        written: set[str] = set()
+
+        real_session = book_db.session
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("connection reset")
+
+        monkeypatch.setattr(book_db, "session", explode)
+        try:
+            book.save_ledger_slice_to_db(book_db, written)
+        except RuntimeError:
+            pass
+        assert written == set(), "a rolled-back slice must not claim its rows"
+        assert book_db.fetch_one("SELECT count(*) AS n FROM positions")["n"] == 0
+
+        monkeypatch.setattr(book_db, "session", real_session)
+        assert book.save_ledger_slice_to_db(book_db, written) > 0
+        assert book_db.fetch_one("SELECT count(*) AS n FROM positions")["n"] == 1

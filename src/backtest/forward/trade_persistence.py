@@ -225,6 +225,10 @@ class LiveTradePersister:
         #: Set by :meth:`attach_order_ledger`; used to resolve an order's
         #: instance id back to the runner (and therefore the portfolio row).
         self._ledger: Any = None
+        #: runner.instance_id → graph keys already sent by
+        #: :meth:`_mirror_book_slice`. Per process: a restart re-sends the
+        #: current state of each row, which the upserters absorb as updates.
+        self._ledger_keys: dict[str, set[str]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -252,6 +256,17 @@ class LiveTradePersister:
         source = str(getattr(getattr(runner, "config", None), "source", "") or "").lower()
         if source in self.NON_PERSISTENT_SOURCES:
             return 0
+        # The execution graph first: a closed trade names the position it came
+        # from, and that row has to exist before the trade that points at it.
+        # Its own guard keeps a ledger failure from costing a trade — a trade
+        # whose position row is missing retries on the next sweep rather than
+        # being dropped.
+        try:
+            self._mirror_book_slice(runner)
+        except Exception:  # noqa: BLE001 — never break the tick
+            logger.exception(
+                "[db] runner %s: could not mirror the execution graph", runner.instance_id
+            )
         try:
             trades = list(runner.closed_trades)
         except Exception:  # noqa: BLE001 — never break the tick
@@ -378,6 +393,31 @@ class LiveTradePersister:
     # Internals
     # ------------------------------------------------------------------
 
+    def _mirror_book_slice(self, runner: Any) -> int:
+        """Send the runner's changed positions / orders / fills to the DB (B3).
+
+        The runner's own :class:`~backtest.simulator.portfolio.Portfolio` is the
+        only place an executed order carries its fee split, its liquidity flag
+        and the position it opened, so it — not the tag-only ledger — owns
+        ``orders``, ``fills`` and ``positions`` for anything that actually
+        became an execution.
+        """
+        portfolio = getattr(runner, "portfolio", None)
+        write_slice = getattr(portfolio, "save_ledger_slice_to_db", None)
+        if write_slice is None:
+            return 0
+
+        portfolio_id = self._ensure_portfolio_row(runner)
+        if portfolio.portfolio_id != portfolio_id:
+            # The book was handed a uuid at construction that no ``portfolios``
+            # row carries, and every child row is written under the portfolio's
+            # own id — so an unaligned book would violate the foreign key. The
+            # database row is the durable identity; the book adopts it.
+            portfolio.portfolio_id = portfolio_id
+
+        written = self._ledger_keys.setdefault(runner.instance_id, set())
+        return write_slice(self.db, written)
+
     def _ensure_portfolio_row(self, runner: Any) -> str:
         """One `portfolios` row per runner instance (created once, cached)."""
         cached = getattr(runner, "_db_portfolio_id", None)
@@ -443,6 +483,12 @@ class LiveTradePersister:
         holding_min = max(int((exit_ts - entry_ts).total_seconds() // 60), 0)
         return {
             "portfolio_id": portfolio_id,
+            # B3: an equity round trip names the ``positions`` row it came from,
+            # which is what lets history be joined back to the execution. An
+            # option structure is a set of legs and never became a share
+            # position, so it names nothing and stays NULL rather than pointing
+            # at a row that does not exist.
+            "position_id": t.get("position_id") or None,
             "symbol": str(t.get("symbol") or "?")[:64],
             "strategy_name": str(runner.config.strategy_name)[:64],
             "direction": "long" if str(t.get("side", "LONG")).upper() == "LONG" else "short",

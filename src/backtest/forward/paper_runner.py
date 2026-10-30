@@ -1848,6 +1848,10 @@ class StrategyRunner:
                     "exit_reason": pos.exit_reason,
                     "coid": None,
                     "exit_coid": None,
+                    # The round trip's own identity in the durable ledger, so a
+                    # stored trade can be joined back to the position and the
+                    # fills that made it (B3).
+                    "position_id": pos.position_id,
                 }
             )
         trades.extend(self.closed_option_trades)
