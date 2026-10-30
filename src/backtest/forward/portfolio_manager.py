@@ -543,7 +543,6 @@ class PortfolioManager:
                 runners = self._segment_runners(name)
                 key = self._segment_key(name)
                 equity = sum(r.equity() for r in runners)
-                day_start = self._bucket_day_start.get(key, 0.0)
                 peak = self._bucket_peak.get(key, 0.0)
                 out[name] = {
                     "display_name": seg.display_name,
@@ -553,7 +552,9 @@ class PortfolioManager:
                     "risk": dict(seg.risk),
                     "runner_count": len(runners),
                     "equity": equity,
-                    "daily_pnl": (equity - day_start) if day_start > 0 else 0.0,
+                    # Today's move, same as the bucket card and the segment
+                    # fuse: ``equity - day_start`` was the life of the segment.
+                    "daily_pnl": sum(r.daily_pnl() for r in runners),
                     "deployed": sum(r.deployed_capital() for r in runners),
                     "drawdown_pct": ((peak - equity) / peak) if peak > 0 else 0.0,
                     "halted": self._bucket_halted.get(key, False),
@@ -2984,7 +2985,12 @@ class PortfolioManager:
             if equity > self._bucket_peak.get(mode, 0.0):
                 self._bucket_peak[mode] = equity
 
-            daily_pnl = equity - self._bucket_day_start.get(mode, 0.0)
+            # The day, not the life. ``equity - day_start`` was the anchor taken
+            # at the bucket's first bar and never rolled, so it fed the breaker
+            # every loss the book has ever had while the card next to it showed
+            # ``daily_pnl`` — today's move. A halt on day 3 of a slow drift, or
+            # none at all after a profitable session, both came from that.
+            daily_pnl = self._bucket_daily_pnl(mode)
             already_halted = self._bucket_halted.get(mode, False)
 
             report = self.supervisor.evaluate(
@@ -3048,7 +3054,7 @@ class PortfolioManager:
             if self._bucket_day_start.get(key, 0.0) <= 0:
                 self._bucket_day_start[key] = seg_equity
 
-            seg_daily_pnl = seg_equity - self._bucket_day_start.get(key, 0.0)
+            seg_daily_pnl = sum(r.daily_pnl() for r in seg_runners)
             seg_halted = self._bucket_halted.get(key, False)
             report = self._segment_risk_supervisor(seg_name, seg_def.risk).evaluate(
                 runners=seg_runners,
@@ -3090,7 +3096,9 @@ class PortfolioManager:
             runners=all_runners,
             total_equity=equity,
             peak_equity=self.peak_equity,
-            daily_pnl=equity - self._day_start_equity,
+            # Same basis as the bucket and segment fuses above, and the same
+            # number the portfolio card shows: the session move, not the life.
+            daily_pnl=self._aggregate_daily_pnl(),
             already_halted=self.halted,
         )
         self.last_report = report.to_dict()

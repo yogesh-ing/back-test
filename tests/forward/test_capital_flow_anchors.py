@@ -1,12 +1,15 @@
 """Ticket 2.3 — capital flows must not read as trading (BUG-33).
 
-``daily_pnl = equity - day_start`` is the fuse's number. The anchor was taken
-once, at the session's first bar, and never moved afterwards — so a runner
-spawned mid-session added its allocated capital to equity while the anchor
-stayed behind, and the bucket reported a huge phantom *gain*. That direction is
-the dangerous one: the daily-loss limit gets spent absorbing the phantom, so a
-real loss the size of the new book trips nothing. Deleting a book moved equity
-the other way and read as a loss against a peak the flow had just inflated.
+The flow-adjusted anchors are what keep the *card* honest: ``daily_pnl`` is now
+the bucket's session move (``Σ runner.daily_pnl()``), while ``day_start`` /
+``peak_equity`` are the percentage denominator and the drawdown baseline. The
+anchor was taken once, at the session's first bar, and never moved afterwards —
+so a runner spawned mid-session added its allocated capital to equity while the
+anchor stayed behind, and the bucket reported a huge phantom *gain*. That
+direction is the dangerous one: the daily-loss limit gets spent absorbing the
+phantom, so a real loss the size of the new book trips nothing. Deleting a book
+moved equity the other way and read as a loss against a peak the flow had just
+inflated.
 
 The anchors (manager baseline, bucket, live segment) and the high-water marks
 now move with the money: in at ``allocated_capital``, out at the book's
@@ -68,8 +71,16 @@ def _manager(daily_loss_limit=100_000, max_drawdown_pct=0.90):
 
 
 def _fuse_daily_pnl(manager, mode):
-    """The number the bucket breaker is fed — equity minus its day anchor."""
-    return manager._bucket_equity(mode) - manager._bucket_day_start.get(mode, 0.0)
+    """The number the bucket breaker is fed — the bucket's session move.
+
+    Since the daily-pnl continuation it is ``Σ runner.daily_pnl()`` (what the
+    card shows), not ``equity - day_start``, which was the bucket's whole life
+    against an anchor taken at its first bar. The anchors below still matter:
+    they are the percentage denominator and the reported day baseline, and a
+    flow must move them or a spawn reads as a gain on the card.
+    """
+    return manager._bucket_daily_pnl(mode)
+
 
 
 @pytest.fixture

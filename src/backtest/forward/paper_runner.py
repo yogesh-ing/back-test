@@ -4289,24 +4289,35 @@ class StrategyRunner:
         self.equity_curve.append(point)
 
     def _roll_trading_day(self, ts: str) -> None:
-        # Daily PnL is session-anchored: the baseline is fixed at the first
-        # bar the runner sees (warmup and replay do not roll days). Call
-        # :meth:`reset_daily_anchor` to re-baseline at the real session start.
+        # Takes the stored session baseline once, at the first bar this runner
+        # sees. It is the equity the snapshot/state reports as the day's start —
+        # NOT the daily fuse, which reads :meth:`daily_pnl` and rolls on the
+        # BUG-04 session anchors. Call :meth:`reset_daily_anchor` to re-baseline.
         day = ts[:10] if ts else datetime.now(timezone.utc).date().isoformat()
         if self._current_day is None:
             self._current_day = day
             self._day_start_equity = self.equity()
 
     def reset_daily_anchor(self) -> None:
-        """Re-baseline daily PnL at current equity (session open / tests)."""
+        """Re-baseline the day at current equity (session open / manual reset).
+
+        The daily fuse reads :meth:`daily_pnl`, so clearing the day means
+        promoting the BUG-04 session anchors too — otherwise this call would
+        move a number nothing consults and the book would stay tripped on the
+        loss it was just forgiven.
+        """
         with self._lock:
             self._day_start_equity = self.equity()
             self._current_day = datetime.now(timezone.utc).date().isoformat()
+            self._capture_pnl_session()
+            self._prev_close_realized_net = self.realized_pnl
+            self._prev_close_open_pnl = self.open_pnl()
+            self._last_session_realized = self.realized_pnl
+            self._last_session_open = self.open_pnl()
 
     # -- instance-level circuit breakers ----------------------------------
 
     def _check_instance_risk(self) -> None:
-        equity = self.equity()
         alloc = self.config.allocated_capital
         breach = None
         # 0 disables a breaker (2026-09-24, mirrors the global daily-loss
@@ -4321,15 +4332,18 @@ class StrategyRunner:
                 f"instance max drawdown {self.max_drawdown_pct:.1%} >= "
                 f"{self.config.max_drawdown_pct:.1%}"
             )
-        elif (
-            self.config.daily_loss_limit_pct > 0
-            and (alloc - equity) >= alloc * self.config.daily_loss_limit_pct
-            and self.daily_pnl() < 0
-        ):
-            loss_pct = (self._day_start_equity - equity) / alloc
-            if loss_pct >= self.config.daily_loss_limit_pct:
+        elif self.config.daily_loss_limit_pct > 0 and alloc > 0:
+            # The day, not the life: ``daily_pnl()`` is the BUG-04 session move.
+            # This branch used ``_day_start_equity`` — the equity at the first
+            # bar the runner ever saw, baselined once and never rolled — so it
+            # counted yesterday's loss against today's limit, and (worse) a
+            # profitable session lifted equity above the anchor so the next
+            # day's crash reached nothing. The cumulative direction already
+            # belongs to the drawdown fuse above, whose baseline is peak_equity.
+            day_move = self.daily_pnl()
+            if day_move <= -alloc * self.config.daily_loss_limit_pct:
                 breach = (
-                    f"instance daily loss {loss_pct:.1%} >= "
+                    f"instance daily loss {-day_move / alloc:.1%} >= "
                     f"{self.config.daily_loss_limit_pct:.1%}"
                 )
         if breach:

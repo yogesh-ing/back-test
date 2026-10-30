@@ -35,6 +35,7 @@ import pytest
 
 from backtest.forward.paper_runner import (
     STATUS_PAUSED,
+    STATUS_RUNNING,
     FillEvent,
     OrderLedger,
     RunnerConfig,
@@ -253,3 +254,112 @@ class TestInstanceBreakerOnRealizedLoss:
         runner._check_instance_risk()
         assert runner.status == STATUS_PAUSED
         assert "daily loss" in (runner.error or "")
+
+
+# ---------------------------------------------------------------------------
+# The fuse must read the SAME day the card reads (daily-pnl continuation)
+# ---------------------------------------------------------------------------
+
+
+class TestInstanceBreakerReadsTheSessionDay:
+    """The instance fuse was fed by a spawn anchor that never rolls.
+
+    ``_check_instance_risk`` gated on ``allocated − equity`` and divided by
+    ``_day_start_equity`` — the equity at the first bar the runner ever saw,
+    baselined once by ``_roll_trading_day`` and never moved again. So it
+    measured the book's lifetime, while ``daily_pnl()`` (the BUG-04 session
+    anchors) measures today. Two wrong directions from one stale number:
+
+    * a good day raises equity above the anchor, so the next day's crash —
+      which the card shows in full — never reaches the gate and the book keeps
+      trading (the money-losing one, live capital);
+    * yesterday's loss stays in the number forever, so a flat today trips.
+
+    The drawdown fuse already owns the cumulative direction (its baseline is
+    ``peak_equity``); the daily fuse owns today.
+    """
+
+    def test_crash_after_a_profitable_day_still_trips(self):
+        """Yesterday's +₹9L must not buy today's −₹9L a free pass."""
+        runner = _equity_runner(
+            name="UPDOWN",
+            allocated_capital=1_000_000,
+            daily_loss_limit_pct=0.05,
+            max_drawdown_pct=0.0,
+        )
+        _feed(runner, [100.0] * 14)
+        assert runner.positions, "fixture failed to open a position"
+
+        _feed(runner, [190.0], start_day=14)  # the good session
+        assert runner.daily_pnl() > 100_000
+        _feed(runner, [190.0], start_day=15)  # rolls: yesterday is banked
+
+        assert runner.status != STATUS_PAUSED, "fixture tripped before the crash"
+        assert runner.equity() > runner.config.allocated_capital, (
+            "the profitable session must leave equity above the spawn anchor, "
+            "which is exactly what blinded the old gate"
+        )
+        _feed(runner, [100.0], start_day=16)  # today: all of it back off
+
+        day_move = runner.daily_pnl()
+        assert day_move < -50_000, f"today's move should be the crash, got {day_move:,.2f}"
+
+        runner._check_instance_risk()
+        assert runner.status == STATUS_PAUSED, (
+            "the daily fuse read the spawn anchor: equity had returned to "
+            "allocation, so a -"
+            f"{-day_move / runner.config.allocated_capital:.0%} day tripped nothing"
+        )
+        assert "daily loss" in (runner.error or "")
+
+    def test_three_small_days_do_not_trip_a_five_percent_daily_limit(self):
+        """Three 1.8% days are three clean days, however long the book has lived."""
+        runner = _equity_runner(
+            name="DRIFT",
+            allocated_capital=1_000_000,
+            daily_loss_limit_pct=0.05,
+            max_drawdown_pct=0.0,
+        )
+        _feed(runner, [1000.0] * 14)
+        assert runner.positions, "fixture failed to open a position"
+
+        for price, day in ((981.0, 14), (962.0, 15), (943.0, 16)):
+            _feed(runner, [price], start_day=day)
+            day_move = runner.daily_pnl()
+            assert -50_000 < day_move < 0, (
+                f"the session on day {day} should be a small loss, got {day_move:,.2f}"
+            )
+            runner._check_instance_risk()
+            assert runner.status != STATUS_PAUSED, (
+                f"paused on day {day} for a {day_move:,.2f} day against a ₹50,000 "
+                "(5%) limit — the fuse was counting the life, not the day"
+            )
+
+        # What the OLD fuse divided by: the loss since the spawn anchor. It is
+        # over the limit here, which is exactly why it fired on a day the book
+        # did not lose. The cumulative direction belongs to the drawdown fuse.
+        assert runner._day_start_equity - runner.equity() > (
+            runner.config.allocated_capital * runner.config.daily_loss_limit_pct
+        )
+
+    def test_manual_anchor_reset_clears_the_day_for_the_fuse(self):
+        """reset_daily_anchor must forgive the day, not just move a stored number."""
+        runner = _equity_runner(
+            name="RESET",
+            allocated_capital=1_000_000,
+            daily_loss_limit_pct=0.05,
+            max_drawdown_pct=0.0,
+        )
+        _feed(runner, [1000.0] * 14)
+        _feed(runner, [800.0], start_day=14)  # −19% in one session
+        assert runner.daily_pnl() < -50_000
+
+        runner.reset_daily_anchor()
+        assert runner.daily_pnl() == pytest.approx(0.0, abs=1.0)
+        runner.status = STATUS_RUNNING  # clearing the day is the resume gesture too
+        runner._check_instance_risk()
+        assert runner.status == STATUS_RUNNING, (
+            "the operator reset the anchors but the fuse still owed the day"
+        )
+
+
