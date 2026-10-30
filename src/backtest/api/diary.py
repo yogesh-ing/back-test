@@ -109,3 +109,28 @@ def diary_instance_trades(instance_key: str) -> Tuple[Response, int]:
     except Exception as exc:  # noqa: BLE001
         log.exception("diary_instance_trades failed: %s", exc)
         return _error(f"Failed to load instance trades: {exc}", 500)
+
+
+@diary_bp.get("/api/diary/edge/regimes")
+def diary_edge_regimes() -> Tuple[Response, int]:
+    mode = request.args.get("mode", "paper")
+    from_arg = request.args.get("from") or None
+    to_arg = request.args.get("to") or None
+    strategy = request.args.get("strategy") or None
+    clock = request.args.get("clock", "entry")
+    group_by = request.args.get("group_by", "strategy")
+    try:
+        payload = DiaryService().get_edge_regimes(
+            mode=mode,
+            from_date=from_arg,
+            to_date=to_arg,
+            strategy=strategy,
+            clock=clock,
+            group_by=group_by,
+        )
+        return jsonify({"success": True, **payload}), 200
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("diary_edge_regimes failed: %s", exc)
+        return _error(f"Failed to load edge regimes: {exc}", 500)

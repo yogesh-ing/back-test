@@ -172,6 +172,17 @@
           type="button"
           class="diary-tab-btn"
           role="tab"
+          id="diary-tab-btn-regimes"
+          aria-selected="false"
+          aria-controls="diary-panel-regimes"
+          data-tab="regimes"
+        >
+          Exit &amp; IST Regimes
+        </button>
+        <button
+          type="button"
+          class="diary-tab-btn"
+          role="tab"
           id="diary-tab-btn-sessions"
           aria-selected="false"
           aria-controls="diary-panel-sessions"
@@ -208,7 +219,51 @@
       </div>
     </div>
 
-    <!-- Tab 2: Daily Session Ledger Breakdown (IST) -->
+    <!-- Tab 2: Slice 3 Institutional Edge Diagnostics I — Exit Reason & NSE IST Session Regimes -->
+    <div id="diary-panel-regimes" role="tabpanel" aria-labelledby="diary-tab-btn-regimes" hidden>
+      <div class="diary-attr-toolbar">
+        <div class="diary-attr-toolbar-left">
+          <label for="diary-regime-groupby" class="muted" style="font-size:11.5px;font-weight:600;">Matrix rows</label>
+          <select id="diary-regime-groupby" class="diary-select" style="min-width:170px;height:30px;font-size:12px;">
+            <option value="strategy">By Strategy</option>
+            <option value="instance">By Spawned Instance</option>
+          </select>
+
+          <label for="diary-regime-clock" class="muted" style="font-size:11.5px;font-weight:600;margin-left:8px;">Session clock</label>
+          <select id="diary-regime-clock" class="diary-select" style="min-width:170px;height:30px;font-size:12px;">
+            <option value="entry">Entry Time (IST)</option>
+            <option value="exit">Exit Time (IST)</option>
+          </select>
+        </div>
+        <div class="diary-attr-toolbar-right">
+          <span class="muted" style="font-size:11.5px;">Single Commission sum · Row &amp; column totals reconciled to 2dp</span>
+        </div>
+      </div>
+
+      <div class="diary-callouts-grid" id="diary-regime-callouts" aria-live="polite"></div>
+
+      <div class="diary-matrix-block">
+        <div class="diary-section-head">
+          <h2 id="diary-exit-matrix-title">Exit-Reason Attribution Matrix</h2>
+          <span class="muted" style="font-size:11.5px;">Net P&amp;L · Closed count · Net Win % · Commission</span>
+        </div>
+        <div class="diary-table-wrap" id="diary-exit-matrix-wrap">
+          <div class="diary-empty">Loading exit-reason matrix…</div>
+        </div>
+      </div>
+
+      <div class="diary-matrix-block" style="margin-top:14px;">
+        <div class="diary-section-head">
+          <h2 id="diary-session-matrix-title">NSE Intraday Session Regime Matrix (IST)</h2>
+          <span class="muted" id="diary-session-clock-note" style="font-size:11.5px;">Bucketed by Entry Time (IST)</span>
+        </div>
+        <div class="diary-table-wrap" id="diary-session-matrix-wrap">
+          <div class="diary-empty">Loading NSE intraday session matrix…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 3: Daily Session Ledger Breakdown (IST) -->
     <div id="diary-panel-sessions" role="tabpanel" aria-labelledby="diary-tab-btn-sessions" hidden>
       <div class="diary-section-head" style="margin-bottom:8px;">
         <h2 id="diary-sessions-title">Session Ledger Breakdown (IST)</h2>

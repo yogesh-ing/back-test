@@ -178,9 +178,12 @@
     activePreset: 'mtd',
     activeTab: 'attribution',
     attrSort: 'net_asc',
+    regimeClock: 'entry',
+    regimeGroupBy: 'strategy',
     calendarDays: [],
     calendarWeeks: [],
     attributionData: null,
+    regimesData: null,
     expandedStrategies: {},
     expandedInstances: {},
     hasAutoExpanded: false
@@ -235,7 +238,8 @@
   }
 
   function switchTab(tabName) {
-    state.activeTab = tabName === 'sessions' ? 'sessions' : 'attribution';
+    var allowed = { attribution: true, regimes: true, sessions: true };
+    state.activeTab = allowed[tabName] ? tabName : 'attribution';
     var tabs = document.querySelectorAll('.diary-tab-btn');
     for (var i = 0; i < tabs.length; i++) {
       var isSel = tabs[i].getAttribute('data-tab') === state.activeTab;
@@ -243,8 +247,10 @@
       tabs[i].setAttribute('aria-selected', isSel ? 'true' : 'false');
     }
     var pAttr = document.getElementById('diary-panel-attribution');
+    var pReg = document.getElementById('diary-panel-regimes');
     var pSess = document.getElementById('diary-panel-sessions');
     if (pAttr) pAttr.hidden = state.activeTab !== 'attribution';
+    if (pReg) pReg.hidden = state.activeTab !== 'regimes';
     if (pSess) pSess.hidden = state.activeTab !== 'sessions';
   }
 
@@ -862,6 +868,124 @@
     wrap.innerHTML = html;
   }
 
+  function computeMatrixCellHeat(netPnl, maxAbsNet, tradeCount) {
+    var n = Number(netPnl || 0);
+    if (!tradeCount || Math.abs(n) < 0.005 || maxAbsNet <= 0) return '';
+    var ratio = Math.min(1, Math.abs(n) / maxAbsNet);
+    var tier = ratio <= 0.25 ? 1 : ratio <= 0.5 ? 2 : ratio <= 0.75 ? 3 : 4;
+    return (n > 0 ? 'mheat-pos-' : 'mheat-neg-') + tier;
+  }
+
+  function renderMatrixCellHtml(cell, maxAbsNet, isTotalCol) {
+    var c = cell || { trade_count: 0, net_pnl: 0, win_rate_pct: 0, commission: 0 };
+    var heat = isTotalCol ? '' : computeMatrixCellHeat(c.net_pnl, maxAbsNet, c.trade_count);
+    var cls = 'diary-mcell' + (isTotalCol ? ' diary-matrix-tot' : '') + (heat ? ' ' + heat : '');
+    if (!c.trade_count) {
+      return '<td class="' + cls + '"><span class="muted">—</span></td>';
+    }
+    var tone = pnlToneClass(c.net_pnl);
+    return '<td class="' + cls + '">' +
+      '<div class="diary-mcell-net ' + tone + '">' + fmtInrSigned(c.net_pnl) + '</div>' +
+      '<div class="diary-mcell-sub">' + c.trade_count + 'tr · ' +
+      Number(c.win_rate_pct || 0).toFixed(0) + '%W · Cost ' + fmtInrAbs(c.commission) + '</div>' +
+      '</td>';
+  }
+
+  function buildMatrixHtml(matrix, rowHeaderLabel, modeLabel) {
+    if (!matrix || !Array.isArray(matrix.rows) || matrix.rows.length === 0) {
+      return '<div class="diary-empty">No closed trades in this IST window for the ' +
+        escapeHtml(modeLabel || 'selected') + ' book.</div>';
+    }
+    var cols = matrix.columns || [];
+    var rows = matrix.rows || [];
+    var colTots = matrix.column_totals || {};
+    var grand = matrix.grand_totals || {};
+    var maxAbs = Number(matrix.max_abs_cell_net || 0);
+
+    var html = '<table class="diary-table diary-matrix-table">' +
+      '<thead><tr><th>' + escapeHtml(rowHeaderLabel) + '</th>';
+    for (var c = 0; c < cols.length; c++) {
+      html += '<th class="num">' + escapeHtml(cols[c].label) +
+        (cols[c].subtitle ? '<span class="diary-matrix-col-sub">' + escapeHtml(cols[c].subtitle) + '</span>' : '') +
+        '</th>';
+    }
+    html += '<th class="num diary-matrix-tot">Row Total</th></tr></thead><tbody>';
+
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r];
+      html += '<tr><td><strong>' + escapeHtml(row.row_label) + '</strong></td>';
+      for (var k = 0; k < cols.length; k++) {
+        var ck = cols[k].key;
+        html += renderMatrixCellHtml((row.cells || {})[ck], maxAbs, false);
+      }
+      html += renderMatrixCellHtml(row.totals, maxAbs, true) + '</tr>';
+    }
+
+    html += '<tr class="diary-row-strategy" style="border-top:2px solid var(--border);">' +
+      '<td><strong>Column Total (' + escapeHtml(modeLabel || '') + ')</strong></td>';
+    for (var t = 0; t < cols.length; t++) {
+      html += renderMatrixCellHtml(colTots[cols[t].key], maxAbs, true);
+    }
+    html += renderMatrixCellHtml(grand, maxAbs, true) + '</tr></tbody></table>';
+    return html;
+  }
+
+  function renderRegimesPanel() {
+    var calloutsEl = document.getElementById('diary-regime-callouts');
+    var exitWrap = document.getElementById('diary-exit-matrix-wrap');
+    var sessWrap = document.getElementById('diary-session-matrix-wrap');
+    var clockNote = document.getElementById('diary-session-clock-note');
+    var data = state.regimesData;
+
+    if (clockNote) {
+      clockNote.textContent = 'Bucketed by ' +
+        (state.regimeClock === 'exit' ? 'Exit Time (IST)' : 'Entry Time (IST)');
+    }
+    if (!data) {
+      if (exitWrap) exitWrap.innerHTML = '<div class="diary-empty">No regime diagnostics loaded.</div>';
+      if (sessWrap) sessWrap.innerHTML = '';
+      if (calloutsEl) calloutsEl.innerHTML = '';
+      return;
+    }
+
+    if (calloutsEl) {
+      var callouts = data.callouts || [];
+      var cHtml = '';
+      for (var i = 0; i < callouts.length; i++) {
+        var co = callouts[i];
+        cHtml += '<article class="diary-callout-card" data-severity="' + escapeHtml(co.severity || 'warning') + '">' +
+          '<div class="diary-callout-title">' + escapeHtml(co.title) + '</div>' +
+          '<div class="diary-callout-detail">' + escapeHtml(co.detail) + '</div>' +
+          '</article>';
+      }
+      calloutsEl.innerHTML = cHtml;
+    }
+
+    var rowLabel = data.group_by === 'instance' ? 'Spawned Instance' : 'Strategy';
+    var modeLabel = state.mode === 'live' ? 'Live' : 'Paper';
+    if (exitWrap) {
+      exitWrap.innerHTML = buildMatrixHtml(data.exit_matrix, rowLabel, modeLabel);
+    }
+    if (sessWrap) {
+      sessWrap.innerHTML = buildMatrixHtml(data.session_matrix, rowLabel, modeLabel);
+    }
+  }
+
+  function loadRegimesOnly() {
+    var regQs = buildQuery({
+      mode: state.mode,
+      from: state.selFrom,
+      to: state.selTo,
+      strategy: state.strategy,
+      clock: state.regimeClock,
+      group_by: state.regimeGroupBy
+    });
+    return fetchJson('/api/diary/edge/regimes?' + regQs).then(function (regData) {
+      state.regimesData = regData;
+      renderRegimesPanel();
+    });
+  }
+
   function renderSessionBreakdownTable(daysInWindow) {
     var wrap = document.getElementById('diary-sessions-table-wrap');
     if (!wrap) return;
@@ -987,6 +1111,14 @@
       to: state.selTo,
       strategy: state.strategy
     });
+    var regQs = buildQuery({
+      mode: state.mode,
+      from: state.selFrom,
+      to: state.selTo,
+      strategy: state.strategy,
+      clock: state.regimeClock,
+      group_by: state.regimeGroupBy
+    });
     var winCalPromise = (state.selFrom >= mb.from && state.selTo <= mb.to)
       ? null
       : fetchJson('/api/diary/calendar?' + winQs);
@@ -995,12 +1127,14 @@
       fetchJson('/api/diary/calendar?' + calQs),
       fetchJson('/api/diary/summary?' + winQs),
       fetchJson('/api/diary/attribution?' + winQs),
+      fetchJson('/api/diary/edge/regimes?' + regQs),
       winCalPromise
     ]).then(function (res) {
       var calData = res[0];
       var sumData = res[1];
       var attrData = res[2];
-      var winCal = res[3];
+      var regData = res[3];
+      var winCal = res[4];
 
       if (calData.today_ist) {
         state.todayIst = calData.today_ist;
@@ -1008,11 +1142,13 @@
       state.calendarDays = calData.days || [];
       state.calendarWeeks = calData.weeks || [];
       state.attributionData = attrData;
+      state.regimesData = regData;
 
       populateStrategies(sumData.available_strategies || calData.available_strategies || []);
       renderSummary(sumData);
       renderCalendarGrid();
       renderAttributionTree();
+      renderRegimesPanel();
 
       var windowDays = [];
       var sourceDays = winCal ? (winCal.days || []) : state.calendarDays;
@@ -1124,6 +1260,22 @@
       sortEl.addEventListener('change', function () {
         state.attrSort = sortEl.value || 'net_asc';
         renderAttributionTree();
+      });
+    }
+
+    var regGroupEl = document.getElementById('diary-regime-groupby');
+    if (regGroupEl) {
+      regGroupEl.addEventListener('change', function () {
+        state.regimeGroupBy = regGroupEl.value === 'instance' ? 'instance' : 'strategy';
+        loadRegimesOnly();
+      });
+    }
+
+    var regClockEl = document.getElementById('diary-regime-clock');
+    if (regClockEl) {
+      regClockEl.addEventListener('change', function () {
+        state.regimeClock = regClockEl.value === 'exit' ? 'exit' : 'entry';
+        loadRegimesOnly();
       });
     }
 
@@ -1244,6 +1396,8 @@
     fmtInrAbs: fmtInrAbs,
     fmtInrSigned: fmtInrSigned,
     computeHeatClass: computeHeatClass,
+    computeMatrixCellHeat: computeMatrixCellHeat,
+    buildMatrixHtml: buildMatrixHtml,
     monthBounds: monthBounds,
     mondayOfWeekIso: mondayOfWeekIso,
     sortAttributionStrategies: sortAttributionStrategies,

@@ -842,3 +842,115 @@
     border: 1px solid var(--danger-shade);
 }
 
+/* Slice 3 — Diagnostic Callout Strip & 2D Heat Matrices */
+.diary-callouts-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.diary-callouts-grid:empty {
+    display: none;
+}
+
+.diary-callout-card {
+    padding: 9px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-soft);
+    background: var(--surface-2);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.diary-callout-card[data-severity="critical"] {
+    border-color: var(--danger-shade);
+    box-shadow: inset 3px 0 0 var(--danger);
+    background: var(--danger-tint);
+}
+
+.diary-callout-card[data-severity="warning"] {
+    border-color: var(--warning-shade);
+    box-shadow: inset 3px 0 0 var(--warning);
+    background: var(--warning-tint);
+}
+
+.diary-callout-card[data-severity="positive"] {
+    border-color: var(--success-shade);
+    box-shadow: inset 3px 0 0 var(--success);
+    background: var(--success-tint);
+}
+
+.diary-callout-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-strong);
+}
+
+.diary-callout-detail {
+    font-size: 11.5px;
+    color: var(--text);
+    line-height: 1.38;
+    font-variant-numeric: tabular-nums;
+}
+
+.diary-matrix-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.diary-matrix-table th,
+.diary-matrix-table td {
+    padding: 7px 9px;
+    vertical-align: top;
+}
+
+.diary-matrix-col-sub {
+    display: block;
+    font-size: 9.5px;
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--muted);
+    margin-top: 1px;
+}
+
+.diary-mcell {
+    min-width: 112px;
+    text-align: right;
+    border-left: 1px solid var(--border-soft);
+}
+
+.diary-mcell.mheat-pos-1 { background: rgba(101, 208, 165, .06); }
+.diary-mcell.mheat-pos-2 { background: rgba(101, 208, 165, .12); }
+.diary-mcell.mheat-pos-3 { background: rgba(101, 208, 165, .19); }
+.diary-mcell.mheat-pos-4 { background: rgba(101, 208, 165, .27); }
+
+.diary-mcell.mheat-neg-1 { background: rgba(241, 132, 145, .06); }
+.diary-mcell.mheat-neg-2 { background: rgba(241, 132, 145, .12); }
+.diary-mcell.mheat-neg-3 { background: rgba(241, 132, 145, .19); }
+.diary-mcell.mheat-neg-4 { background: rgba(241, 132, 145, .27); }
+
+.diary-mcell-net {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.diary-mcell-sub {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 1px;
+}
+
+.diary-matrix-tot {
+    background: var(--surface-2);
+    border-left: 2px solid var(--border);
+}
+
+

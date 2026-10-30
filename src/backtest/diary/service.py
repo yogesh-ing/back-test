@@ -34,6 +34,11 @@ from backtest.diary.ledger import (
     normalize_db_trade_row,
     normalize_memory_trade_dict,
 )
+from backtest.diary.regimes import (
+    build_regime_matrices,
+    validate_regime_clock,
+    validate_regime_group_by,
+)
 from backtest.forward.portfolio_manager import get_portfolio_manager
 from backtest.live.market_status import NSE_HOLIDAYS_2026
 from backtest.timekeeping import (
@@ -679,6 +684,56 @@ class DiaryService:
                         "instance": inst,
                     }
         raise KeyError(f"Spawned instance {instance_key!r} not found in {tree['mode']} window")
+
+    # ------------------------------------------------------------------
+    # Public Slice 3 Views: Exit-Reason & NSE IST Session Regimes
+    # ------------------------------------------------------------------
+
+    def get_edge_regimes(
+        self,
+        *,
+        mode: str = "paper",
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        strategy: Optional[str] = None,
+        clock: str = "entry",
+        group_by: str = "strategy",
+        today_ist: Optional[date] = None,
+    ) -> dict[str, Any]:
+        """Return Exit-Reason & NSE Intraday Session Regime 2D heat matrices."""
+        book_mode = validate_diary_mode(mode)
+        norm_clock = validate_regime_clock(clock)
+        norm_group = validate_regime_group_by(group_by)
+        resolved_today = today_ist or current_session_date()
+        start_d, end_d = parse_ist_date_range(
+            from_date, to_date, default_span="today", today_ist=resolved_today
+        )
+        strat_filter = _normalize_strategy_filter(strategy)
+
+        loaded = self.load_book_trades(
+            mode=book_mode,
+            start_date=start_d,
+            end_date=end_d,
+            strategy=strat_filter,
+        )
+        trades = loaded["trades"]
+        mismatches = sum(1 for t in trades if not t.get("reconcile_ok", True))
+        payload = build_regime_matrices(
+            book_mode=book_mode,
+            start_d=start_d,
+            end_d=end_d,
+            today_ist=resolved_today,
+            selected_strategy=strat_filter,
+            available_strategies=loaded["available_strategies"],
+            trades=trades,
+            clock=norm_clock,
+            group_by=norm_group,
+            duplicates_collapsed=loaded["duplicates_collapsed"],
+        )
+        payload["ledger_health"] = self._ledger_health(
+            loaded["duplicates_collapsed"], mismatches
+        )
+        return payload
 
     @staticmethod
     def _rollup_weeks(days: list[dict[str, Any]]) -> list[dict[str, Any]]:

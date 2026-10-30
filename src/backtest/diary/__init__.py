@@ -18,6 +18,15 @@ from backtest.diary.ledger import (
     reconcile_trade_amounts,
     single_commission_decimal,
 )
+from backtest.diary.regimes import (
+    CANONICAL_EXIT_BUCKETS,
+    NSE_SESSION_REGIMES,
+    build_regime_matrices,
+    canonical_exit_reason,
+    classify_ist_session_regime,
+    validate_regime_clock,
+    validate_regime_group_by,
+)
 from backtest.diary.service import (
     VALID_DIARY_MODES,
     DiaryService,
@@ -26,12 +35,17 @@ from backtest.diary.service import (
 )
 
 __all__ = [
+    "CANONICAL_EXIT_BUCKETS",
     "DEFAULT_INLINE_TRADE_LIMIT",
     "DiaryService",
+    "NSE_SESSION_REGIMES",
     "RECONCILE_TOLERANCE_INR",
     "VALID_DIARY_MODES",
     "build_attribution_tree",
+    "build_regime_matrices",
+    "canonical_exit_reason",
     "canonical_trade_signature",
+    "classify_ist_session_regime",
     "compute_rollup_metrics",
     "dedupe_normalized_trades",
     "extract_instance_prefix",
@@ -44,4 +58,6 @@ __all__ = [
     "reconcile_trade_amounts",
     "single_commission_decimal",
     "validate_diary_mode",
+    "validate_regime_clock",
+    "validate_regime_group_by",
 ]
