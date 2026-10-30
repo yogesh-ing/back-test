@@ -310,6 +310,9 @@ class PortfolioManager:
         #: BUG-39: the session clock is read once a second so the EOD
         #: square-off cannot depend on a tick arriving at 15:10.
         self.eod_sweep_interval_s: float = 1.0
+        #: Edge trigger for the "paused book carries overnight" warning, so a
+        #: 1 s sweep says it once per session rather than 1,200 times.
+        self._paused_carry_warned: bool = False
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None
         if auto_start_feed and "PYTEST_CURRENT_TEST" not in os.environ:
@@ -1528,19 +1531,36 @@ class PortfolioManager:
 
         A positional carry is never touched: holding past the close has to be a
         declared ``carry_policy``, not an accident of a quiet quote feed.
+
+        A book outside ``RUNNING`` is skipped and reported in ``held_paused``:
+        PAUSE is the operator's opt-out from this obligation (B4), so the sweep
+        never overrides it — it says so, once per session, and they own the
+        carry.
         """
         reference = now or now_utc()
         if not self._is_eod_sweep_enabled():
             return {"skipped": True, "reason": "sweep_disabled", "squared_off": []}
         if not in_eod_squareoff_window(reference):
+            self._paused_carry_warned = False
             return {"skipped": True, "reason": "outside_squareoff_window", "squared_off": []}
         with self._lock:
-            runners = [
+            intraday_books = [
                 r
                 for r in self._runners.values()
-                if r.status == STATUS_RUNNING
-                and r.options_bridge is not None
-                and r.options_bridge.carries_intraday
+                if r.options_bridge is not None and r.options_bridge.carries_intraday
+            ]
+            runners = [r for r in intraday_books if r.status == STATUS_RUNNING]
+            # B4: pause is an opt-out from the obligation, not a request to
+            # override it — but an unforced overnight carry must not be silent.
+            held = [
+                {
+                    "instance_id": r.instance_id,
+                    "name": r.config.name,
+                    "status": r.status,
+                    "scope": self._runner_bucket(r),
+                }
+                for r in intraday_books
+                if r.status != STATUS_RUNNING
             ]
         squared: List[Dict[str, Any]] = []
         for runner in runners:
@@ -1574,7 +1594,28 @@ class PortfolioManager:
             )
         if squared:
             self._persist_state()
-        return {"skipped": False, "squared_off": squared}
+        if held and not self._paused_carry_warned:
+            # Once per session (the sweep runs every second): the log is one
+            # surface, the in-app audit trail another — an operator who paused
+            # a book through the UI sees the consequence where they acted.
+            self._paused_carry_warned = True
+            logger.warning(
+                "[session-clock] square-off obligation NOT enforced on %d "
+                "intraday book(s) outside RUNNING — operator owns the carry",
+                len(held),
+            )
+            for book in held:
+                self._audit_log(
+                    "EOD_CARRY_HELD",
+                    scope=book["scope"],
+                    instance_id=book["instance_id"],
+                    detail=(
+                        f"{book['name']} is {book['status']} at "
+                        f"{reference.astimezone(EXCHANGE_TZ):%H:%M:%S} IST — intraday "
+                        "book carried overnight, square-off skipped by design"
+                    ),
+                )
+        return {"skipped": False, "squared_off": squared, "held_paused": held}
 
     def _repair_runner_marks_internal(
         self,
