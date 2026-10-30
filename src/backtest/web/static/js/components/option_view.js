@@ -259,7 +259,7 @@ const OptionView = (function () {
       {
         key: "book_realized",
         label: "Book P&L (Closed)",
-        value: num(b.total_pnl),
+        value: num(b.net_realized_pnl),
         money: true,
         pnl: true,
         sub: closed ? Math.round(num(b.win_rate) * 100) + "% won · settled " + num(b.settled_count) : "",
