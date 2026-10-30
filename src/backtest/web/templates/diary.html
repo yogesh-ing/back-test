@@ -153,14 +153,70 @@
     </div>
   </section>
 
-  <!-- Selected Window Session Ledger & Attribution Mount -->
-  <section class="card diary-sessions-card" id="diary-attribution-mount" aria-label="Selected window session breakdown">
-    <div class="diary-section-head">
-      <h2 id="diary-sessions-title">Session Ledger Breakdown (IST)</h2>
-      <span class="muted" id="diary-sessions-hint">Click any active row to isolate that IST session day.</span>
+  <!-- Tabbed Attribution & Institutional Edge Suite Mount -->
+  <section class="card diary-sessions-card" id="diary-attribution-mount" aria-label="Attribution and session ledger">
+    <div class="diary-tabs-bar">
+      <div class="diary-tabs" role="tablist" aria-label="Diary analytical views">
+        <button
+          type="button"
+          class="diary-tab-btn is-active"
+          role="tab"
+          id="diary-tab-btn-attribution"
+          aria-selected="true"
+          aria-controls="diary-panel-attribution"
+          data-tab="attribution"
+        >
+          Strategy &rarr; Spawned Instances
+        </button>
+        <button
+          type="button"
+          class="diary-tab-btn"
+          role="tab"
+          id="diary-tab-btn-sessions"
+          aria-selected="false"
+          aria-controls="diary-panel-sessions"
+          data-tab="sessions"
+        >
+          Daily Session Ledger (IST)
+        </button>
+      </div>
+      <span class="muted" id="diary-attr-summary-badge">Loading attribution…</span>
     </div>
-    <div class="diary-table-wrap" id="diary-sessions-table-wrap">
-      <div class="diary-empty">Loading session ledger…</div>
+
+    <!-- Tab 1: 3-Level Strategy -> Spawned Instance -> Trade/Structure Hierarchy -->
+    <div id="diary-panel-attribution" role="tabpanel" aria-labelledby="diary-tab-btn-attribution">
+      <div class="diary-attr-toolbar">
+        <div class="diary-attr-toolbar-left">
+          <label for="diary-attr-sort" class="muted" style="font-size:11.5px;font-weight:600;">Sort by</label>
+          <select id="diary-attr-sort" class="diary-select" style="min-width:190px;height:30px;font-size:12px;">
+            <option value="net_asc">Net P&amp;L (Worst &rarr; Best)</option>
+            <option value="net_desc">Net P&amp;L (Best &rarr; Worst)</option>
+            <option value="comm_desc">Commission Burn (High &rarr; Low)</option>
+            <option value="trades_desc">Trade Count (High &rarr; Low)</option>
+            <option value="wr_desc">Net Win % (High &rarr; Low)</option>
+            <option value="pf_desc">Profit Factor (High &rarr; Low)</option>
+          </select>
+        </div>
+        <div class="diary-attr-toolbar-right">
+          <button type="button" class="btn btn-ghost btn-small" id="diary-expand-all">Expand all</button>
+          <button type="button" class="btn btn-ghost btn-small" id="diary-collapse-all">Collapse all</button>
+        </div>
+      </div>
+
+      <div class="diary-table-wrap" id="diary-attr-tree-wrap">
+        <div class="diary-empty">Loading Strategy &rarr; Spawned Instance attribution…</div>
+      </div>
+    </div>
+
+    <!-- Tab 2: Daily Session Ledger Breakdown (IST) -->
+    <div id="diary-panel-sessions" role="tabpanel" aria-labelledby="diary-tab-btn-sessions" hidden>
+      <div class="diary-section-head" style="margin-bottom:8px;">
+        <h2 id="diary-sessions-title">Session Ledger Breakdown (IST)</h2>
+        <span class="muted" id="diary-sessions-hint">Click any active row to isolate that IST session day.</span>
+      </div>
+      <div class="diary-table-wrap" id="diary-sessions-table-wrap">
+        <div class="diary-empty">Loading session ledger…</div>
+      </div>
     </div>
   </section>
 </div>

@@ -532,3 +532,313 @@
     color: var(--muted);
     font-size: 13px;
 }
+
+/* Slice 2 — Tab Bar & 3-Level Strategy -> Instance -> Trade Attribution Tree */
+.diary-tabs-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border-soft);
+}
+
+.diary-tabs {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    padding: 3px;
+}
+
+.diary-tab-btn {
+    height: 30px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--muted);
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .14s ease, color .14s ease;
+}
+
+.diary-tab-btn:hover {
+    color: var(--text-strong);
+    background: var(--surface-2);
+}
+
+.diary-tab-btn.is-active {
+    background: var(--primary-tint);
+    color: var(--primary);
+    box-shadow: inset 0 0 0 1px var(--primary-shade);
+}
+
+.diary-attr-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 0 10px;
+}
+
+.diary-attr-toolbar-left,
+.diary-attr-toolbar-right {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.diary-tree-table th,
+.diary-tree-table td {
+    vertical-align: middle;
+}
+
+.diary-row-strategy {
+    background: var(--surface);
+    font-weight: 600;
+}
+
+.diary-row-strategy:hover {
+    background: var(--surface-2);
+}
+
+.diary-row-instance {
+    background: rgba(145, 161, 175, .03);
+}
+
+.diary-row-instance td:first-child {
+    padding-left: 28px;
+    box-shadow: inset 3px 0 0 var(--border);
+}
+
+.diary-row-drawer td {
+    padding: 10px 14px 14px 36px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    white-space: normal;
+}
+
+.diary-expand-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    border: 0;
+    background: transparent;
+    color: var(--text-strong);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 700;
+    padding: 2px 4px;
+    cursor: pointer;
+    text-align: left;
+}
+
+.diary-expand-btn:hover {
+    color: var(--primary);
+}
+
+.diary-chevron {
+    display: inline-block;
+    width: 14px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+    transition: transform .12s ease;
+}
+
+.diary-expand-btn[aria-expanded="true"] .diary-chevron {
+    transform: rotate(90deg);
+    color: var(--primary);
+}
+
+.diary-strat-filter-btn {
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-left: 6px;
+}
+
+.diary-strat-filter-btn:hover,
+.diary-strat-filter-btn.is-filtered {
+    border-color: var(--primary-shade);
+    background: var(--primary-tint);
+    color: var(--primary);
+}
+
+.diary-inst-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    margin-top: 3px;
+    padding-left: 21px;
+}
+
+.diary-status-pill {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+}
+
+.diary-status-pill[data-status="RUNNING"] {
+    background: var(--success-tint);
+    color: var(--success-text);
+    border: 1px solid var(--success-shade);
+}
+
+.diary-status-pill[data-status="PAUSED"] {
+    background: var(--warning-tint);
+    color: var(--warning-text);
+    border: 1px solid var(--warning-shade);
+}
+
+.diary-status-pill[data-status="BLOCKED_BY_RISK"],
+.diary-status-pill[data-status="ERROR"] {
+    background: var(--danger-tint);
+    color: var(--danger-text);
+    border: 1px solid var(--danger-shade);
+}
+
+.diary-status-pill[data-status="RETIRED"],
+.diary-status-pill[data-status="STOPPED"] {
+    background: var(--surface-3);
+    color: var(--muted);
+    border: 1px solid var(--border);
+}
+
+.diary-cfg-pill {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-soft);
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+}
+
+.diary-inst-link {
+    font-size: 11px;
+    color: var(--primary);
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.diary-inst-link:hover {
+    text-decoration: underline;
+}
+
+.diary-contrib-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 3px;
+}
+
+.diary-contrib-track {
+    width: 72px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--surface-3);
+    overflow: hidden;
+}
+
+.diary-contrib-fill {
+    height: 100%;
+    border-radius: 2px;
+}
+
+.diary-contrib-fill.is-pos {
+    background: var(--success);
+}
+
+.diary-contrib-fill.is-neg {
+    background: var(--danger);
+}
+
+.diary-drawer-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.diary-drawer-section:last-child {
+    margin-bottom: 0;
+}
+
+.diary-drawer-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.diary-subtable {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11.5px;
+    background: var(--surface);
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.diary-subtable th,
+.diary-subtable td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border-soft);
+    white-space: nowrap;
+}
+
+.diary-subtable th {
+    background: var(--surface-2);
+    color: var(--muted);
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.diary-subtable th.num,
+.diary-subtable td.num {
+    text-align: right;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+.diary-recon-flag {
+    display: inline-block;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.diary-recon-flag.is-ok {
+    color: var(--success-text);
+}
+
+.diary-recon-flag.is-bad {
+    background: var(--danger-tint);
+    color: var(--danger-text);
+    border: 1px solid var(--danger-shade);
+}
+

@@ -1,8 +1,9 @@
-/* PnL Diary & Institutional Edge Suite — Slice 1 Controller (diary.js)
+/* PnL Diary & Institutional Edge Suite — Slice 1 + Slice 2 Controller (diary.js)
  *
  * Strictly segregates Paper vs Live books (?mode=paper|live), enforces IST
- * calendar date math, and renders exact 2dp Gross − Commission = Net figures
- * with a single total Commission sum (zero fee-component breakdown).
+ * calendar date math, renders exact 2dp Gross − Commission = Net figures
+ * with a single total Commission sum (zero fee-component breakdown), and
+ * mounts the 3-level Strategy → Spawned Instance → Trade/Structure tree.
  */
 (function (root) {
   'use strict';
@@ -121,6 +122,50 @@
     return pad2(p.day) + '-' + (shortMonths[p.month - 1] || 'Jan') + '-' + p.year;
   }
 
+  function pfRankValue(node) {
+    if (node.unbounded_pf) return 1e9;
+    if (node.profit_factor == null) return -1;
+    return Number(node.profit_factor);
+  }
+
+  function makeComparator(sortKey) {
+    return function (a, b) {
+      if (sortKey === 'net_desc') {
+        return Number(b.net_pnl || 0) - Number(a.net_pnl || 0);
+      }
+      if (sortKey === 'comm_desc') {
+        return Number(b.commission || 0) - Number(a.commission || 0);
+      }
+      if (sortKey === 'trades_desc') {
+        return Number(b.trade_count || 0) - Number(a.trade_count || 0);
+      }
+      if (sortKey === 'wr_desc') {
+        return Number(b.win_rate_pct || 0) - Number(a.win_rate_pct || 0);
+      }
+      if (sortKey === 'pf_desc') {
+        return pfRankValue(b) - pfRankValue(a);
+      }
+      // Default: net_asc (worst bleeders surfaced first)
+      return Number(a.net_pnl || 0) - Number(b.net_pnl || 0);
+    };
+  }
+
+  function sortAttributionStrategies(strategies, sortKey) {
+    if (!Array.isArray(strategies)) return [];
+    var cmp = makeComparator(sortKey || 'net_asc');
+    var copy = strategies.map(function (s) {
+      var instCopy = Array.isArray(s.instances) ? s.instances.slice().sort(cmp) : [];
+      var cloned = {};
+      for (var k in s) {
+        if (Object.prototype.hasOwnProperty.call(s, k)) cloned[k] = s[k];
+      }
+      cloned.instances = instCopy;
+      return cloned;
+    });
+    copy.sort(cmp);
+    return copy;
+  }
+
   var state = {
     mode: 'paper',
     strategy: '',
@@ -131,8 +176,14 @@
     selTo: '',
     anchorDate: '',
     activePreset: 'mtd',
+    activeTab: 'attribution',
+    attrSort: 'net_asc',
     calendarDays: [],
-    calendarWeeks: []
+    calendarWeeks: [],
+    attributionData: null,
+    expandedStrategies: {},
+    expandedInstances: {},
+    hasAutoExpanded: false
   };
 
   function resolveInitialMode() {
@@ -183,6 +234,20 @@
     } catch (_e2) { /* ignore */ }
   }
 
+  function switchTab(tabName) {
+    state.activeTab = tabName === 'sessions' ? 'sessions' : 'attribution';
+    var tabs = document.querySelectorAll('.diary-tab-btn');
+    for (var i = 0; i < tabs.length; i++) {
+      var isSel = tabs[i].getAttribute('data-tab') === state.activeTab;
+      tabs[i].classList.toggle('is-active', isSel);
+      tabs[i].setAttribute('aria-selected', isSel ? 'true' : 'false');
+    }
+    var pAttr = document.getElementById('diary-panel-attribution');
+    var pSess = document.getElementById('diary-panel-sessions');
+    if (pAttr) pAttr.hidden = state.activeTab !== 'attribution';
+    if (pSess) pSess.hidden = state.activeTab !== 'sessions';
+  }
+
   function setPresetPills(preset) {
     state.activePreset = preset || '';
     var pills = document.querySelectorAll('.diary-range-pill');
@@ -218,7 +283,6 @@
       state.calYear = tp.year;
       state.calMonth = tp.month;
     } else {
-      // Default MTD
       var mb = monthBounds(tp.year, tp.month);
       state.selFrom = mb.from;
       state.selTo = today < mb.to ? today : mb.to;
@@ -260,6 +324,14 @@
     el.textContent = textOverride != null ? textOverride : fmtInrSigned(val);
   }
 
+  function fmtPfText(node) {
+    if (node.profit_factor != null) {
+      return Number(node.profit_factor).toFixed(2) + '×';
+    }
+    if (node.unbounded_pf) return '∞';
+    return '—';
+  }
+
   function renderSummary(data) {
     if (!data) return;
     var scopeLabel = document.getElementById('diary-scope-label');
@@ -293,7 +365,6 @@
       }
     }
 
-    // 1. Net Realized P&L
     setSignedValue('dkpi-net-pnl', data.net_pnl);
     var netSub = document.getElementById('dkpi-net-sub');
     if (netSub) {
@@ -301,14 +372,12 @@
         'Gross ' + fmtInrSigned(data.gross_pnl) + ' − Cost ' + fmtInrAbs(data.commission);
     }
 
-    // 2. Gross Realized P&L
     setSignedValue('dkpi-gross-pnl', data.gross_pnl);
     var grossSub = document.getElementById('dkpi-gross-sub');
     if (grossSub) {
       grossSub.textContent = (data.trade_count || 0) + ' closed trade' + (data.trade_count === 1 ? '' : 's');
     }
 
-    // 3. Commission (Single Sum) + Drag %
     var commEl = document.getElementById('dkpi-commission');
     if (commEl) {
       commEl.textContent = fmtInrAbs(data.commission);
@@ -325,7 +394,6 @@
       }
     }
 
-    // 4. Live Running MTM (IST Today only)
     var mtmBadge = document.getElementById('dkpi-mtm-badge');
     var mtmSub = document.getElementById('dkpi-running-sub');
     if (data.includes_today) {
@@ -347,7 +415,6 @@
       }
     }
 
-    // 5. Net Win Rate
     var wrEl = document.getElementById('dkpi-win-rate');
     if (wrEl) {
       var wr = Number(data.win_rate_pct || 0);
@@ -360,7 +427,6 @@
         (data.win_count || 0) + 'W · ' + (data.loss_count || 0) + 'L · ' + (data.flat_count || 0) + 'F';
     }
 
-    // 6. Net Profit Factor
     var pfEl = document.getElementById('dkpi-profit-factor');
     if (pfEl) {
       if (data.profit_factor != null) {
@@ -380,7 +446,6 @@
       pfSub.textContent = 'Net wins ÷ |Net losses| (BE 1.00×)';
     }
 
-    // 7. Net Expectancy
     setSignedValue('dkpi-expectancy', data.expectancy_net || 0);
     var expSub = document.getElementById('dkpi-exp-sub');
     if (expSub) {
@@ -388,7 +453,6 @@
         'Avg W ' + fmtInrSigned(data.avg_win_net || 0) + ' · Avg L ' + fmtInrSigned(data.avg_loss_net || 0);
     }
 
-    // 8. Extremes & Streak
     var extEl = document.getElementById('dkpi-extremes');
     if (extEl) {
       if ((data.trade_count || 0) > 0) {
@@ -506,7 +570,6 @@
         cur = shiftDaysIso(cur, 1);
       }
 
-      // Weekly rollup cell (8th column)
       var wk = weekMap[weekStart];
       if (wk) {
         var wkTone = pnlToneClass(wk.net_pnl);
@@ -531,6 +594,274 @@
     gridEl.innerHTML = html;
   }
 
+  function renderInstanceDrawerHtml(inst, includesToday) {
+    var html = '';
+    var openRows = inst.open_positions || [];
+    if (includesToday && openRows.length > 0) {
+      html += '<div class="diary-drawer-section">' +
+        '<div class="diary-drawer-title">Live Open Positions / Option Structures (' + openRows.length + ' · Gross MTM)</div>' +
+        '<table class="diary-subtable">' +
+        '<thead><tr>' +
+        '<th>Instrument / Structure</th>' +
+        '<th>Kind</th>' +
+        '<th>Side</th>' +
+        '<th class="num">Qty</th>' +
+        '<th class="num">Entry</th>' +
+        '<th class="num">Last Mark</th>' +
+        '<th class="num">Unrealized MTM</th>' +
+        '</tr></thead><tbody>';
+
+      for (var o = 0; o < openRows.length; o++) {
+        var op = openRows[o];
+        html += '<tr>' +
+          '<td><strong>' + escapeHtml(op.display_symbol || op.symbol) + '</strong>' +
+          (op.mark_stale ? ' <span class="diary-recon-flag is-bad">STALE</span>' : '') + '</td>' +
+          '<td>' + escapeHtml(op.kind || 'equity') + '</td>' +
+          '<td>' + escapeHtml(op.side || 'LONG') + '</td>' +
+          '<td class="num">' + Number(op.qty || 0) + '</td>' +
+          '<td class="num">' + fmtInrAbs(op.entry_price) + '</td>' +
+          '<td class="num">' + fmtInrAbs(op.current_price) + '</td>' +
+          '<td class="num ' + pnlToneClass(op.unrealized_pnl) + '"><strong>' +
+          fmtInrSigned(op.unrealized_pnl) + '</strong></td>' +
+          '</tr>';
+      }
+      html += '</tbody></table></div>';
+    }
+
+    var trades = inst.trades || [];
+    html += '<div class="diary-drawer-section">' +
+      '<div class="diary-drawer-title">Closed Trade &amp; Structure Ledger (' +
+      inst.trade_count + ' round-trip' + (inst.trade_count === 1 ? '' : 's') +
+      ' · Single Commission Sum · 2dp Reconciled)</div>';
+
+    if (trades.length === 0) {
+      html += '<div class="muted" style="font-size:12px;padding:6px 0;">No closed round-trips in this IST window for this instance.</div>';
+    } else {
+      html += '<table class="diary-subtable">' +
+        '<thead><tr>' +
+        '<th>Exit (IST)</th>' +
+        '<th>Entry (IST)</th>' +
+        '<th>Hold</th>' +
+        '<th>Instrument / Structure</th>' +
+        '<th>Side</th>' +
+        '<th class="num">Qty</th>' +
+        '<th class="num">Entry &rarr; Exit</th>' +
+        '<th>Exit Reason</th>' +
+        '<th class="num">Gross P&amp;L</th>' +
+        '<th class="num">Commission</th>' +
+        '<th class="num">Net P&amp;L</th>' +
+        '<th>Recon</th>' +
+        '</tr></thead><tbody>';
+
+      for (var t = 0; t < trades.length; t++) {
+        var tr = trades[t];
+        var qtyLabel = tr.kind === 'option' && tr.units
+          ? (Number(tr.qty) + ' (' + tr.units + 'u)')
+          : String(Number(tr.qty || 0));
+        var reconCell = tr.reconcile_ok
+          ? '<span class="diary-recon-flag is-ok" title="Gross − Commission = Net verified">&#10003;</span>'
+          : '<span class="diary-recon-flag is-bad" title="Recorded Net differs by ' +
+            fmtInrSigned(tr.reconcile_diff) + '">&Delta; ' + fmtInrAbs(tr.reconcile_diff) + '</span>';
+
+        html += '<tr>' +
+          '<td class="tabular-nums">' + escapeHtml(tr.exit_ist_label || tr.session_date || '—') + '</td>' +
+          '<td class="tabular-nums muted">' + escapeHtml(tr.entry_ist_label || '—') + '</td>' +
+          '<td class="tabular-nums">' + escapeHtml(tr.holding_display || '—') + '</td>' +
+          '<td><strong>' + escapeHtml(tr.display_symbol || tr.symbol) + '</strong></td>' +
+          '<td>' + escapeHtml(tr.side || 'LONG') + '</td>' +
+          '<td class="num">' + escapeHtml(qtyLabel) + '</td>' +
+          '<td class="num">' + fmtInrAbs(tr.entry_price) + ' &rarr; ' + fmtInrAbs(tr.exit_price) + '</td>' +
+          '<td><span class="diary-cfg-pill">' + escapeHtml(tr.exit_reason || 'unspecified') + '</span></td>' +
+          '<td class="num ' + pnlToneClass(tr.gross_pnl) + '">' + fmtInrSigned(tr.gross_pnl) + '</td>' +
+          '<td class="num">' + fmtInrAbs(tr.commission) + '</td>' +
+          '<td class="num ' + pnlToneClass(tr.net_pnl) + '"><strong>' + fmtInrSigned(tr.net_pnl) + '</strong></td>' +
+          '<td>' + reconCell + '</td>' +
+          '</tr>';
+      }
+      html += '</tbody></table>';
+
+      if (inst.trades_truncated) {
+        html += '<div style="margin-top:6px;">' +
+          '<button type="button" class="btn btn-ghost btn-small" data-load-full-instance="' +
+          escapeHtml(inst.instance_key) + '">Load all ' + inst.trade_count + ' trades for this instance</button>' +
+          '</div>';
+      }
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderAttributionTree() {
+    var wrap = document.getElementById('diary-attr-tree-wrap');
+    var badgeEl = document.getElementById('diary-attr-summary-badge');
+    var data = state.attributionData;
+    if (!wrap) return;
+    if (!data) {
+      wrap.innerHTML = '<div class="diary-empty">No attribution data loaded.</div>';
+      return;
+    }
+
+    var totals = data.totals || {};
+    if (badgeEl) {
+      badgeEl.textContent =
+        (totals.strategy_count || 0) + ' strateg' + (totals.strategy_count === 1 ? 'y' : 'ies') +
+        ' · ' + (totals.instance_count || 0) + ' spawned instance' + (totals.instance_count === 1 ? '' : 's') +
+        ' (' + (totals.active_instance_count || 0) + ' active · ' +
+        (totals.retired_instance_count || 0) + ' retired)';
+    }
+
+    var rawStrategies = data.strategies || [];
+    if (rawStrategies.length === 0) {
+      wrap.innerHTML = '<div class="diary-empty">No closed trades or active positions in this IST window for the ' +
+        (state.mode === 'live' ? 'Live' : 'Paper') + ' book.</div>';
+      return;
+    }
+
+    if (!state.hasAutoExpanded && rawStrategies.length <= 5) {
+      state.expandedStrategies[rawStrategies[0].strategy_name] = true;
+      state.hasAutoExpanded = true;
+    }
+
+    var sorted = sortAttributionStrategies(rawStrategies, state.attrSort);
+    var includesToday = Boolean(data.includes_today);
+    var maxAbs = Number(data.max_abs_strategy_net || 0);
+
+    var html = '<table class="diary-table diary-tree-table">' +
+      '<thead><tr>' +
+      '<th>Strategy / Spawned Instance</th>' +
+      '<th class="num">Trades</th>' +
+      '<th class="num">Win %</th>' +
+      '<th class="num">PF</th>' +
+      '<th class="num">Expectancy</th>' +
+      '<th class="num">Gross P&amp;L</th>' +
+      '<th class="num">Commission</th>' +
+      '<th class="num">Net P&amp;L</th>' +
+      '<th class="num">' + (includesToday ? 'Running MTM' : 'Total Net') + '</th>' +
+      '</tr></thead><tbody>';
+
+    for (var sIdx = 0; sIdx < sorted.length; sIdx++) {
+      var st = sorted[sIdx];
+      var sName = st.strategy_name;
+      var sOpen = Boolean(state.expandedStrategies[sName]);
+      var barPct = maxAbs > 0 ? Math.min(100, Math.round((Math.abs(Number(st.net_pnl || 0)) / maxAbs) * 100)) : 0;
+      var barTone = Number(st.net_pnl || 0) >= 0 ? 'is-pos' : 'is-neg';
+      var isFiltered = state.strategy === sName;
+
+      html += '<tr class="diary-row-strategy">' +
+        '<td>' +
+        '<button type="button" class="diary-expand-btn" data-toggle-strategy="' + escapeHtml(sName) + '" ' +
+        'aria-expanded="' + (sOpen ? 'true' : 'false') + '">' +
+        '<span class="diary-chevron">&#9654;</span>' +
+        '<span>' + escapeHtml(sName) + '</span>' +
+        '</button>' +
+        '<span class="diary-cfg-pill" style="margin-left:6px;">' +
+        st.instance_count + ' inst (' + st.active_instance_count + ' live · ' + st.retired_instance_count + ' ret)' +
+        '</span>' +
+        '<button type="button" class="diary-strat-filter-btn' + (isFiltered ? ' is-filtered' : '') + '" ' +
+        'data-filter-strategy="' + escapeHtml(sName) + '" title="Filter calendar &amp; KPIs to this strategy">' +
+        (isFiltered ? 'Filtered ✓' : 'Filter') +
+        '</button>' +
+        '</td>' +
+        '<td class="num">' + st.trade_count + ' (' + st.win_count + 'W/' + st.loss_count + 'L)</td>' +
+        '<td class="num">' + Number(st.win_rate_pct || 0).toFixed(1) + '%</td>' +
+        '<td class="num">' + fmtPfText(st) + '</td>' +
+        '<td class="num ' + pnlToneClass(st.expectancy_net) + '">' + fmtInrSigned(st.expectancy_net) + '</td>' +
+        '<td class="num ' + pnlToneClass(st.gross_pnl) + '">' + fmtInrSigned(st.gross_pnl) + '</td>' +
+        '<td class="num">' + fmtInrAbs(st.commission) +
+        (st.commission_drag_pct != null ? ' <span class="muted" style="font-size:10px;">(' + Number(st.commission_drag_pct).toFixed(0) + '%)</span>' : '') +
+        '</td>' +
+        '<td class="num">' +
+        '<div class="diary-contrib-wrap">' +
+        '<span class="' + pnlToneClass(st.net_pnl) + '"><strong>' + fmtInrSigned(st.net_pnl) + '</strong></span>' +
+        '<span class="diary-contrib-track"><span class="diary-contrib-fill ' + barTone + '" style="width:' + barPct + '%"></span></span>' +
+        '</div>' +
+        '</td>' +
+        '<td class="num ' + pnlToneClass(includesToday ? st.running_mtm : st.net_pnl) + '">' +
+        (includesToday ? fmtInrSigned(st.running_mtm || 0) : fmtInrSigned(st.net_pnl)) +
+        '</td>' +
+        '</tr>';
+
+      if (sOpen) {
+        var instances = st.instances || [];
+        for (var iIdx = 0; iIdx < instances.length; iIdx++) {
+          var inst = instances[iIdx];
+          var iKey = inst.instance_key;
+          var iOpen = Boolean(state.expandedInstances[iKey]);
+
+          var pillsHtml = '<span class="diary-status-pill" data-status="' +
+            escapeHtml(inst.lifecycle_status) + '">' + escapeHtml(inst.lifecycle_status) + '</span>';
+
+          if (inst.symbols && inst.symbols.length > 0) {
+            var symText = inst.symbols.slice(0, 3).join(', ') +
+              (inst.symbol_count > 3 ? ' +' + (inst.symbol_count - 3) : '');
+            pillsHtml += '<span class="diary-cfg-pill">' + escapeHtml(symText) + '</span>';
+          }
+          if (inst.allocated_capital != null && Number(inst.allocated_capital) > 0) {
+            pillsHtml += '<span class="diary-cfg-pill">Cap ' + fmtInrAbs(inst.allocated_capital) + '</span>';
+          }
+          var cfgBadges = inst.config_badges || [];
+          for (var b = 0; b < cfgBadges.length; b++) {
+            pillsHtml += '<span class="diary-cfg-pill">' + escapeHtml(cfgBadges[b]) + '</span>';
+          }
+          if (inst.reconcile_anomalies > 0) {
+            pillsHtml += '<span class="diary-recon-flag is-bad">' + inst.reconcile_anomalies + ' recon !</span>';
+          }
+          if (inst.is_active && inst.instance_id) {
+            pillsHtml += '<a class="diary-inst-link" href="/portfolio/' + state.mode +
+              '?instance=' + encodeURIComponent(inst.instance_id) + '">Inspect runner &nearr;</a>';
+          }
+
+          html += '<tr class="diary-row-instance">' +
+            '<td>' +
+            '<button type="button" class="diary-expand-btn" style="font-weight:600;font-size:12.5px;" ' +
+            'data-toggle-instance="' + escapeHtml(iKey) + '" aria-expanded="' + (iOpen ? 'true' : 'false') + '">' +
+            '<span class="diary-chevron">&#9654;</span>' +
+            '<span>' + escapeHtml(inst.display_name) + '</span>' +
+            '</button>' +
+            '<div class="diary-inst-meta">' + pillsHtml + '</div>' +
+            '</td>' +
+            '<td class="num">' + inst.trade_count + ' (' + inst.win_count + 'W/' + inst.loss_count + 'L)</td>' +
+            '<td class="num">' + Number(inst.win_rate_pct || 0).toFixed(1) + '%</td>' +
+            '<td class="num">' + fmtPfText(inst) + '</td>' +
+            '<td class="num ' + pnlToneClass(inst.expectancy_net) + '">' + fmtInrSigned(inst.expectancy_net) + '</td>' +
+            '<td class="num ' + pnlToneClass(inst.gross_pnl) + '">' + fmtInrSigned(inst.gross_pnl) + '</td>' +
+            '<td class="num">' + fmtInrAbs(inst.commission) + '</td>' +
+            '<td class="num ' + pnlToneClass(inst.net_pnl) + '"><strong>' + fmtInrSigned(inst.net_pnl) + '</strong></td>' +
+            '<td class="num ' + pnlToneClass(includesToday ? inst.running_mtm : inst.net_pnl) + '">' +
+            (includesToday
+              ? (inst.is_active ? fmtInrSigned(inst.running_mtm || 0) : '<span class="muted">Retired</span>')
+              : fmtInrSigned(inst.net_pnl)) +
+            '</td>' +
+            '</tr>';
+
+          if (iOpen) {
+            html += '<tr class="diary-row-drawer"><td colspan="9">' +
+              renderInstanceDrawerHtml(inst, includesToday) +
+              '</td></tr>';
+          }
+        }
+      }
+    }
+
+    // Book Grand Total Footer Row (verifies Sum(Strategies) == Summary Tile)
+    html += '<tr class="diary-row-strategy" style="border-top:2px solid var(--border);">' +
+      '<td><strong>Book Window Total (' + (state.mode === 'live' ? 'Live' : 'Paper') + ')</strong></td>' +
+      '<td class="num"><strong>' + (totals.trade_count || 0) + '</strong></td>' +
+      '<td class="num"><strong>' + Number(totals.win_rate_pct || 0).toFixed(1) + '%</strong></td>' +
+      '<td class="num"><strong>' + fmtPfText(totals) + '</strong></td>' +
+      '<td class="num ' + pnlToneClass(totals.expectancy_net) + '"><strong>' + fmtInrSigned(totals.expectancy_net || 0) + '</strong></td>' +
+      '<td class="num ' + pnlToneClass(totals.gross_pnl) + '"><strong>' + fmtInrSigned(totals.gross_pnl || 0) + '</strong></td>' +
+      '<td class="num"><strong>' + fmtInrAbs(totals.commission || 0) + '</strong></td>' +
+      '<td class="num ' + pnlToneClass(totals.net_pnl) + '"><strong>' + fmtInrSigned(totals.net_pnl || 0) + '</strong></td>' +
+      '<td class="num ' + pnlToneClass(includesToday ? totals.running_mtm : totals.net_pnl) + '"><strong>' +
+      (includesToday ? fmtInrSigned(totals.running_mtm || 0) : fmtInrSigned(totals.net_pnl || 0)) +
+      '</strong></td>' +
+      '</tr>';
+
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }
+
   function renderSessionBreakdownTable(daysInWindow) {
     var wrap = document.getElementById('diary-sessions-table-wrap');
     if (!wrap) return;
@@ -538,11 +869,14 @@
     var activeRows = [];
     for (var i = 0; i < daysInWindow.length; i++) {
       var d = daysInWindow[i];
-      if (d.trade_count > 0 || (d.is_today && (d.open_count || 0) > 0) || d.date === state.selFrom && state.selFrom === state.selTo) {
+      if (
+        d.trade_count > 0 ||
+        (d.is_today && (d.open_count || 0) > 0) ||
+        (d.date === state.selFrom && state.selFrom === state.selTo)
+      ) {
         activeRows.push(d);
       }
     }
-    // Sort reverse chronological (most recent IST session on top)
     activeRows.sort(function (a, b) {
       return a.date < b.date ? 1 : a.date > b.date ? -1 : 0;
     });
@@ -614,6 +948,31 @@
     });
   }
 
+  function loadFullInstanceTrades(instanceKey) {
+    if (!instanceKey || !state.attributionData) return Promise.resolve();
+    var qs = buildQuery({
+      mode: state.mode,
+      from: state.selFrom,
+      to: state.selTo
+    });
+    return fetchJson(
+      '/api/diary/instance/' + encodeURIComponent(instanceKey) + '/trades?' + qs
+    ).then(function (payload) {
+      if (!payload || !payload.instance || !state.attributionData) return;
+      var strategies = state.attributionData.strategies || [];
+      for (var s = 0; s < strategies.length; s++) {
+        var insts = strategies[s].instances || [];
+        for (var i = 0; i < insts.length; i++) {
+          if (insts[i].instance_key === instanceKey) {
+            insts[i].trades = payload.instance.trades || [];
+            insts[i].trades_truncated = false;
+          }
+        }
+      }
+      renderAttributionTree();
+    });
+  }
+
   function loadAll() {
     var mb = monthBounds(state.calYear, state.calMonth);
     var calQs = buildQuery({
@@ -622,35 +981,38 @@
       to: mb.to,
       strategy: state.strategy
     });
-    var sumQs = buildQuery({
+    var winQs = buildQuery({
       mode: state.mode,
       from: state.selFrom,
       to: state.selTo,
       strategy: state.strategy
     });
-    // Also fetch calendar days for selected window if it spans outside visible month
     var winCalPromise = (state.selFrom >= mb.from && state.selTo <= mb.to)
       ? null
-      : fetchJson('/api/diary/calendar?' + sumQs);
+      : fetchJson('/api/diary/calendar?' + winQs);
 
     return Promise.all([
       fetchJson('/api/diary/calendar?' + calQs),
-      fetchJson('/api/diary/summary?' + sumQs),
+      fetchJson('/api/diary/summary?' + winQs),
+      fetchJson('/api/diary/attribution?' + winQs),
       winCalPromise
     ]).then(function (res) {
       var calData = res[0];
       var sumData = res[1];
-      var winCal = res[2];
+      var attrData = res[2];
+      var winCal = res[3];
 
       if (calData.today_ist) {
         state.todayIst = calData.today_ist;
       }
       state.calendarDays = calData.days || [];
       state.calendarWeeks = calData.weeks || [];
+      state.attributionData = attrData;
 
       populateStrategies(sumData.available_strategies || calData.available_strategies || []);
       renderSummary(sumData);
       renderCalendarGrid();
+      renderAttributionTree();
 
       var windowDays = [];
       var sourceDays = winCal ? (winCal.days || []) : state.calendarDays;
@@ -702,6 +1064,22 @@
     loadAll();
   }
 
+  function expandOrCollapseAll(expand) {
+    state.expandedStrategies = {};
+    state.expandedInstances = {};
+    if (expand && state.attributionData && Array.isArray(state.attributionData.strategies)) {
+      var strats = state.attributionData.strategies;
+      for (var s = 0; s < strats.length; s++) {
+        state.expandedStrategies[strats[s].strategy_name] = true;
+        var insts = strats[s].instances || [];
+        for (var i = 0; i < insts.length; i++) {
+          state.expandedInstances[insts[i].instance_key] = true;
+        }
+      }
+    }
+    renderAttributionTree();
+  }
+
   function bindEvents() {
     var modeEl = document.getElementById('diary-mode');
     if (modeEl) {
@@ -709,6 +1087,9 @@
         var next = (modeEl.value || '').toLowerCase() === 'live' ? 'live' : 'paper';
         state.mode = next;
         state.strategy = '';
+        state.expandedStrategies = {};
+        state.expandedInstances = {};
+        state.hasAutoExpanded = false;
         syncModeChrome(next);
         loadAll();
       });
@@ -730,6 +1111,26 @@
         loadAll();
       });
     }
+
+    var tabs = document.querySelectorAll('.diary-tab-btn');
+    for (var t = 0; t < tabs.length; t++) {
+      tabs[t].addEventListener('click', function (ev) {
+        switchTab(ev.currentTarget.getAttribute('data-tab'));
+      });
+    }
+
+    var sortEl = document.getElementById('diary-attr-sort');
+    if (sortEl) {
+      sortEl.addEventListener('change', function () {
+        state.attrSort = sortEl.value || 'net_asc';
+        renderAttributionTree();
+      });
+    }
+
+    var expBtn = document.getElementById('diary-expand-all');
+    if (expBtn) expBtn.addEventListener('click', function () { expandOrCollapseAll(true); });
+    var colBtn = document.getElementById('diary-collapse-all');
+    if (colBtn) colBtn.addEventListener('click', function () { expandOrCollapseAll(false); });
 
     var applyBtn = document.getElementById('diary-apply');
     if (applyBtn) {
@@ -780,6 +1181,44 @@
       });
     }
 
+    var treeWrap = document.getElementById('diary-attr-tree-wrap');
+    if (treeWrap) {
+      treeWrap.addEventListener('click', function (ev) {
+        if (!ev.target || !ev.target.closest) return;
+
+        var stratBtn = ev.target.closest('[data-toggle-strategy]');
+        if (stratBtn) {
+          var sKey = stratBtn.getAttribute('data-toggle-strategy');
+          state.expandedStrategies[sKey] = !state.expandedStrategies[sKey];
+          renderAttributionTree();
+          return;
+        }
+
+        var filterBtn = ev.target.closest('[data-filter-strategy]');
+        if (filterBtn) {
+          var targetStrat = filterBtn.getAttribute('data-filter-strategy') || '';
+          state.strategy = state.strategy === targetStrat ? '' : targetStrat;
+          var selEl = document.getElementById('diary-strategy');
+          if (selEl) selEl.value = state.strategy;
+          loadAll();
+          return;
+        }
+
+        var instBtn = ev.target.closest('[data-toggle-instance]');
+        if (instBtn) {
+          var iKey = instBtn.getAttribute('data-toggle-instance');
+          state.expandedInstances[iKey] = !state.expandedInstances[iKey];
+          renderAttributionTree();
+          return;
+        }
+
+        var fullBtn = ev.target.closest('[data-load-full-instance]');
+        if (fullBtn) {
+          loadFullInstanceTrades(fullBtn.getAttribute('data-load-full-instance'));
+        }
+      });
+    }
+
     var tableWrap = document.getElementById('diary-sessions-table-wrap');
     if (tableWrap) {
       tableWrap.addEventListener('click', function (ev) {
@@ -807,6 +1246,7 @@
     computeHeatClass: computeHeatClass,
     monthBounds: monthBounds,
     mondayOfWeekIso: mondayOfWeekIso,
+    sortAttributionStrategies: sortAttributionStrategies,
     _state: state
   };
 

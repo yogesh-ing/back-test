@@ -1,8 +1,10 @@
 """PnL Diary REST API blueprint (``/api/diary/*``).
 
-Slice 1 endpoints:
-* ``GET /api/diary/calendar`` — IST session calendar heatmap + weekly strip
-* ``GET /api/diary/summary``  — Executive day/range KPI strip + ledger health
+Endpoints:
+* ``GET /api/diary/calendar``                  — Slice 1 IST session calendar heatmap
+* ``GET /api/diary/summary``                   — Slice 1 Executive day/range KPI strip
+* ``GET /api/diary/attribution``               — Slice 2 Strategy → Instance → Trade tree
+* ``GET /api/diary/instance/<key>/trades``     — Slice 2 Full Level-3 drilldown ledger
 
 Paper and Live books are strictly segregated by ``?mode=paper|live``.
 """
@@ -64,3 +66,46 @@ def diary_summary() -> Tuple[Response, int]:
     except Exception as exc:  # noqa: BLE001
         log.exception("diary_summary failed: %s", exc)
         return _error(f"Failed to load diary summary: {exc}", 500)
+
+
+@diary_bp.get("/api/diary/attribution")
+def diary_attribution() -> Tuple[Response, int]:
+    mode = request.args.get("mode", "paper")
+    from_arg = request.args.get("from") or None
+    to_arg = request.args.get("to") or None
+    strategy = request.args.get("strategy") or None
+    try:
+        payload = DiaryService().get_attribution(
+            mode=mode,
+            from_date=from_arg,
+            to_date=to_arg,
+            strategy=strategy,
+        )
+        return jsonify({"success": True, **payload}), 200
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("diary_attribution failed: %s", exc)
+        return _error(f"Failed to load diary attribution: {exc}", 500)
+
+
+@diary_bp.get("/api/diary/instance/<path:instance_key>/trades")
+def diary_instance_trades(instance_key: str) -> Tuple[Response, int]:
+    mode = request.args.get("mode", "paper")
+    from_arg = request.args.get("from") or None
+    to_arg = request.args.get("to") or None
+    try:
+        payload = DiaryService().get_instance_trades(
+            instance_key=instance_key,
+            mode=mode,
+            from_date=from_arg,
+            to_date=to_arg,
+        )
+        return jsonify({"success": True, **payload}), 200
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    except KeyError as exc:
+        return _error(str(exc), 404)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("diary_instance_trades failed: %s", exc)
+        return _error(f"Failed to load instance trades: {exc}", 500)

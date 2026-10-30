@@ -239,14 +239,16 @@ def normalize_memory_trade_dict(
         slippage_total=trade.get("slippage_total", 0),
     )
 
+    entry_raw = trade.get("entry_ts") or trade.get("entry_time")
+    exit_raw = trade.get("exit_ts") or trade.get("exit_time")
     entry_utc = None
     exit_utc = None
     try:
-        entry_utc = from_stored_utc(trade.get("entry_ts"))
+        entry_utc = from_stored_utc(entry_raw)
     except Exception:  # noqa: BLE001
         entry_utc = None
     try:
-        exit_utc = from_stored_utc(trade.get("exit_ts"))
+        exit_utc = from_stored_utc(exit_raw)
     except Exception:  # noqa: BLE001
         exit_utc = None
 
@@ -264,25 +266,31 @@ def normalize_memory_trade_dict(
     sig = canonical_trade_signature(
         pkey,
         symbol=symbol,
-        entry_ts=entry_utc or trade.get("entry_ts"),
-        exit_ts=exit_utc or trade.get("exit_ts"),
+        entry_ts=entry_utc or entry_raw,
+        exit_ts=exit_utc or exit_raw,
         units_or_qty=units_or_qty,
         gross_pnl=gross_raw,
     )
 
+    raw_side = str(trade.get("side") or trade.get("direction") or "LONG").upper()
+    norm_side = "SHORT" if raw_side.startswith("SHORT") or raw_side == "SELL" else "LONG"
+
     out = dict(trade)
+    out.pop("statutory_fees", None)
+    out.pop("brokerage", None)
     out.update(
         {
             "symbol": symbol,
             "kind": _infer_kind(symbol, trade.get("kind")),
+            "side": norm_side,
             "runner_id": iid or None,
             "instance_prefix": iid[:8].lower() if iid else None,
             "portfolio_id": portfolio_id,
             "runner_name": runner_name or trade.get("runner_name") or "",
             "strategy": strategy_name or trade.get("strategy") or "",
             "mode": str(mode or trade.get("mode") or "paper").lower(),
-            "entry_ts": iso_utc(entry_utc) if entry_utc is not None else trade.get("entry_ts"),
-            "exit_ts": iso_utc(exit_utc) if exit_utc is not None else trade.get("exit_ts"),
+            "entry_ts": iso_utc(entry_utc) if entry_utc is not None else entry_raw,
+            "exit_ts": iso_utc(exit_utc) if exit_utc is not None else exit_raw,
             "exit_ist_iso": exit_ist_iso,
             "entry_ist_label": entry_label,
             "exit_ist_label": exit_label,
@@ -291,8 +299,10 @@ def normalize_memory_trade_dict(
             "exit_session_date": exit_sdate or trade.get("exit_session_date"),
             "holding_seconds": round(hold_secs, 1) if hold_secs is not None else None,
             "holding_display": format_holding_duration(hold_secs),
+            "exit_reason": trade.get("exit_reason") or trade.get("reason"),
             "pnl": amounts["gross_pnl"],
             "gross_pnl": amounts["gross_pnl"],
+            "commission": amounts["commission_total"],
             "commission_total": amounts["commission_total"],
             "slippage_total": amounts["slippage_total"],
             "net_pnl": amounts["net_pnl"],
@@ -323,6 +333,11 @@ def normalize_db_trade_row(
         str(getattr(portfolio_row, "mode", "paper") or "paper").lower()
         if portfolio_row is not None
         else "paper"
+    )
+    p_cap = (
+        round(float(_to_decimal(getattr(portfolio_row, "initial_capital", 0))), 2)
+        if portfolio_row is not None and getattr(portfolio_row, "initial_capital", None) is not None
+        else None
     )
     clean_name, prefix = extract_instance_prefix(p_name, fallback_id=p_id)
 
@@ -366,6 +381,7 @@ def normalize_db_trade_row(
         "instance_prefix": prefix,
         "runner_name": clean_name,
         "portfolio_name": p_name,
+        "allocated_capital": p_cap,
         "strategy": str(getattr(trade_row, "strategy_name", "") or ""),
         "mode": p_mode,
         "symbol": symbol,

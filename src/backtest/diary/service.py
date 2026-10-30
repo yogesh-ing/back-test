@@ -24,6 +24,10 @@ import logging
 from datetime import date, timedelta
 from typing import Any, Optional
 
+from backtest.diary.attribution import (
+    DEFAULT_INLINE_TRADE_LIMIT,
+    build_attribution_tree,
+)
 from backtest.diary.ledger import (
     dedupe_normalized_trades,
     extract_instance_prefix,
@@ -586,6 +590,95 @@ class DiaryService:
                 loaded["duplicates_collapsed"], mismatches
             ),
         }
+
+    # ------------------------------------------------------------------
+    # Public Slice 2 Views: 3-Level Strategy → Instance → Trade Tree
+    # ------------------------------------------------------------------
+
+    def get_attribution(
+        self,
+        *,
+        mode: str = "paper",
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        strategy: Optional[str] = None,
+        today_ist: Optional[date] = None,
+        inline_trade_limit: int = DEFAULT_INLINE_TRADE_LIMIT,
+    ) -> dict[str, Any]:
+        """Return 3-level Strategy → Spawned Instance → Trade/Structure tree."""
+        book_mode = validate_diary_mode(mode)
+        resolved_today = today_ist or current_session_date()
+        start_d, end_d = parse_ist_date_range(
+            from_date, to_date, default_span="today", today_ist=resolved_today
+        )
+        strat_filter = _normalize_strategy_filter(strategy)
+
+        loaded = self.load_book_trades(
+            mode=book_mode,
+            start_date=start_d,
+            end_date=end_d,
+            strategy=strat_filter,
+        )
+        tree = build_attribution_tree(
+            book_mode=book_mode,
+            start_d=start_d,
+            end_d=end_d,
+            today_ist=resolved_today,
+            selected_strategy=strat_filter,
+            available_strategies=loaded["available_strategies"],
+            trades=loaded["trades"],
+            active_instances=loaded["active_instances"],
+            runner_lookup=getattr(self.mgr, "get_runner", None),
+            duplicates_collapsed=loaded["duplicates_collapsed"],
+            inline_trade_limit=inline_trade_limit,
+        )
+        tree["ledger_health"] = self._ledger_health(
+            loaded["duplicates_collapsed"],
+            tree["totals"]["reconcile_anomalies"],
+        )
+        return tree
+
+    def get_instance_trades(
+        self,
+        instance_key: str,
+        *,
+        mode: str = "paper",
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        today_ist: Optional[date] = None,
+    ) -> dict[str, Any]:
+        """Return full un-truncated Level-3 trades + open structures for one instance."""
+        target = str(instance_key or "").strip()
+        if not target:
+            raise ValueError("instance_key is required")
+
+        tree = self.get_attribution(
+            mode=mode,
+            from_date=from_date,
+            to_date=to_date,
+            today_ist=today_ist,
+            inline_trade_limit=100_000,
+        )
+        target_low = target.lower()
+        for strat in tree["strategies"]:
+            for inst in strat["instances"]:
+                candidates = {
+                    str(inst.get("instance_key") or "").lower(),
+                    str(inst.get("instance_id") or "").lower(),
+                    str(inst.get("instance_prefix") or "").lower(),
+                    str(inst.get("portfolio_id") or "").lower(),
+                }
+                candidates.discard("")
+                if target_low in candidates:
+                    return {
+                        "mode": tree["mode"],
+                        "from_date": tree["from_date"],
+                        "to_date": tree["to_date"],
+                        "today_ist": tree["today_ist"],
+                        "includes_today": tree["includes_today"],
+                        "instance": inst,
+                    }
+        raise KeyError(f"Spawned instance {instance_key!r} not found in {tree['mode']} window")
 
     @staticmethod
     def _rollup_weeks(days: list[dict[str, Any]]) -> list[dict[str, Any]]:
