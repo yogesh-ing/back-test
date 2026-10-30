@@ -226,10 +226,10 @@ def test_alembic_chain_009_to_020():
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script.get_heads() == ["020"]
+    assert script.get_heads() == ["022"]
     revs = (
         "009", "010", "011", "012", "013", "014", "015", "016", "017",
-        "018", "019", "020",
+        "018", "019", "020", "021", "022",
     )
     chain = {r: script.get_revision(r).down_revision for r in revs}
     assert chain == {
@@ -245,6 +245,8 @@ def test_alembic_chain_009_to_020():
         "018": "017",
         "019": "018",
         "020": "019",
+        "021": "020",
+        "022": "021",
     }
 
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import calendar
 import logging
+import uuid
 from datetime import date, timedelta
 from typing import Any, Optional
 
@@ -28,6 +29,7 @@ from backtest.diary.attribution import (
     DEFAULT_INLINE_TRADE_LIMIT,
     build_attribution_tree,
 )
+from backtest.diary.graduation import build_graduation_scorecard
 from backtest.diary.ledger import (
     dedupe_normalized_trades,
     extract_instance_prefix,
@@ -45,13 +47,71 @@ from backtest.live.market_status import NSE_HOLIDAYS_2026
 from backtest.timekeeping import (
     current_session_date,
     format_session_scope,
+    from_stored_utc,
+    iso_exchange,
+    iso_utc,
     ist_session_bounds_utc,
+    now_utc,
+    to_exchange,
 )
 
 logger = logging.getLogger(__name__)
 
 VALID_DIARY_MODES = ("paper", "live")
 MAX_CALENDAR_SPAN_DAYS = 400
+CANONICAL_JOURNAL_TAGS = (
+    "Trend",
+    "Chop",
+    "Expiry",
+    "Gap",
+    "Event",
+    "HighVIX",
+    "RuleBreach",
+)
+_CANONICAL_TAG_MAP = {t.lower(): t for t in CANONICAL_JOURNAL_TAGS}
+MAX_JOURNAL_NOTE_CHARS = 4000
+MAX_JOURNAL_TAGS = 8
+MAX_JOURNAL_TAG_CHARS = 24
+
+
+def normalize_journal_tags(raw_tags: Any) -> list[str]:
+    """Validate and normalize operator journal regime tags."""
+    if raw_tags is None or raw_tags == "":
+        return []
+    if not isinstance(raw_tags, (list, tuple)):
+        raise ValueError("regime_tags must be a JSON array of tag strings")
+    out: list[str] = []
+    seen_low: set[str] = set()
+    for item in raw_tags:
+        if not isinstance(item, str):
+            raise ValueError("regime_tags items must be strings")
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        if len(cleaned) > MAX_JOURNAL_TAG_CHARS:
+            raise ValueError(
+                f"regime tag {cleaned!r} exceeds {MAX_JOURNAL_TAG_CHARS} characters"
+            )
+        canonical = _CANONICAL_TAG_MAP.get(cleaned.lower(), cleaned)
+        low = canonical.lower()
+        if low not in seen_low:
+            seen_low.add(low)
+            out.append(canonical)
+            if len(out) >= MAX_JOURNAL_TAGS:
+                break
+    return out
+
+
+def _normalize_optional_uuid(raw_id: Any, field_name: str = "portfolio_id") -> Optional[str]:
+    if raw_id is None:
+        return None
+    cleaned = str(raw_id).strip()
+    if not cleaned:
+        return None
+    try:
+        return str(uuid.UUID(cleaned))
+    except ValueError as exc:
+        raise ValueError(f"Invalid {field_name} UUID {raw_id!r}") from exc
 
 
 def validate_diary_mode(raw_mode: Optional[str]) -> str:
@@ -782,6 +842,345 @@ class DiaryService:
             loaded["duplicates_collapsed"], mismatches
         )
         return payload
+
+    # ------------------------------------------------------------------
+    # Public Slice 5 Views: Graduation Scorecard & Persistent Journal
+    # ------------------------------------------------------------------
+
+    def get_graduation(
+        self,
+        *,
+        mode: str = "paper",
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        strategy: Optional[str] = None,
+        today_ist: Optional[date] = None,
+    ) -> dict[str, Any]:
+        """Return 6-gate Paper → Live Graduation (or Live Health) Scorecard."""
+        book_mode = validate_diary_mode(mode)
+        resolved_today = today_ist or current_session_date()
+        start_d, end_d = parse_ist_date_range(
+            from_date, to_date, default_span="month", today_ist=resolved_today
+        )
+        strat_filter = _normalize_strategy_filter(strategy)
+
+        loaded = self.load_book_trades(
+            mode=book_mode,
+            start_date=start_d,
+            end_date=end_d,
+            strategy=strat_filter,
+        )
+        tree = build_attribution_tree(
+            book_mode=book_mode,
+            start_d=start_d,
+            end_d=end_d,
+            today_ist=resolved_today,
+            selected_strategy=strat_filter,
+            available_strategies=loaded["available_strategies"],
+            trades=loaded["trades"],
+            active_instances=loaded["active_instances"],
+            runner_lookup=getattr(self.mgr, "get_runner", None),
+            duplicates_collapsed=loaded["duplicates_collapsed"],
+            inline_trade_limit=100_000,
+        )
+        payload = build_graduation_scorecard(
+            book_mode=book_mode,
+            start_d=start_d,
+            end_d=end_d,
+            today_ist=resolved_today,
+            selected_strategy=strat_filter,
+            available_strategies=loaded["available_strategies"],
+            attribution_tree=tree,
+            active_instances=loaded["active_instances"],
+            runner_lookup=getattr(self.mgr, "get_runner", None),
+        )
+        payload["ledger_health"] = self._ledger_health(
+            loaded["duplicates_collapsed"],
+            payload["reconcile_anomalies"],
+        )
+        return payload
+
+    def _ensure_diary_tables(self) -> None:
+        if self.db is None or getattr(self.db, "_diary_tables_ready", False):
+            return
+        from backtest.db.models import DIARY_TABLES
+
+        for tbl in DIARY_TABLES:
+            tbl.create(bind=self.db.engine, checkfirst=True)
+        setattr(self.db, "_diary_tables_ready", True)
+
+    def _ephemeral_notes_store(self) -> dict[str, dict[str, Any]]:
+        store = getattr(self.mgr, "_diary_ephemeral_notes", None)
+        if store is None:
+            store = {}
+            setattr(self.mgr, "_diary_ephemeral_notes", store)
+        return store
+
+    @staticmethod
+    def _serialize_note_fields(
+        *,
+        note_id: str,
+        mode: str,
+        session_d: date,
+        strategy_name: Optional[str],
+        portfolio_id: Optional[str],
+        instance_label: Optional[str],
+        regime_tags: Any,
+        note_text: str,
+        created_at: Any,
+        updated_at: Any,
+    ) -> dict[str, Any]:
+        c_utc = from_stored_utc(created_at) if created_at is not None else now_utc()
+        u_utc = from_stored_utc(updated_at) if updated_at is not None else c_utc
+        u_ist = to_exchange(u_utc) if u_utc is not None else None
+        tags = list(regime_tags) if isinstance(regime_tags, (list, tuple)) else []
+        return {
+            "note_id": str(note_id),
+            "mode": str(mode),
+            "session_date": session_d.isoformat(),
+            "strategy_name": strategy_name or None,
+            "portfolio_id": portfolio_id or None,
+            "instance_label": instance_label or None,
+            "regime_tags": tags,
+            "note_text": str(note_text or ""),
+            "created_at": iso_utc(c_utc) if c_utc is not None else None,
+            "updated_at": iso_utc(u_utc) if u_utc is not None else None,
+            "updated_ist": iso_exchange(u_ist) if u_ist is not None else None,
+            "updated_ist_label": (
+                f"{u_ist:%d-%b %H:%M} IST" if u_ist is not None else None
+            ),
+        }
+
+    def list_notes(
+        self,
+        *,
+        mode: str = "paper",
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        strategy: Optional[str] = None,
+        today_ist: Optional[date] = None,
+    ) -> dict[str, Any]:
+        """List operator journal notes strictly segregated by ``mode``."""
+        book_mode = validate_diary_mode(mode)
+        resolved_today = today_ist or current_session_date()
+        start_d, end_d = parse_ist_date_range(
+            from_date, to_date, default_span="month", today_ist=resolved_today
+        )
+        strat_filter = _normalize_strategy_filter(strategy)
+
+        notes_out: list[dict[str, Any]] = []
+        if self.db is not None:
+            self._ensure_diary_tables()
+            from backtest.db.models import DiaryNote
+
+            with self.db.session() as session:
+                q = session.query(DiaryNote).filter(
+                    DiaryNote.mode == book_mode,
+                    DiaryNote.session_date >= start_d,
+                    DiaryNote.session_date <= end_d,
+                )
+                if strat_filter is not None:
+                    q = q.filter(DiaryNote.strategy_name == strat_filter)
+                rows = q.order_by(
+                    DiaryNote.session_date.desc(),
+                    DiaryNote.updated_at.desc(),
+                ).all()
+                for row in rows:
+                    notes_out.append(
+                        self._serialize_note_fields(
+                            note_id=row.note_id,
+                            mode=row.mode,
+                            session_d=row.session_date,
+                            strategy_name=row.strategy_name,
+                            portfolio_id=row.portfolio_id,
+                            instance_label=row.instance_label,
+                            regime_tags=row.regime_tags,
+                            note_text=row.note_text,
+                            created_at=row.created_at,
+                            updated_at=row.updated_at,
+                        )
+                    )
+        else:
+            start_iso = start_d.isoformat()
+            end_iso = end_d.isoformat()
+            for item in self._ephemeral_notes_store().values():
+                if item["mode"] != book_mode:
+                    continue
+                if not (start_iso <= item["session_date"] <= end_iso):
+                    continue
+                if strat_filter is not None and item.get("strategy_name") != strat_filter:
+                    continue
+                notes_out.append(dict(item))
+            notes_out.sort(
+                key=lambda n: (n["session_date"], n.get("updated_at") or ""),
+                reverse=True,
+            )
+
+        return {
+            "mode": book_mode,
+            "from_date": start_d.isoformat(),
+            "to_date": end_d.isoformat(),
+            "today_ist": resolved_today.isoformat(),
+            "selected_strategy": strat_filter or "all",
+            "canonical_tags": list(CANONICAL_JOURNAL_TAGS),
+            "note_count": len(notes_out),
+            "notes": notes_out,
+            "persisted_backend": self.db is not None,
+        }
+
+    def save_note(
+        self,
+        *,
+        mode: str,
+        session_date: str,
+        note_text: str = "",
+        regime_tags: Any = None,
+        strategy_name: Optional[str] = None,
+        portfolio_id: Optional[str] = None,
+        instance_label: Optional[str] = None,
+        note_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Create or update a book-segregated operator journal note."""
+        book_mode = validate_diary_mode(mode)
+        s_date = _parse_iso_day(session_date, "session_date")
+        tags = normalize_journal_tags(regime_tags)
+        clean_text = str(note_text or "").strip()
+        if len(clean_text) > MAX_JOURNAL_NOTE_CHARS:
+            raise ValueError(
+                f"note_text exceeds maximum {MAX_JOURNAL_NOTE_CHARS} characters"
+            )
+        if not clean_text and not tags:
+            raise ValueError(
+                "Journal entry requires non-empty note_text or at least one regime_tag"
+            )
+
+        strat_val = _normalize_strategy_filter(strategy_name)
+        pid_val = _normalize_optional_uuid(portfolio_id, "portfolio_id")
+        inst_val = str(instance_label or "").strip()[:128] or None
+        target_id = _normalize_optional_uuid(note_id, "note_id")
+        stamp = now_utc()
+
+        if self.db is not None:
+            self._ensure_diary_tables()
+            from backtest.db.models import DiaryNote
+
+            with self.db.session() as session:
+                if target_id is not None:
+                    row = (
+                        session.query(DiaryNote)
+                        .filter(
+                            DiaryNote.note_id == target_id,
+                            DiaryNote.mode == book_mode,
+                        )
+                        .one_or_none()
+                    )
+                    if row is None:
+                        raise KeyError(
+                            f"Journal note {target_id!r} not found in {book_mode} book"
+                        )
+                    row.session_date = s_date
+                    row.strategy_name = strat_val
+                    row.portfolio_id = pid_val
+                    row.instance_label = inst_val
+                    row.regime_tags = tags
+                    row.note_text = clean_text
+                    row.updated_at = stamp
+                else:
+                    row = DiaryNote(
+                        note_id=str(uuid.uuid4()),
+                        mode=book_mode,
+                        session_date=s_date,
+                        strategy_name=strat_val,
+                        portfolio_id=pid_val,
+                        instance_label=inst_val,
+                        regime_tags=tags,
+                        note_text=clean_text,
+                        created_at=stamp,
+                        updated_at=stamp,
+                    )
+                    session.add(row)
+                session.flush()
+                return self._serialize_note_fields(
+                    note_id=row.note_id,
+                    mode=row.mode,
+                    session_d=row.session_date,
+                    strategy_name=row.strategy_name,
+                    portfolio_id=row.portfolio_id,
+                    instance_label=row.instance_label,
+                    regime_tags=row.regime_tags,
+                    note_text=row.note_text,
+                    created_at=row.created_at,
+                    updated_at=row.updated_at,
+                )
+
+        store = self._ephemeral_notes_store()
+        if target_id is not None:
+            existing = store.get(target_id)
+            if existing is None or existing["mode"] != book_mode:
+                raise KeyError(
+                    f"Journal note {target_id!r} not found in {book_mode} book"
+                )
+            created_raw = existing.get("created_at") or stamp
+            nid = target_id
+        else:
+            nid = str(uuid.uuid4())
+            created_raw = stamp
+
+        serialized = self._serialize_note_fields(
+            note_id=nid,
+            mode=book_mode,
+            session_d=s_date,
+            strategy_name=strat_val,
+            portfolio_id=pid_val,
+            instance_label=inst_val,
+            regime_tags=tags,
+            note_text=clean_text,
+            created_at=created_raw,
+            updated_at=stamp,
+        )
+        store[nid] = serialized
+        return dict(serialized)
+
+    def delete_note(
+        self,
+        note_id: str,
+        *,
+        mode: str,
+    ) -> dict[str, Any]:
+        """Delete a journal note strictly inside ``mode``."""
+        book_mode = validate_diary_mode(mode)
+        target_id = _normalize_optional_uuid(note_id, "note_id")
+        if target_id is None:
+            raise ValueError("note_id is required")
+
+        if self.db is not None:
+            self._ensure_diary_tables()
+            from backtest.db.models import DiaryNote
+
+            with self.db.session() as session:
+                row = (
+                    session.query(DiaryNote)
+                    .filter(
+                        DiaryNote.note_id == target_id,
+                        DiaryNote.mode == book_mode,
+                    )
+                    .one_or_none()
+                )
+                if row is None:
+                    raise KeyError(
+                        f"Journal note {target_id!r} not found in {book_mode} book"
+                    )
+                session.delete(row)
+                return {"deleted_note_id": target_id, "mode": book_mode}
+
+        store = self._ephemeral_notes_store()
+        existing = store.get(target_id)
+        if existing is None or existing["mode"] != book_mode:
+            raise KeyError(
+                f"Journal note {target_id!r} not found in {book_mode} book"
+            )
+        del store[target_id]
+        return {"deleted_note_id": target_id, "mode": book_mode}
 
     @staticmethod
     def _rollup_weeks(days: list[dict[str, Any]]) -> list[dict[str, Any]]:

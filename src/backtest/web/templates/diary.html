@@ -194,6 +194,17 @@
           type="button"
           class="diary-tab-btn"
           role="tab"
+          id="diary-tab-btn-graduation"
+          aria-selected="false"
+          aria-controls="diary-panel-graduation"
+          data-tab="graduation"
+        >
+          Graduation &amp; Journal
+        </button>
+        <button
+          type="button"
+          class="diary-tab-btn"
+          role="tab"
           id="diary-tab-btn-sessions"
           aria-selected="false"
           aria-controls="diary-panel-sessions"
@@ -318,7 +329,95 @@
       </div>
     </div>
 
-    <!-- Tab 4: Daily Session Ledger Breakdown (IST) -->
+    <!-- Tab 4: Slice 5 Institutional Edge Diagnostics III — Paper -> Live Graduation & Persistent Journal -->
+    <div id="diary-panel-graduation" role="tabpanel" aria-labelledby="diary-tab-btn-graduation" hidden>
+      <div class="diary-matrix-block" style="margin-top:6px;">
+        <div class="diary-section-head">
+          <div>
+            <h2 id="diary-graduation-title" style="margin:0;">Paper &rarr; Live Graduation Scorecard</h2>
+            <span class="muted" id="diary-graduation-subtitle" style="font-size:11.5px;">
+              6 institutional gates: Sample &ge; 20 &middot; Expectancy &gt; ₹0 &middot; PF &ge; 1.35 &middot; Fee Drag &le; 35% &middot; Max DD &le; 10% &middot; 0 Ledger Anomalies
+            </span>
+          </div>
+          <div class="diary-grad-summary-pills" id="diary-grad-summary-pills"></div>
+        </div>
+        <div class="diary-table-wrap" id="diary-graduation-table-wrap">
+          <div class="diary-empty">Loading 6-gate graduation scorecard…</div>
+        </div>
+      </div>
+
+      <div class="diary-matrix-block" style="margin-top:18px;">
+        <div class="diary-section-head">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <h2 id="diary-journal-title" style="margin:0;">Operator Session &amp; Instance Journal</h2>
+            <span class="diary-book-pill" id="diary-journal-book-badge" data-mode="{{ initial_mode }}">
+              {{ 'LIVE JOURNAL' if initial_mode == 'live' else 'PAPER JOURNAL' }}
+            </span>
+          </div>
+          <span class="muted" id="diary-journal-count-badge" style="font-size:11.5px;">0 persisted entries in window</span>
+        </div>
+
+        <div class="diary-journal-layout">
+          <form class="diary-journal-composer" id="diary-journal-form" novalidate>
+            <input type="hidden" id="diary-note-id" value="">
+            <input type="hidden" id="diary-note-portfolio-id" value="">
+
+            <div class="diary-journal-row">
+              <div class="diary-field">
+                <label for="diary-note-date">IST Session Date</label>
+                <input id="diary-note-date" class="diary-date-input" type="date" required>
+              </div>
+              <div class="diary-field">
+                <label for="diary-note-strategy">Strategy (optional)</label>
+                <input id="diary-note-strategy" class="diary-text-input" type="text" maxlength="64" placeholder="e.g. orb_breakout">
+              </div>
+              <div class="diary-field">
+                <label for="diary-note-instance">Spawned Instance (optional)</label>
+                <input id="diary-note-instance" class="diary-text-input" type="text" maxlength="128" placeholder="e.g. NIFTY Runner [a1b2c3d4]">
+              </div>
+            </div>
+
+            <div class="diary-field" style="margin-top:8px;">
+              <label>Regime &amp; Execution Tags</label>
+              <div class="diary-tag-picker" id="diary-note-tags" role="group" aria-label="Session regime tags">
+                <button type="button" class="diary-tag-chip" data-journal-tag="Trend" aria-pressed="false">Trend</button>
+                <button type="button" class="diary-tag-chip" data-journal-tag="Chop" aria-pressed="false">Chop</button>
+                <button type="button" class="diary-tag-chip" data-journal-tag="Expiry" aria-pressed="false">Expiry</button>
+                <button type="button" class="diary-tag-chip" data-journal-tag="Gap" aria-pressed="false">Gap</button>
+                <button type="button" class="diary-tag-chip" data-journal-tag="Event" aria-pressed="false">Event</button>
+                <button type="button" class="diary-tag-chip" data-journal-tag="HighVIX" aria-pressed="false">HighVIX</button>
+                <button type="button" class="diary-tag-chip" data-journal-tag="RuleBreach" aria-pressed="false">RuleBreach</button>
+              </div>
+            </div>
+
+            <div class="diary-field" style="margin-top:8px;">
+              <label for="diary-note-text">Observation &amp; Action Plan</label>
+              <textarea
+                id="diary-note-text"
+                class="diary-textarea"
+                rows="3"
+                maxlength="4000"
+                placeholder="Record intraday regime context, slippage observations, or parameter promotion notes…"
+              ></textarea>
+            </div>
+
+            <div class="diary-journal-actions">
+              <div style="display:flex;align-items:center;gap:8px;">
+                <button type="submit" class="btn btn-primary btn-small" id="diary-note-save">Save journal entry</button>
+                <button type="button" class="btn btn-ghost btn-small" id="diary-note-cancel" hidden>Cancel edit</button>
+              </div>
+              <span class="muted" id="diary-note-status" aria-live="polite" style="font-size:11.5px;"></span>
+            </div>
+          </form>
+
+          <div class="diary-journal-feed" id="diary-journal-feed-wrap">
+            <div class="diary-empty">No operator journal notes recorded for this book and IST window yet.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 5: Daily Session Ledger Breakdown (IST) -->
     <div id="diary-panel-sessions" role="tabpanel" aria-labelledby="diary-tab-btn-sessions" hidden>
       <div class="diary-section-head" style="margin-bottom:8px;">
         <h2 id="diary-sessions-title">Session Ledger Breakdown (IST)</h2>

@@ -187,6 +187,9 @@
     attributionData: null,
     regimesData: null,
     payoffData: null,
+    graduationData: null,
+    notesData: null,
+    selectedJournalTags: {},
     expandedStrategies: {},
     expandedInstances: {},
     hasAutoExpanded: false
@@ -230,6 +233,17 @@
     if (openBookLabel) {
       openBookLabel.textContent = mode === 'live' ? 'Open Live book' : 'Open Paper book';
     }
+    var journalBadgeEl = document.getElementById('diary-journal-book-badge');
+    if (journalBadgeEl) {
+      journalBadgeEl.setAttribute('data-mode', mode);
+      journalBadgeEl.textContent = mode === 'live' ? 'LIVE JOURNAL' : 'PAPER JOURNAL';
+    }
+    var gradTitleEl = document.getElementById('diary-graduation-title');
+    if (gradTitleEl) {
+      gradTitleEl.innerHTML = mode === 'live'
+        ? 'Live Runner Health &amp; Continuation Scorecard'
+        : 'Paper &rarr; Live Graduation Scorecard';
+    }
     try {
       localStorage.setItem('trading-diary.mode', mode);
     } catch (_e) { /* ignore */ }
@@ -241,7 +255,13 @@
   }
 
   function switchTab(tabName) {
-    var allowed = { attribution: true, regimes: true, payoff: true, sessions: true };
+    var allowed = {
+      attribution: true,
+      regimes: true,
+      payoff: true,
+      graduation: true,
+      sessions: true
+    };
     state.activeTab = allowed[tabName] ? tabName : 'attribution';
     var tabs = document.querySelectorAll('.diary-tab-btn');
     for (var i = 0; i < tabs.length; i++) {
@@ -252,10 +272,12 @@
     var pAttr = document.getElementById('diary-panel-attribution');
     var pReg = document.getElementById('diary-panel-regimes');
     var pPay = document.getElementById('diary-panel-payoff');
+    var pGrad = document.getElementById('diary-panel-graduation');
     var pSess = document.getElementById('diary-panel-sessions');
     if (pAttr) pAttr.hidden = state.activeTab !== 'attribution';
     if (pReg) pReg.hidden = state.activeTab !== 'regimes';
     if (pPay) pPay.hidden = state.activeTab !== 'payoff';
+    if (pGrad) pGrad.hidden = state.activeTab !== 'graduation';
     if (pSess) pSess.hidden = state.activeTab !== 'sessions';
   }
 
@@ -1371,6 +1393,390 @@
     wrap.innerHTML = html;
   }
 
+  /* ------------------------------------------------------------------
+   * Slice 5 — 6-Gate Graduation Scorecard & Persistent Operator Journal
+   * ------------------------------------------------------------------ */
+
+  function renderGateChip(shortLabel, gateObj) {
+    var passed = Boolean(gateObj && gateObj.passed);
+    var cls = passed ? 'diary-gate-chip is-pass' : 'diary-gate-chip is-fail';
+    var mark = passed ? '✓' : '✕';
+    var tip = gateObj && gateObj.target ? ('Target ' + gateObj.target) : '';
+    return '<span class="' + cls + '" title="' + escapeHtml(tip) + '">' +
+      mark + ' ' + escapeHtml(shortLabel) + '</span>';
+  }
+
+  function buildGraduationTableHtml(instances, bookLabel) {
+    var rows = Array.isArray(instances) ? instances : [];
+    if (rows.length === 0) {
+      return '<div class="diary-empty">No spawned instances evaluated in this IST window for the ' +
+        escapeHtml(bookLabel || 'Paper') + ' book.</div>';
+    }
+
+    var html = '<table class="diary-table" id="diary-graduation-table">' +
+      '<thead><tr>' +
+      '<th>Spawned Instance / Strategy</th>' +
+      '<th>6-Gate Check</th>' +
+      '<th class="num">Trades</th>' +
+      '<th class="num">Expectancy</th>' +
+      '<th class="num">PF</th>' +
+      '<th class="num">Fee Drag</th>' +
+      '<th class="num">Max DD</th>' +
+      '<th class="num">Commission</th>' +
+      '<th class="num">Net P&amp;L</th>' +
+      '<th>Verdict &amp; Advisory</th>' +
+      '</tr></thead><tbody>';
+
+    for (var i = 0; i < rows.length; i++) {
+      var inst = rows[i];
+      var g = inst.gates || {};
+      var gatesHtml = '<div class="diary-gate-strip">' +
+        renderGateChip('n', g.sample_size) +
+        renderGateChip('E', g.net_expectancy) +
+        renderGateChip('PF', g.profit_factor) +
+        renderGateChip('Fee', g.commission_drag) +
+        renderGateChip('DD', g.max_drawdown) +
+        renderGateChip('Led', g.ledger_integrity) +
+        '</div>' +
+        '<div class="muted tabular-nums" style="font-size:10px;margin-top:2px;">' +
+        Number(inst.gates_passed || 0) + '/' + Number(inst.gates_total || 6) + ' passed</div>';
+
+      var pfDisp = inst.unbounded_pf
+        ? '∞'
+        : (inst.profit_factor != null ? Number(inst.profit_factor).toFixed(2) + '×' : '—');
+      var dragDisp = inst.commission_drag_pct != null
+        ? Number(inst.commission_drag_pct).toFixed(1) + '%'
+        : '—';
+      var ddDisp = inst.max_drawdown_pct != null
+        ? (Number(inst.max_drawdown_pct).toFixed(2) + '% (' + fmtInrAbs(inst.max_drawdown_inr || 0) + ')')
+        : fmtInrAbs(inst.max_drawdown_inr || 0);
+
+      var badgesHtml = '';
+      var cfgBadges = inst.config_badges || [];
+      for (var b = 0; b < cfgBadges.length; b++) {
+        badgesHtml += '<span class="diary-cfg-pill">' + escapeHtml(cfgBadges[b]) + '</span> ';
+      }
+
+      var linkHtml = inst.portfolio_deep_link
+        ? ' <a class="diary-cfg-pill" href="' + escapeHtml(inst.portfolio_deep_link) + '">Open Runner &rarr;</a>'
+        : '';
+
+      var adv = inst.entitlement_advisory || {};
+      var advHtml = adv.requires_live_entitlement_review && adv.message
+        ? '<div class="diary-advisory-note">' + escapeHtml(adv.message) + '</div>'
+        : '';
+
+      html += '<tr>' +
+        '<td>' +
+          '<div><strong>' + escapeHtml(inst.instance_label || inst.display_name || '') + '</strong>' + linkHtml + '</div>' +
+          '<div class="muted" style="font-size:11px;">' +
+            escapeHtml(inst.strategy || '') + ' &middot; ' + escapeHtml(inst.lifecycle_status || '') +
+          '</div>' +
+          (badgesHtml ? '<div style="margin-top:3px;">' + badgesHtml + '</div>' : '') +
+        '</td>' +
+        '<td>' + gatesHtml + '</td>' +
+        '<td class="num tabular-nums">' + Number(inst.trade_count || 0) + '</td>' +
+        '<td class="num tabular-nums ' + pnlToneClass(inst.expectancy_net) + '">' + fmtInrSigned(inst.expectancy_net || 0) + '</td>' +
+        '<td class="num tabular-nums">' + pfDisp + '</td>' +
+        '<td class="num tabular-nums">' + dragDisp + '</td>' +
+        '<td class="num tabular-nums">' + ddDisp + '</td>' +
+        '<td class="num tabular-nums">' + fmtInrAbs(inst.commission || 0) + '</td>' +
+        '<td class="num tabular-nums ' + pnlToneClass(inst.net_pnl) + '"><strong>' + fmtInrSigned(inst.net_pnl || 0) + '</strong></td>' +
+        '<td>' +
+          '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
+            '<span class="diary-verdict-badge" data-tone="' + escapeHtml(inst.verdict_tone || 'caution') + '">' +
+              escapeHtml(inst.verdict_label || inst.verdict || '') +
+            '</span>' +
+            '<button type="button" class="diary-strat-filter-btn" ' +
+              'data-journal-prefill-strategy="' + escapeHtml(inst.strategy || '') + '" ' +
+              'data-journal-prefill-instance="' + escapeHtml(inst.instance_label || '') + '" ' +
+              'data-journal-prefill-pid="' + escapeHtml(inst.portfolio_id || '') + '">' +
+              '+ Journal' +
+            '</button>' +
+          '</div>' +
+          '<div class="muted" style="font-size:10.5px;margin-top:3px;max-width:300px;white-space:normal;">' +
+            escapeHtml(inst.rationale || '') +
+          '</div>' +
+          advHtml +
+        '</td>' +
+        '</tr>';
+    }
+    html += '</tbody></table>';
+    return html;
+  }
+
+  function buildJournalFeedHtml(notes, bookLabel) {
+    var list = Array.isArray(notes) ? notes : [];
+    if (list.length === 0) {
+      return '<div class="diary-empty">No operator journal notes recorded for the ' +
+        escapeHtml(bookLabel || 'Paper') + ' book in this IST window yet.</div>';
+    }
+
+    var html = '';
+    for (var i = 0; i < list.length; i++) {
+      var n = list[i];
+      var tagsHtml = '';
+      var tags = Array.isArray(n.regime_tags) ? n.regime_tags : [];
+      for (var t = 0; t < tags.length; t++) {
+        tagsHtml += '<span class="diary-cfg-pill">' + escapeHtml(tags[t]) + '</span>';
+      }
+      var scopePills = '';
+      if (n.strategy_name) {
+        scopePills += '<span class="diary-cfg-pill">' + escapeHtml(n.strategy_name) + '</span>';
+      }
+      if (n.instance_label) {
+        scopePills += '<span class="diary-cfg-pill">' + escapeHtml(n.instance_label) + '</span>';
+      }
+
+      html += '<article class="diary-journal-card" data-note-card="' + escapeHtml(n.note_id || '') + '">' +
+        '<div class="diary-journal-card-head">' +
+          '<div class="diary-journal-card-meta">' +
+            '<strong class="tabular-nums">' + escapeHtml(n.session_date || '') + ' IST</strong>' +
+            scopePills +
+            tagsHtml +
+          '</div>' +
+          '<div class="diary-journal-card-meta">' +
+            (n.updated_ist_label
+              ? '<span class="muted tabular-nums" style="font-size:10.5px;">' + escapeHtml(n.updated_ist_label) + '</span>'
+              : '') +
+            '<button type="button" class="diary-strat-filter-btn" data-edit-note="' + escapeHtml(n.note_id || '') + '">Edit</button>' +
+            '<button type="button" class="diary-strat-filter-btn" data-delete-note="' + escapeHtml(n.note_id || '') + '">Delete</button>' +
+          '</div>' +
+        '</div>' +
+        (n.note_text
+          ? '<div class="diary-journal-card-body">' + escapeHtml(n.note_text) + '</div>'
+          : '<div class="muted" style="font-size:11.5px;">(Tag-only session marker)</div>') +
+        '</article>';
+    }
+    return html;
+  }
+
+  function renderGraduationPanel() {
+    var data = state.graduationData;
+    var tableWrap = document.getElementById('diary-graduation-table-wrap');
+    var pillsWrap = document.getElementById('diary-grad-summary-pills');
+    var bookLabel = state.mode === 'live' ? 'Live' : 'Paper';
+    if (!tableWrap) return;
+    if (!data) {
+      tableWrap.innerHTML = '<div class="diary-empty">No graduation scorecard loaded.</div>';
+      return;
+    }
+
+    var sum = data.summary || {};
+    if (pillsWrap) {
+      var pText = state.mode === 'live' ? 'Healthy' : 'Promote';
+      pillsWrap.innerHTML =
+        '<span class="diary-verdict-badge" data-tone="positive">' + pText + ': ' + Number(sum.promote_count || 0) + '</span>' +
+        '<span class="diary-verdict-badge" data-tone="caution">Tune: ' + Number(sum.tune_count || 0) + '</span>' +
+        '<span class="diary-verdict-badge" data-tone="negative">Retire/Kill: ' + Number(sum.retire_count || 0) + '</span>' +
+        (Number(sum.entitlement_advisory_count || 0) > 0
+          ? '<span class="diary-cfg-pill">Option Entitlement Review: ' + Number(sum.entitlement_advisory_count) + '</span>'
+          : '');
+    }
+
+    tableWrap.innerHTML = buildGraduationTableHtml(data.instances || [], bookLabel);
+  }
+
+  function syncJournalTagButtons() {
+    var btns = document.querySelectorAll('[data-journal-tag]');
+    for (var i = 0; i < btns.length; i++) {
+      var tag = btns[i].getAttribute('data-journal-tag') || '';
+      var active = Boolean(state.selectedJournalTags[tag]);
+      btns[i].classList.toggle('is-selected', active);
+      btns[i].setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+  }
+
+  function resetJournalComposer(keepStatus) {
+    state.selectedJournalTags = {};
+    syncJournalTagButtons();
+    var idEl = document.getElementById('diary-note-id');
+    var pidEl = document.getElementById('diary-note-portfolio-id');
+    var dateEl = document.getElementById('diary-note-date');
+    var stratEl = document.getElementById('diary-note-strategy');
+    var instEl = document.getElementById('diary-note-instance');
+    var textEl = document.getElementById('diary-note-text');
+    var cancelBtn = document.getElementById('diary-note-cancel');
+    var saveBtn = document.getElementById('diary-note-save');
+    var statusEl = document.getElementById('diary-note-status');
+    if (idEl) idEl.value = '';
+    if (pidEl) pidEl.value = '';
+    if (dateEl && !dateEl.value) dateEl.value = state.selTo || state.todayIst;
+    if (stratEl) stratEl.value = state.strategy || '';
+    if (instEl) instEl.value = '';
+    if (textEl) textEl.value = '';
+    if (cancelBtn) cancelBtn.hidden = true;
+    if (saveBtn) saveBtn.textContent = 'Save journal entry';
+    if (statusEl && !keepStatus) statusEl.textContent = '';
+  }
+
+  function renderJournalPanel() {
+    var data = state.notesData;
+    var feedWrap = document.getElementById('diary-journal-feed-wrap');
+    var countEl = document.getElementById('diary-journal-count-badge');
+    var dateEl = document.getElementById('diary-note-date');
+    var bookLabel = state.mode === 'live' ? 'Live' : 'Paper';
+    if (dateEl && !dateEl.value) {
+      dateEl.value = state.selTo || state.todayIst;
+    }
+    if (!feedWrap) return;
+    if (!data) {
+      feedWrap.innerHTML = '<div class="diary-empty">Loading operator journal…</div>';
+      return;
+    }
+    var notes = data.notes || [];
+    if (countEl) {
+      countEl.textContent = notes.length + (notes.length === 1 ? ' entry' : ' entries') +
+        ' in ' + bookLabel + ' window';
+    }
+    feedWrap.innerHTML = buildJournalFeedHtml(notes, bookLabel);
+  }
+
+  function loadNotesOnly() {
+    var qs = buildQuery({
+      mode: state.mode,
+      from: state.selFrom,
+      to: state.selTo,
+      strategy: state.strategy
+    });
+    return fetchJson('/api/diary/notes?' + qs).then(function (payload) {
+      state.notesData = payload;
+      renderJournalPanel();
+    });
+  }
+
+  function saveJournalNote(ev) {
+    if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+    var idVal = ((document.getElementById('diary-note-id') || {}).value || '').trim();
+    var pidVal = ((document.getElementById('diary-note-portfolio-id') || {}).value || '').trim();
+    var dateVal = ((document.getElementById('diary-note-date') || {}).value || '').trim() || state.selTo || state.todayIst;
+    var stratVal = ((document.getElementById('diary-note-strategy') || {}).value || '').trim();
+    var instVal = ((document.getElementById('diary-note-instance') || {}).value || '').trim();
+    var textVal = ((document.getElementById('diary-note-text') || {}).value || '').trim();
+    var statusEl = document.getElementById('diary-note-status');
+
+    var chosenTags = [];
+    for (var k in state.selectedJournalTags) {
+      if (Object.prototype.hasOwnProperty.call(state.selectedJournalTags, k) && state.selectedJournalTags[k]) {
+        chosenTags.push(k);
+      }
+    }
+
+    var body = {
+      mode: state.mode,
+      session_date: dateVal,
+      strategy_name: stratVal || null,
+      portfolio_id: pidVal || null,
+      instance_label: instVal || null,
+      regime_tags: chosenTags,
+      note_text: textVal
+    };
+    if (idVal) body.note_id = idVal;
+
+    return fetch('/api/diary/notes', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(body)
+    }).then(function (resp) {
+      return resp.json().then(function (resBody) {
+        if (!resp.ok || (resBody && resBody.success === false)) {
+          throw new Error((resBody && resBody.error) || ('HTTP ' + resp.status));
+        }
+        return resBody;
+      });
+    }).then(function () {
+      if (statusEl) {
+        statusEl.textContent = 'Saved to ' + (state.mode === 'live' ? 'Live' : 'Paper') + ' journal.';
+      }
+      resetJournalComposer(true);
+      return loadNotesOnly();
+    }).catch(function (err) {
+      if (statusEl) {
+        statusEl.textContent = 'Save error: ' + (err && err.message ? err.message : String(err));
+      }
+    });
+  }
+
+  function populateComposerForEdit(noteId) {
+    if (!state.notesData || !Array.isArray(state.notesData.notes)) return;
+    var found = null;
+    for (var i = 0; i < state.notesData.notes.length; i++) {
+      if (state.notesData.notes[i].note_id === noteId) {
+        found = state.notesData.notes[i];
+        break;
+      }
+    }
+    if (!found) return;
+    state.selectedJournalTags = {};
+    var tags = Array.isArray(found.regime_tags) ? found.regime_tags : [];
+    for (var t = 0; t < tags.length; t++) {
+      state.selectedJournalTags[tags[t]] = true;
+    }
+    syncJournalTagButtons();
+    var idEl = document.getElementById('diary-note-id');
+    var pidEl = document.getElementById('diary-note-portfolio-id');
+    var dateEl = document.getElementById('diary-note-date');
+    var stratEl = document.getElementById('diary-note-strategy');
+    var instEl = document.getElementById('diary-note-instance');
+    var textEl = document.getElementById('diary-note-text');
+    var cancelBtn = document.getElementById('diary-note-cancel');
+    var saveBtn = document.getElementById('diary-note-save');
+    var statusEl = document.getElementById('diary-note-status');
+    if (idEl) idEl.value = found.note_id || '';
+    if (pidEl) pidEl.value = found.portfolio_id || '';
+    if (dateEl) dateEl.value = found.session_date || state.todayIst;
+    if (stratEl) stratEl.value = found.strategy_name || '';
+    if (instEl) instEl.value = found.instance_label || '';
+    if (textEl) {
+      textEl.value = found.note_text || '';
+      if (typeof textEl.focus === 'function') textEl.focus();
+    }
+    if (cancelBtn) cancelBtn.hidden = false;
+    if (saveBtn) saveBtn.textContent = 'Update entry';
+    if (statusEl) statusEl.textContent = 'Editing ' + (found.session_date || '') + ' entry…';
+  }
+
+  function deleteJournalNote(noteId) {
+    if (!noteId) return Promise.resolve();
+    var statusEl = document.getElementById('diary-note-status');
+    var qs = buildQuery({ mode: state.mode });
+    return fetch('/api/diary/notes/' + encodeURIComponent(noteId) + '?' + qs, {
+      method: 'DELETE',
+      headers: { 'Accept': 'application/json' }
+    }).then(function (resp) {
+      return resp.json().then(function (resBody) {
+        if (!resp.ok || (resBody && resBody.success === false)) {
+          throw new Error((resBody && resBody.error) || ('HTTP ' + resp.status));
+        }
+        return resBody;
+      });
+    }).then(function () {
+      if (statusEl) statusEl.textContent = 'Deleted journal entry.';
+      return loadNotesOnly();
+    }).catch(function (err) {
+      if (statusEl) {
+        statusEl.textContent = 'Delete error: ' + (err && err.message ? err.message : String(err));
+      }
+    });
+  }
+
+  function prefillJournalFromInstance(strategyName, instanceLabel, portfolioId) {
+    resetJournalComposer(false);
+    var dateEl = document.getElementById('diary-note-date');
+    var stratEl = document.getElementById('diary-note-strategy');
+    var instEl = document.getElementById('diary-note-instance');
+    var pidEl = document.getElementById('diary-note-portfolio-id');
+    var textEl = document.getElementById('diary-note-text');
+    if (dateEl) dateEl.value = state.selTo || state.todayIst;
+    if (stratEl) stratEl.value = strategyName || '';
+    if (instEl) instEl.value = instanceLabel || '';
+    if (pidEl) pidEl.value = portfolioId || '';
+    if (textEl && typeof textEl.focus === 'function') textEl.focus();
+  }
+
   function buildQuery(paramsObj) {
     var usp = new URLSearchParams();
     for (var k in paramsObj) {
@@ -1456,6 +1862,8 @@
       fetchJson('/api/diary/attribution?' + winQs),
       fetchJson('/api/diary/edge/regimes?' + regQs),
       fetchJson('/api/diary/edge/payoff?' + payQs),
+      fetchJson('/api/diary/graduation?' + winQs),
+      fetchJson('/api/diary/notes?' + winQs),
       winCalPromise
     ]).then(function (res) {
       var calData = res[0];
@@ -1463,7 +1871,9 @@
       var attrData = res[2];
       var regData = res[3];
       var payData = res[4];
-      var winCal = res[5];
+      var gradData = res[5];
+      var notesData = res[6];
+      var winCal = res[7];
 
       if (calData.today_ist) {
         state.todayIst = calData.today_ist;
@@ -1473,6 +1883,8 @@
       state.attributionData = attrData;
       state.regimesData = regData;
       state.payoffData = payData;
+      state.graduationData = gradData;
+      state.notesData = notesData;
 
       populateStrategies(sumData.available_strategies || calData.available_strategies || []);
       renderSummary(sumData);
@@ -1480,6 +1892,8 @@
       renderAttributionTree();
       renderRegimesPanel();
       renderPayoffPanel();
+      renderGraduationPanel();
+      renderJournalPanel();
 
       var windowDays = [];
       var sourceDays = winCal ? (winCal.days || []) : state.calendarDays;
@@ -1557,6 +1971,7 @@
         state.expandedStrategies = {};
         state.expandedInstances = {};
         state.hasAutoExpanded = false;
+        resetJournalComposer(false);
         syncModeChrome(next);
         loadAll();
       });
@@ -1741,6 +2156,66 @@
         }
       });
     }
+
+    var gradWrap = document.getElementById('diary-graduation-table-wrap');
+    if (gradWrap) {
+      gradWrap.addEventListener('click', function (ev) {
+        var btn = ev.target && ev.target.closest
+          ? ev.target.closest('[data-journal-prefill-instance]')
+          : null;
+        if (btn) {
+          prefillJournalFromInstance(
+            btn.getAttribute('data-journal-prefill-strategy') || '',
+            btn.getAttribute('data-journal-prefill-instance') || '',
+            btn.getAttribute('data-journal-prefill-pid') || ''
+          );
+        }
+      });
+    }
+
+    var tagPickerEl = document.getElementById('diary-note-tags');
+    if (tagPickerEl) {
+      tagPickerEl.addEventListener('click', function (ev) {
+        var chip = ev.target && ev.target.closest
+          ? ev.target.closest('[data-journal-tag]')
+          : null;
+        if (chip) {
+          var tag = chip.getAttribute('data-journal-tag') || '';
+          if (tag) {
+            state.selectedJournalTags[tag] = !state.selectedJournalTags[tag];
+            syncJournalTagButtons();
+          }
+        }
+      });
+    }
+
+    var journalFormEl = document.getElementById('diary-journal-form');
+    if (journalFormEl) {
+      journalFormEl.addEventListener('submit', saveJournalNote);
+    }
+
+    var cancelEditBtn = document.getElementById('diary-note-cancel');
+    if (cancelEditBtn) {
+      cancelEditBtn.addEventListener('click', function () {
+        resetJournalComposer(false);
+      });
+    }
+
+    var feedWrapEl = document.getElementById('diary-journal-feed-wrap');
+    if (feedWrapEl) {
+      feedWrapEl.addEventListener('click', function (ev) {
+        if (!ev.target || !ev.target.closest) return;
+        var editBtn = ev.target.closest('[data-edit-note]');
+        if (editBtn) {
+          populateComposerForEdit(editBtn.getAttribute('data-edit-note') || '');
+          return;
+        }
+        var delBtn = ev.target.closest('[data-delete-note]');
+        if (delBtn) {
+          deleteJournalNote(delBtn.getAttribute('data-delete-note') || '');
+        }
+      });
+    }
   }
 
   function init() {
@@ -1761,6 +2236,8 @@
     buildMatrixHtml: buildMatrixHtml,
     buildHoldDurationTableHtml: buildHoldDurationTableHtml,
     buildPayoffQuadrantSvg: buildPayoffQuadrantSvg,
+    buildGraduationTableHtml: buildGraduationTableHtml,
+    buildJournalFeedHtml: buildJournalFeedHtml,
     monthBounds: monthBounds,
     mondayOfWeekIso: mondayOfWeekIso,
     sortAttributionStrategies: sortAttributionStrategies,

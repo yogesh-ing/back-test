@@ -157,3 +157,98 @@ def diary_edge_payoff() -> Tuple[Response, int]:
     except Exception as exc:  # noqa: BLE001
         log.exception("diary_edge_payoff failed: %s", exc)
         return _error(f"Failed to load edge payoff diagnostics: {exc}", 500)
+
+
+@diary_bp.get("/api/diary/graduation")
+def diary_graduation() -> Tuple[Response, int]:
+    mode = request.args.get("mode", "paper")
+    from_arg = request.args.get("from") or None
+    to_arg = request.args.get("to") or None
+    strategy = request.args.get("strategy") or None
+    try:
+        payload = DiaryService().get_graduation(
+            mode=mode,
+            from_date=from_arg,
+            to_date=to_arg,
+            strategy=strategy,
+        )
+        return jsonify({"success": True, **payload}), 200
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("diary_graduation failed: %s", exc)
+        return _error(f"Failed to load graduation scorecard: {exc}", 500)
+
+
+@diary_bp.get("/api/diary/notes")
+def diary_notes_list() -> Tuple[Response, int]:
+    mode = request.args.get("mode", "paper")
+    from_arg = request.args.get("from") or None
+    to_arg = request.args.get("to") or None
+    strategy = request.args.get("strategy") or None
+    try:
+        payload = DiaryService().list_notes(
+            mode=mode,
+            from_date=from_arg,
+            to_date=to_arg,
+            strategy=strategy,
+        )
+        return jsonify({"success": True, **payload}), 200
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("diary_notes_list failed: %s", exc)
+        return _error(f"Failed to list diary notes: {exc}", 500)
+
+
+@diary_bp.post("/api/diary/notes")
+def diary_notes_save() -> Tuple[Response, int]:
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _error("Expected JSON object body", 400)
+    mode = body.get("mode") if "mode" in body else request.args.get("mode", "paper")
+    session_date = body.get("session_date")
+    if not session_date:
+        return _error("session_date (YYYY-MM-DD) is required", 400)
+    try:
+        saved = DiaryService().save_note(
+            mode=mode,
+            session_date=str(session_date),
+            note_text=body.get("note_text", ""),
+            regime_tags=body.get("regime_tags"),
+            strategy_name=body.get("strategy_name"),
+            portfolio_id=body.get("portfolio_id"),
+            instance_label=body.get("instance_label"),
+            note_id=body.get("note_id"),
+        )
+        status = 200 if body.get("note_id") else 201
+        return jsonify({"success": True, "note": saved}), status
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    except KeyError as exc:
+        return _error(str(exc), 404)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("diary_notes_save failed: %s", exc)
+        return _error(f"Failed to save diary note: {exc}", 500)
+
+
+@diary_bp.delete("/api/diary/notes/<note_id>")
+def diary_notes_delete(note_id: str) -> Tuple[Response, int]:
+    body = request.get_json(silent=True)
+    mode = (
+        body.get("mode")
+        if isinstance(body, dict) and "mode" in body
+        else request.args.get("mode")
+    )
+    if not mode:
+        return _error("mode ('paper' or 'live') query param is required", 400)
+    try:
+        deleted = DiaryService().delete_note(note_id, mode=mode)
+        return jsonify({"success": True, **deleted}), 200
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    except KeyError as exc:
+        return _error(str(exc), 404)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("diary_notes_delete failed: %s", exc)
+        return _error(f"Failed to delete diary note: {exc}", 500)

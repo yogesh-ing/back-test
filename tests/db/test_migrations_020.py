@@ -50,7 +50,7 @@ SQL_016 = MIGRATIONS / "016_add_dhan_source.sqlite.sql"
 SQL_020 = MIGRATIONS / "020_add_upstox_source.sqlite.sql"
 PG_020 = MIGRATIONS / "020_add_upstox_source.sql"
 ALEMBIC_020 = (
-    ALEMBIC_VERSIONS / "20261013_1200_020_add_upstox_source_to_portfolios.py"
+    ALEMBIC_VERSIONS / "20261013_1200_021_add_upstox_source_to_portfolios.py"
 )
 
 POPULATED_ID = "11111111-1111-1111-1111-111111111111"
@@ -302,11 +302,11 @@ def test_pg_020_file_matches_conventions():
 
 
 def test_alembic_020_mirrors_the_sql():
-    """The Alembic revision widens exactly the same constraint."""
+    """The Alembic revision (linearized to 021 after 020 intent journal) widens the constraint."""
     assert ALEMBIC_020.exists(), f"missing {ALEMBIC_020}"
     src = ALEMBIC_020.read_text()
-    assert 'revision: str = "020"' in src
-    assert 'down_revision: Union[str, None] = "019"' in src
+    assert 'revision: str = "021"' in src
+    assert 'down_revision: Union[str, None] = "020"' in src
     assert "'synthetic','replay','mstock','dhan','upstox'" in src  # widened
     assert 'def downgrade()' in src
     # Downgrade restores the 016-era CHECK (drops upstox only).

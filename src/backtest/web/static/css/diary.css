@@ -1085,5 +1085,213 @@
     background: var(--primary-tint) !important;
 }
 
+/* Slice 5 — 6-Gate Graduation Scorecard & Persistent Operator Journal */
+.diary-grad-summary-pills {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.diary-gate-strip {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 3px;
+}
+
+.diary-gate-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .02em;
+}
+
+.diary-gate-chip.is-pass {
+    background: var(--success-tint);
+    color: var(--success-text);
+    border: 1px solid var(--success-shade);
+}
+
+.diary-gate-chip.is-fail {
+    background: var(--danger-tint);
+    color: var(--danger-text);
+    border: 1px solid var(--danger-shade);
+}
+
+.diary-verdict-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: .03em;
+}
+
+.diary-verdict-badge[data-tone="positive"] {
+    background: var(--success-tint);
+    color: var(--success-text);
+    border: 1px solid var(--success-shade);
+}
+
+.diary-verdict-badge[data-tone="caution"] {
+    background: var(--warning-tint);
+    color: var(--warning-text);
+    border: 1px solid var(--warning-shade);
+}
+
+.diary-verdict-badge[data-tone="negative"] {
+    background: var(--danger-tint);
+    color: var(--danger-text);
+    border: 1px solid var(--danger-shade);
+}
+
+.diary-advisory-note {
+    margin-top: 4px;
+    padding: 3px 6px;
+    border-radius: 5px;
+    font-size: 10.5px;
+    line-height: 1.35;
+    background: var(--warning-tint);
+    color: var(--warning-text);
+    border: 1px solid var(--warning-shade);
+    max-width: 310px;
+    white-space: normal;
+}
+
+.diary-journal-layout {
+    display: grid;
+    grid-template-columns: minmax(300px, 1.05fr) minmax(320px, 1.25fr);
+    gap: 14px;
+    align-items: start;
+}
+
+@media (max-width: 980px) {
+    .diary-journal-layout {
+        grid-template-columns: 1fr;
+    }
+}
+
+.diary-journal-composer,
+.diary-journal-feed {
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border-soft);
+    background: var(--surface-2);
+}
+
+.diary-journal-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+@media (max-width: 720px) {
+    .diary-journal-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+.diary-text-input,
+.diary-textarea {
+    width: 100%;
+    padding: 6px 9px;
+    border-radius: var(--radius-control);
+    border: 1px solid var(--border);
+    background: var(--input-bg);
+    color: var(--text-strong);
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+}
+
+.diary-text-input {
+    height: 32px;
+}
+
+.diary-textarea {
+    resize: vertical;
+    min-height: 70px;
+    line-height: 1.45;
+}
+
+.diary-tag-picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+.diary-tag-chip {
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all .12s ease;
+}
+
+.diary-tag-chip:hover {
+    color: var(--text-strong);
+    border-color: var(--primary-shade);
+}
+
+.diary-tag-chip.is-selected,
+.diary-tag-chip[aria-pressed="true"] {
+    background: var(--primary-tint);
+    color: var(--primary);
+    border-color: var(--primary-shade);
+}
+
+.diary-journal-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.diary-journal-card {
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-soft);
+    background: var(--surface);
+    margin-bottom: 8px;
+}
+
+.diary-journal-card:last-child {
+    margin-bottom: 0;
+}
+
+.diary-journal-card-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.diary-journal-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+}
+
+.diary-journal-card-body {
+    font-size: 12.5px;
+    line-height: 1.48;
+    color: var(--text-strong);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+
 
 
