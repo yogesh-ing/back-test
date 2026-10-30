@@ -30,6 +30,8 @@ from typing import Any, Deque, Dict, List, Optional
 from backtest.data.sources_policy import policy_key, synthetic_enabled
 from backtest.timekeeping import (
     EXCHANGE_TZ,
+    current_session_date,
+    format_session_scope,
     in_eod_squareoff_window,
     now_utc,
 )
@@ -331,6 +333,18 @@ class PortfolioManager:
         """Derive daily P&L for a bucket from its runners."""
         return sum(r.daily_pnl() for r in self._bucket_runners(mode))
 
+    def _bucket_daily_realized_net_pnl(self, mode: str) -> float:
+        """Today's IST-scoped net realized P&L across a bucket's runners (E1)."""
+        return sum(r.daily_realized_net_pnl() for r in self._bucket_runners(mode))
+
+    def _bucket_daily_gross_pnl(self, mode: str) -> float:
+        """Today's IST-scoped gross realized P&L across a bucket's runners (E1)."""
+        return sum(r.daily_gross_pnl() for r in self._bucket_runners(mode))
+
+    def _bucket_daily_commission(self, mode: str) -> float:
+        """Today's single combined commission sum across a bucket's runners (E2)."""
+        return sum(r.daily_commission() for r in self._bucket_runners(mode))
+
     def _bucket_realized_pnl(self, mode: str) -> float:
         """Derive realized P&L for a bucket from its runners."""
         return sum(r.realized_pnl for r in self._bucket_runners(mode))
@@ -476,12 +490,17 @@ class PortfolioManager:
         and SSE stream consume this directly.
         """
         buckets: Dict[str, Dict[str, Any]] = {}
+        today_ist = current_session_date()
+        scope_label = format_session_scope(today_ist)
         for mode in ("paper", "live"):
             equity = self._bucket_equity(mode)
             capital = self._bucket_capital(mode)
             peak = self._bucket_peak.get(mode, 0.0)
             day_start = self._bucket_day_start.get(mode, 0.0)
             daily = self._bucket_daily_pnl(mode)
+            daily_realized_net = self._bucket_daily_realized_net_pnl(mode)
+            daily_gross = self._bucket_daily_gross_pnl(mode)
+            daily_comm = self._bucket_daily_commission(mode)
             counts = self._bucket_runner_counts(mode)
             limit = abs(self.supervisor.config.daily_loss_limit)
 
@@ -492,6 +511,11 @@ class PortfolioManager:
                 "drawdown_pct": round(self._bucket_drawdown(mode), 4),
                 "daily_pnl": round(daily, 2),
                 "daily_pnl_pct": (round(daily / day_start, 6) if day_start else 0.0),
+                "daily_realized_net_pnl": round(daily_realized_net, 2),
+                "daily_gross_pnl": round(daily_gross, 2),
+                "daily_commission": round(daily_comm, 2),
+                "session_date_ist": today_ist.isoformat(),
+                "session_scope_label": scope_label,
                 "realized_pnl": round(self._bucket_realized_pnl(mode), 2),
                 "deployed_capital": round(self._bucket_deployed(mode), 2),
                 "open_positions": self._bucket_open_positions(mode),
@@ -3056,6 +3080,11 @@ class PortfolioManager:
             equity = sum(s["equity"] for s in states)
             deployed = sum(s["deployed_capital"] for s in states)
             daily = sum(s["daily_pnl"] for s in states)
+            daily_realized_net = sum(
+                float(s.get("daily_realized_net_pnl") or 0.0) for s in states
+            )
+            daily_gross = sum(float(s.get("daily_gross_pnl") or 0.0) for s in states)
+            daily_comm = sum(float(s.get("daily_commission") or 0.0) for s in states)
             realized = sum(s["realized_pnl"] for s in states)
             open_positions = sum(s["open_positions"] for s in states)
             running = sum(1 for s in states if s["status"] == STATUS_RUNNING)
@@ -3134,9 +3163,13 @@ class PortfolioManager:
             combined_realized = realized + dashboard_realized
             combined_positions = open_positions + dashboard_positions
             stale_marks_count = sum(int(s.get("stale_positions") or 0) for s in states)
+            today_ist = current_session_date()
+            scope_label = format_session_scope(today_ist)
 
             return {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "session_date_ist": today_ist.isoformat(),
+                "session_scope_label": scope_label,
                 "total_capital": round(total_capital, 2),
                 "total_equity": round(combined_equity, 2),
                 "deployed_capital": round(deployed, 2),
@@ -3145,6 +3178,9 @@ class PortfolioManager:
                 ),
                 "daily_pnl": round(combined_daily, 2),
                 "daily_pnl_pct": (round(combined_daily / day_start, 6) if day_start else 0.0),
+                "daily_realized_net_pnl": round(daily_realized_net, 2),
+                "daily_gross_pnl": round(daily_gross, 2),
+                "daily_commission": round(daily_comm, 2),
                 "realized_pnl": round(combined_realized, 2),
                 "open_positions": combined_positions,
                 "stale_marks_count": stale_marks_count,

@@ -164,7 +164,58 @@ def session_date(value: Union[datetime, str, None]) -> Optional[date]:
     if isinstance(value, date):
         return value
     parsed = from_market_clock(value)
-    return parsed.date() if parsed is not None else None
+    return parsed.astimezone(EXCHANGE_TZ).date() if parsed is not None else None
+
+
+def current_session_date(value: Optional[datetime] = None) -> date:
+    """Today's exchange-calendar date in IST (00:00 IST roll)."""
+    return _as_exchange(value if value is not None else now_utc()).date()
+
+
+def _coerce_date(value: Union[date, str]) -> date:
+    if isinstance(value, datetime):
+        return _as_exchange(value).date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value).strip()[:10])
+
+
+def ist_session_bounds_utc(
+    start_date: Union[date, str],
+    end_date: Union[date, str, None] = None,
+) -> tuple[datetime, datetime]:
+    """Half-open aware-UTC bounds ``[start_utc, end_utc)`` for IST session day(s).
+
+    ``start_date`` and ``end_date`` (inclusive; defaults to ``start_date``) name
+    IST calendar dates. Converting the ``00:00:00+05:30`` walls to aware UTC in
+    Python lets every ``TIMESTAMPTZ`` range scan use ``ix_trades_portfolio_exit``
+    directly without depending on PostgreSQL's session timezone or SQLite string
+    casts.
+    """
+    d0 = _coerce_date(start_date)
+    d1 = _coerce_date(end_date) if end_date is not None else d0
+    if d1 < d0:
+        raise ValueError(f"end_date {d1.isoformat()} precedes start_date {d0.isoformat()}")
+    start_utc = datetime.combine(d0, time.min, tzinfo=EXCHANGE_TZ).astimezone(UTC)
+    end_utc = datetime.combine(
+        d1 + timedelta(days=1), time.min, tzinfo=EXCHANGE_TZ
+    ).astimezone(UTC)
+    return start_utc, end_utc
+
+
+def format_session_scope(
+    target_date: Union[date, str, None] = None,
+    *,
+    reference_now: Optional[datetime] = None,
+) -> str:
+    """Human scope badge for P&L tiles (E1: e.g. ``'Today · 30-Oct IST'``)."""
+    today_ist = current_session_date(reference_now)
+    day = _coerce_date(target_date) if target_date is not None else today_ist
+    if day == today_ist:
+        return f"Today · {day:%d-%b} IST"
+    if day.year == today_ist.year:
+        return f"{day:%d-%b} IST"
+    return f"{day:%d-%b-%Y} IST"
 
 
 def iso_utc(value: Optional[datetime]) -> Optional[str]:
@@ -318,15 +369,18 @@ __all__ = [
     "MARKET_CLOSE_TIME",
     "MARKET_OPEN_TIME",
     "UTC",
+    "current_session_date",
     "duration_seconds",
     "ensure_exchange",
     "ensure_utc",
     "entry_window_refusal",
+    "format_session_scope",
     "from_market_clock",
-    "in_eod_squareoff_window",
     "from_stored_utc",
+    "in_eod_squareoff_window",
     "iso_exchange",
     "iso_utc",
+    "ist_session_bounds_utc",
     "market_is_open",
     "now_exchange",
     "now_utc",

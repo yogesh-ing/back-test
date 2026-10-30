@@ -23,13 +23,17 @@ from decimal import Decimal
 from typing import Any
 
 from backtest.data.sources_policy import default_broker_source
+from backtest.diary.ledger import canonical_trade_signature
 from backtest.timekeeping import from_stored_utc, now_utc
 
 logger = logging.getLogger(__name__)
 
-#: Runner-level dedupe key length — a natural key of exit_ts+symbol+pnl is
-#: enough to catch the double-flush case (same trade seen on two sweeps).
-_NATURAL_KEY_LEN = 3
+_VALID_PORTFOLIO_MODES = frozenset({"paper", "live"})
+
+
+def _resolve_runner_mode(cfg: Any) -> str:
+    raw = str(getattr(cfg, "mode", "paper") or "paper").strip().lower()
+    return raw if raw in _VALID_PORTFOLIO_MODES else "paper"
 
 
 class LiveTradePersister:
@@ -37,8 +41,10 @@ class LiveTradePersister:
 
     def __init__(self, db_manager: Any) -> None:
         self.db = db_manager
-        #: runner.instance_id → set of (exit_ts, symbol, pnl) already written
-        self._flushed: dict[str, set[tuple[str, str, str]]] = {}
+        #: runner.instance_id → set of canonical trade signatures already written
+        self._flushed: dict[str, set[tuple[Any, ...]]] = {}
+        #: runner.instance_id values whose existing DB rows have been pre-loaded
+        self._seeded_runners: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -74,12 +80,22 @@ class LiveTradePersister:
             return 0
 
         seen = self._flushed.setdefault(runner.instance_id, set())
+        if runner.instance_id not in self._seeded_runners:
+            self._seed_existing_signatures(runner, seen)
+
+        pkey = str(runner.instance_id)[:8].lower()
         pending = []
         for t in trades:
-            key = (
-                str(t.get("exit_ts") or ""),
-                str(t.get("symbol") or ""),
-                str(t.get("pnl") or ""),
+            gross_val = t.get("gross_pnl")
+            if gross_val is None:
+                gross_val = t.get("pnl", 0)
+            key = canonical_trade_signature(
+                pkey,
+                symbol=t.get("symbol"),
+                entry_ts=t.get("entry_ts"),
+                exit_ts=t.get("exit_ts"),
+                units_or_qty=t.get("units") or t.get("qty") or 1,
+                gross_pnl=gross_val,
             )
             if key in seen:
                 continue
@@ -108,6 +124,60 @@ class LiveTradePersister:
     # Internals
     # ------------------------------------------------------------------
 
+    def _seed_existing_signatures(self, runner: Any, seen: set[tuple[Any, ...]]) -> None:
+        """Pre-load signatures already stored in ``trades`` for ``runner`` (B1 fix).
+
+        Without this seed, every process restart restored ``runner.closed_trades``
+        from ``portfolio_state.json`` into a fresh empty ``self._flushed`` dict
+        and re-inserted the historical tail into ``trades``.
+        """
+        self._seeded_runners.add(runner.instance_id)
+        try:
+            from backtest.db.models import Portfolio as PortfolioRow
+            from backtest.db.models import Trade as TradeRow
+
+            cfg = runner.config
+            name = f"{cfg.name} [{runner.instance_id[:8]}]"
+            pkey = str(runner.instance_id)[:8].lower()
+            resolved_mode = _resolve_runner_mode(cfg)
+            with self.db.session() as session:
+                existing = (
+                    session.query(PortfolioRow).filter(PortfolioRow.name == name).one_or_none()
+                )
+                if existing is None:
+                    return
+                runner._db_portfolio_id = existing.portfolio_id
+                if getattr(cfg, "mode", None) and existing.mode != resolved_mode:
+                    existing.mode = resolved_mode
+                rows = (
+                    session.query(
+                        TradeRow.symbol,
+                        TradeRow.entry_time,
+                        TradeRow.exit_time,
+                        TradeRow.quantity,
+                        TradeRow.gross_pnl,
+                    )
+                    .filter(TradeRow.portfolio_id == existing.portfolio_id)
+                    .all()
+                )
+                for row in rows:
+                    seen.add(
+                        canonical_trade_signature(
+                            pkey,
+                            symbol=row.symbol,
+                            entry_ts=row.entry_time,
+                            exit_ts=row.exit_time,
+                            units_or_qty=row.quantity,
+                            gross_pnl=row.gross_pnl,
+                        )
+                    )
+        except Exception:  # noqa: BLE001 — fail-soft for duck-typed test mocks
+            logger.debug(
+                "seed_existing_signatures skipped for runner %s",
+                runner.instance_id,
+                exc_info=True,
+            )
+
     def _ensure_portfolio_row(self, runner: Any) -> str:
         """One `portfolios` row per runner instance (created once, cached)."""
         cached = getattr(runner, "_db_portfolio_id", None)
@@ -118,11 +188,14 @@ class LiveTradePersister:
 
         cfg = runner.config
         name = f"{cfg.name} [{runner.instance_id[:8]}]"
+        resolved_mode = _resolve_runner_mode(cfg)
         with self.db.session() as session:
             existing = (
                 session.query(PortfolioRow).filter(PortfolioRow.name == name).one_or_none()
             )
             if existing is not None:
+                if getattr(cfg, "mode", None) and existing.mode != resolved_mode:
+                    existing.mode = resolved_mode
                 runner._db_portfolio_id = existing.portfolio_id
                 return existing.portfolio_id
             row = PortfolioRow(
@@ -133,7 +206,7 @@ class LiveTradePersister:
                         or getattr(runner.portfolio, "cash", 0)
                         or 0)
                 ),
-                mode="paper",
+                mode=resolved_mode,
                 # Never a literal feed name: the runner's own source is already
                 # policy-resolved at construction, and if a legacy config
                 # somehow carries none, this writes the deployment's broker

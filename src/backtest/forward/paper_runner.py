@@ -77,6 +77,7 @@ from backtest.simulator.position_sizing import all_in_size
 from backtest.strategy.base import Strategy
 from backtest.strategy.registry import get_strategy
 from backtest.timekeeping import (
+    current_session_date,
     entry_window_refusal,
     from_market_clock,
     from_stored_utc,
@@ -4005,6 +4006,68 @@ class StrategyRunner:
             deployed += float(self.options_bridge.premium_at_risk)
         return deployed
 
+    def daily_realized_breakdown(self, target_date: Optional[str] = None) -> Dict[str, Any]:
+        """Today's IST-scoped realized P&L triad: gross, single commission, net (E1/E2).
+
+        Closed positions/structures from prior IST sessions remain in the
+        restored cache for lifetime equity, but are excluded here so every
+        daily P&L and realized-today tile reflects ONLY ``target_date`` (default
+        today in IST).
+        """
+        today = target_date or current_session_date().isoformat()
+        gross = Decimal("0")
+        commission = Decimal("0")
+        net = Decimal("0")
+        count = 0
+
+        for p in self.portfolio.closed_positions:
+            if p.closed_at is None or _as_ist_date(p.closed_at) != today:
+                continue
+            gross += p.realized_pnl
+            commission += getattr(p, "commission_total", Decimal("0"))
+            net += p.net_pnl
+            count += 1
+
+        if self.options_bridge is not None:
+            book = self.options_bridge.option_broker
+            for structure in book.get_closed_structures():
+                s_date = getattr(structure, "effective_session_date", None)
+                if not s_date and getattr(structure, "closed_at", None) is not None:
+                    s_date = _as_ist_date(structure.closed_at)
+                if s_date != today:
+                    continue
+                prior_net = getattr(structure, "prior_close_net_pnl", Decimal("0"))
+                struct_comm = structure.total_commission + getattr(
+                    structure, "statutory_fees", Decimal("0")
+                )
+                lifetime_net = getattr(
+                    structure,
+                    "net_pnl",
+                    structure.total_realized_pnl - struct_comm,
+                )
+                today_net = lifetime_net - prior_net
+                gross += today_net + struct_comm if prior_net else structure.total_realized_pnl
+                commission += struct_comm
+                net += today_net
+                count += 1
+
+        return {
+            "session_date": today,
+            "gross_pnl": float(gross),
+            "commission_total": float(commission),
+            "net_pnl": float(net),
+            "trade_count": count,
+        }
+
+    def daily_realized_net_pnl(self) -> float:
+        return self.daily_realized_breakdown()["net_pnl"]
+
+    def daily_gross_pnl(self) -> float:
+        return self.daily_realized_breakdown()["gross_pnl"]
+
+    def daily_commission(self) -> float:
+        return self.daily_realized_breakdown()["commission_total"]
+
     def daily_pnl(self) -> float:
         """Daily PnL: round trips whose IST session date is today + open MTM.
 
@@ -4022,7 +4085,7 @@ class StrategyRunner:
         net out brokerage + statutory fees so ``daily_pnl()`` reconciles with
         ``equity() - _day_start_equity`` and rolls cleanly at 00:00 IST.
         """
-        today = datetime.now(_IST).date().isoformat()
+        today = current_session_date().isoformat()
         realized_today = sum(
             (
                 p.net_pnl
@@ -4213,6 +4276,7 @@ class StrategyRunner:
                 self.options_bridge.summary() if self.options_bridge is not None else None
             )
             open_structures = int((options_summary or {}).get("open_structures") or 0)
+            daily_breakdown = self.daily_realized_breakdown()
             return {
                 "instance_id": self.instance_id,
                 "name": self.config.name,
@@ -4227,6 +4291,10 @@ class StrategyRunner:
                 "deployed_capital": round(self.deployed_capital(), 2),
                 "open_pnl": round(self.unrealized_pnl(), 2),
                 "daily_pnl": round(self.daily_pnl(), 2),
+                "daily_realized_net_pnl": round(daily_breakdown["net_pnl"], 2),
+                "daily_gross_pnl": round(daily_breakdown["gross_pnl"], 2),
+                "daily_commission": round(daily_breakdown["commission_total"], 2),
+                "daily_trade_count": int(daily_breakdown["trade_count"]),
                 "realized_pnl": round(self.realized_pnl, 2),
                 "win_rate": round(self.win_rate(), 4),
                 "max_drawdown_pct": round(self.max_drawdown_pct, 4),
@@ -4877,7 +4945,7 @@ class PaperRunner:
         ``net_pnl`` key nobody wrote, so realized was structurally 0 while
         the entire lifetime's commission was subtracted every call.
         """
-        today = datetime.now(_IST).date().isoformat()
+        today = current_session_date().isoformat()
         realized_today = sum(
             (
                 p.net_pnl
