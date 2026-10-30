@@ -5,11 +5,11 @@ Slice 5 of ``docs/PNL-DIARY-AND-EDGE-SUITE-PLAN.md``. Persists book-segregated
 strategy / spawned-instance annotations across restarts on both PostgreSQL and
 SQLite.
 
-Hand-applied equivalents: ``db/migrations/022_diary_journal_notes.sql``
-(PostgreSQL) and ``022_diary_journal_notes.sqlite.sql``.
+Hand-applied equivalents: ``db/migrations/023_diary_journal_notes.sql``
+(PostgreSQL) and ``023_diary_journal_notes.sqlite.sql``.
 
-Revision ID: 022
-Revises: 021
+Revision ID: 023
+Revises: 022
 Create Date: 2026-10-30
 """
 
@@ -21,8 +21,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "022"
-down_revision: Union[str, None] = "021"
+revision: str = "023"
+down_revision: Union[str, None] = "022"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

@@ -21,6 +21,7 @@ paper has no square-off contract to sweep.
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -35,7 +36,11 @@ from backtest.forward.options_bridge import (
     EXIT_INTRADAY_SQUAREOFF,
     OptionsBridge,
 )
-from backtest.forward.paper_runner import STATUS_RUNNING, StrategyRunner
+from backtest.forward.paper_runner import (
+    STATUS_PAUSED,
+    STATUS_RUNNING,
+    StrategyRunner,
+)
 from backtest.forward.portfolio_manager import PortfolioManager
 from backtest.forward.risk_supervisor import GlobalRiskConfig
 from backtest.forward.trade_persistence import _map_exit_reason
@@ -346,6 +351,58 @@ def test_squareoff_before_the_window_does_nothing():
     assert bridge._has_open_structure() is True
 
 
+# --------------------------------------------------------------------------- #
+# 3b. The status contract on every door (B4, live gate 2026-10-30)
+# --------------------------------------------------------------------------- #
+
+
+def _squareoff_fired(bridge: OptionsBridge) -> bool:
+    """Did a door force this book flat as an obligation (not as a strategy exit)?"""
+    return any(
+        structure.exit_reason == EXIT_INTRADAY_SQUAREOFF
+        for structure in bridge.option_broker.get_closed_structures()
+    )
+
+
+def test_tick_at_the_cutoff_honours_pause_and_still_squares_off_a_running_book():
+    """PAUSE is a reliable opt-out — the symptom that broke the 30-Oct negative control.
+
+    Book ``2201907e`` was deliberately PAUSED as the gate's negative control and a
+    15:10:00 IST tick flattened it anyway, because the tick/bar door read only the
+    clock while the sweep next door required ``RUNNING``. Both doors now consult
+    ``runner_running``, which the runner syncs from its own status.
+    """
+    bridge = _bridge(timeframe="5min")
+    assert _open_structure(bridge, hour=10).get("structure_id")
+
+    bridge.runner_running = False
+    bridge.on_tick("NIFTY", 24_500.0, _ist_text(15, 10, 5))
+    assert _squareoff_fired(bridge) is False
+    assert bridge.last_unrealized_pnl is not None  # a paused book is still marked
+
+    # Same bridge, same minute, permission restored: the obligation is enforced.
+    bridge.runner_running = True
+    bridge.on_tick("NIFTY", 24_500.0, _ist_text(15, 10, 30))
+    assert _squareoff_fired(bridge) is True
+
+
+def test_bar_at_the_cutoff_honours_pause():
+    bridge = _bridge(timeframe="5min")
+    assert _open_structure(bridge, hour=10).get("structure_id")
+    bridge.runner_running = False
+    bridge.on_bar("NIFTY", 24_500.0, _ist_text(15, 11, 0))
+    assert _squareoff_fired(bridge) is False
+
+
+def test_public_squareoff_seam_honours_pause_too():
+    """The gate lives in the shared choke point, so no door can forget it."""
+    bridge = _bridge(timeframe="5min")
+    assert _open_structure(bridge, hour=10).get("structure_id")
+    bridge.runner_running = False
+    assert bridge.eod_squareoff(_ist(15, 10, 30)) is None
+    assert _squareoff_fired(bridge) is False
+
+
 class _StubRunner:
     """Minimal shape the sweep reads: status, bridge, seam, identity."""
 
@@ -418,6 +475,52 @@ def test_sweep_reports_and_audits_a_squared_off_book():
     ]
     audit = [entry["action"] for entry in mgr.get_audit_log()]
     assert "EOD_SQUAREOFF" in audit
+    mgr.shutdown()
+
+
+def test_sweep_reports_a_paused_book_instead_of_flattening_it(caplog):
+    """The sweep skips a paused book and says so — once per session, not once a second."""
+    mgr = _manager()
+    paused = _StubRunner("PAUSED-BOOK", carries_intraday=True)
+    paused.status = STATUS_PAUSED
+    mgr._runners = {"PAUSED-BOOK": paused}
+
+    with caplog.at_level(logging.WARNING, logger="backtest.forward.portfolio_manager"):
+        first = mgr.run_eod_squareoff_sweep(_ist(15, 10, 5))
+        second = mgr.run_eod_squareoff_sweep(_ist(15, 10, 6))
+
+    assert first["held_paused"] == [
+        {
+            "instance_id": "PAUSED-BOOK",
+            "name": "PAUSED-BOOK",
+            "status": STATUS_PAUSED,
+            "scope": "paper",
+        }
+    ]
+    assert first["squared_off"] == [] and second["squared_off"] == []
+    assert paused.calls == [], "a paused book must never be asked to flatten"
+    notices = [r for r in caplog.records if "obligation NOT enforced" in r.getMessage()]
+    assert len(notices) == 1
+    carry = [e for e in mgr.get_audit_log() if e["action"] == "EOD_CARRY_HELD"]
+    assert len(carry) == 1
+    mgr.shutdown()
+
+
+def test_paused_carry_warning_re_arms_for_the_next_session(caplog):
+    mgr = _manager()
+    paused = _StubRunner("PAUSED-BOOK", carries_intraday=True)
+    paused.status = STATUS_PAUSED
+    mgr._runners = {"PAUSED-BOOK": paused}
+
+    def notices() -> list:
+        return [r for r in caplog.records if "obligation NOT enforced" in r.getMessage()]
+
+    with caplog.at_level(logging.WARNING, logger="backtest.forward.portfolio_manager"):
+        mgr.run_eod_squareoff_sweep(_ist(15, 10, 5))
+        assert len(notices()) == 1
+        mgr.run_eod_squareoff_sweep(_ist(14, 59, 0))  # window closes → latch re-arms
+        mgr.run_eod_squareoff_sweep(_ist(15, 10, 5))
+        assert len(notices()) == 2
     mgr.shutdown()
 
 

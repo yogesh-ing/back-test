@@ -287,12 +287,16 @@ class TestStrategyRunner:
         broker.submit_market(r.instance_id, "AAA", SIDE_BUY, 100, 100.0)
         broker.submit_market(r.instance_id, "AAA", SIDE_SELL, 100, 110.0)
         assert len(r.closed_trades) == 1
-        assert r.realized_pnl == pytest.approx(1000.0)
+        # BUG-04: ``realized_pnl`` is the NET half — the price P&L is on
+        # ``gross_realized_pnl`` and this trip's whole cost stack is off it,
+        # which is the same money ``cash`` shows.
+        assert r.gross_realized_pnl == pytest.approx(1000.0)
+        assert r.realized_pnl == pytest.approx(
+            1000.0 - float(r.portfolio.total_commission)
+        )
         assert r.wins == 1
         assert r.win_rate() == 1.0
         assert "AAA" not in r.positions
-        # ``realized_pnl`` is the price P&L; the cash shows what the trip
-        # actually left after the venue took its cut.
         assert r.cash == pytest.approx(101_000.0 - float(r.portfolio.total_commission))
         assert float(r.portfolio.total_commission) > 0
 

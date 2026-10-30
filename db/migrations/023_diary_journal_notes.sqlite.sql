@@ -1,4 +1,4 @@
--- Migration 022: PnL Diary Operator Journal (SQLite)
+-- Migration 023: PnL Diary Operator Journal (SQLite)
 
 CREATE TABLE IF NOT EXISTS diary_notes (
     note_id        VARCHAR(36) PRIMARY KEY NOT NULL,
@@ -21,4 +21,4 @@ CREATE INDEX IF NOT EXISTS ix_diary_notes_strategy
     ON diary_notes (mode, strategy_name);
 
 INSERT OR IGNORE INTO schema_migrations (version, description)
-VALUES ('022', 'Add diary_notes table for book-segregated PnL Diary operator journal');
+VALUES ('023', 'Add diary_notes table for book-segregated PnL Diary operator journal');

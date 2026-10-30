@@ -51,6 +51,7 @@
       deployed_pct: b.capital > 0 ? b.deployed_capital / b.capital : 0,
       daily_pnl: b.daily_pnl,
       daily_pnl_pct: b.daily_pnl_pct,
+      realized_pnl_today: b.realized_pnl_today,
       daily_realized_net_pnl: b.daily_realized_net_pnl,
       daily_gross_pnl: b.daily_gross_pnl,
       daily_commission: b.daily_commission,
@@ -167,9 +168,9 @@
       ((p.daily_pnl_pct || 0) * 100).toFixed(2) + "%";
     $("m-daily-pnl-pct").textContent = scopeLabel + " · " + pctStr;
 
-    const realizedToday = p.daily_realized_net_pnl != null
-      ? p.daily_realized_net_pnl
-      : p.realized_pnl;
+    const realizedToday = p.realized_pnl_today != null
+      ? p.realized_pnl_today
+      : (p.daily_realized_net_pnl != null ? p.daily_realized_net_pnl : p.realized_pnl);
     const real = $("m-realized-pnl");
     real.textContent = fmtSigned(realizedToday);
     real.className = "metric-value " + pnlClass(realizedToday);

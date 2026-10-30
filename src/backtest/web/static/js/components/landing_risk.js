@@ -123,20 +123,37 @@
     if (ddEl) ddEl.textContent = pct(ddPct);
     if (posEl) posEl.textContent = `${summary.open_positions || 0} pos`;
 
-    // Keep the redesigned summary synchronized with the SAME scoped snapshot
-    // as its risk row. Missing fields never become invented zeros.
-    for (const [id, key] of [["equity", "total_equity"], ["allocated", "total_capital"], ["daily-pnl", "daily_pnl"], ["realized-pnl", "realized_pnl"]]) {
+    // Keep the redesigned summary synchronized with the SAME snapshot as its
+    // risk row. Two shapes arrive here: a scoped /summary payload
+    // (total_equity, total_capital, runner_count) and a buckets[mode] object
+    // (equity, capital, count) — the bucket names are authoritative, the
+    // scoped ones are the fallback. Missing fields never become invented zeros.
+    const moneyFields = [
+      ["equity", ["equity", "total_equity"], false],
+      ["allocated", ["capital", "total_capital"], false],
+      ["daily-pnl", ["daily_pnl"], true],
+      ["realized-pnl", ["realized_pnl"], true],
+    ];
+    for (const [id, keys, isPnl] of moneyFields) {
       const el = $("bucket-" + id + "-" + mode);
-      if (!el || summary[key] == null) continue;
-      const value = summary[key];
+      if (!el) continue;
+      let value = null;
+      for (const key of keys) {
+        if (summary[key] != null) {
+          value = summary[key];
+          break;
+        }
+      }
+      if (value == null) continue;
       el.textContent = typeof Money !== "undefined" ? Money.format(value, 0) : fmtMoney(value);
-      if (id.includes("pnl")) {
+      if (isPnl) {
         el.classList.toggle("pnl-pos", value > 0);
         el.classList.toggle("pnl-neg", value < 0);
       }
     }
     const instances = $("bucket-instances-" + mode);
-    if (instances && summary.runner_count != null) instances.textContent = summary.runner_count;
+    const count = summary.count != null ? summary.count : summary.runner_count;
+    if (instances && count != null) instances.textContent = count;
 
     // 2026-09-22: live Running / Open-positions rows on the overview card.
     const runEl = $("bucket-running-" + mode);

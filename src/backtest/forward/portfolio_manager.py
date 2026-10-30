@@ -280,6 +280,8 @@ class PortfolioManager:
             from backtest.db import DatabaseManager
 
             self._trade_persister = LiveTradePersister(DatabaseManager.from_env())
+            # B3: the execution ledger becomes durable at the transition itself.
+            self._trade_persister.attach_order_ledger(self.ledger)
         except Exception:  # noqa: BLE001 — persistence is best-effort
             logger.info("trade persistence disabled (no reachable database)", exc_info=True)
         self._restoring = False  # suppress saves while rehydrating
@@ -295,6 +297,15 @@ class PortfolioManager:
             logger.exception("portfolio intelligence disabled (init failed)")
         self._restore_state()
 
+        # BUG-37 (ticket 2.4 item 3): the ledger keeps 'active' rows for books
+        # nobody runs — deleted runners, re-spawns under a new instance id, test
+        # fixtures — and ``sum(initial_capital) WHERE status='active'`` is what
+        # capital is read from. Fail-soft like every other boot side effect.
+        try:
+            self._reap_orphan_portfolio_rows()
+        except Exception:  # noqa: BLE001 — a reap must never block a start
+            logger.exception("[ledger] orphan portfolio-row reap skipped")
+
         # MTM Staleness Watchdog (R6): periodic 60s mark-repair timer + manual
         # operator trigger (~10s cooldown per runner).
         self._refresh_marks_cooldown_s: float = 10.0
@@ -303,6 +314,9 @@ class PortfolioManager:
         #: BUG-39: the session clock is read once a second so the EOD
         #: square-off cannot depend on a tick arriving at 15:10.
         self.eod_sweep_interval_s: float = 1.0
+        #: Edge trigger for the "paused book carries overnight" warning, so a
+        #: 1 s sweep says it once per session rather than 1,200 times.
+        self._paused_carry_warned: bool = False
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None
         if auto_start_feed and "PYTEST_CURRENT_TEST" not in os.environ:
@@ -326,28 +340,120 @@ class PortfolioManager:
         return sum(r.equity() for r in self._bucket_runners(mode))
 
     def _bucket_capital(self, mode: str) -> float:
-        """Derive total allocated capital for a bucket."""
+        """Derive total allocated capital for a bucket from its runners."""
         return sum(r.config.allocated_capital for r in self._bucket_runners(mode))
+
+    def _sync_total_capital(self) -> None:
+        """Re-derive ``total_capital`` from the runners that actually exist.
+
+        BUG-03: it was an accumulator, added to on spawn and subtracted from on
+        delete. A refused restore, a re-spawn, or any path that removed a
+        runner without paying the subtraction left it drifting away from the
+        money on the books — and the state file then faithfully re-saved the
+        drift. Callers must run this *after* mutating ``_runners``.
+        """
+        self.total_capital = round(
+            sum(r.config.allocated_capital for r in self._runners.values()), 2
+        )
+
+    def _anchor_keys(self, runner: StrategyRunner, bucket: str) -> List[str]:
+        """Every bucket key this runner's money sits inside."""
+        keys = [bucket]
+        segment = getattr(runner.config, "segment", None)
+        if bucket == "live" and segment:
+            keys.append(self._segment_key(str(segment).strip().lower()))
+        return keys
+
+    def _record_capital_flow(self, runner: StrategyRunner, delta: float) -> None:
+        """Move the day/peak anchors with money entering or leaving a book.
+
+        BUG-33: ``daily_pnl = equity - day_start`` only measures trading while
+        the anchor and the book see the same money. A runner spawned mid-session
+        put its allocated capital into equity without touching the anchor, so
+        the fuse saw a large phantom *gain* — which is worse than a phantom
+        loss, because the bucket's daily-loss limit is then spent masking real
+        losses instead of tripping on them. Deleting a book subtracted its
+        equity and read as a loss against a peak it had just inflated.
+
+        So every anchor and high-water mark the runner belongs to (the manager
+        baseline, its bucket, its live segment) shifts by the same flow: money
+        in at ``allocated_capital``, money out at the book's ``equity()``, which
+        leaves the surviving books' measured P&L exactly where it was.
+
+        An anchor of 0 means the session baseline has not been taken yet — the
+        first bar takes it from current equity, which already contains the flow,
+        so those keys are skipped. That is also what keeps a boot-time restore
+        (which zeroes every anchor) from double-counting its own runners.
+
+        Callers hold ``self._lock``.
+        """
+        if not delta:
+            return
+        for key in self._anchor_keys(runner, self._runner_bucket(runner)):
+            anchor = self._bucket_day_start.get(key, 0.0)
+            if anchor > 0:
+                self._bucket_day_start[key] = round(anchor + delta, 2)
+            peak = self._bucket_peak.get(key, 0.0)
+            if peak > 0:
+                self._bucket_peak[key] = round(max(peak + delta, 0.0), 2)
+        if self._day_start_equity > 0:
+            self._day_start_equity = round(self._day_start_equity + delta, 2)
+        if self.peak_equity > 0:
+            self.peak_equity = round(max(self.peak_equity + delta, 0.0), 2)
+        logger.info(
+            "[ledger] capital flow %+.2f applied to anchors (runner=%s bucket=%s)",
+            delta,
+            runner.config.name,
+            self._runner_bucket(runner),
+        )
 
     def _bucket_daily_pnl(self, mode: str) -> float:
         """Derive daily P&L for a bucket from its runners."""
         return sum(r.daily_pnl() for r in self._bucket_runners(mode))
 
+    def _bucket_realized_pnl(self, mode: str) -> float:
+        """Derive NET realized P&L for a bucket from its runners (BUG-04).
+
+        ``runner.realized_pnl`` is the net half of the contract — lifetime
+        realized less the costs that belong to closed round trips.
+        """
+        return sum(r.realized_pnl for r in self._bucket_runners(mode))
+
+    def _bucket_sum(self, mode: str, attr: str, call: bool = False) -> float:
+        """Sum one BUG-04 contract field across a bucket's runners."""
+        total = 0.0
+        for r in self._bucket_runners(mode):
+            value = getattr(r, attr, 0.0)
+            total += float(value() if call else value)
+        return total
+
+    def _bucket_gross_realized(self, mode: str) -> float:
+        """Lifetime realized before any cost — see BUG-04 contract."""
+        return self._bucket_sum(mode, "gross_realized_pnl")
+
+    def _bucket_fees(self, mode: str) -> float:
+        """Lifetime brokerage + statutory charges paid by this bucket."""
+        return self._bucket_sum(mode, "total_fees_paid")
+
+    def _bucket_realized_today(self, mode: str) -> float:
+        """NET realized booked in the current session, all runners."""
+        return self._bucket_sum(mode, "realized_pnl_today")
+
     def _bucket_daily_realized_net_pnl(self, mode: str) -> float:
         """Today's IST-scoped net realized P&L across a bucket's runners (E1)."""
-        return sum(r.daily_realized_net_pnl() for r in self._bucket_runners(mode))
+        return self._bucket_sum(mode, "daily_realized_net_pnl", call=True)
 
     def _bucket_daily_gross_pnl(self, mode: str) -> float:
         """Today's IST-scoped gross realized P&L across a bucket's runners (E1)."""
-        return sum(r.daily_gross_pnl() for r in self._bucket_runners(mode))
+        return self._bucket_sum(mode, "daily_gross_pnl", call=True)
 
     def _bucket_daily_commission(self, mode: str) -> float:
         """Today's single combined commission sum across a bucket's runners (E2)."""
-        return sum(r.daily_commission() for r in self._bucket_runners(mode))
+        return self._bucket_sum(mode, "daily_commission", call=True)
 
-    def _bucket_realized_pnl(self, mode: str) -> float:
-        """Derive realized P&L for a bucket from its runners."""
-        return sum(r.realized_pnl for r in self._bucket_runners(mode))
+    def _bucket_open_pnl(self, mode: str) -> float:
+        """NET mark-to-market on books still open."""
+        return self._bucket_sum(mode, "open_pnl", call=True)
 
     def _bucket_deployed(self, mode: str) -> float:
         """Derive deployed capital for a bucket from its runners."""
@@ -451,7 +557,6 @@ class PortfolioManager:
                 runners = self._segment_runners(name)
                 key = self._segment_key(name)
                 equity = sum(r.equity() for r in runners)
-                day_start = self._bucket_day_start.get(key, 0.0)
                 peak = self._bucket_peak.get(key, 0.0)
                 out[name] = {
                     "display_name": seg.display_name,
@@ -461,7 +566,9 @@ class PortfolioManager:
                     "risk": dict(seg.risk),
                     "runner_count": len(runners),
                     "equity": equity,
-                    "daily_pnl": (equity - day_start) if day_start > 0 else 0.0,
+                    # Today's move, same as the bucket card and the segment
+                    # fuse: ``equity - day_start`` was the life of the segment.
+                    "daily_pnl": sum(r.daily_pnl() for r in runners),
                     "deployed": sum(r.deployed_capital() for r in runners),
                     "drawdown_pct": ((peak - equity) / peak) if peak > 0 else 0.0,
                     "halted": self._bucket_halted.get(key, False),
@@ -503,6 +610,9 @@ class PortfolioManager:
             daily_comm = self._bucket_daily_commission(mode)
             counts = self._bucket_runner_counts(mode)
             limit = abs(self.supervisor.config.daily_loss_limit)
+            # BUG-33: the percentage is quoted against the money in the bucket,
+            # never against a smaller stale anchor.
+            pct_denominator = max(day_start, capital, 1.0)
 
             buckets[mode] = {
                 "equity": round(equity, 2),
@@ -510,13 +620,20 @@ class PortfolioManager:
                 "peak_equity": round(peak, 2),
                 "drawdown_pct": round(self._bucket_drawdown(mode), 4),
                 "daily_pnl": round(daily, 2),
-                "daily_pnl_pct": (round(daily / day_start, 6) if day_start else 0.0),
+                "daily_pnl_pct": round(daily / pct_denominator, 6),
                 "daily_realized_net_pnl": round(daily_realized_net, 2),
                 "daily_gross_pnl": round(daily_gross, 2),
                 "daily_commission": round(daily_comm, 2),
                 "session_date_ist": today_ist.isoformat(),
                 "session_scope_label": scope_label,
                 "realized_pnl": round(self._bucket_realized_pnl(mode), 2),
+                # BUG-04: the full NET contract, per bucket. Rows and cards
+                # must be able to reconcile gross − fees = net without opening
+                # a runner detail.
+                "gross_realized_pnl": round(self._bucket_gross_realized(mode), 2),
+                "total_fees_paid": round(self._bucket_fees(mode), 2),
+                "realized_pnl_today": round(self._bucket_realized_today(mode), 2),
+                "open_pnl": round(self._bucket_open_pnl(mode), 2),
                 "deployed_capital": round(self._bucket_deployed(mode), 2),
                 "open_positions": self._bucket_open_positions(mode),
                 "halted": self._bucket_halted.get(mode, False),
@@ -625,7 +742,10 @@ class PortfolioManager:
                 "open_positions": 0,
                 "open_structures": 0,
                 "equity": 0.0,
+                "gross_realized_pnl": 0.0,
+                "total_fees_paid": 0.0,
                 "realized_pnl": 0.0,
+                "open_pnl": 0.0,
                 "unrealized_pnl": 0.0,
                 "capital": 0.0,
                 "positions": [],
@@ -645,12 +765,28 @@ class PortfolioManager:
             open_positions = broker.get_open_positions()
             open_structures = broker.get_open_structures()
 
+            # BUG-04: this row is runner-shaped, so it owes the same contract.
+            # ``total_realized_pnl`` is gross and ``total_costs_paid`` is the
+            # lifetime stack; the part still sitting on open books belongs to
+            # the mark, the rest to realized — the same attribution the runners
+            # use, so gross − fees = net here and there alike.
+            gross_realized = float(broker.total_realized_pnl)
+            fees_paid = float(broker.total_costs_paid)
+            open_fees = sum(
+                float(s.total_commission) + float(s.statutory_fees or 0)
+                for s in open_structures
+            )
+            net_open = float(broker.total_unrealized_pnl) - open_fees
+
             return {
                 "exists": True,
                 "open_positions": len(open_positions),
                 "open_structures": len(open_structures),
                 "equity": float(broker.total_equity),
-                "realized_pnl": float(broker.total_realized_pnl),
+                "gross_realized_pnl": gross_realized,
+                "total_fees_paid": fees_paid,
+                "realized_pnl": gross_realized - (fees_paid - open_fees),
+                "open_pnl": net_open,
                 "unrealized_pnl": float(broker.total_unrealized_pnl),
                 "capital": float(broker.capital),
                 "available_cash": float(broker.available_cash),
@@ -1051,11 +1187,13 @@ class PortfolioManager:
                     config.mode,
                 )
             self._runners[runner.instance_id] = runner
-            self.total_capital += config.allocated_capital
+            self._sync_total_capital()
 
             # Per-bucket state initialization (idempotent)
             bucket = self._runner_bucket(runner)
             self._ensure_bucket_state(bucket)
+            # BUG-33: the money this book brings in is not trading profit.
+            self._record_capital_flow(runner, float(config.allocated_capital))
 
             # Feed + anchors — subscriptions accounted in the shared bus
             # (U6.2). Bar-feed subscriptions are taken here; the chain-bus
@@ -1139,6 +1277,10 @@ class PortfolioManager:
                     return True
                 return False
             bucket = self._runner_bucket(runner)
+            # BUG-33: the money leaving is this book's equity, measured while
+            # the book is still intact — taken before stop() and the anchor
+            # shift so the surviving books' day P&L does not jump.
+            self._record_capital_flow(runner, -float(runner.equity()))
             if self.intelligence is not None:
                 try:
                     self.intelligence.unregister_runner(instance_id, runner)
@@ -1160,7 +1302,7 @@ class PortfolioManager:
                 feed = self.mstock_feed
             feed.remove_symbols(runner.config.symbols)
             self._sync_mstock_thread()
-            self.total_capital -= runner.config.allocated_capital
+            self._sync_total_capital()
             self._refresh_anchors()
             # If this was the last runner in the bucket, reset bucket state
             if not self._bucket_runners(bucket):
@@ -1416,19 +1558,36 @@ class PortfolioManager:
 
         A positional carry is never touched: holding past the close has to be a
         declared ``carry_policy``, not an accident of a quiet quote feed.
+
+        A book outside ``RUNNING`` is skipped and reported in ``held_paused``:
+        PAUSE is the operator's opt-out from this obligation (B4), so the sweep
+        never overrides it — it says so, once per session, and they own the
+        carry.
         """
         reference = now or now_utc()
         if not self._is_eod_sweep_enabled():
             return {"skipped": True, "reason": "sweep_disabled", "squared_off": []}
         if not in_eod_squareoff_window(reference):
+            self._paused_carry_warned = False
             return {"skipped": True, "reason": "outside_squareoff_window", "squared_off": []}
         with self._lock:
-            runners = [
+            intraday_books = [
                 r
                 for r in self._runners.values()
-                if r.status == STATUS_RUNNING
-                and r.options_bridge is not None
-                and r.options_bridge.carries_intraday
+                if r.options_bridge is not None and r.options_bridge.carries_intraday
+            ]
+            runners = [r for r in intraday_books if r.status == STATUS_RUNNING]
+            # B4: pause is an opt-out from the obligation, not a request to
+            # override it — but an unforced overnight carry must not be silent.
+            held = [
+                {
+                    "instance_id": r.instance_id,
+                    "name": r.config.name,
+                    "status": r.status,
+                    "scope": self._runner_bucket(r),
+                }
+                for r in intraday_books
+                if r.status != STATUS_RUNNING
             ]
         squared: List[Dict[str, Any]] = []
         for runner in runners:
@@ -1462,7 +1621,28 @@ class PortfolioManager:
             )
         if squared:
             self._persist_state()
-        return {"skipped": False, "squared_off": squared}
+        if held and not self._paused_carry_warned:
+            # Once per session (the sweep runs every second): the log is one
+            # surface, the in-app audit trail another — an operator who paused
+            # a book through the UI sees the consequence where they acted.
+            self._paused_carry_warned = True
+            logger.warning(
+                "[session-clock] square-off obligation NOT enforced on %d "
+                "intraday book(s) outside RUNNING — operator owns the carry",
+                len(held),
+            )
+            for book in held:
+                self._audit_log(
+                    "EOD_CARRY_HELD",
+                    scope=book["scope"],
+                    instance_id=book["instance_id"],
+                    detail=(
+                        f"{book['name']} is {book['status']} at "
+                        f"{reference.astimezone(EXCHANGE_TZ):%H:%M:%S} IST — intraday "
+                        "book carried overnight, square-off skipped by design"
+                    ),
+                )
+        return {"skipped": False, "squared_off": squared, "held_paused": held}
 
     def _repair_runner_marks_internal(
         self,
@@ -2509,6 +2689,40 @@ class PortfolioManager:
                 "[state] restore from %s failed — starting clean", self._state_store.path
             )
 
+    def _reap_orphan_portfolio_rows(self) -> None:
+        """Retire ledger rows this process has no runner for (BUG-37).
+
+        Claim keys come from the runners that actually booted, so a restore
+        that brought back nothing cannot reap anything: on 2026-10-27 a refused
+        restore emptied the runner list, and an unconditional reap would have
+        retired the whole ledger on the next boot.
+        """
+        db = getattr(self._trade_persister, "db", None)
+        if db is None or not self._runners:
+            return
+
+        from backtest.forward.portfolio_reaper import (
+            reap_orphan_portfolio_rows,
+            runner_claim_keys,
+        )
+
+        claims = runner_claim_keys(self._runners.values())
+        with db.session() as session:
+            report = reap_orphan_portfolio_rows(session, claims)
+        if report.changed:
+            logger.warning(
+                "[ledger] retired %d portfolio row(s) no runner owns (Rs %s of capital was "
+                "booked against them; %d still show open positions; %d row(s) claimed kept)",
+                report.changed,
+                report.reaped_capital,
+                report.reaped_open_exposure_rows,
+                len(report.kept),
+            )
+        else:
+            logger.info(
+                "[ledger] portfolio rows clean: %d active row(s), all claimed", report.scanned
+            )
+
     def _apply_state_payload(self, payload: Dict[str, Any]) -> int:
         # Runners FIRST (add_runner re-subscribes feeds + the registry and
         # re-books capital + recomputes anchors), then manager scalars and
@@ -2559,7 +2773,10 @@ class PortfolioManager:
             restored += 1
 
         manager = payload.get("manager", {})
-        self.total_capital = float(manager.get("total_capital", 0.0))
+        # BUG-03: never re-adopt the saved scalar — it is whatever the
+        # accumulator had drifted to when the file was written. The runners
+        # restored above are the capital.
+        self._sync_total_capital()
         self.peak_equity = float(manager.get("peak_equity", 0.0))
         # CRITICAL FIX 2026-10-15: Do NOT restore day_start_equity from state —
         # it's a GHOST from a previous session and causes false daily-loss breaches.
@@ -2792,7 +3009,12 @@ class PortfolioManager:
             if equity > self._bucket_peak.get(mode, 0.0):
                 self._bucket_peak[mode] = equity
 
-            daily_pnl = equity - self._bucket_day_start.get(mode, 0.0)
+            # The day, not the life. ``equity - day_start`` was the anchor taken
+            # at the bucket's first bar and never rolled, so it fed the breaker
+            # every loss the book has ever had while the card next to it showed
+            # ``daily_pnl`` — today's move. A halt on day 3 of a slow drift, or
+            # none at all after a profitable session, both came from that.
+            daily_pnl = self._bucket_daily_pnl(mode)
             already_halted = self._bucket_halted.get(mode, False)
 
             report = self.supervisor.evaluate(
@@ -2856,7 +3078,7 @@ class PortfolioManager:
             if self._bucket_day_start.get(key, 0.0) <= 0:
                 self._bucket_day_start[key] = seg_equity
 
-            seg_daily_pnl = seg_equity - self._bucket_day_start.get(key, 0.0)
+            seg_daily_pnl = sum(r.daily_pnl() for r in seg_runners)
             seg_halted = self._bucket_halted.get(key, False)
             report = self._segment_risk_supervisor(seg_name, seg_def.risk).evaluate(
                 runners=seg_runners,
@@ -2898,7 +3120,9 @@ class PortfolioManager:
             runners=all_runners,
             total_equity=equity,
             peak_equity=self.peak_equity,
-            daily_pnl=equity - self._day_start_equity,
+            # Same basis as the bucket and segment fuses above, and the same
+            # number the portfolio card shows: the session move, not the life.
+            daily_pnl=self._aggregate_daily_pnl(),
             already_halted=self.halted,
         )
         self.last_report = report.to_dict()
@@ -3080,17 +3304,27 @@ class PortfolioManager:
             equity = sum(s["equity"] for s in states)
             deployed = sum(s["deployed_capital"] for s in states)
             daily = sum(s["daily_pnl"] for s in states)
+            realized = sum(s["realized_pnl"] for s in states)
+            # BUG-04: the NET contract rows travel with every runner state, so
+            # the aggregate views can publish gross, fees and the day's slice
+            # without re-deriving them.
+            gross_realized = sum(s.get("gross_realized_pnl") or 0.0 for s in states)
+            fees = sum(s.get("total_fees_paid") or 0.0 for s in states)
+            realized_today = sum(s.get("realized_pnl_today") or 0.0 for s in states)
             daily_realized_net = sum(
                 float(s.get("daily_realized_net_pnl") or 0.0) for s in states
             )
             daily_gross = sum(float(s.get("daily_gross_pnl") or 0.0) for s in states)
             daily_comm = sum(float(s.get("daily_commission") or 0.0) for s in states)
-            realized = sum(s["realized_pnl"] for s in states)
+            open_pnl = sum(s.get("open_pnl") or 0.0 for s in states)
             open_positions = sum(s["open_positions"] for s in states)
             running = sum(1 for s in states if s["status"] == STATUS_RUNNING)
             paused = sum(1 for s in states if s["status"] == STATUS_PAUSED)
             stopped = sum(1 for s in states if s["status"] == STATUS_STOPPED)
             errors = sum(1 for s in states if s["status"] == "ERROR")
+
+            # C4: embed per-bucket aggregates in the single stream
+            buckets = self.get_bucket_aggregates()
 
             # C2: Use per-bucket peak when scoped; manager-level when combined
             if mode is not None:
@@ -3102,7 +3336,9 @@ class PortfolioManager:
                 bucket_halt_mode = self._bucket_halt_mode.get(mode)
                 bucket_halted_ts = self._bucket_halted_ts.get(mode)
             else:
-                total_capital = self.total_capital
+                # BUG-03: the unscoped ledger is the buckets summed, not the
+                # manager scalar — so capital cannot drift from the books.
+                total_capital = round(sum(b["capital"] for b in buckets.values()), 2)
                 peak_equity = self.peak_equity
                 day_start = self._day_start_equity
                 bucket_halted = self.halted
@@ -3111,11 +3347,12 @@ class PortfolioManager:
                 bucket_halted_ts = self.halted_ts
             drawdown = ((peak_equity - equity) / peak_equity) if peak_equity > 0 else 0.0
             limit = abs(self.supervisor.config.daily_loss_limit)
+            # BUG-33: quote the percentage against the larger of the
+            # flow-adjusted anchor and the capital in scope, so a stale or
+            # tiny anchor cannot inflate a return.
+            pct_denominator = max(day_start, total_capital, 1.0)
 
             warnings = self.last_report.get("warnings", []) if self.last_report else []
-
-            # C4: embed per-bucket aggregates in the single stream
-            buckets = self.get_bucket_aggregates()
 
             # C6: capability flag — drives the REAL MONEY / Simulated fills banner.
             # broker_connected is a process-level property (is the broker session active?).
@@ -3148,7 +3385,9 @@ class PortfolioManager:
                 dashboard_book.get("equity", 0.0) if dashboard_book.get("exists") else 0.0
             )
             dashboard_daily = (
-                dashboard_book.get("unrealized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
+                # BUG-04: fold the NET mark, not gross MTM — the gross half
+                # would overstate today by every rupee of fee this book paid.
+                dashboard_book.get("open_pnl", 0.0) if dashboard_book.get("exists") else 0.0
             )
             dashboard_realized = (
                 dashboard_book.get("realized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
@@ -3157,11 +3396,43 @@ class PortfolioManager:
                 dashboard_book.get("open_positions", 0) if dashboard_book.get("exists") else 0
             )
 
-            # Combined totals include dashboard book so flatten/emergency is honest
-            combined_equity = equity + dashboard_equity
-            combined_daily = daily + dashboard_daily
-            combined_realized = realized + dashboard_realized
-            combined_positions = open_positions + dashboard_positions
+            # Include the dashboard book in the combined totals — but only
+            # where it belongs. Its ``equity`` is capital + P&L, so folding it
+            # in unconditionally booked ₹10,00,000 of capital the ledger never
+            # carried (BUG-03), and did so on scoped paper/live calls too, where
+            # the singleton belongs to neither bucket. On an unscoped read of a
+            # book that actually holds money, its capital and margin join the
+            # totals as well, so total_equity - total_capital stays exactly P&L.
+            dashboard_in_use = dashboard_book.get("exists") and (
+                dashboard_positions > 0 or abs(dashboard_realized) >= 0.005
+            )
+            fold_dashboard = mode is None and bool(dashboard_in_use)
+            if fold_dashboard:
+                total_capital = round(
+                    total_capital + float(dashboard_book.get("capital") or 0.0), 2
+                )
+                deployed = deployed + float(dashboard_book.get("margin_used") or 0.0)
+
+            combined_equity = equity + (dashboard_equity if fold_dashboard else 0.0)
+            combined_daily = daily + (dashboard_daily if fold_dashboard else 0.0)
+            combined_realized = realized + (dashboard_realized if fold_dashboard else 0.0)
+            combined_positions = open_positions + (dashboard_positions if fold_dashboard else 0)
+            # BUG-04: the rest of the NET contract on the combined/scoped view.
+            # Each is the same sum the runners made, plus the dashboard book
+            # when its money genuinely belongs in this scope.
+            combined_gross = gross_realized + (
+                float(dashboard_book.get("gross_realized_pnl") or 0.0)
+                if fold_dashboard
+                else 0.0
+            )
+            combined_fees = fees + (
+                float(dashboard_book.get("total_fees_paid") or 0.0)
+                if fold_dashboard
+                else 0.0
+            )
+            combined_open = open_pnl + (
+                float(dashboard_book.get("open_pnl") or 0.0) if fold_dashboard else 0.0
+            )
             stale_marks_count = sum(int(s.get("stale_positions") or 0) for s in states)
             today_ist = current_session_date()
             scope_label = format_session_scope(today_ist)
@@ -3173,15 +3444,17 @@ class PortfolioManager:
                 "total_capital": round(total_capital, 2),
                 "total_equity": round(combined_equity, 2),
                 "deployed_capital": round(deployed, 2),
-                "deployed_pct": (
-                    round(deployed / self.total_capital, 4) if self.total_capital > 0 else 0.0
-                ),
+                "deployed_pct": (round(deployed / total_capital, 4) if total_capital > 0 else 0.0),
                 "daily_pnl": round(combined_daily, 2),
-                "daily_pnl_pct": (round(combined_daily / day_start, 6) if day_start else 0.0),
+                "daily_pnl_pct": round(combined_daily / pct_denominator, 6),
                 "daily_realized_net_pnl": round(daily_realized_net, 2),
                 "daily_gross_pnl": round(daily_gross, 2),
                 "daily_commission": round(daily_comm, 2),
                 "realized_pnl": round(combined_realized, 2),
+                "gross_realized_pnl": round(combined_gross, 2),
+                "total_fees_paid": round(combined_fees, 2),
+                "realized_pnl_today": round(realized_today, 2),
+                "open_pnl": round(combined_open, 2),
                 "open_positions": combined_positions,
                 "stale_marks_count": stale_marks_count,
                 "runner_count": len(states),
@@ -3297,6 +3570,11 @@ class PortfolioManager:
                     "mode": state["mode"],
                     "equity": state["equity"],
                     "realized_pnl": state["realized_pnl"],
+                    # BUG-04: the row that quotes a NET realized must also show
+                    # the gross it came from and the fees taken off it.
+                    "gross_realized_pnl": state.get("gross_realized_pnl", 0.0),
+                    "total_fees_paid": state.get("total_fees_paid", 0.0),
+                    "realized_pnl_today": state.get("realized_pnl_today", 0.0),
                     "daily_pnl": state["daily_pnl"],
                     "open_pnl": state["open_pnl"],
                     "win_rate": state["win_rate"],

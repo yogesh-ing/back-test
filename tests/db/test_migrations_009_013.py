@@ -213,23 +213,28 @@ def test_store_runs_on_the_hand_migrated_database(sqlite_db: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_chain_009_to_020():
-    """One linear chain, one head — 009 through 020.
+def test_alembic_chain_009_to_022():
+    """One linear chain, one head — 009 through 022.
 
     Asserting the *specific* head makes every new revision a failing test
     that must be updated deliberately (the convention in this repo's git
     history: "test(db): track alembic head NNN after ... migration"). A
     drifted head is exactly what this test is for: it is the cheap signal
     that a revision landed without its chain being checked.
+
+    Head ``021`` was the 2026-10-30 unfork (BUG-38): the Upstox CHECK widening
+    used to declare ``020`` on the same parent as ``option_intent_journal``, so
+    this test had two heads to choose between and could only fail. ``022`` is
+    B1's ``trades.dedupe_key`` and ``023`` is Slice 5's ``diary_notes`` journal.
     """
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script.get_heads() == ["022"]
+    assert script.get_heads() == ["023"]
     revs = (
         "009", "010", "011", "012", "013", "014", "015", "016", "017",
-        "018", "019", "020", "021", "022",
+        "018", "019", "020", "021", "022", "023",
     )
     chain = {r: script.get_revision(r).down_revision for r in revs}
     assert chain == {
@@ -247,6 +252,7 @@ def test_alembic_chain_009_to_020():
         "020": "019",
         "021": "020",
         "022": "021",
+        "023": "022",
     }
 
 

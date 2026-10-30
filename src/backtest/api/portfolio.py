@@ -30,7 +30,12 @@ from backtest.diary.ledger import (
     normalize_db_trade_row,
     normalize_memory_trade_dict,
 )
-from backtest.forward.paper_runner import TARGET_POOL, TARGET_SINGLE, RunnerConfig
+from backtest.forward.paper_runner import (
+    MAX_TRADE_LOG,
+    RunnerConfig,
+    TARGET_POOL,
+    TARGET_SINGLE,
+)
 from backtest.forward.portfolio_manager import get_portfolio_manager
 from backtest.logging_config import get_logger
 from backtest.simulator.bucket_risk import BUCKET_RISK_LIMITS, update_bucket_limits
@@ -293,7 +298,9 @@ def risk_board() -> Tuple[Response, int]:
             all_trades.extend(runner.closed_trades)
 
         if all_trades:
-            pnls = [float(t.get("pnl", 0)) for t in all_trades]
+            # NET, not the gross ``pnl`` field: every realized figure this board
+            # shows has to be the same money the bucket header shows (B5).
+            pnls = [float(t.get("net_pnl", t.get("pnl", 0))) for t in all_trades]
             wins = [p for p in pnls if p >= 0]
             losses = [p for p in pnls if p < 0]
             trade_stats["total_trades"] = len(pnls)
@@ -553,6 +560,7 @@ def aggregated_trades() -> Tuple[Response, int]:
             "total_net_pnl": net_total,
             "total_pnl": net_total,
             "win_rate": round(wins / total, 4) if total else 0.0,
+            "per_runner_cap": MAX_TRADE_LOG,
             "mismatch_count": mismatches,
             "duplicates_collapsed": duplicates_collapsed,
             "session_date_ist": (

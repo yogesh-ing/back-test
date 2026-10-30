@@ -1625,9 +1625,21 @@ class OptionsBridge:
         *,
         ts_override: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        """Square off intraday option structures >= 20 min before 15:30 IST close (OPT-5)."""
+        """Square off intraday option structures >= 20 min before 15:30 IST close (OPT-5).
+
+        The status read below is what makes PAUSE a reliable opt-out. This is the
+        single choke point every square-off route passes — bar, tick and the
+        session-clock sweep — and until now it read only the clock, so a tick
+        landing inside the window flattened a deliberately PAUSED book (B4,
+        gate of 2026-10-30: book ``2201907e`` at 15:10:00 IST) while the sweep
+        next door required ``RUNNING``. An operator who paused owns the overnight
+        carry; the manager's session-clock sweep reports it instead of overriding
+        the pause.
+        """
         mins_before = self.intraday_squareoff_minutes_before
         if mins_before is None or mins_before <= 0 or not self._has_open_structure():
+            return None
+        if not self.runner_running:
             return None
         ist_dt = self._ist_clock_from_ts(ts)
         if ist_dt is None:

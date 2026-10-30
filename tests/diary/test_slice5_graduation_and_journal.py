@@ -42,8 +42,8 @@ from backtest.web.app import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SQLITE_001 = REPO_ROOT / "db" / "migrations" / "001_initial_schema.sqlite.sql"
-SQLITE_022 = REPO_ROOT / "db" / "migrations" / "022_diary_journal_notes.sqlite.sql"
-PG_022 = REPO_ROOT / "db" / "migrations" / "022_diary_journal_notes.sql"
+SQLITE_023 = REPO_ROOT / "db" / "migrations" / "023_diary_journal_notes.sqlite.sql"
+PG_023 = REPO_ROOT / "db" / "migrations" / "023_diary_journal_notes.sql"
 
 FORBIDDEN_FEE_SPLIT_KEYS = (
     "brokerage",
@@ -75,23 +75,23 @@ def sqlite_db():
 
 
 class TestMigration022AndDiaryNoteModel:
-    def test_sqlite_and_pg_022_sql_parity_and_mode_check(self):
-        assert SQLITE_022.exists()
-        assert PG_022.exists()
-        pg_src = PG_022.read_text(encoding="utf-8")
+    def test_sqlite_and_pg_023_sql_parity_and_mode_check(self):
+        assert SQLITE_023.exists()
+        assert PG_023.exists()
+        pg_src = PG_023.read_text(encoding="utf-8")
         assert "CREATE TABLE IF NOT EXISTS diary_notes" in pg_src
         assert "ck_diary_notes_mode CHECK (mode IN ('paper', 'live'))" in pg_src
-        assert "VALUES ('022'" in pg_src
+        assert "VALUES ('023'" in pg_src
 
         conn = sqlite3.connect(":memory:")
         try:
             conn.executescript(SQLITE_001.read_text(encoding="utf-8"))
-            conn.executescript(SQLITE_022.read_text(encoding="utf-8"))
+            conn.executescript(SQLITE_023.read_text(encoding="utf-8"))
 
             row = conn.execute(
-                "SELECT version FROM schema_migrations WHERE version = '022'"
+                "SELECT version FROM schema_migrations WHERE version = '023'"
             ).fetchone()
-            assert row == ("022",)
+            assert row == ("023",)
 
             conn.execute(
                 """

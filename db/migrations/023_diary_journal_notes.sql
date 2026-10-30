@@ -1,4 +1,4 @@
--- Migration 022: PnL Diary Operator Journal (PostgreSQL)
+-- Migration 023: PnL Diary Operator Journal (PostgreSQL)
 -- Strictly segregates Paper vs Live journal entries by IST session_date.
 
 BEGIN;
@@ -24,7 +24,7 @@ CREATE INDEX IF NOT EXISTS ix_diary_notes_strategy
     ON diary_notes (mode, strategy_name);
 
 INSERT INTO schema_migrations (version, description)
-VALUES ('022', 'Add diary_notes table for book-segregated PnL Diary operator journal')
+VALUES ('023', 'Add diary_notes table for book-segregated PnL Diary operator journal')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
