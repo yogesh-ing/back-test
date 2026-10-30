@@ -249,6 +249,31 @@ await test("refresh queries the page's own scope and renders the ledger", async 
     assert.ok(html.includes("100.00") && html.includes("100.25"), "requested and filled price");
 });
 
+await test("the stamp column renders IST, not the UTC hour (B6)", async () => {
+    fresh();
+    // 04:45:00+00:00 is a 10:15 fill on the exchange clock the operator reads.
+    // Slicing the string printed the UTC hour while the Positions table beside
+    // this one showed IST for the same instant.
+    serve([order({
+        created_ts: "2026-09-23T04:44:00+00:00",
+        updated_ts: "2026-09-23T04:45:00+00:00",
+    })]);
+    await OT.refresh(true);
+    const html = bodyHtml();
+    assert.ok(html.includes("10:15:00"), `expected the IST wall clock, got ${html.slice(0, 160)}`);
+    assert.ok(!html.includes(">04:45:00<"), "the UTC hour must not reach the screen");
+});
+
+await test("a naive stamp is read as UTC, not as browser time (B6)", async () => {
+    fresh();
+    serve([order({
+        created_ts: "2026-09-23T09:14:00",
+        updated_ts: "2026-09-23T09:15:00",
+    })]);
+    await OT.refresh(true);
+    assert.ok(bodyHtml().includes("14:45:00"), "naive UTC + 05:30 = 14:45:00 IST");
+});
+
 await test("only a working order offers a cancel button", async () => {
     fresh();
     serve([FILLED, PENDING, REJECTED]);

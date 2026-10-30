@@ -82,11 +82,30 @@ const OrdersTab = (function () {
       .replace(/"/g, "&quot;");
   }
 
-  /** "14:07:31" from an ISO stamp (the date is noise inside a session view). */
+  // B6 — one clock on the page. Every order stamp is aware UTC at rest (the
+  // 2026-10-27 clock policy) and IST is this app's presentation zone, but this
+  // cell used to slice the hour straight out of the string: a 10:15 fill read
+  // "04:45:00" while the Positions table beside it read the same instant as IST
+  // wall-clock. Values with no offset are legacy naive-UTC stamps — read as UTC,
+  // never as browser time, so the row means the same in any browser.
+  const IST_ZONE = "Asia/Kolkata";
+
+  function parseUtc(iso) {
+    const text = String(iso || "").replace(" ", "T");
+    if (!text) return null;
+    const stamped = /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(text) ? text : text + "Z";
+    const date = new Date(stamped);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  /** "14:07:31" IST (the date is noise inside a session view). */
   function clock(iso) {
-    const text = String(iso || "");
-    const m = text.match(/T(\d{2}:\d{2}:\d{2})/);
-    return m ? m[1] : (text.slice(11, 19) || "—");
+    const date = parseUtc(iso);
+    if (!date) return "—";
+    return date.toLocaleTimeString("en-IN", {
+      hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit",
+      timeZone: IST_ZONE,
+    });
   }
 
   function ageSeconds(order) {
@@ -94,9 +113,9 @@ const OrdersTab = (function () {
     // bands and the engine's alerts were computed from); the client only
     // falls back to its own arithmetic for a row that carries no age.
     if (order.age_s !== null && order.age_s !== undefined) return Number(order.age_s);
-    const created = Date.parse(String(order.created_ts || "").replace(" ", "T"));
-    if (!Number.isFinite(created)) return null;
-    return Math.max(0, Math.round((Date.now() - created) / 1000));
+    const created = parseUtc(order.created_ts);
+    if (!created) return null;
+    return Math.max(0, Math.round((Date.now() - created.getTime()) / 1000));
   }
 
   function ageText(order) {
