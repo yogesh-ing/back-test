@@ -22,7 +22,12 @@ from backtest.data.universe import (
     is_universe,
     list_universes,
 )
-from backtest.forward.paper_runner import TARGET_POOL, TARGET_SINGLE, RunnerConfig
+from backtest.forward.paper_runner import (
+    MAX_TRADE_LOG,
+    RunnerConfig,
+    TARGET_POOL,
+    TARGET_SINGLE,
+)
 from backtest.forward.portfolio_manager import get_portfolio_manager
 from backtest.logging_config import get_logger
 from backtest.simulator.bucket_risk import BUCKET_RISK_LIMITS, update_bucket_limits
@@ -280,7 +285,9 @@ def risk_board() -> Tuple[Response, int]:
             all_trades.extend(runner.closed_trades)
 
         if all_trades:
-            pnls = [float(t.get("pnl", 0)) for t in all_trades]
+            # NET, not the gross ``pnl`` field: every realized figure this board
+            # shows has to be the same money the bucket header shows (B5).
+            pnls = [float(t["net_pnl"]) for t in all_trades]
             wins = [p for p in pnls if p >= 0]
             losses = [p for p in pnls if p < 0]
             trade_stats["total_trades"] = len(pnls)
@@ -438,7 +445,10 @@ def aggregated_trades() -> Tuple[Response, int]:
         total = len(trades)
         sliced = trades[:limit]
 
-        pnls = [float(t.get("pnl", 0)) for t in trades]
+        # NET (see the risk-board stats above): this is the number the operator
+        # compares with the bucket header, so it must be after commission and
+        # statutory, not the price P&L alone.
+        pnls = [float(t["net_pnl"]) for t in trades]
         summary = {
             "total": total,
             "returned": len(sliced),
@@ -446,6 +456,12 @@ def aggregated_trades() -> Tuple[Response, int]:
             "win_rate": round(sum(1 for p in pnls if p >= 0) / len(pnls), 4)
             if pnls
             else 0.0,
+            # What ``total`` really counts: each book hands over its last
+            # MAX_TRADE_LOG round trips, so a book with 500 closes is not
+            # summarised in full. Named here so the tab can say so — the header
+            # is a lifetime figure and the two are only comparable once the
+            # window is on the label.
+            "per_runner_cap": MAX_TRADE_LOG,
         }
 
     except Exception as exc:  # noqa: BLE001

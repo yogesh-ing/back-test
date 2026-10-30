@@ -639,6 +639,11 @@ class Trade(Base):
     holding_period_minutes: Mapped[Optional[int]] = mapped_column(Integer)
     return_percentage: Mapped[Optional[Decimal]] = mapped_column(Ratio)
     exit_reason: Mapped[Optional[str]] = mapped_column(String(32))
+    #: SHA-256 of the identity columns (see
+    #: :func:`backtest.forward.trade_persistence.trade_dedupe_key`). Nullable
+    #: because rows written before B1 carry no key; the unique index ignores
+    #: NULLs on both PostgreSQL and SQLite.
+    dedupe_key: Mapped[Optional[str]] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -659,6 +664,7 @@ class Trade(Base):
         Index("ix_trades_symbol", "symbol"),
         Index("ix_trades_strategy", "strategy_name"),
         Index("ix_trades_net_pnl", "portfolio_id", "net_pnl"),
+        Index("uq_trades_dedupe_key", "dedupe_key", unique=True),
     )
 
     @property

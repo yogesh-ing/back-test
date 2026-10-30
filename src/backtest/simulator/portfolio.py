@@ -1181,6 +1181,98 @@ class Portfolio:
         logger.info("portfolio %s saved (%s)", self.name, self.portfolio_id)
         return self.portfolio_id
 
+    def save_ledger_slice_to_db(self, db: "DatabaseManager", written: set[str]) -> int:
+        """Persist only the ledger rows this book has not already sent.
+
+        :meth:`save_to_db` is the backtest engine's shape: it rewrites every
+        position, order and fill in the book each call. A live paper runner
+        cannot afford that inside the tick loop — its closed history grows all
+        session, so a full write grows with it. This is the same graph in
+        foreign-key order, narrowed to the rows whose **state changed** since
+        the last call.
+
+        Keys live in the caller's ``written`` set (per runner, per process) as
+        ``"<position_id>:<status>"``, ``"<order_id>:<status>:<fill_count>"`` and
+        the bare ``<fill_id>``. A position is therefore written once while it is
+        open — so its fills and its closed trade have a row to point at — and
+        once more when it closes, which is the write that carries the final
+        realised P&L, the exit mark and ``closed_at``. Marks in between stay in
+        memory, where the Positions tab already reads them.
+
+        The ``portfolios`` row is deliberately not touched. In the live path it
+        is owned by
+        :class:`backtest.forward.trade_persistence.LiveTradePersister`, whose
+        name carries the runner's instance id and whose cash the capital ledger
+        reads; a portfolio-level write here would clobber both.
+
+        ``written`` is updated only after the transaction commits, so a rolled
+        back slice stays retryable instead of silently marking rows as sent.
+
+        Returns the number of rows written.
+        """
+        from backtest.db.models import Fill as FillRow
+        from backtest.db.models import Order as OrderRow
+        from backtest.db.models import Position as PositionRow
+
+        def position_key(position: Position) -> str:
+            return f"{position.position_id}:{position.status}"
+
+        def order_key(order: Any) -> str:
+            # The fill count rides on the key because a partial fill changes it
+            # without changing the status — and the new fill is precisely the
+            # row that still has to be written.
+            return f"{order.order_id}:{order.status}:{len(getattr(order, 'fills', ()) or ())}"
+
+        closed = [p for p in self.closed_positions if position_key(p) not in written]
+        open_ = [p for p in self.positions.values() if position_key(p) not in written]
+        orders = [
+            o
+            for o in (*self.pending_orders, *self.filled_orders)
+            if order_key(o) not in written
+        ]
+        if not closed and not open_ and not orders:
+            return 0
+
+        sent: list[str] = []
+        rows = 0
+        with db.session() as session:
+            # Closed before open, exactly as save_to_db does: a symbol closed
+            # and reopened in one slice must never have two 'open' rows at flush
+            # time, which uq_positions_one_open_per_symbol would refuse.
+            with session.no_autoflush:
+                for position in closed:
+                    self._upsert_position(session, PositionRow, position)
+                    sent.append(position_key(position))
+                    rows += 1
+            session.flush()
+
+            with session.no_autoflush:
+                for position in open_:
+                    self._upsert_position(session, PositionRow, position)
+                    sent.append(position_key(position))
+                    rows += 1
+            session.flush()
+
+            with session.no_autoflush:
+                for order in orders:
+                    self._upsert_order(session, OrderRow, order)
+                    sent.append(order_key(order))
+                    rows += 1
+            session.flush()
+
+            with session.no_autoflush:
+                for order in orders:
+                    for fill in getattr(order, "fills", ()):
+                        if fill.fill_id in written:
+                            continue
+                        self._insert_fill(session, FillRow, fill)
+                        sent.append(fill.fill_id)
+                        rows += 1
+            session.flush()
+
+        written.update(sent)
+        return rows
+
     def _upsert_position(self, session: Any, PositionRow: Any, position: Position) -> None:
         """Insert or update one position row."""
         row = session.get(PositionRow, position.position_id)

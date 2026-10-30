@@ -13,11 +13,14 @@ connection URL). Nothing here ever writes credentials to disk.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DatabaseConfig",
@@ -26,6 +29,9 @@ __all__ = [
     "get_db_url",
     "DEFAULT_CONFIG_PATH",
     "ENV_PREFIX",
+    "LIVE_DB_NAMES",
+    "PYTEST_SANDBOX_URL",
+    "pytest_db_firewall",
 ]
 
 ENV_PREFIX = "FORWARD_TEST_DB"
@@ -261,6 +267,69 @@ def _collect_env() -> dict[str, Any]:
     return found
 
 
+#: Databases that hold the operator's real paper/live ledger. A test run must
+#: never resolve a URL pointing at one of these (BUG-37: suites writing fixture
+#: portfolios into ``forward_test`` inflated ``sum(initial_capital)`` by ₹82.5L
+#: and left 27 orphan rows behind). Other Postgres databases are deliberately
+#: *not* blocked — a migration test that creates its own scratch database is a
+#: legitimate user of the same server.
+LIVE_DB_NAMES = frozenset({"forward_test"})
+
+#: Where a live URL is redirected under pytest. ``DatabaseManager`` already puts
+#: in-memory SQLite on a ``StaticPool`` with ``check_same_thread=False``, so one
+#: shared empty database behaves normally across threads and workers.
+PYTEST_SANDBOX_URL = "sqlite:///:memory:"
+
+#: Deliberate opt-out, for a test that must exercise real Postgres behaviour.
+PYTEST_ALLOW_LIVE_ENV = "ALLOW_LIVE_DB_IN_PYTEST"
+
+_firewall_logged = False
+
+
+def _live_db_name(url: str) -> str | None:
+    """Return the database name if ``url`` targets a live ledger, else ``None``."""
+    try:
+        parts = urlsplit(str(url))
+    except ValueError:
+        return None
+    if parts.scheme.split("+", 1)[0].lower() not in {"postgresql", "postgres"}:
+        return None
+    name = parts.path.rsplit("/", 1)[-1].strip()
+    return name if name in LIVE_DB_NAMES else None
+
+
+def pytest_db_firewall(url: str) -> str:
+    """Refuse to point a pytest run at the live paper database (Ticket 2.4).
+
+    ``PYTEST_CURRENT_TEST`` is set by pytest for every test, so this needs no
+    test-side cooperation and cannot be forgotten. Outside pytest it is inert —
+    the running application keeps its configured URL.
+    """
+    global _firewall_logged
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return url
+    live = _live_db_name(url)
+    if live is None:
+        return url
+    if os.environ.get(PYTEST_ALLOW_LIVE_ENV) == "1":
+        logger.warning(
+            "[db-firewall] %s=1: test run is allowed to write the live database %r",
+            PYTEST_ALLOW_LIVE_ENV,
+            live,
+        )
+        return url
+    if not _firewall_logged:
+        _firewall_logged = True
+        logger.warning(
+            "[db-firewall] a test run resolved a URL for the live database %r; "
+            "redirected to %s. Set %s=1 to opt in deliberately.",
+            live,
+            PYTEST_SANDBOX_URL,
+            PYTEST_ALLOW_LIVE_ENV,
+        )
+    return PYTEST_SANDBOX_URL
+
+
 def load_config(
     path: str | Path | None = None,
     profile: str | None = None,
@@ -351,6 +420,14 @@ def load_config(
             f"  export {ENV_PREFIX}_URL=postgresql+psycopg2://user:pass@host:5432/forward_test\n"
             f"or add a 'url:' key under profiles.{chosen} in {config_path}."
         )
+
+    # Last gate before anything can hold a live URL: every layer above is
+    # covered, including an explicit ``url=`` argument, because the firewall
+    # runs on the *resolved* value.
+    configured_url = parsed["url"]
+    parsed["url"] = pytest_db_firewall(configured_url)
+    if parsed["url"] != configured_url:
+        source["url"] = f"pytest-firewall(from {source.get('url', 'unknown')})"
 
     return DatabaseConfig(profile=chosen, _source=source, **parsed).validated()
 

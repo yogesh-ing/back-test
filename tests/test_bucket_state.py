@@ -122,7 +122,15 @@ class TestDerivedEquity:
         manager.broker.submit_market(pid, "AAA", SIDE_SELL, 100, 110.0)
 
         agg = manager.get_bucket_aggregates()
-        assert agg["paper"]["realized_pnl"] == pytest.approx(1000.0)
+        # BUG-04: the bucket's realized is the NET half of the runner contract,
+        # so the paper leg reads the ₹1,000 price move less what the venue took.
+        runner_fees = runner.total_fees_paid
+        assert runner_fees > 0
+        assert agg["paper"]["gross_realized_pnl"] == pytest.approx(1000.0)
+        assert agg["paper"]["total_fees_paid"] == pytest.approx(runner_fees)
+        assert agg["paper"]["realized_pnl"] == pytest.approx(1000.0 - runner_fees)
+        assert agg["paper"]["realized_pnl_today"] == pytest.approx(1000.0 - runner_fees)
+        assert agg["paper"]["open_pnl"] == pytest.approx(0.0)
         assert agg["live"]["realized_pnl"] == pytest.approx(0.0)
 
 

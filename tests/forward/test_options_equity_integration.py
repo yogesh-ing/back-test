@@ -204,7 +204,12 @@ class TestEquityIncludesOptionBook:
         assert broker.get_open_structures() == []
 
         booked = float(broker.total_realized_pnl)
-        assert runner.realized_pnl == pytest.approx(booked)
+        # BUG-04: ``realized_pnl`` is the NET half — the legs' gross P&L is on
+        # ``gross_realized_pnl`` and the spread's cost stack is off the net.
+        assert runner.gross_realized_pnl == pytest.approx(booked)
+        assert runner.realized_pnl == pytest.approx(
+            booked - float(broker.total_costs_paid)
+        )
         # Net of the cost stack, and the open-leg mark is gone.
         assert runner.option_pnl() == pytest.approx(
             booked - float(broker.total_costs_paid)

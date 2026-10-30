@@ -424,6 +424,13 @@ def capture_runner(runner: Any) -> Dict[str, Any]:
         "max_drawdown_pct": runner.max_drawdown_pct,
         "day_start_equity": runner._day_start_equity,
         "current_day": runner._current_day,
+        # BUG-04: the NET contract's day anchors. Without them a restart
+        # mid-session would re-baseline daily P&L to the whole lifetime.
+        "pnl_session": runner._pnl_session,
+        "last_session_realized": runner._last_session_realized,
+        "last_session_open": runner._last_session_open,
+        "prev_close_realized_net": runner._prev_close_realized_net,
+        "prev_close_open_pnl": runner._prev_close_open_pnl,
         "last_price": dict(runner.last_price),
         "last_bar_ts": dict(getattr(runner, "_last_bar_ts", {}) or {}),
         "last_option_pnl": runner.last_option_pnl,
@@ -457,13 +464,16 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
     restart until a human resumes); PAUSED/STOPPED → as saved.
     """
     from backtest.forward.paper_runner import STATUS_PAUSED, STATUS_RUNNING, STATUS_STOPPED
-    from backtest.simulator.execution import free_executor
     from backtest.simulator.portfolio import Portfolio
 
     # Book — full round-trip (positions, closed, equity history, orders).
     restored = Portfolio.from_dict(snapshot["portfolio"])
     runner.portfolio = restored
-    runner.executor = free_executor(restored)
+    # Rebind the runner's OWN costed engine to the new book. This site used to
+    # install ``free_executor``, so every runner that survived a restart traded
+    # zero-fee regardless of the BUG-26 cost fix — and a restored book is the
+    # normal case, not the exception.
+    runner.bind_executor(restored)
 
     runner.bars_processed = int(snapshot.get("bars_processed", 0))
     runner.created_ts = snapshot.get("created_ts", runner.created_ts)
@@ -474,6 +484,22 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
     runner.last_price = dict(snapshot.get("last_price", {}))
     runner._last_bar_ts = dict(snapshot.get("last_bar_ts", {}))
     runner.last_option_pnl = float(snapshot.get("last_option_pnl", 0.0))
+    # BUG-04 day anchors. A snapshot written before the contract existed has
+    # no session history, and the book it restores is not flat: starting the
+    # anchors at 0 would report the whole lifetime as today's P&L until the
+    # first EOD. So baseline them at the restored book — the same
+    # "re-baseline from current equity" decision the manager's anchors made
+    # on 2026-10-15 — and let the session roll them forward from there.
+    # Read after the bar clock and marks are back, because baselining asks
+    # the runner for its current realized/open P&L.
+    if "pnl_session" in snapshot:
+        runner._pnl_session = snapshot.get("pnl_session")
+        runner._last_session_realized = float(snapshot.get("last_session_realized", 0.0))
+        runner._last_session_open = float(snapshot.get("last_session_open", 0.0))
+        runner._prev_close_realized_net = float(snapshot.get("prev_close_realized_net", 0.0))
+        runner._prev_close_open_pnl = float(snapshot.get("prev_close_open_pnl", 0.0))
+    else:
+        runner.baseline_pnl_anchors()
     runner.closed_trades_cache = list(snapshot.get("closed_trades_cache", []))
     runner.equity_curve = list(snapshot.get("equity_curve", []))
     runner.error = snapshot.get("error")

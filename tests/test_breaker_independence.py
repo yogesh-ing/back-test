@@ -112,6 +112,33 @@ def flatten_manager():
     mgr.shutdown()
 
 
+@pytest.fixture
+def daily_only_manager():
+    """Only the daily-loss fuse can fire — the drawdown limit is set out of reach.
+
+    The day-vs-life tests below must attribute a halt to the daily breaker; a
+    10% drawdown limit would trip on the same crash for the cumulative reason.
+    """
+    from live_test_support import ARMED_KWARGS
+
+    mgr = PortfolioManager(
+        **ARMED_KWARGS,
+        risk_config=GlobalRiskConfig(
+            daily_loss_limit=10_000,
+            max_drawdown_pct=0.90,
+            breach_mode=HALT_PAUSE,
+        ),
+        auto_start_feed=False,
+    )
+    yield mgr
+    mgr.shutdown()
+
+
+def _round_trip(mgr, pid, symbol, entry, exit_):
+    mgr.broker.submit_market(pid, symbol, SIDE_BUY, 1000, entry)
+    mgr.broker.submit_market(pid, symbol, SIDE_SELL, 1000, exit_)
+
+
 # ---------------------------------------------------------------------------
 # Breaker independence — paper breach does NOT halt live
 # ---------------------------------------------------------------------------
@@ -202,6 +229,127 @@ class TestBreakerIndependence:
         assert flatten_manager._bucket_halted["paper"] is True
         # Live should NOT be halted
         assert flatten_manager._bucket_halted["live"] is False
+
+
+# ---------------------------------------------------------------------------
+# The daily fuse reads the session, in the bucket too (daily-pnl continuation)
+# ---------------------------------------------------------------------------
+
+
+class TestDailyFuseReadsTheSession:
+    """The bucket and master breakers were fed ``equity − day_start``.
+
+    ``_bucket_day_start`` is taken at the bucket's first bar and only ever
+    moves with a capital flow (BUG-33), so the difference is the lifetime, not
+    the day — while the card beside it printed ``daily_pnl``, the BUG-04
+    session move. A halt on day 3 of a slow drift, and no halt at all the day
+    after a good session, were the same stale number in two directions. Both
+    fuses now read Σ ``runner.daily_pnl()``, the basis the display uses.
+    """
+
+    def test_yesterdays_loss_does_not_halt_today(self, daily_only_manager):
+        mgr = daily_only_manager
+        pid = mgr.add_runner(_paper_config(capital=100_000, symbols=["AAA"]), start=True)
+
+        mgr._on_bar("AAA", _first_bar("AAA", "2026-09-02 10:00:00"))
+        _round_trip(mgr, pid, "AAA", 100.0, 94.0)  # day 1: ~−6% of the book
+        assert -10_000 < mgr._bucket_daily_pnl("paper") < 0
+        mgr._evaluate_risk()
+        assert mgr._bucket_halted["paper"] is False
+
+        mgr._on_bar("AAA", _first_bar("AAA", "2026-09-03 10:00:00"))
+        # Sized for what is left of the book after day 1 — the same ~6% day.
+        _round_trip(mgr, pid, "AAA", 90.0, 84.0)
+
+        day_move = mgr._bucket_daily_pnl("paper")
+        assert -10_000 < day_move < 0, f"today should stand alone, got {day_move:,.2f}"
+        # What the old basis fed the breaker: two clean days made one breach.
+        lifetime = mgr._bucket_equity("paper") - mgr._bucket_day_start["paper"]
+        assert lifetime < -10_000, (
+            f"fixture lost its edge — old basis said {lifetime:,.2f}, the halt "
+            "the assertion below forbids is the one the old code had a right to"
+        )
+
+        mgr._evaluate_risk()
+        assert mgr._bucket_halted["paper"] is False, (
+            f"the bucket halted on a {day_move:,.2f} day against a ₹10,000 limit "
+            f"because it was still owing {lifetime:,.2f} from yesterday"
+        )
+
+    def test_crash_after_a_profitable_session_halts_the_bucket(self, daily_only_manager):
+        mgr = daily_only_manager
+        pid = mgr.add_runner(_paper_config(capital=100_000, symbols=["AAA"]), start=True)
+
+        mgr._on_bar("AAA", _first_bar("AAA", "2026-09-02 10:00:00"))
+        _round_trip(mgr, pid, "AAA", 100.0, 130.0)  # a good day: +3% of allocation…
+        assert mgr._bucket_daily_pnl("paper") > 0
+        mgr._evaluate_risk()
+        assert mgr._bucket_halted["paper"] is False
+
+        mgr._on_bar("AAA", _first_bar("AAA", "2026-09-03 10:00:00"))
+        _round_trip(mgr, pid, "AAA", 100.0, 85.0)  # …then −15% in one session
+
+        day_move = mgr._bucket_daily_pnl("paper")
+        assert day_move < -10_000
+        # Equity has never gone below the spawn anchor, so the old subtraction
+        # was POSITIVE on the day the book lost 15% of itself.
+        assert mgr._bucket_equity("paper") > mgr._bucket_day_start["paper"]
+
+        mgr._evaluate_risk()
+        assert mgr._bucket_halted["paper"] is True, (
+            "the daily fuse saw a profitable session, not today's crash — the "
+            f"card showed {day_move:,.2f} while equity stood above the anchor"
+        )
+        # One number, one clock: the breaker's reason quotes the same figure
+        # the aggregate publishes.
+        reported = mgr.get_bucket_aggregates()["paper"]["daily_pnl"]
+        assert reported == pytest.approx(day_move, abs=1.0)
+        assert "daily" in (mgr._bucket_halt_reason["paper"] or "").lower()
+
+    def test_master_fuse_uses_the_session_basis(self, daily_only_manager):
+        mgr = daily_only_manager
+        pid = mgr.add_runner(_paper_config(capital=100_000, symbols=["AAA"]), start=True)
+
+        mgr._on_bar("AAA", _first_bar("AAA", "2026-09-02 10:00:00"))
+        _round_trip(mgr, pid, "AAA", 100.0, 130.0)
+        mgr._evaluate_risk()
+        assert mgr.halted is False
+
+        mgr._on_bar("AAA", _first_bar("AAA", "2026-09-03 10:00:00"))
+        _round_trip(mgr, pid, "AAA", 100.0, 85.0)
+
+        assert mgr._aggregate_daily_pnl() < -10_000
+        assert mgr._aggregate_equity() > mgr._day_start_equity, (
+            "fixture drifted: the global anchor must be behind today's equity, "
+            "which is what blinded the old master fuse"
+        )
+        mgr._evaluate_risk()
+        assert mgr.halted is True, (
+            "the master breaker still subtracted a never-rolling anchor: a "
+            "-15% session passed while the portfolio card reported the loss"
+        )
+        assert mgr.last_report["daily_pnl"] == pytest.approx(
+            mgr._aggregate_daily_pnl(), abs=1.0
+        )
+
+    def test_reset_breaker_plus_anchor_reset_clears_the_day(self, daily_only_manager):
+        """The operator's acknowledge gesture must actually release the fuse."""
+        mgr = daily_only_manager
+        pid = mgr.add_runner(_paper_config(capital=100_000, symbols=["AAA"]), start=True)
+        mgr._on_bar("AAA", _first_bar("AAA", "2026-09-02 10:00:00"))
+        _round_trip(mgr, pid, "AAA", 100.0, 85.0)
+        mgr._evaluate_risk()
+        assert mgr._bucket_halted["paper"] is True
+
+        mgr.reset_daily_anchors()
+        mgr.reset_circuit_breaker("paper")
+        assert mgr._bucket_daily_pnl("paper") == pytest.approx(0.0, abs=1.0)
+
+        mgr._evaluate_risk()
+        assert mgr._bucket_halted["paper"] is False, (
+            "the day was reset but the breaker re-tripped on the loss the "
+            "reset had just forgiven — the fuse is not reading the anchors"
+        )
 
 
 # ---------------------------------------------------------------------------

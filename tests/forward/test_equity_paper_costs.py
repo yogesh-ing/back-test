@@ -46,6 +46,8 @@ from backtest.forward.paper_runner import (
     equity_fee_split,
 )
 from backtest.plugins import discover_plugins
+from backtest.forward.state_store import capture_runner, restore_runner
+from backtest.simulator.execution import free_executor
 from backtest.simulator.fees import PAPER_FREE_PROFILE, TradeSegment
 from backtest.simulator.position import Position
 
@@ -88,9 +90,9 @@ def _bars(closes, symbol: str = "RELIANCE"):
     ]
 
 
-def _equity_runner(timeframe: str = "1min", **overrides) -> StrategyRunner:
+def _equity_config(name: str = "EQ", timeframe: str = "1min", **overrides) -> RunnerConfig:
     kwargs = dict(
-        name="EQ",
+        name=name,
         strategy_name="buy_and_hold",
         allocated_capital=1_000_000,
         symbols=["RELIANCE"],
@@ -99,7 +101,13 @@ def _equity_runner(timeframe: str = "1min", **overrides) -> StrategyRunner:
         source="synthetic",
     )
     kwargs.update(overrides)
-    runner = StrategyRunner(RunnerConfig(**kwargs), ledger=OrderLedger())
+    return RunnerConfig(**kwargs)
+
+
+def _equity_runner(timeframe: str = "1min", **overrides) -> StrategyRunner:
+    runner = StrategyRunner(
+        _equity_config(timeframe=timeframe, **overrides), ledger=OrderLedger()
+    )
     runner.start()
     for bar in _bars([100.0] * 14):
         runner.process_candle_event("RELIANCE", bar)
@@ -326,6 +334,67 @@ class TestExitReasonStamping:
         )
         assert closed.exit_reason is None
         assert runner._closed_trades[-1]["exit_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# The restart: a restored book must still pay (B7's root cause)
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreKeepsTheCostedEngine:
+    """``restore_runner`` rebinds the executor — and used to rebind the FREE one.
+
+    The state store replaces the whole :class:`Portfolio` on restore, so it also
+    rebuilt the fill engine against the new book, with
+    ``free_executor(restored)``. Every runner that survived a restart therefore
+    went back to booking zero-cost round trips no matter what the constructor
+    resolved — which is the normal production path, not an edge case. That is
+    why all three 2026-10-30 equity closes were written post-deploy with
+    ``commission_total = 0``: their entries were carried from 29-Oct, their
+    exits ran on the rebind.
+    """
+
+    def _carried_runner(self) -> StrategyRunner:
+        """A book that opened its position while fills were free."""
+        runner = StrategyRunner(_equity_config(), ledger=OrderLedger())
+        runner.start()
+        runner.executor = free_executor(runner.portfolio)
+        for bar in _bars([100.0] * 14):
+            runner.process_candle_event("RELIANCE", bar)
+        open_pos = runner.portfolio.positions["RELIANCE"]
+        assert open_pos.commission_total == 0, "fixture must enter on the free profile"
+        return runner
+
+    def test_restore_does_not_rebind_to_the_free_profile(self):
+        runner = _equity_runner()
+        revived = StrategyRunner(_equity_config(), ledger=OrderLedger())
+        restore_runner(revived, capture_runner(runner))
+
+        assert revived.executor.fees.broker.name != PAPER_FREE_PROFILE.name
+        assert revived.fee_profile == "zerodha"
+        assert revived.fee_segment == TradeSegment.EQUITY_INTRADAY
+
+    def test_a_carried_book_pays_its_costs_after_the_restart(self):
+        """The 30-Oct ICICIBANK case: entry free, exit after a restart, costed."""
+        revived = StrategyRunner(_equity_config(), ledger=OrderLedger())
+        restore_runner(revived, capture_runner(self._carried_runner()))
+
+        closed = _round_trip(revived, exit_price=95.0)
+        assert closed.commission_total > 0
+        assert closed.brokerage_total + closed.statutory_fees_total == closed.commission_total
+        assert closed.net_pnl == closed.realized_pnl - closed.commission_total
+
+    def test_the_restart_keeps_the_position_it_restored(self):
+        """The rebind must not be paid for with the book itself."""
+        runner = self._carried_runner()
+        snapshot = capture_runner(runner)
+        revived = StrategyRunner(_equity_config(), ledger=OrderLedger())
+        restore_runner(revived, snapshot)
+
+        assert list(revived.portfolio.positions) == ["RELIANCE"]
+        assert float(revived.portfolio.positions["RELIANCE"].quantity) == float(
+            runner.portfolio.positions["RELIANCE"].quantity
+        )
 
 
 # ---------------------------------------------------------------------------

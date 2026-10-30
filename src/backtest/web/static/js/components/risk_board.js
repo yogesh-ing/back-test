@@ -182,7 +182,7 @@
           <div class="risk-stat"><span>Total Trades</span><strong>${tradeStats.total_trades || 0}</strong></div>
           <div class="risk-stat"><span>Win Rate</span><strong>${pct(tradeStats.win_rate)}</strong></div>
           <div class="risk-stat"><span>Profit Factor</span><strong>${tradeStats.profit_factor || 0}</strong></div>
-          <div class="risk-stat"><span>Total PnL</span><strong class="${pnlClass(tradeStats.total_pnl)}">${fmtSigned(tradeStats.total_pnl || 0)}</strong></div>
+          <div class="risk-stat"><span>Net PnL</span><strong class="${pnlClass(tradeStats.total_pnl)}">${fmtSigned(tradeStats.total_pnl || 0)}</strong></div>
           <div class="risk-stat"><span>Avg Win</span><strong class="pnl-pos">${fmtMoney(tradeStats.avg_win || 0)}</strong></div>
           <div class="risk-stat"><span>Avg Loss</span><strong class="pnl-neg">${fmtMoney(tradeStats.avg_loss || 0)}</strong></div>
           <div class="risk-stat"><span>Best / Worst</span><strong>${fmtMoney(tradeStats.best_trade || 0)} / ${fmtMoney(tradeStats.worst_trade || 0)}</strong></div>
@@ -235,7 +235,13 @@
       const data = await api(url);
       const tbody = $("agg-trades-body");
       const summaryEl = $("agg-trades-summary");
-      if (summaryEl) summaryEl.textContent = `${data.summary.total} total · ${data.summary.returned} shown · PnL ${fmtSigned(data.summary.total_pnl)} · Win rate ${pct(data.summary.win_rate)}`;
+      // Say what the number covers. It is NET (after commission and statutory,
+      // the same basis as the bucket header) and it counts each book's last
+      // ``per_runner_cap`` round trips, not its whole life — a book with 500
+      // closes is not summarised in full, and an unlabelled gap of that size is
+      // how one page came to show three different realized P&L figures.
+      const cap = data.summary.per_runner_cap;
+      if (summaryEl) summaryEl.textContent = `${data.summary.total} total · ${data.summary.returned} shown · Net P&L ${fmtSigned(data.summary.total_pnl)} (last ${cap} per book) · Win rate ${pct(data.summary.win_rate)}`;
       if (tbody) {
         if (!data.trades.length) tbody.innerHTML = `<tr><td colspan="9" class="muted">No closed trades yet.</td></tr>`;
         else tbody.innerHTML = data.trades.map(t => {
@@ -250,7 +256,10 @@
           const qtyCell = isOpt
             ? `${t.qty ?? ""} lot${t.qty === 1 ? "" : "s"} <span class="muted">(${t.units ?? ""} u)</span>`
             : (t.qty ?? "");
-          return `<tr class="${isOpt ? "matrix-row-option" : ""}"><td>${symCell}</td><td>${t.runner_name || ""}</td><td>${t.strategy || ""}</td><td>${t.kind || "equity"}</td><td>${t.side || ""}</td><td class="num">${qtyCell}</td><td class="num">${t.entry_price ?? ""} → ${t.exit_price ?? ""}</td><td class="num ${pnlClass(t.pnl)}">${fmtSigned(t.pnl || 0)}</td><td>${t.exit_reason || ""} <span class="muted">${(t.exit_ts || "").slice(0,16)}</span></td></tr>`;
+          // One money column, and it is the NET one: this table has no
+          // commission column, so a gross column here could never be added up
+          // to the Net P&L in the line above.
+          return `<tr class="${isOpt ? "matrix-row-option" : ""}"><td>${symCell}</td><td>${t.runner_name || ""}</td><td>${t.strategy || ""}</td><td>${t.kind || "equity"}</td><td>${t.side || ""}</td><td class="num">${qtyCell}</td><td class="num">${t.entry_price ?? ""} → ${t.exit_price ?? ""}</td><td class="num ${pnlClass(t.net_pnl)}">${fmtSigned(t.net_pnl || 0)}</td><td>${t.exit_reason || ""} <span class="muted">${(t.exit_ts || "").slice(0,16)}</span></td></tr>`;
         }).join("");
       }
     } catch (e) {
