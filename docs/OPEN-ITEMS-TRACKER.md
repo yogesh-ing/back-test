@@ -2,7 +2,7 @@
 
 **How to use:** tick `[x]` when done. "Who: You" = needs your action (credentials/money/account/live box). "Who: Agent" = I can do it on request. Everything stays on this page — nothing held in your head.
 
-**Last updated:** 2026-10-25 (`arena/ab59b7e5-back-test` @ `258366a`) · Strategy-Owned Execution v2 Phases 0–4 + strategy cards (`PR #45`) · mStock WS 6-cause depth fix (`e06c003`, 29/29 live paper fills reconciled to the paisa) · IST `00:00` daily-loss roll (`8074fca`) · Realtime Options & Swing Pool **Phases 1–4 + Phase 5.0 shipped** (`97430a8` → `258366a`)
+**Last updated:** 2026-10-30 (`feature/bugfix-2026-10-28` worktree) · **+ Portfolio P&L & UI enhancement points E1–E3** (§📊 below, from the 28-Oct paper-loss review) · 2026-10-25 (`arena/ab59b7e5-back-test` @ `258366a`) · Strategy-Owned Execution v2 Phases 0–4 + strategy cards (`PR #45`) · mStock WS 6-cause depth fix (`e06c003`, 29/29 live paper fills reconciled to the paisa) · IST `00:00` daily-loss roll (`8074fca`) · Realtime Options & Swing Pool **Phases 1–4 + Phase 5.0 shipped** (`97430a8` → `258366a`)
 
 > **2026-10-25 update — shipped since the 2026-10-06 sweep:**
 > - **Strategy-Owned Execution v2 (`PR #45`, `f49e89a`)**: unified `EquityStrategy` / `DirectionalOptionStrategy` / `StructureStrategy` templates, single Risk Gate, selections-only spawn UI, and structured strategy cards.
@@ -14,6 +14,39 @@
 > - **Phase 3 (`9cfdf0a`, `7b48448`)**: sub-second MTM & SL/TP/trailing exit checks on WS ticks (`OptionsBridge.on_tick()`), tick-cadence option evaluation, WS `BarBuilder`, option commission netting (`net_pnl` + open entry fees), and `OPTIONS_INTRADAY_SQUAREOFF_MINUTES` EOD auto-square-off.
 > - **Phase 4 (`85ebf0a`)**: `LongStraddle` & `ShortStraddle` (`StructureKind.STRADDLE`, paper-entitled), external WS order/trade push `<50 ms` fill wakeup, marketable `LIMIT` option pricing (`OPTIONS_LIVE_ORDER_TYPE=LIMIT`), and `LiveOptionBrokerAdapter` (`mode="live"` runner routing via `LiveOptionTrader` + `OptionExecutionGate`).
 > - **Phase 5.0 (`258366a`)**: TimescaleDB-safe insert-only `1day` equity ingest (`ON CONFLICT DO NOTHING`, canonical `03:45Z` / `09:15 IST`), `1min -> 1day` completeness-quorum (`>=338/375`) rollup, pilot ceiling (`<=10` symbols, `<=120d`), 502 circuit breaker + checkpointing, and mandatory day-by-day NSE session verifier (`tools/daily_equity_ingest.py`).
+
+---
+
+## 📊 Portfolio P&L & UI Enhancements (raised 30-Oct 2026, during the ~₹3.0L paper-loss review)
+
+Raised by the operator while reviewing the 28-Oct paper loss. **No code written — enhancement
+points only.** Evidence: `tools/out/TRADES-300K-LOSS-2026-10-30.md` (+ `trades_2026-10-28_dedup.csv`),
+`tools/out/SPRINT2-BUG-NOTES-2026-10-30.md` (bug side, Sprint 2 side agent).
+
+### E1 — Day-scoped paper P&L (Daily P&L = today's realized + running)
+
+- **Want:** every P&L number on the paper pages describes **today's session**, not the lifetime of the book.
+- **Today:** the header sums each runner's *restored closed-trade cache*, so it silently mixes 27-Oct, 28-Oct and today's closes — and one screen shows three different answers (header −₹2,98,230 vs trade-history −₹1,60,753.68 over 1,307 rows vs DB −₹4,52,543.09 deduped / −₹6,76,178.83 raw).
+- **Rule to implement:** `Daily P&L = equity_now − day_start_anchor`, and that must equal `realized (exit_time inside the IST session date, duplicates removed) + unrealized on open positions`. The anchor re-bases on capital flows, so a deposit never reads as P&L. Fees on still-open positions are not booked until close — "running" is a gross mark.
+- **Accept when:** every P&L tile on `/portfolio/paper` states its scope ("Today · 30-Oct IST") and the day's realized equals the sum of that day's trade rows exactly.
+
+### E2 — Commission visible on the UI as one sum (brokerage + taxes)
+
+- **Want:** the operator sees the total commission the run paid (brokerage + statutory taxes) — a single number, on the trade history and on the P&L tiles.
+- **Scope guard (operator decision, 30-Oct-2026):** **no per-component breakdown** (no separate brokerage / STT / GST / stamp columns). One sum only.
+- **Today:** `trades.commission_total` already holds that sum, but the UI never shows it — the trade-history table prints gross and net with the difference unexplained, which is precisely why the ₹40 fee-floor disagreement (B2 in the Sprint 2 notes, 1,344 rows / ₹51,200) went unnoticed.
+- **Accept when:** each trade row and the day tile show one `Commission` figure, and `gross − commission = net` visibly holds for every row. Rows where it does not hold are a data bug and must be surfaced, not smoothed over.
+
+### E3 — PnL daily diary: strategy-wise P&L for a chosen day
+
+- **Want:** a diary view where the operator picks a session date and reads that day's P&L **per strategy** (and per runner underneath it): realized, running, trade count, win rate, commission — plus the day's totals and the anchor the day started from.
+- **Depends on E1 and E2.** While Sprint 2's B1 (duplicate trade re-inserts, ₹2.24L phantom) and B2 (fee-floor disagreement) are open, any per-strategy daily figure is unreliable: duplicates inflate it, the fee-floor disagreement understates it. **Ship the diary after B1/B2, or ship it with a visible "ledger known inconsistent" banner.**
+- **Where:** a new tab on `/portfolio/paper` (or the reporting page). Realized comes from `trades` grouped by `strategy_name` + `portfolios.name`, day-scoped by IST exit date; the running column comes from live open structures, not from the DB.
+- **Accept when:** for 30-Oct the diary reproduces the 13 closed rows measured in `TRADES-300K-LOSS-2026-10-30.md` (net −₹10,520.51, including the five 15:10 `eod_flat` rows), and every strategy row sums to the day total.
+
+### Explicitly out of scope
+
+- Fee-component breakdown in the UI (brokerage / STT / GST / stamp) — operator declined 30-Oct-2026.
 
 ---
 
