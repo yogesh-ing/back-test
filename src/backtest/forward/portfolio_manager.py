@@ -293,6 +293,15 @@ class PortfolioManager:
             logger.exception("portfolio intelligence disabled (init failed)")
         self._restore_state()
 
+        # BUG-37 (ticket 2.4 item 3): the ledger keeps 'active' rows for books
+        # nobody runs — deleted runners, re-spawns under a new instance id, test
+        # fixtures — and ``sum(initial_capital) WHERE status='active'`` is what
+        # capital is read from. Fail-soft like every other boot side effect.
+        try:
+            self._reap_orphan_portfolio_rows()
+        except Exception:  # noqa: BLE001 — a reap must never block a start
+            logger.exception("[ledger] orphan portfolio-row reap skipped")
+
         # MTM Staleness Watchdog (R6): periodic 60s mark-repair timer + manual
         # operator trigger (~10s cooldown per runner).
         self._refresh_marks_cooldown_s: float = 10.0
@@ -2483,6 +2492,40 @@ class PortfolioManager:
         except Exception:  # noqa: BLE001 — a bad restore must not block boot
             logger.exception(
                 "[state] restore from %s failed — starting clean", self._state_store.path
+            )
+
+    def _reap_orphan_portfolio_rows(self) -> None:
+        """Retire ledger rows this process has no runner for (BUG-37).
+
+        Claim keys come from the runners that actually booted, so a restore
+        that brought back nothing cannot reap anything: on 2026-10-27 a refused
+        restore emptied the runner list, and an unconditional reap would have
+        retired the whole ledger on the next boot.
+        """
+        db = getattr(self._trade_persister, "db", None)
+        if db is None or not self._runners:
+            return
+
+        from backtest.forward.portfolio_reaper import (
+            reap_orphan_portfolio_rows,
+            runner_claim_keys,
+        )
+
+        claims = runner_claim_keys(self._runners.values())
+        with db.session() as session:
+            report = reap_orphan_portfolio_rows(session, claims)
+        if report.changed:
+            logger.warning(
+                "[ledger] retired %d portfolio row(s) no runner owns (Rs %s of capital was "
+                "booked against them; %d still show open positions; %d row(s) claimed kept)",
+                report.changed,
+                report.reaped_capital,
+                report.reaped_open_exposure_rows,
+                len(report.kept),
+            )
+        else:
+            logger.info(
+                "[ledger] portfolio rows clean: %d active row(s), all claimed", report.scanned
             )
 
     def _apply_state_payload(self, payload: Dict[str, Any]) -> int:
