@@ -475,6 +475,10 @@ class OrderLedger:
         self._runners: Dict[str, Any] = {}  # instance_id -> StrategyRunner
         self._pending_fills: Dict[str, Deque[FillEvent]] = defaultdict(deque)
         self._fill_count = 0
+        #: B3: mirrors terminal orders into the durable ``orders`` table.
+        self._persistence_sink: Optional[
+            Callable[["Order", Optional[FillEvent]], None]
+        ] = None
 
     # -- registration ------------------------------------------------------
 
@@ -495,6 +499,39 @@ class OrderLedger:
     def runner_for(self, instance_id: str) -> Optional[Any]:
         with self._lock:
             return self._runners.get(instance_id)
+
+    # -- durable mirror (B3) ------------------------------------------------
+
+    def set_persistence_sink(
+        self, sink: Optional[Callable[["Order", Optional[FillEvent]], None]]
+    ) -> None:
+        """Register the writer that mirrors terminal orders into the database.
+
+        Only the transitions the ledger itself owns are mirrored — refusals,
+        cancels and the synchronous option-leg rows written by
+        :meth:`record_filled`. An equity order that *executed* is in the
+        runner's :class:`~backtest.simulator.portfolio.Portfolio` under the
+        same client order id, and that book is the writer for it; mirroring
+        both would fight over ``uq_orders_client_order_id``.
+
+        The sink runs outside the ledger lock and its exceptions are swallowed:
+        the durable table is a record of what happened, never a participant in
+        it, so a database outage must not cost a fill.
+        """
+        self._persistence_sink = sink
+
+    def _notify_persistence(
+        self, order: "Order", fill: Optional[FillEvent] = None
+    ) -> None:
+        sink = self._persistence_sink
+        if sink is None:
+            return
+        try:
+            sink(order, fill)
+        except Exception:  # noqa: BLE001 — the mirror must never break trading
+            logger.exception(
+                "[ledger] durable mirror failed for %s", order.client_order_id
+            )
 
     # -- orders -------------------------------------------------------------
 
@@ -532,7 +569,8 @@ class OrderLedger:
                 return False
             order.status = ORDER_CANCELLED
             order.updated_ts = datetime.now(timezone.utc).isoformat()
-            return True
+        self._notify_persistence(order)
+        return True
 
     def reject(self, client_order_id: str, reason: str) -> bool:
         """Mark a pending order rejected with the broker's reason.
@@ -548,7 +586,8 @@ class OrderLedger:
             order.status = ORDER_REJECTED
             order.reject_reason = str(reason or "rejected")
             order.updated_ts = datetime.now(timezone.utc).isoformat()
-            return True
+        self._notify_persistence(order)
+        return True
 
     def amend(
         self,
@@ -688,6 +727,8 @@ class OrderLedger:
         broker_order_id: Optional[str] = None,
         order_type: str = "MARKET",
         limit_price: Optional[float] = None,
+        commission: Optional[float] = None,
+        statutory_fees: Optional[float] = None,
     ) -> Order:
         """Write a **terminal FILLED row** for a fill that never was a routed order.
 
@@ -696,6 +737,10 @@ class OrderLedger:
         PENDING order to advance — yet the execution still belongs in the
         ledger, because the Orders tab is the audit of "did it fill, and at
         what price?".
+
+        ``commission`` / ``statutory_fees`` are the option book's own fee split
+        for this leg (same BUG-26 contract as :meth:`apply_fill`); the leg
+        record knows what it charged, so the mirrored fill must not report zero.
 
         Deliberately **not** :meth:`apply_fill`: that routes a FillEvent to the
         owning runner's equity handler, which would open a share-simulation
@@ -731,12 +776,28 @@ class OrderLedger:
         order.slippage, order.slippage_pct = self._slippage(
             side, float(price), order.requested_price
         )
+        leg_fill = FillEvent(
+            client_order_id=coid,
+            instance_id=instance_id,
+            symbol=order.symbol,
+            side=side,
+            quantity=float(quantity),
+            price=float(price),
+            ts=stamp,
+            tag=dict(tag or {}),
+            commission=float(commission or 0.0),
+            statutory_fees=float(statutory_fees or 0.0),
+        )
         with self._lock:
             self._routing[coid] = instance_id
             self._orders[coid] = order
             self._order_history.append(coid)
             self._fill_count += 1
             self._trim_locked()
+        # Mirror outside the lock, and only to the durable table — this fill is
+        # never queued in _pending_fills or routed to a handler, because the
+        # option book already owns the accounting for it.
+        self._notify_persistence(order, leg_fill)
         return order
 
     def drain_pending_fills(self, instance_id: str) -> List[FillEvent]:
@@ -1834,6 +1895,10 @@ class StrategyRunner:
             broker_order_id=str(broker_order_id) if broker_order_id else None,
             order_type=order_type,
             limit_price=float(limit_price) if limit_price is not None else None,
+            # The leg record carries the brokerage the option book charged; the
+            # statutory stack is booked per structure, not per leg, so it is
+            # deliberately absent here rather than guessed at.
+            commission=float(record.get("commission") or 0.0),
         )
 
     def _on_option_execution_halt(self, reason: str) -> None:

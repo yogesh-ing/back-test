@@ -278,6 +278,8 @@ class PortfolioManager:
             from backtest.db import DatabaseManager
 
             self._trade_persister = LiveTradePersister(DatabaseManager.from_env())
+            # B3: the execution ledger becomes durable at the transition itself.
+            self._trade_persister.attach_order_ledger(self.ledger)
         except Exception:  # noqa: BLE001 — persistence is best-effort
             logger.info("trade persistence disabled (no reachable database)", exc_info=True)
         self._restoring = False  # suppress saves while rehydrating
