@@ -150,7 +150,7 @@ def report(groups: list[dict], total: int) -> None:
     for group in sorted(dupes, key=len, reverse=True)[:5]:
         first = group[0]
         print(
-            f"    keep {first['trade_id'][:8]} ({first['created_at']}) "
+            f"    keep {str(first['trade_id'])[:8]} ({first['created_at']}) "
             f"drop {len(group) - 1}: {first['symbol']} "
             f"{str(first['exit_time'])[:19]} ₹{Decimal(str(first['net_pnl'] or 0)):,.2f}"
         )
@@ -161,7 +161,15 @@ def execute(engine, groups: list[dict], stamp: str, force: bool) -> None:
     from backtest.db.models import Trade as TradeRow
 
     bak = f"bak_trades_dupes_{stamp}"
-    doomed = [row["trade_id"] for group in groups if len(group) > 1 for row in group[1:]]
+    # ``trade_id`` is a ``uuid`` column on Postgres, so a raw SELECT hands back a
+    # ``uuid.UUID`` object rather than the string SQLite returns. The ORM type is
+    # ``PGUUID(as_uuid=False)``, so the delete below binds a string.
+    doomed = [
+        str(row["trade_id"])
+        for group in groups
+        if len(group) > 1
+        for row in group[1:]
+    ]
     if not doomed:
         print("\n  no duplicate round trips — nothing to do.")
         return
@@ -185,7 +193,7 @@ def execute(engine, groups: list[dict], stamp: str, force: bool) -> None:
                     "UPDATE trades SET dedupe_key = :k "
                     "WHERE trade_id = :tid AND dedupe_key IS NULL"
                 ),
-                {"k": trade_dedupe_key(_as_values(survivor)), "tid": survivor["trade_id"]},
+                {"k": trade_dedupe_key(_as_values(survivor)), "tid": str(survivor["trade_id"])},
             ).rowcount
         remaining = conn.execute(text("SELECT COUNT(*) FROM trades")).scalar_one()
         print(f"\n  snapshot   {bak}")
