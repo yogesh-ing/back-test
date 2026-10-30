@@ -9,27 +9,74 @@ engine writes, so cross-session history accumulates in one place.
 
 Design rules (matching the platform's honesty/fail-soft conventions):
 * Persistence must NEVER break trading — every failure is logged and swallowed.
-* Idempotent per runner: each runner tracks which exit_ts+symbols it has
-  already flushed (in-memory set; duplicates are skipped by a natural key).
+* Idempotent per ROUND TRIP, not per process: the in-memory ``_flushed`` set
+  is only a fast path. The durable guard is :func:`trade_dedupe_key` — the
+  ``trades`` row's identity columns are looked up before every insert, so a
+  restart that restores a runner's closed-trades cache re-writes nothing
+  (B1, QA 2026-10-30: 6,476 raw rows for 2,878 real trades, ₹2,23,635.74 of
+  phantom loss, 16 copies of one fill).
 * Synthetic-testable: accepts any duck-typed DatabaseManager; unit tests use
   in-memory SQLite.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Mapping
 
 from backtest.data.sources_policy import default_broker_source
-from backtest.timekeeping import from_stored_utc, now_utc
+from backtest.timekeeping import from_stored_utc, iso_utc, now_utc
 
 logger = logging.getLogger(__name__)
 
-#: Runner-level dedupe key length — a natural key of exit_ts+symbol+pnl is
-#: enough to catch the double-flush case (same trade seen on two sweeps).
-_NATURAL_KEY_LEN = 3
+#: The columns that make a round trip *this* round trip — the same tuple the
+#: 2026-10-30 duplicate audit grouped on, so the guard and a backfill of the
+#: existing rows agree about what "already persisted" means. P&L is
+#: deliberately absent: a corrected fee must not look like a new trade.
+DEDUPE_COLUMNS = (
+    "portfolio_id",
+    "symbol",
+    "direction",
+    "entry_time",
+    "exit_time",
+    "entry_price",
+    "exit_price",
+    "quantity",
+)
+
+#: Unit separator — cannot appear in a symbol or an ISO timestamp.
+_KEY_JOINER = "\x1f"
+
+
+def _canonical(value: Any) -> str:
+    """Render one identity column the same way it is stored.
+
+    Timestamps go through :func:`iso_utc` so a trade cached as naive UTC and a
+    row stored as ``+05:30`` hash identically, and prices/quantities to the
+    column's 8 decimals so ``154.0`` and ``154.00000000`` are one value.
+    """
+    if isinstance(value, datetime):
+        return iso_utc(value) or ""
+    if isinstance(value, (Decimal, int, float)) and not isinstance(value, bool):
+        return f"{Decimal(str(value)):.8f}"
+    return str(value or "").strip()
+
+
+def trade_dedupe_key(values: Mapping[str, Any]) -> str:
+    """Deterministic 64-hex id for one closed round trip.
+
+    Built from :data:`DEDUPE_COLUMNS` only, so the same trade produces the same
+    key whether it is read from the runner's cache or from a stored row — which
+    is what lets ``scripts/repair_trade_duplicates.py`` backfill history.
+    """
+    missing = [c for c in DEDUPE_COLUMNS if c not in values]
+    if missing:
+        raise KeyError(f"trade identity columns missing: {missing}")
+    joined = _KEY_JOINER.join(_canonical(values[c]) for c in DEDUPE_COLUMNS)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
 class LiveTradePersister:
@@ -88,19 +135,31 @@ class LiveTradePersister:
             return 0
 
         written = 0
+        skipped = 0
         for t, key in pending:
             try:
                 portfolio_id = self._ensure_portfolio_row(runner)
-                self._insert_trade(portfolio_id, runner, t)
+                values = self._trade_values(portfolio_id, runner, t)
+                # The durable guard runs before every insert: ``_flushed`` died
+                # with the last process, the DB did not.
+                if self._already_persisted(values):
+                    seen.add(key)
+                    skipped += 1
+                    continue
+                values["dedupe_key"] = trade_dedupe_key(values)
+                self._insert_trade(values)
                 seen.add(key)
                 written += 1
             except Exception:  # noqa: BLE001 — one bad trade must not stop the rest
                 logger.exception(
                     "trade persist failed for runner %s (%s)", runner.instance_id, t.get("symbol")
                 )
-        if written:
+        if written or skipped:
             logger.info(
-                "[db] persisted %d closed trade(s) for runner %s", written, runner.instance_id
+                "[db] runner %s: persisted %d closed trade(s), %d already in history",
+                runner.instance_id,
+                written,
+                skipped,
             )
         return written
 
@@ -145,9 +204,13 @@ class LiveTradePersister:
             runner._db_portfolio_id = row.portfolio_id
             return row.portfolio_id
 
-    def _insert_trade(self, portfolio_id: str, runner: Any, t: dict[str, Any]) -> None:
-        from backtest.db.models import Trade as TradeRow
+    def _trade_values(self, portfolio_id: str, runner: Any, t: dict[str, Any]) -> dict[str, Any]:
+        """One closed trade as the exact column values that will be written.
 
+        Returned as a dict rather than an ORM row so the identity columns can be
+        hashed into :func:`trade_dedupe_key` and queried for existence before
+        anything is inserted.
+        """
         entry_ts = _parse_ts(t.get("entry_ts"))
         exit_ts = _parse_ts(t.get("exit_ts")) or now_utc()
         if entry_ts is None:
@@ -167,27 +230,55 @@ class LiveTradePersister:
         entry_px = Decimal(str(t.get("entry_price") or 0))
         exit_px = Decimal(str(t.get("exit_price") or 0))
         holding_min = max(int((exit_ts - entry_ts).total_seconds() // 60), 0)
-        exit_reason = _map_exit_reason(t.get("exit_reason"))
+        return {
+            "portfolio_id": portfolio_id,
+            "symbol": str(t.get("symbol") or "?")[:64],
+            "strategy_name": str(runner.config.strategy_name)[:64],
+            "direction": "long" if str(t.get("side", "LONG")).upper() == "LONG" else "short",
+            "quantity": abs(qty),
+            "entry_price": abs(entry_px),
+            "exit_price": abs(exit_px),
+            "entry_time": entry_ts,
+            "exit_time": exit_ts,
+            "gross_pnl": gross,
+            "net_pnl": net,
+            "commission_total": costs,
+            "holding_period_minutes": holding_min,
+            "exit_reason": _map_exit_reason(t.get("exit_reason")),
+        }
+
+    def _already_persisted(self, values: Mapping[str, Any]) -> bool:
+        """Has this exact round trip already been written?
+
+        Matched on the identity columns, not on ``dedupe_key``, because the rows
+        the 2026-10-30 duplicates were measured against predate the key column —
+        a key-only lookup would have re-inserted all of them on the first
+        restart after this shipped.
+        """
+        from backtest.db.models import Trade as TradeRow
 
         with self.db.session() as session:
-            session.add(
-                TradeRow(
-                    portfolio_id=portfolio_id,
-                    symbol=str(t.get("symbol") or "?")[:64],
-                    strategy_name=str(runner.config.strategy_name)[:64],
-                    direction="long" if str(t.get("side", "LONG")).upper() == "LONG" else "short",
-                    quantity=abs(qty),
-                    entry_price=abs(entry_px),
-                    exit_price=abs(exit_px),
-                    entry_time=entry_ts,
-                    exit_time=exit_ts,
-                    gross_pnl=gross,
-                    net_pnl=net,
-                    commission_total=costs,
-                    holding_period_minutes=holding_min,
-                    exit_reason=exit_reason,
+            found = (
+                session.query(TradeRow.trade_id)
+                .filter(
+                    TradeRow.portfolio_id == values["portfolio_id"],
+                    TradeRow.symbol == values["symbol"],
+                    TradeRow.direction == values["direction"],
+                    TradeRow.entry_time == values["entry_time"],
+                    TradeRow.exit_time == values["exit_time"],
+                    TradeRow.entry_price == values["entry_price"],
+                    TradeRow.exit_price == values["exit_price"],
+                    TradeRow.quantity == values["quantity"],
                 )
+                .first()
             )
+        return found is not None
+
+    def _insert_trade(self, values: Mapping[str, Any]) -> None:
+        from backtest.db.models import Trade as TradeRow
+
+        with self.db.session() as session:
+            session.add(TradeRow(**values))
 
 
 def _parse_ts(value: Any) -> datetime | None:

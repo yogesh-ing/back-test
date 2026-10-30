@@ -341,9 +341,11 @@ def test_alembic_has_single_linear_head():
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script.get_heads() == ["021"], (
-        "the alembic chain must be linear with one head, got "
-        f"{script.get_heads()} — a revision was added without chaining it"
+    # Not pinned to an id on purpose: the head moves with every revision, and a
+    # guard that has to be edited to stay green is the one that gets edited
+    # wrongly. ``test_alembic_chain_009_to_022`` owns the pinned head.
+    assert len(script.get_heads()) == 1, (
+        f"the alembic chain must have exactly one head, got {script.get_heads()}"
     )
 
     declared: dict[str, str] = {}
