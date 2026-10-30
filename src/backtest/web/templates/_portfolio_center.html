@@ -27,6 +27,7 @@
                 </div>
             </div>
             <div class="pcc-actions">
+                <a id="btn-open-diary" class="btn btn-ghost" href="/diary?mode={{ center_mode if center_mode in ('paper', 'live') else 'paper' }}" title="Open IST session PnL Diary for this book">{{ icon('calendar', 13) }} PnL diary</a>
                 <button id="btn-add" class="btn btn-primary" type="button">{{ icon('plus', 14) }} Add instance</button>
                 <button id="btn-pause-all" class="btn btn-warn" type="button">{{ icon('pause', 13) }} Pause all</button>
                 <button id="btn-resume-all" class="btn btn-ghost" type="button">{{ icon('play', 13) }} Resume all</button>

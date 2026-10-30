@@ -1,11 +1,4 @@
-"""PnL Diary & Institutional Edge Attribution package.
-
-Slice 0 ships :mod:`backtest.diary.ledger` — the canonical trade-row
-normalization, single-commission sum (E2), ``Gross - Commission = Net``
-reconciliation check (B2), and cross-restart/cross-store deduplication (B1)
-shared by :class:`~backtest.forward.trade_persistence.LiveTradePersister`,
-the Portfolio trade-history API, and the ``/diary`` endpoints.
-"""
+"""PnL Diary & Institutional Edge Attribution package."""
 
 from backtest.diary.ledger import (
     RECONCILE_TOLERANCE_INR,
@@ -18,15 +11,25 @@ from backtest.diary.ledger import (
     reconcile_trade_amounts,
     single_commission_decimal,
 )
+from backtest.diary.service import (
+    VALID_DIARY_MODES,
+    DiaryService,
+    parse_ist_date_range,
+    validate_diary_mode,
+)
 
 __all__ = [
+    "DiaryService",
     "RECONCILE_TOLERANCE_INR",
+    "VALID_DIARY_MODES",
     "canonical_trade_signature",
     "dedupe_normalized_trades",
     "extract_instance_prefix",
     "format_holding_duration",
     "normalize_db_trade_row",
     "normalize_memory_trade_dict",
+    "parse_ist_date_range",
     "reconcile_trade_amounts",
     "single_commission_decimal",
+    "validate_diary_mode",
 ]

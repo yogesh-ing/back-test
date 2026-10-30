@@ -24,6 +24,7 @@ PAGES = [
     ("/portfolio", "portfolio"),
     ("/portfolio/paper", "portfolio"),
     ("/portfolio/live", "portfolio"),
+    ("/diary", "diary"),
     ("/analytics", "analytics"),
     ("/risk", "risk"),
     ("/reporting", "reporting"),

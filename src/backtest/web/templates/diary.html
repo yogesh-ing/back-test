@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, page_header %}
+{% block title %}PnL Diary · Trading Bot{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diary.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="screen-page diary-page" id="diary-root" data-initial-mode="{{ initial_mode }}">
+  {% call page_header(
+      'Workspace / Session Attribution & Edge Diary',
+      'PnL Diary',
+      'IST-scoped session calendar, Gross − Commission = Net ledger reconciliation, and book-segregated performance tracking.'
+  ) %}
+    <a id="diary-open-book" class="btn btn-ghost" href="/portfolio/{{ initial_mode }}">
+      {{ icon('portfolio', 14) }}
+      <span id="diary-open-book-label">Open {{ 'Live' if initial_mode == 'live' else 'Paper' }} book</span>
+    </a>
+    <button id="diary-refresh" class="btn btn-primary" type="button">
+      {{ icon('refresh', 14) }} Refresh diary
+    </button>
+  {% endcall %}
+
+  <!-- Book Segregator + Strategy + Date Scope Controls -->
+  <section class="card diary-controls" aria-label="Diary filters">
+    <div class="diary-controls-left">
+      <div class="diary-field">
+        <label for="diary-mode">Trading book</label>
+        <select id="diary-mode" class="diary-select diary-select-book" data-mode="{{ initial_mode }}">
+          <option value="paper" {% if initial_mode == 'paper' %}selected{% endif %}>Paper Book (Simulated)</option>
+          <option value="live" {% if initial_mode == 'live' %}selected{% endif %}>Live Book (Broker Capital)</option>
+        </select>
+      </div>
+
+      <div class="diary-field">
+        <label for="diary-strategy">Strategy filter</label>
+        <select id="diary-strategy" class="diary-select">
+          <option value="">All strategies</option>
+        </select>
+      </div>
+
+      <div class="diary-field">
+        <label>Quick IST window</label>
+        <div class="diary-quick-ranges" role="group" aria-label="Quick IST date windows">
+          <button type="button" class="diary-range-pill" data-preset="today" id="diary-preset-today">Today</button>
+          <button type="button" class="diary-range-pill" data-preset="7d" id="diary-preset-7d">7D</button>
+          <button type="button" class="diary-range-pill is-active" data-preset="mtd" id="diary-preset-mtd">MTD</button>
+          <button type="button" class="diary-range-pill" data-preset="30d" id="diary-preset-30d">30D</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="diary-controls-right">
+      <div class="diary-field">
+        <label for="diary-from">From (IST)</label>
+        <input id="diary-from" class="diary-date-input" type="date">
+      </div>
+      <div class="diary-field">
+        <label for="diary-to">To (IST)</label>
+        <input id="diary-to" class="diary-date-input" type="date">
+      </div>
+      <button id="diary-apply" class="btn btn-small" type="button">Apply range</button>
+    </div>
+  </section>
+
+  <!-- Active Scope & Ledger Reconciliation Status -->
+  <div class="diary-scope-banner" id="diary-scope-banner" role="status" aria-live="polite">
+    <div class="diary-scope-left">
+      <span class="diary-book-pill" id="diary-book-pill" data-mode="{{ initial_mode }}">
+        {{ 'LIVE BOOK' if initial_mode == 'live' else 'PAPER BOOK' }}
+      </span>
+      <strong id="diary-scope-label">Loading IST session window…</strong>
+      <span class="muted" id="diary-scope-counts"></span>
+    </div>
+    <div class="diary-scope-right">
+      <span class="diary-recon-pill is-ok" id="diary-recon-pill">Gross − Commission = Net verified</span>
+    </div>
+  </div>
+
+  <!-- Executive Day / Range Summary Strip (8 institutional cards) -->
+  <section class="diary-kpi-grid" id="diary-summary-strip" aria-label="Executive PnL summary">
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Net Realized P&amp;L</span><span>After Cost</span></div>
+      <div class="diary-kpi-value" id="dkpi-net-pnl">₹0.00</div>
+      <div class="diary-kpi-sub" id="dkpi-net-sub">Gross ₹0.00 − Cost ₹0.00</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Gross Realized P&amp;L</span><span>Pre-Cost</span></div>
+      <div class="diary-kpi-value" id="dkpi-gross-pnl">₹0.00</div>
+      <div class="diary-kpi-sub" id="dkpi-gross-sub">0 closed trades</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Commission (Total)</span><span>Single Sum</span></div>
+      <div class="diary-kpi-value" id="dkpi-commission">₹0.00</div>
+      <div class="diary-kpi-sub" id="dkpi-commission-sub">Drag: — of gross profit</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Live Running MTM</span><span id="dkpi-mtm-badge">IST Today</span></div>
+      <div class="diary-kpi-value" id="dkpi-running-mtm">—</div>
+      <div class="diary-kpi-sub" id="dkpi-running-sub">Open positions unrealized MTM</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Net Win Rate</span><span>After Cost</span></div>
+      <div class="diary-kpi-value" id="dkpi-win-rate">0.0%</div>
+      <div class="diary-kpi-sub" id="dkpi-win-sub">0W · 0L · 0F</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Net Profit Factor</span><span>∑Win / |∑Loss|</span></div>
+      <div class="diary-kpi-value" id="dkpi-profit-factor">—</div>
+      <div class="diary-kpi-sub" id="dkpi-pf-sub">Breakeven at 1.00×</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Net Expectancy</span><span>Per Trade</span></div>
+      <div class="diary-kpi-value" id="dkpi-expectancy">₹0.00</div>
+      <div class="diary-kpi-sub" id="dkpi-exp-sub">Avg W ₹0.00 · Avg L ₹0.00</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Extremes &amp; Streak</span><span>Session Edge</span></div>
+      <div class="diary-kpi-value" id="dkpi-extremes">— / —</div>
+      <div class="diary-kpi-sub" id="dkpi-streak-sub">Active streak: Flat</div>
+    </article>
+  </section>
+
+  <!-- IST Session Calendar Heatmap + Weekly Strip -->
+  <section class="card diary-calendar-card" id="diary-calendar-panel" aria-label="IST session calendar heatmap">
+    <div class="diary-cal-header">
+      <div class="diary-cal-title-wrap">
+        <h2 class="diary-cal-title">IST Session Calendar Heatmap</h2>
+        <div class="diary-month-nav" role="group" aria-label="Calendar month navigation">
+          <button type="button" class="btn btn-ghost btn-small" id="diary-month-prev" aria-label="Previous month">&larr;</button>
+          <span class="diary-month-label tabular-nums" id="diary-month-label">—</span>
+          <button type="button" class="btn btn-ghost btn-small" id="diary-month-next" aria-label="Next month">&rarr;</button>
+        </div>
+      </div>
+      <div class="diary-cal-legend">
+        <span><i class="diary-legend-swatch" style="background:rgba(241,132,145,.28)"></i>Net Loss</span>
+        <span><i class="diary-legend-swatch" style="background:rgba(101,208,165,.28)"></i>Net Profit</span>
+        <span><i class="diary-legend-swatch" style="border:1px dashed var(--warning)"></i>NSE Holiday</span>
+        <span class="muted">Click a day to inspect · Shift+Click to select range</span>
+      </div>
+    </div>
+
+    <div class="diary-cal-scroll">
+      <div class="diary-cal-grid" id="diary-cal-grid" role="grid" aria-label="Monthly IST trading sessions"></div>
+    </div>
+  </section>
+
+  <!-- Selected Window Session Ledger & Attribution Mount -->
+  <section class="card diary-sessions-card" id="diary-attribution-mount" aria-label="Selected window session breakdown">
+    <div class="diary-section-head">
+      <h2 id="diary-sessions-title">Session Ledger Breakdown (IST)</h2>
+      <span class="muted" id="diary-sessions-hint">Click any active row to isolate that IST session day.</span>
+    </div>
+    <div class="diary-table-wrap" id="diary-sessions-table-wrap">
+      <div class="diary-empty">Loading session ledger…</div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/diary.js') }}"></script>
+<script>
+  if (window.PnLDiary && typeof window.PnLDiary.init === 'function') {
+    window.PnLDiary.init();
+  }
+</script>
+{% endblock %}

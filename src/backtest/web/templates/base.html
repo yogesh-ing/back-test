@@ -2,6 +2,7 @@
 {% set navigation = [
     ('Workspace', [
         ('portfolio', '/portfolio', 'Portfolio', 'portfolio'),
+        ('diary', '/diary', 'PnL diary', 'calendar'),
         ('analytics', '/analytics', 'Analytics', 'chart'),
         ('risk', '/risk', 'Risk management', 'shield'),
         ('reporting', '/reporting', 'P&L reports', 'report')
@@ -18,7 +19,7 @@
         ('settings', '/settings', 'Settings', 'settings')
     ])
 ] %}
-{% set page_labels = {'portfolio': 'Portfolio', 'analytics': 'Analytics', 'risk': 'Risk management', 'reporting': 'P&L reports', 'backtest': 'Backtest', 'compare': 'Compare strategies', 'optimize': 'Optimization', 'strategy_builder': 'Strategy builder', 'forward': 'Engine playground', 'data': 'Market data', 'settings': 'Settings'} %}
+{% set page_labels = {'portfolio': 'Portfolio', 'diary': 'PnL diary', 'analytics': 'Analytics', 'risk': 'Risk management', 'reporting': 'P&L reports', 'backtest': 'Backtest', 'compare': 'Compare strategies', 'optimize': 'Optimization', 'strategy_builder': 'Strategy builder', 'forward': 'Engine playground', 'data': 'Market data', 'settings': 'Settings'} %}
 {% set source_name = {'synthetic': 'Synthetic data', 'csv': 'CSV data', 'db': 'Historical data', 'mstock': 'mStock data', 'dhan': 'Dhan data', 'upstox': 'Upstox data'}.get(config.get('BACKTEST_SOURCE'), 'Data source') %}
 <!DOCTYPE html>
 <html lang="en" data-theme="dark">
