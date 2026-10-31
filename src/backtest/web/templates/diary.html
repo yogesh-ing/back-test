@@ -1,0 +1,441 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, page_header %}
+{% block title %}PnL Diary · Trading Bot{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diary.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="screen-page diary-page" id="diary-root" data-initial-mode="{{ initial_mode }}">
+  {% call page_header(
+      'Workspace / Session Attribution & Edge Diary',
+      'PnL Diary',
+      'IST-scoped session calendar, Gross − Commission = Net ledger reconciliation, and book-segregated performance tracking.'
+  ) %}
+    <a id="diary-open-book" class="btn btn-ghost" href="/portfolio/{{ initial_mode }}">
+      {{ icon('portfolio', 14) }}
+      <span id="diary-open-book-label">Open {{ 'Live' if initial_mode == 'live' else 'Paper' }} book</span>
+    </a>
+    <button id="diary-refresh" class="btn btn-primary" type="button">
+      {{ icon('refresh', 14) }} Refresh diary
+    </button>
+  {% endcall %}
+
+  <!-- Book Segregator + Strategy + Date Scope Controls -->
+  <section class="card diary-controls" aria-label="Diary filters">
+    <div class="diary-controls-left">
+      <div class="diary-field">
+        <label for="diary-mode">Trading book</label>
+        <select id="diary-mode" class="diary-select diary-select-book" data-mode="{{ initial_mode }}">
+          <option value="paper" {% if initial_mode == 'paper' %}selected{% endif %}>Paper Book (Simulated)</option>
+          <option value="live" {% if initial_mode == 'live' %}selected{% endif %}>Live Book (Broker Capital)</option>
+        </select>
+      </div>
+
+      <div class="diary-field">
+        <label for="diary-strategy">Strategy filter</label>
+        <select id="diary-strategy" class="diary-select">
+          <option value="">All strategies</option>
+        </select>
+      </div>
+
+      <div class="diary-field">
+        <label>Quick IST window</label>
+        <div class="diary-quick-ranges" role="group" aria-label="Quick IST date windows">
+          <button type="button" class="diary-range-pill" data-preset="today" id="diary-preset-today">Today</button>
+          <button type="button" class="diary-range-pill" data-preset="7d" id="diary-preset-7d">7D</button>
+          <button type="button" class="diary-range-pill is-active" data-preset="mtd" id="diary-preset-mtd">MTD</button>
+          <button type="button" class="diary-range-pill" data-preset="30d" id="diary-preset-30d">30D</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="diary-controls-right">
+      <div class="diary-field">
+        <label for="diary-from">From (IST)</label>
+        <input id="diary-from" class="diary-date-input" type="date">
+      </div>
+      <div class="diary-field">
+        <label for="diary-to">To (IST)</label>
+        <input id="diary-to" class="diary-date-input" type="date">
+      </div>
+      <button id="diary-apply" class="btn btn-small" type="button">Apply range</button>
+    </div>
+  </section>
+
+  <!-- Active Scope & Ledger Reconciliation Status -->
+  <div class="diary-scope-banner" id="diary-scope-banner" role="status" aria-live="polite">
+    <div class="diary-scope-left">
+      <span class="diary-book-pill" id="diary-book-pill" data-mode="{{ initial_mode }}">
+        {{ 'LIVE BOOK' if initial_mode == 'live' else 'PAPER BOOK' }}
+      </span>
+      <strong id="diary-scope-label">Loading IST session window…</strong>
+      <span class="muted" id="diary-scope-counts"></span>
+    </div>
+    <div class="diary-scope-right">
+      <span class="diary-recon-pill is-ok" id="diary-recon-pill">Gross − Commission = Net verified</span>
+    </div>
+  </div>
+
+  <!-- Executive Day / Range Summary Strip (8 institutional cards) -->
+  <section class="diary-kpi-grid" id="diary-summary-strip" aria-label="Executive PnL summary">
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Net Realized P&amp;L</span><span>After Cost</span></div>
+      <div class="diary-kpi-value" id="dkpi-net-pnl">₹0.00</div>
+      <div class="diary-kpi-sub" id="dkpi-net-sub">Gross ₹0.00 − Cost ₹0.00</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Gross Realized P&amp;L</span><span>Pre-Cost</span></div>
+      <div class="diary-kpi-value" id="dkpi-gross-pnl">₹0.00</div>
+      <div class="diary-kpi-sub" id="dkpi-gross-sub">0 closed trades</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Commission (Total)</span><span>Single Sum</span></div>
+      <div class="diary-kpi-value" id="dkpi-commission">₹0.00</div>
+      <div class="diary-kpi-sub" id="dkpi-commission-sub">Drag: — of gross profit</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Live Running MTM</span><span id="dkpi-mtm-badge">IST Today</span></div>
+      <div class="diary-kpi-value" id="dkpi-running-mtm">—</div>
+      <div class="diary-kpi-sub" id="dkpi-running-sub">Open positions unrealized MTM</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Net Win Rate</span><span>After Cost</span></div>
+      <div class="diary-kpi-value" id="dkpi-win-rate">0.0%</div>
+      <div class="diary-kpi-sub" id="dkpi-win-sub">0W · 0L · 0F</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Net Profit Factor</span><span>∑Win / |∑Loss|</span></div>
+      <div class="diary-kpi-value" id="dkpi-profit-factor">—</div>
+      <div class="diary-kpi-sub" id="dkpi-pf-sub">Breakeven at 1.00×</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Net Expectancy</span><span>Per Trade</span></div>
+      <div class="diary-kpi-value" id="dkpi-expectancy">₹0.00</div>
+      <div class="diary-kpi-sub" id="dkpi-exp-sub">Avg W ₹0.00 · Avg L ₹0.00</div>
+    </article>
+
+    <article class="diary-kpi-card">
+      <div class="diary-kpi-label"><span>Extremes &amp; Streak</span><span>Session Edge</span></div>
+      <div class="diary-kpi-value" id="dkpi-extremes">— / —</div>
+      <div class="diary-kpi-sub" id="dkpi-streak-sub">Active streak: Flat</div>
+    </article>
+  </section>
+
+  <!-- IST Session Calendar Heatmap + Weekly Strip -->
+  <section class="card diary-calendar-card" id="diary-calendar-panel" aria-label="IST session calendar heatmap">
+    <div class="diary-cal-header">
+      <div class="diary-cal-title-wrap">
+        <h2 class="diary-cal-title">IST Session Calendar Heatmap</h2>
+        <div class="diary-month-nav" role="group" aria-label="Calendar month navigation">
+          <button type="button" class="btn btn-ghost btn-small" id="diary-month-prev" aria-label="Previous month">&larr;</button>
+          <span class="diary-month-label tabular-nums" id="diary-month-label">—</span>
+          <button type="button" class="btn btn-ghost btn-small" id="diary-month-next" aria-label="Next month">&rarr;</button>
+        </div>
+      </div>
+      <div class="diary-cal-legend">
+        <span><i class="diary-legend-swatch" style="background:rgba(241,132,145,.28)"></i>Net Loss</span>
+        <span><i class="diary-legend-swatch" style="background:rgba(101,208,165,.28)"></i>Net Profit</span>
+        <span><i class="diary-legend-swatch" style="border:1px dashed var(--warning)"></i>NSE Holiday</span>
+        <span class="muted">Click a day to inspect · Shift+Click to select range</span>
+      </div>
+    </div>
+
+    <div class="diary-cal-scroll">
+      <div class="diary-cal-grid" id="diary-cal-grid" role="grid" aria-label="Monthly IST trading sessions"></div>
+    </div>
+  </section>
+
+  <!-- Tabbed Attribution & Institutional Edge Suite Mount -->
+  <section class="card diary-sessions-card" id="diary-attribution-mount" aria-label="Attribution and session ledger">
+    <div class="diary-tabs-bar">
+      <div class="diary-tabs" role="tablist" aria-label="Diary analytical views">
+        <button
+          type="button"
+          class="diary-tab-btn is-active"
+          role="tab"
+          id="diary-tab-btn-attribution"
+          aria-selected="true"
+          aria-controls="diary-panel-attribution"
+          data-tab="attribution"
+        >
+          Strategy &rarr; Spawned Instances
+        </button>
+        <button
+          type="button"
+          class="diary-tab-btn"
+          role="tab"
+          id="diary-tab-btn-regimes"
+          aria-selected="false"
+          aria-controls="diary-panel-regimes"
+          data-tab="regimes"
+        >
+          Exit &amp; IST Regimes
+        </button>
+        <button
+          type="button"
+          class="diary-tab-btn"
+          role="tab"
+          id="diary-tab-btn-payoff"
+          aria-selected="false"
+          aria-controls="diary-panel-payoff"
+          data-tab="payoff"
+        >
+          Hold &amp; Payoff Edge
+        </button>
+        <button
+          type="button"
+          class="diary-tab-btn"
+          role="tab"
+          id="diary-tab-btn-graduation"
+          aria-selected="false"
+          aria-controls="diary-panel-graduation"
+          data-tab="graduation"
+        >
+          Graduation &amp; Journal
+        </button>
+        <button
+          type="button"
+          class="diary-tab-btn"
+          role="tab"
+          id="diary-tab-btn-sessions"
+          aria-selected="false"
+          aria-controls="diary-panel-sessions"
+          data-tab="sessions"
+        >
+          Daily Session Ledger (IST)
+        </button>
+      </div>
+      <span class="muted" id="diary-attr-summary-badge">Loading attribution…</span>
+    </div>
+
+    <!-- Tab 1: 3-Level Strategy -> Spawned Instance -> Trade/Structure Hierarchy -->
+    <div id="diary-panel-attribution" role="tabpanel" aria-labelledby="diary-tab-btn-attribution">
+      <div class="diary-attr-toolbar">
+        <div class="diary-attr-toolbar-left">
+          <label for="diary-attr-sort" class="muted" style="font-size:11.5px;font-weight:600;">Sort by</label>
+          <select id="diary-attr-sort" class="diary-select" style="min-width:190px;height:30px;font-size:12px;">
+            <option value="net_asc">Net P&amp;L (Worst &rarr; Best)</option>
+            <option value="net_desc">Net P&amp;L (Best &rarr; Worst)</option>
+            <option value="comm_desc">Commission Burn (High &rarr; Low)</option>
+            <option value="trades_desc">Trade Count (High &rarr; Low)</option>
+            <option value="wr_desc">Net Win % (High &rarr; Low)</option>
+            <option value="pf_desc">Profit Factor (High &rarr; Low)</option>
+          </select>
+        </div>
+        <div class="diary-attr-toolbar-right">
+          <button type="button" class="btn btn-ghost btn-small" id="diary-expand-all">Expand all</button>
+          <button type="button" class="btn btn-ghost btn-small" id="diary-collapse-all">Collapse all</button>
+        </div>
+      </div>
+
+      <div class="diary-table-wrap" id="diary-attr-tree-wrap">
+        <div class="diary-empty">Loading Strategy &rarr; Spawned Instance attribution…</div>
+      </div>
+    </div>
+
+    <!-- Tab 2: Slice 3 Institutional Edge Diagnostics I — Exit Reason & NSE IST Session Regimes -->
+    <div id="diary-panel-regimes" role="tabpanel" aria-labelledby="diary-tab-btn-regimes" hidden>
+      <div class="diary-attr-toolbar">
+        <div class="diary-attr-toolbar-left">
+          <label for="diary-regime-groupby" class="muted" style="font-size:11.5px;font-weight:600;">Matrix rows</label>
+          <select id="diary-regime-groupby" class="diary-select" style="min-width:170px;height:30px;font-size:12px;">
+            <option value="strategy">By Strategy</option>
+            <option value="instance">By Spawned Instance</option>
+          </select>
+
+          <label for="diary-regime-clock" class="muted" style="font-size:11.5px;font-weight:600;margin-left:8px;">Session clock</label>
+          <select id="diary-regime-clock" class="diary-select" style="min-width:170px;height:30px;font-size:12px;">
+            <option value="entry">Entry Time (IST)</option>
+            <option value="exit">Exit Time (IST)</option>
+          </select>
+        </div>
+        <div class="diary-attr-toolbar-right">
+          <span class="muted" style="font-size:11.5px;">Single Commission sum · Row &amp; column totals reconciled to 2dp</span>
+        </div>
+      </div>
+
+      <div class="diary-callouts-grid" id="diary-regime-callouts" aria-live="polite"></div>
+
+      <div class="diary-matrix-block">
+        <div class="diary-section-head">
+          <h2 id="diary-exit-matrix-title">Exit-Reason Attribution Matrix</h2>
+          <span class="muted" style="font-size:11.5px;">Net P&amp;L · Closed count · Net Win % · Commission</span>
+        </div>
+        <div class="diary-table-wrap" id="diary-exit-matrix-wrap">
+          <div class="diary-empty">Loading exit-reason matrix…</div>
+        </div>
+      </div>
+
+      <div class="diary-matrix-block" style="margin-top:14px;">
+        <div class="diary-section-head">
+          <h2 id="diary-session-matrix-title">NSE Intraday Session Regime Matrix (IST)</h2>
+          <span class="muted" id="diary-session-clock-note" style="font-size:11.5px;">Bucketed by Entry Time (IST)</span>
+        </div>
+        <div class="diary-table-wrap" id="diary-session-matrix-wrap">
+          <div class="diary-empty">Loading NSE intraday session matrix…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 3: Slice 4 Institutional Edge Diagnostics II — Hold-Duration Drag & Payoff Quadrant -->
+    <div id="diary-panel-payoff" role="tabpanel" aria-labelledby="diary-tab-btn-payoff" hidden>
+      <div class="diary-matrix-block" style="margin-top:6px;">
+        <div class="diary-section-head">
+          <h2 id="diary-hold-title">Hold-Duration &amp; Commission-Drag Analyzer</h2>
+          <span class="muted" style="font-size:11.5px;">Drag bands: &lt;30% Healthy · 30–50% Warning · &gt;50% or Gross &le; 0 Critical</span>
+        </div>
+        <div class="diary-table-wrap" id="diary-hold-table-wrap">
+          <div class="diary-empty">Loading hold-duration friction breakdown…</div>
+        </div>
+      </div>
+
+      <div class="diary-matrix-block" style="margin-top:16px;">
+        <div class="diary-attr-toolbar" style="padding-top:0;">
+          <div class="diary-attr-toolbar-left">
+            <h2 id="diary-quadrant-title" style="margin:0;font-size:15px;font-weight:700;color:var(--text-strong);">
+              Net Win % vs Payoff Breakeven Quadrant
+            </h2>
+            <span class="diary-cfg-pill">Breakeven Curve: R = (1 &minus; W) / W</span>
+          </div>
+          <div class="diary-attr-toolbar-right">
+            <label for="diary-payoff-groupby" class="muted" style="font-size:11.5px;font-weight:600;">Bubbles</label>
+            <select id="diary-payoff-groupby" class="diary-select" style="min-width:178px;height:30px;font-size:12px;">
+              <option value="instance">By Spawned Instance</option>
+              <option value="strategy">By Strategy</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="diary-quadrant-layout">
+          <div class="diary-quadrant-chart-card" id="diary-quadrant-svg-wrap">
+            <div class="diary-empty">Loading payoff quadrant…</div>
+          </div>
+          <div class="diary-quadrant-inspector" id="diary-quadrant-inspector" aria-live="polite">
+            <div class="muted" style="font-size:12px;">Select a bubble or table row to inspect its payoff prescription.</div>
+          </div>
+        </div>
+
+        <div class="diary-table-wrap" id="diary-payoff-table-wrap" style="margin-top:10px;">
+          <div class="diary-empty">Loading edge prescriptions…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 4: Slice 5 Institutional Edge Diagnostics III — Paper -> Live Graduation & Persistent Journal -->
+    <div id="diary-panel-graduation" role="tabpanel" aria-labelledby="diary-tab-btn-graduation" hidden>
+      <div class="diary-matrix-block" style="margin-top:6px;">
+        <div class="diary-section-head">
+          <div>
+            <h2 id="diary-graduation-title" style="margin:0;">Paper &rarr; Live Graduation Scorecard</h2>
+            <span class="muted" id="diary-graduation-subtitle" style="font-size:11.5px;">
+              6 institutional gates: Sample &ge; 20 &middot; Expectancy &gt; ₹0 &middot; PF &ge; 1.35 &middot; Fee Drag &le; 35% &middot; Max DD &le; 10% &middot; 0 Ledger Anomalies
+            </span>
+          </div>
+          <div class="diary-grad-summary-pills" id="diary-grad-summary-pills"></div>
+        </div>
+        <div class="diary-table-wrap" id="diary-graduation-table-wrap">
+          <div class="diary-empty">Loading 6-gate graduation scorecard…</div>
+        </div>
+      </div>
+
+      <div class="diary-matrix-block" style="margin-top:18px;">
+        <div class="diary-section-head">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <h2 id="diary-journal-title" style="margin:0;">Operator Session &amp; Instance Journal</h2>
+            <span class="diary-book-pill" id="diary-journal-book-badge" data-mode="{{ initial_mode }}">
+              {{ 'LIVE JOURNAL' if initial_mode == 'live' else 'PAPER JOURNAL' }}
+            </span>
+          </div>
+          <span class="muted" id="diary-journal-count-badge" style="font-size:11.5px;">0 persisted entries in window</span>
+        </div>
+
+        <div class="diary-journal-layout">
+          <form class="diary-journal-composer" id="diary-journal-form" novalidate>
+            <input type="hidden" id="diary-note-id" value="">
+            <input type="hidden" id="diary-note-portfolio-id" value="">
+
+            <div class="diary-journal-row">
+              <div class="diary-field">
+                <label for="diary-note-date">IST Session Date</label>
+                <input id="diary-note-date" class="diary-date-input" type="date" required>
+              </div>
+              <div class="diary-field">
+                <label for="diary-note-strategy">Strategy (optional)</label>
+                <input id="diary-note-strategy" class="diary-text-input" type="text" maxlength="64" placeholder="e.g. orb_breakout">
+              </div>
+              <div class="diary-field">
+                <label for="diary-note-instance">Spawned Instance (optional)</label>
+                <input id="diary-note-instance" class="diary-text-input" type="text" maxlength="128" placeholder="e.g. NIFTY Runner [a1b2c3d4]">
+              </div>
+            </div>
+
+            <div class="diary-field" style="margin-top:8px;">
+              <label>Regime &amp; Execution Tags</label>
+              <div class="diary-tag-picker" id="diary-note-tags" role="group" aria-label="Session regime tags">
+                <button type="button" class="diary-tag-chip" data-journal-tag="Trend" aria-pressed="false">Trend</button>
+                <button type="button" class="diary-tag-chip" data-journal-tag="Chop" aria-pressed="false">Chop</button>
+                <button type="button" class="diary-tag-chip" data-journal-tag="Expiry" aria-pressed="false">Expiry</button>
+                <button type="button" class="diary-tag-chip" data-journal-tag="Gap" aria-pressed="false">Gap</button>
+                <button type="button" class="diary-tag-chip" data-journal-tag="Event" aria-pressed="false">Event</button>
+                <button type="button" class="diary-tag-chip" data-journal-tag="HighVIX" aria-pressed="false">HighVIX</button>
+                <button type="button" class="diary-tag-chip" data-journal-tag="RuleBreach" aria-pressed="false">RuleBreach</button>
+              </div>
+            </div>
+
+            <div class="diary-field" style="margin-top:8px;">
+              <label for="diary-note-text">Observation &amp; Action Plan</label>
+              <textarea
+                id="diary-note-text"
+                class="diary-textarea"
+                rows="3"
+                maxlength="4000"
+                placeholder="Record intraday regime context, slippage observations, or parameter promotion notes…"
+              ></textarea>
+            </div>
+
+            <div class="diary-journal-actions">
+              <div style="display:flex;align-items:center;gap:8px;">
+                <button type="submit" class="btn btn-primary btn-small" id="diary-note-save">Save journal entry</button>
+                <button type="button" class="btn btn-ghost btn-small" id="diary-note-cancel" hidden>Cancel edit</button>
+              </div>
+              <span class="muted" id="diary-note-status" aria-live="polite" style="font-size:11.5px;"></span>
+            </div>
+          </form>
+
+          <div class="diary-journal-feed" id="diary-journal-feed-wrap">
+            <div class="diary-empty">No operator journal notes recorded for this book and IST window yet.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 5: Daily Session Ledger Breakdown (IST) -->
+    <div id="diary-panel-sessions" role="tabpanel" aria-labelledby="diary-tab-btn-sessions" hidden>
+      <div class="diary-section-head" style="margin-bottom:8px;">
+        <h2 id="diary-sessions-title">Session Ledger Breakdown (IST)</h2>
+        <span class="muted" id="diary-sessions-hint">Click any active row to isolate that IST session day.</span>
+      </div>
+      <div class="diary-table-wrap" id="diary-sessions-table-wrap">
+        <div class="diary-empty">Loading session ledger…</div>
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/diary.js') }}"></script>
+<script>
+  if (window.PnLDiary && typeof window.PnLDiary.init === 'function') {
+    window.PnLDiary.init();
+  }
+</script>
+{% endblock %}

@@ -143,17 +143,33 @@
     return '<div class="dd-section"><h4>Options Book</h4>' + statStrip + table + "</div>";
   }
 
+  function fmtSigned2dp(v) {
+    const n = Number(v || 0);
+    return (n >= 0 ? "+₹" : "-₹") + Math.abs(n).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function fmtCost2dp(v) {
+    const n = Math.abs(Number(v || 0));
+    return "₹" + n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
   function tradesHtml(r) {
     if (!r.trades || !r.trades.length) {
       return '<p class="muted" style="padding:10px">No closed trades yet.</p>';
     }
-    // C2: option rows are structures — label them, and say *why* they closed
-    // (stop / flip / settlement), which the equity columns cannot show.
-    return '<table class="dd-table"><thead><tr><th>Symbol</th>' +
+    // C2 + E2: show Gross, single Commission sum (brokerage + taxes), and Net
+    // so Gross − Commission = Net holds visibly on every row.
+    return '<table class="dd-table" style="font-variant-numeric:tabular-nums;"><thead><tr><th>Symbol</th>' +
       '<th class="num">Qty</th><th class="num">Entry</th><th class="num">Exit</th>' +
-      '<th class="num">P&amp;L</th><th>Exit Reason</th></tr></thead><tbody>' +
+      '<th class="num">Gross</th><th class="num">Commission</th><th class="num">Net P&amp;L</th><th>Exit Reason</th></tr></thead><tbody>' +
       r.trades.slice(0, 50).map((t) => {
         const option = OptionView.isOptionTrade(t);
+        const gross = Number(t.gross_pnl != null ? t.gross_pnl : (t.pnl || 0));
+        const comm = Number(t.commission_total != null ? t.commission_total : (Number(t.commission || 0) + Number(t.statutory_fees || 0)));
+        const net = Number(t.net_pnl != null ? t.net_pnl : (gross - comm));
+        const mismatch = Math.abs((gross - comm) - net) > 0.05
+          ? ' <span class="badge badge-warn" title="Gross − Commission ≠ Net">⚠</span>'
+          : "";
         return "<tr" + (option ? ' class="trade-option"' : "") + ">" +
           "<td>" + esc(option ? (t.label || t.symbol) : t.symbol) +
           (option ? '<div class="cell-sub">' + esc(t.structure_type || "") +
@@ -162,7 +178,9 @@
           "<td class='num'>" + t.qty + "</td>" +
           '<td class="num">' + fmtPrice(t.entry_price) + "</td>" +
           '<td class="num">' + fmtPrice(t.exit_price) + "</td>" +
-          '<td class="num ' + pnlClass(t.pnl) + '">' + fmtSigned(t.pnl) + "</td>" +
+          '<td class="num ' + pnlClass(gross) + '">' + fmtSigned2dp(gross) + "</td>" +
+          '<td class="num muted">' + fmtCost2dp(comm) + "</td>" +
+          '<td class="num ' + pnlClass(net) + '">' + fmtSigned2dp(net) + mismatch + "</td>" +
           "<td>" + esc(option ? OptionView.exitReasonLabel(t.exit_reason)
             : (t.exit_reason || "—")) + "</td></tr>";
       }).join("") + "</tbody></table>";

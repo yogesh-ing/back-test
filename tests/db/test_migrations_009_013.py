@@ -225,17 +225,16 @@ def test_alembic_chain_009_to_022():
     Head ``021`` was the 2026-10-30 unfork (BUG-38): the Upstox CHECK widening
     used to declare ``020`` on the same parent as ``option_intent_journal``, so
     this test had two heads to choose between and could only fail. ``022`` is
-    B1's ``trades.dedupe_key`` — the first revision chained onto a repaired
-    chain, which is the proof the repair holds.
+    B1's ``trades.dedupe_key`` and ``023`` is Slice 5's ``diary_notes`` journal.
     """
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script.get_heads() == ["022"]
+    assert script.get_heads() == ["023"]
     revs = (
         "009", "010", "011", "012", "013", "014", "015", "016", "017",
-        "018", "019", "020", "021", "022",
+        "018", "019", "020", "021", "022", "023",
     )
     chain = {r: script.get_revision(r).down_revision for r in revs}
     assert chain == {
@@ -253,6 +252,7 @@ def test_alembic_chain_009_to_022():
         "020": "019",
         "021": "020",
         "022": "021",
+        "023": "022",
     }
 
 

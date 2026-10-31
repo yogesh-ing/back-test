@@ -30,6 +30,8 @@ from typing import Any, Deque, Dict, List, Optional
 from backtest.data.sources_policy import policy_key, synthetic_enabled
 from backtest.timekeeping import (
     EXCHANGE_TZ,
+    current_session_date,
+    format_session_scope,
     in_eod_squareoff_window,
     now_utc,
 )
@@ -444,6 +446,18 @@ class PortfolioManager:
         """NET realized booked in the current session, all runners."""
         return self._bucket_sum(mode, "realized_pnl_today")
 
+    def _bucket_daily_realized_net_pnl(self, mode: str) -> float:
+        """Today's IST-scoped net realized P&L across a bucket's runners (E1)."""
+        return self._bucket_sum(mode, "daily_realized_net_pnl", call=True)
+
+    def _bucket_daily_gross_pnl(self, mode: str) -> float:
+        """Today's IST-scoped gross realized P&L across a bucket's runners (E1)."""
+        return self._bucket_sum(mode, "daily_gross_pnl", call=True)
+
+    def _bucket_daily_commission(self, mode: str) -> float:
+        """Today's single combined commission sum across a bucket's runners (E2)."""
+        return self._bucket_sum(mode, "daily_commission", call=True)
+
     def _bucket_open_pnl(self, mode: str) -> float:
         """NET mark-to-market on books still open."""
         return self._bucket_sum(mode, "open_pnl", call=True)
@@ -590,12 +604,17 @@ class PortfolioManager:
         and SSE stream consume this directly.
         """
         buckets: Dict[str, Dict[str, Any]] = {}
+        today_ist = current_session_date()
+        scope_label = format_session_scope(today_ist)
         for mode in ("paper", "live"):
             equity = self._bucket_equity(mode)
             capital = self._bucket_capital(mode)
             peak = self._bucket_peak.get(mode, 0.0)
             day_start = self._bucket_day_start.get(mode, 0.0)
             daily = self._bucket_daily_pnl(mode)
+            daily_realized_net = self._bucket_daily_realized_net_pnl(mode)
+            daily_gross = self._bucket_daily_gross_pnl(mode)
+            daily_comm = self._bucket_daily_commission(mode)
             counts = self._bucket_runner_counts(mode)
             limit = abs(self.supervisor.config.daily_loss_limit)
             # BUG-33: the percentage is quoted against the money in the bucket,
@@ -609,6 +628,11 @@ class PortfolioManager:
                 "drawdown_pct": round(self._bucket_drawdown(mode), 4),
                 "daily_pnl": round(daily, 2),
                 "daily_pnl_pct": round(daily / pct_denominator, 6),
+                "daily_realized_net_pnl": round(daily_realized_net, 2),
+                "daily_gross_pnl": round(daily_gross, 2),
+                "daily_commission": round(daily_comm, 2),
+                "session_date_ist": today_ist.isoformat(),
+                "session_scope_label": scope_label,
                 "realized_pnl": round(self._bucket_realized_pnl(mode), 2),
                 # BUG-04: the full NET contract, per bucket. Rows and cards
                 # must be able to reconcile gross − fees = net without opening
@@ -3294,6 +3318,11 @@ class PortfolioManager:
             gross_realized = sum(s.get("gross_realized_pnl") or 0.0 for s in states)
             fees = sum(s.get("total_fees_paid") or 0.0 for s in states)
             realized_today = sum(s.get("realized_pnl_today") or 0.0 for s in states)
+            daily_realized_net = sum(
+                float(s.get("daily_realized_net_pnl") or 0.0) for s in states
+            )
+            daily_gross = sum(float(s.get("daily_gross_pnl") or 0.0) for s in states)
+            daily_comm = sum(float(s.get("daily_commission") or 0.0) for s in states)
             open_pnl = sum(s.get("open_pnl") or 0.0 for s in states)
             open_positions = sum(s["open_positions"] for s in states)
             running = sum(1 for s in states if s["status"] == STATUS_RUNNING)
@@ -3412,15 +3441,22 @@ class PortfolioManager:
                 float(dashboard_book.get("open_pnl") or 0.0) if fold_dashboard else 0.0
             )
             stale_marks_count = sum(int(s.get("stale_positions") or 0) for s in states)
+            today_ist = current_session_date()
+            scope_label = format_session_scope(today_ist)
 
             return {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "session_date_ist": today_ist.isoformat(),
+                "session_scope_label": scope_label,
                 "total_capital": round(total_capital, 2),
                 "total_equity": round(combined_equity, 2),
                 "deployed_capital": round(deployed, 2),
                 "deployed_pct": (round(deployed / total_capital, 4) if total_capital > 0 else 0.0),
                 "daily_pnl": round(combined_daily, 2),
                 "daily_pnl_pct": round(combined_daily / pct_denominator, 6),
+                "daily_realized_net_pnl": round(daily_realized_net, 2),
+                "daily_gross_pnl": round(daily_gross, 2),
+                "daily_commission": round(daily_comm, 2),
                 "realized_pnl": round(combined_realized, 2),
                 "gross_realized_pnl": round(combined_gross, 2),
                 "total_fees_paid": round(combined_fees, 2),

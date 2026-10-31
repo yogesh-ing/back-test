@@ -27,6 +27,7 @@ from backtest.api import (
     backtest_bp,
     broker_auth_bp,
     data_bp,
+    diary_bp,
     forward_bp,
     intelligence_bp,
     portfolio_bp,
@@ -521,6 +522,7 @@ def create_app(
     app.register_blueprint(segments_bp)
     app.register_blueprint(settings_bp)
     app.register_blueprint(reporting_bp)
+    app.register_blueprint(diary_bp)
 
     # SSE broadcast cadence for the portfolio command center.
     app.config.setdefault("PORTFOLIO_SSE_INTERVAL", 1.0)
@@ -659,6 +661,18 @@ def create_app(
     def reporting_page() -> Any:
         """Consolidated P&L / tax report (PRD-002)."""
         return render_template("reporting.html", active="reporting")
+
+    @app.get("/diary")
+    def diary_page() -> Any:
+        """IST-scoped PnL Diary & Institutional Edge Suite (Paper | Live segregated)."""
+        raw_mode = (request.args.get("mode") or "paper").strip().lower()
+        initial_mode = raw_mode if raw_mode in ("paper", "live") else "paper"
+        return render_template(
+            "diary.html",
+            active="diary",
+            mode=initial_mode,
+            initial_mode=initial_mode,
+        )
 
     # Options trading dashboard (Phase 7) — page + JSON API
     from backtest.web.options_api import register_options_routes

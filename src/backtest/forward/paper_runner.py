@@ -77,6 +77,7 @@ from backtest.simulator.position_sizing import all_in_size
 from backtest.strategy.base import Strategy
 from backtest.strategy.registry import get_strategy
 from backtest.timekeeping import (
+    current_session_date,
     entry_window_refusal,
     from_market_clock,
     from_stored_utc,
@@ -1551,7 +1552,7 @@ class StrategyRunner:
         #: Most recent option-book MTM (0.0 for equity runners) — task A1.
         self.last_option_pnl: float = 0.0
         self.signal_log: Deque[Dict[str, Any]] = deque(maxlen=MAX_SIGNAL_LOG)
-        
+
         # Audit list of closed round trips — _record_closed_trade stamps
         # exit_time / session_date / net_pnl at closure; daily_pnl() reads
         # the book (portfolio.closed_positions), not this list.
@@ -1574,7 +1575,7 @@ class StrategyRunner:
         self._last_session_open: float = 0.0
         self._prev_close_realized_net: float = 0.0
         self._prev_close_open_pnl: float = 0.0
-        
+
         #: PnL-vs-spot watch series (2026-09-24): one row per closed bar while
         #: an option structure is open — feeds the end-of-day chart export
         #: (watch_export.py). Live (mstock) runners only; synthetic books are
@@ -3979,7 +3980,7 @@ class StrategyRunner:
 
     def on_fill(self, fill: FillEvent) -> None:
         """Track fills and persist closed trades to database.
-        
+
         FIX 2026-10-13: Previously this was a no-op stub. Now it:
         1. Tracks trade closures for daily PnL calculation
         2. Persists trades to database immediately
@@ -3991,7 +3992,7 @@ class StrategyRunner:
                 "Fill routed to wrong runner: %s != %s", fill.instance_id, self.instance_id
             )
             return
-        
+
         # Validate quantity (FIX for qty=0 bug)
         if not fill.quantity or fill.quantity <= 0:
             logger.error(
@@ -3999,7 +4000,7 @@ class StrategyRunner:
                 f"This indicates broken position tracking!"
             )
             return
-        
+
         logger.debug(
             "fill routed to runner %s: %s %s %g @ %s | Fees: Rs%.2f",
             self.instance_id[:8],
@@ -4009,7 +4010,7 @@ class StrategyRunner:
             fill.price,
             float(fill.total_fees) if hasattr(fill, 'total_fees') else 0.0,
         )
-        
+
         # Track trade closure for daily PnL calculation
         # A close happens when a fill reduces/closes an existing position
         try:
@@ -4019,7 +4020,7 @@ class StrategyRunner:
                 self._record_closed_trade(fill)
         except Exception as e:
             logger.warning(f"Error tracking trade closure: {e}")
-    
+
     def _record_closed_trade(self, closing_fill: FillEvent) -> None:
         """Record a closed round trip for the audit trail and daily PnL.
 
@@ -4165,7 +4166,68 @@ class StrategyRunner:
         BUG-18 anchor on the bar clock, and the two must roll together.
         """
         newest = max(self._last_bar_ts.values(), default="") or ""
-        return _ist_date_of(newest) or datetime.now(_IST).date().isoformat()
+        return _ist_date_of(newest) or current_session_date().isoformat()
+
+    def daily_realized_breakdown(self, target_date: Optional[str] = None) -> Dict[str, Any]:
+        """Today's IST-scoped realized P&L triad: gross, single commission, net (E1/E2).
+
+        Closed positions/structures from prior IST sessions remain in the
+        restored cache for lifetime equity, but are excluded here so every
+        daily commission and realized-today subtitle reflects ONLY ``target_date``.
+        """
+        today = target_date or self._pnl_session_now()
+        gross = Decimal("0")
+        commission = Decimal("0")
+        net = Decimal("0")
+        count = 0
+
+        for p in self.portfolio.closed_positions:
+            if p.closed_at is None or _as_ist_date(p.closed_at) != today:
+                continue
+            gross += p.realized_pnl
+            commission += getattr(p, "commission_total", Decimal("0"))
+            net += p.net_pnl
+            count += 1
+
+        if self.options_bridge is not None:
+            book = self.options_bridge.option_broker
+            for structure in book.get_closed_structures():
+                s_date = getattr(structure, "effective_session_date", None)
+                if not s_date and getattr(structure, "closed_at", None) is not None:
+                    s_date = _as_ist_date(structure.closed_at)
+                if s_date != today:
+                    continue
+                prior_net = getattr(structure, "prior_close_net_pnl", Decimal("0"))
+                struct_comm = structure.total_commission + getattr(
+                    structure, "statutory_fees", Decimal("0")
+                )
+                lifetime_net = getattr(
+                    structure,
+                    "net_pnl",
+                    structure.total_realized_pnl - struct_comm,
+                )
+                today_net = lifetime_net - prior_net
+                gross += today_net + struct_comm if prior_net else structure.total_realized_pnl
+                commission += struct_comm
+                net += today_net
+                count += 1
+
+        return {
+            "session_date": today,
+            "gross_pnl": float(gross),
+            "commission_total": float(commission),
+            "net_pnl": float(net),
+            "trade_count": count,
+        }
+
+    def daily_realized_net_pnl(self) -> float:
+        return self.daily_realized_breakdown()["net_pnl"]
+
+    def daily_gross_pnl(self) -> float:
+        return self.daily_realized_breakdown()["gross_pnl"]
+
+    def daily_commission(self) -> float:
+        return self.daily_realized_breakdown()["commission_total"]
 
     def _capture_pnl_session(self) -> None:
         """Roll the BUG-04 day anchors: store the current (realized, open) pair.
@@ -4405,6 +4467,7 @@ class StrategyRunner:
                 self.options_bridge.summary() if self.options_bridge is not None else None
             )
             open_structures = int((options_summary or {}).get("open_structures") or 0)
+            daily_breakdown = self.daily_realized_breakdown()
             return {
                 "instance_id": self.instance_id,
                 "name": self.config.name,
@@ -4427,6 +4490,10 @@ class StrategyRunner:
                 "realized_pnl_today": round(self.realized_pnl_today, 2),
                 "prev_close_open_pnl": round(self.prev_close_open_pnl, 2),
                 "daily_pnl": round(self.daily_pnl(), 2),
+                "daily_realized_net_pnl": round(daily_breakdown["net_pnl"], 2),
+                "daily_gross_pnl": round(daily_breakdown["gross_pnl"], 2),
+                "daily_commission": round(daily_breakdown["commission_total"], 2),
+                "daily_trade_count": int(daily_breakdown["trade_count"]),
                 "realized_pnl": round(self.realized_pnl, 2),
                 "win_rate": round(self.win_rate(), 4),
                 "max_drawdown_pct": round(self.max_drawdown_pct, 4),
@@ -5021,7 +5088,7 @@ class PaperRunner:
         # a paper run; the bars' origin comes from the source class.
         self.portfolio.mode = "paper"
         self.portfolio.source = self.source_tag
-        
+
         # Closed-trade audit list: this class has no _record_closed_trade
         # producer (fills are applied inside run_engine_loop), so daily_pnl()
         # reads portfolio.closed_positions directly.
@@ -5060,11 +5127,11 @@ class PaperRunner:
             coid_prefix="paper",
             log_label="paper run",
         )
-    
+
     # ------------------------------------------------------------------ #
     # Accounting / metrics (FIX 2026-10-13)
     # ------------------------------------------------------------------ #
-    
+
     def equity(self) -> float:
         """Current equity = cash + position value."""
         return float(self.portfolio.calculate_total_equity())

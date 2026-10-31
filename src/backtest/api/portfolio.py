@@ -12,6 +12,8 @@ import json
 import time
 from typing import Tuple
 
+from datetime import date as _date
+
 from flask import Blueprint, Response, current_app, jsonify, request
 from flask import stream_with_context
 
@@ -21,6 +23,12 @@ from backtest.data.universe import (
     correlation_group_for,
     is_universe,
     list_universes,
+)
+from backtest.diary.ledger import (
+    dedupe_normalized_trades,
+    extract_instance_prefix,
+    normalize_db_trade_row,
+    normalize_memory_trade_dict,
 )
 from backtest.forward.paper_runner import (
     MAX_TRADE_LOG,
@@ -32,6 +40,11 @@ from backtest.forward.portfolio_manager import get_portfolio_manager
 from backtest.logging_config import get_logger
 from backtest.simulator.bucket_risk import BUCKET_RISK_LIMITS, update_bucket_limits
 from backtest.simulator.errors import SimulatorError
+from backtest.timekeeping import (
+    current_session_date,
+    format_session_scope,
+    ist_session_bounds_utc,
+)
 
 portfolio_bp = Blueprint("portfolio_api", __name__)
 log = get_logger(__name__)
@@ -287,7 +300,7 @@ def risk_board() -> Tuple[Response, int]:
         if all_trades:
             # NET, not the gross ``pnl`` field: every realized figure this board
             # shows has to be the same money the bucket header shows (B5).
-            pnls = [float(t["net_pnl"]) for t in all_trades]
+            pnls = [float(t.get("net_pnl", t.get("pnl", 0))) for t in all_trades]
             wins = [p for p in pnls if p >= 0]
             losses = [p for p in pnls if p < 0]
             trade_stats["total_trades"] = len(pnls)
@@ -418,6 +431,22 @@ def aggregated_trades() -> Tuple[Response, int]:
     if kind not in ("all", "equity", "option"):
         return _error("kind must be all|equity|option")
 
+    scope = (request.args.get("scope") or "all").strip().lower()
+    if scope not in ("all", "today"):
+        return _error("scope must be all|today")
+
+    session_date_arg = (request.args.get("session_date") or "").strip()
+    target_date: _date | None = None
+    if session_date_arg:
+        try:
+            target_date = _date.fromisoformat(session_date_arg[:10])
+        except ValueError:
+            return _error(f"invalid session_date {session_date_arg!r}; expected YYYY-MM-DD")
+    elif scope == "today":
+        target_date = current_session_date()
+
+    instance_filter = (request.args.get("instance_id") or "").strip().lower()
+
     try:
         limit = int(request.args.get("limit", 200))
     except (TypeError, ValueError):
@@ -425,43 +454,121 @@ def aggregated_trades() -> Tuple[Response, int]:
     limit = max(1, min(limit, 1000))
 
     mgr = _manager()
-    trades: list[dict] = []
+    raw_records: list[dict] = []
     try:
-        for rs in mgr.list_instances(mode=mode):
-            runner = mgr.get_runner(rs.get("instance_id"))
+        instances = mgr.list_instances(mode=mode)
+        prefix_to_iid = {
+            str(rs.get("instance_id") or "")[:8].lower(): str(rs.get("instance_id") or "")
+            for rs in instances
+            if rs.get("instance_id")
+        }
+
+        # 1. Persisted DB trades (preserves retired/restarted instances + exact
+        #    commission_total; deduped below against the live in-memory tail).
+        persister = getattr(mgr, "_trade_persister", None)
+        db = getattr(persister, "db", None)
+        if db is not None:
+            try:
+                from backtest.db.models import Portfolio as PortfolioRow
+                from backtest.db.models import Trade as TradeRow
+
+                with db.session() as session:
+                    q = session.query(TradeRow, PortfolioRow).join(
+                        PortfolioRow,
+                        TradeRow.portfolio_id == PortfolioRow.portfolio_id,
+                    )
+                    if mode is not None:
+                        q = q.filter(PortfolioRow.mode == mode)
+                    if target_date is not None:
+                        start_utc, end_utc = ist_session_bounds_utc(target_date)
+                        q = q.filter(
+                            TradeRow.exit_time >= start_utc,
+                            TradeRow.exit_time < end_utc,
+                        )
+                    for trade_row, portfolio_row in q.order_by(
+                        TradeRow.exit_time.desc()
+                    ).all():
+                        _, prefix = extract_instance_prefix(
+                            portfolio_row.name, fallback_id=portfolio_row.portfolio_id
+                        )
+                        active_iid = prefix_to_iid.get(prefix or "")
+                        raw_records.append(
+                            normalize_db_trade_row(
+                                trade_row,
+                                portfolio_row,
+                                active_runner_id=active_iid,
+                            )
+                        )
+            except Exception as db_exc:  # noqa: BLE001 — fail-soft to in-memory book
+                log.debug("aggregated_trades DB read skipped: %s", db_exc)
+
+        # 2. Active in-memory runner closed trades (catches un-flushed recent
+        #    closes and non-DB test/dev sessions).
+        target_iso = target_date.isoformat() if target_date is not None else None
+        for rs in instances:
+            iid = str(rs.get("instance_id") or "")
+            runner = mgr.get_runner(iid)
             if runner is None:
                 continue
             for t in runner.closed_trades:
-                if kind != "all" and t.get("kind", "equity") != kind:
+                norm = normalize_memory_trade_dict(
+                    t,
+                    instance_id=iid,
+                    runner_name=rs.get("name"),
+                    strategy_name=rs.get("strategy_name"),
+                    mode=rs.get("mode"),
+                    portfolio_id=getattr(runner, "_db_portfolio_id", None),
+                )
+                if target_iso is not None and norm.get("session_date") != target_iso:
                     continue
-                enriched = dict(t)
-                enriched["runner_id"] = rs.get("instance_id")
-                enriched["runner_name"] = rs.get("name")
-                enriched["strategy"] = rs.get("strategy_name")
-                enriched["mode"] = rs.get("mode")
-                trades.append(enriched)
+                raw_records.append(norm)
+
+        deduped, duplicates_collapsed = dedupe_normalized_trades(raw_records)
+
+        trades: list[dict] = []
+        for t in deduped:
+            if kind != "all" and t.get("kind", "equity") != kind:
+                continue
+            if instance_filter:
+                rid = str(t.get("runner_id") or "").lower()
+                pref = str(t.get("instance_prefix") or "").lower()
+                pid = str(t.get("portfolio_id") or "").lower()
+                if not (
+                    rid == instance_filter
+                    or rid.startswith(instance_filter)
+                    or pref == instance_filter[:8]
+                    or pid == instance_filter
+                ):
+                    continue
+            trades.append(t)
 
         trades.sort(key=lambda x: x.get("exit_ts") or "", reverse=True)
         total = len(trades)
         sliced = trades[:limit]
 
-        # NET (see the risk-board stats above): this is the number the operator
-        # compares with the bucket header, so it must be after commission and
-        # statutory, not the price P&L alone.
-        pnls = [float(t["net_pnl"]) for t in trades]
+        gross_total = round(sum(float(t.get("gross_pnl") or 0.0) for t in trades), 2)
+        comm_total = round(sum(float(t.get("commission_total") or 0.0) for t in trades), 2)
+        net_total = round(sum(float(t.get("net_pnl") or 0.0) for t in trades), 2)
+        wins = sum(1 for t in trades if t.get("is_winner"))
+        mismatches = sum(1 for t in trades if not t.get("reconcile_ok", True))
+
         summary = {
             "total": total,
             "returned": len(sliced),
-            "total_pnl": round(sum(pnls), 2) if pnls else 0.0,
-            "win_rate": round(sum(1 for p in pnls if p >= 0) / len(pnls), 4)
-            if pnls
-            else 0.0,
-            # What ``total`` really counts: each book hands over its last
-            # MAX_TRADE_LOG round trips, so a book with 500 closes is not
-            # summarised in full. Named here so the tab can say so — the header
-            # is a lifetime figure and the two are only comparable once the
-            # window is on the label.
+            "total_gross_pnl": gross_total,
+            "total_commission": comm_total,
+            "total_net_pnl": net_total,
+            "total_pnl": net_total,
+            "win_rate": round(wins / total, 4) if total else 0.0,
             "per_runner_cap": MAX_TRADE_LOG,
+            "mismatch_count": mismatches,
+            "duplicates_collapsed": duplicates_collapsed,
+            "session_date_ist": (
+                target_date.isoformat() if target_date else current_session_date().isoformat()
+            ),
+            "session_scope_label": (
+                format_session_scope(target_date) if target_date else "All sessions"
+            ),
         }
 
     except Exception as exc:  # noqa: BLE001
@@ -469,7 +576,14 @@ def aggregated_trades() -> Tuple[Response, int]:
         return _error(f"failed to aggregate trades: {exc}", 500)
 
     return jsonify(
-        {"success": True, "trades": sliced, "summary": summary, "mode": mode or "all", "kind": kind}
+        {
+            "success": True,
+            "trades": sliced,
+            "summary": summary,
+            "mode": mode or "all",
+            "kind": kind,
+            "scope": "session_date" if session_date_arg else scope,
+        }
     ), 200
 
 

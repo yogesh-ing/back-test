@@ -51,6 +51,12 @@
       deployed_pct: b.capital > 0 ? b.deployed_capital / b.capital : 0,
       daily_pnl: b.daily_pnl,
       daily_pnl_pct: b.daily_pnl_pct,
+      realized_pnl_today: b.realized_pnl_today,
+      daily_realized_net_pnl: b.daily_realized_net_pnl,
+      daily_gross_pnl: b.daily_gross_pnl,
+      daily_commission: b.daily_commission,
+      session_date_ist: b.session_date_ist || p.session_date_ist,
+      session_scope_label: b.session_scope_label || p.session_scope_label,
       realized_pnl: b.realized_pnl,
       open_positions: b.open_positions,
       runner_count: b.count,
@@ -154,15 +160,25 @@
       " (" + pct(p.deployed_pct) + ")";
     $("m-deployed-bar").style.width = Math.min(100, (p.deployed_pct || 0) * 100) + "%";
 
+    const scopeLabel = p.session_scope_label || "Today · IST";
     const daily = $("m-daily-pnl");
     daily.textContent = fmtSigned(p.daily_pnl);
     daily.className = "metric-value " + pnlClass(p.daily_pnl);
-    $("m-daily-pnl-pct").textContent = (p.daily_pnl >= 0 ? "+" : "") +
+    const pctStr = (p.daily_pnl >= 0 ? "+" : "") +
       ((p.daily_pnl_pct || 0) * 100).toFixed(2) + "%";
+    $("m-daily-pnl-pct").textContent = scopeLabel + " · " + pctStr;
 
+    const realizedToday = p.realized_pnl_today != null
+      ? p.realized_pnl_today
+      : (p.daily_realized_net_pnl != null ? p.daily_realized_net_pnl : p.realized_pnl);
     const real = $("m-realized-pnl");
-    real.textContent = fmtSigned(p.realized_pnl);
-    real.className = "metric-value " + pnlClass(p.realized_pnl);
+    real.textContent = fmtSigned(realizedToday);
+    real.className = "metric-value " + pnlClass(realizedToday);
+    const realSub = $("m-realized-sub");
+    if (realSub) {
+      const commToday = p.daily_commission != null ? p.daily_commission : 0;
+      realSub.textContent = scopeLabel + " · Comm " + fmtMoney(commToday);
+    }
 
     const staleMarksCount = typeof p.stale_marks_count === "number"
       ? p.stale_marks_count

@@ -58,6 +58,13 @@ DEDUPE_COLUMNS = (
 #: Unit separator — cannot appear in a symbol or an ISO timestamp.
 _KEY_JOINER = "\x1f"
 
+_VALID_PORTFOLIO_MODES = frozenset({"paper", "live"})
+
+
+def _resolve_runner_mode(cfg: Any) -> str:
+    raw = str(getattr(cfg, "mode", "paper") or "paper").strip().lower()
+    return raw if raw in _VALID_PORTFOLIO_MODES else "paper"
+
 
 def _canonical(value: Any) -> str:
     """Render one identity column the same way it is stored.
@@ -428,11 +435,14 @@ class LiveTradePersister:
 
         cfg = runner.config
         name = f"{cfg.name} [{runner.instance_id[:8]}]"
+        resolved_mode = _resolve_runner_mode(cfg)
         with self.db.session() as session:
             existing = (
                 session.query(PortfolioRow).filter(PortfolioRow.name == name).one_or_none()
             )
             if existing is not None:
+                if getattr(cfg, "mode", None) and existing.mode != resolved_mode:
+                    existing.mode = resolved_mode
                 runner._db_portfolio_id = existing.portfolio_id
                 return existing.portfolio_id
             row = PortfolioRow(
@@ -443,7 +453,7 @@ class LiveTradePersister:
                         or getattr(runner.portfolio, "cash", 0)
                         or 0)
                 ),
-                mode="paper",
+                mode=resolved_mode,
                 # Never a literal feed name: the runner's own source is already
                 # policy-resolved at construction, and if a legacy config
                 # somehow carries none, this writes the deployment's broker

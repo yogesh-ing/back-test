@@ -2322,3 +2322,58 @@ BACKTEST_LEDGER_TABLES = (
     BacktestRun.__table__,
     BacktestRunSeries.__table__,
 )
+
+
+# ---------------------------------------------------------------------------
+# PnL Diary & Institutional Edge Suite — Operator Journal (Slice 5 / Mig 023)
+# ---------------------------------------------------------------------------
+
+
+class DiaryNote(Base):
+    """Book-segregated IST session & spawned-instance operator journal entry.
+
+    Paper and Live books are strictly isolated via ``mode IN ('paper','live')``.
+    ``portfolio_id`` / ``instance_label`` are optional so a note can attach to
+    an entire IST session day, a strategy on that day, or a specific spawned
+    runner instance (without a rigid FK that would block notes on compacted or
+    in-memory runs).
+    """
+
+    __tablename__ = "diary_notes"
+
+    note_id: Mapped[str] = mapped_column(
+        UUIDStr, primary_key=True, default=_uuid4_str
+    )
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    strategy_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    portfolio_id: Mapped[Optional[str]] = mapped_column(UUIDStr, nullable=True)
+    instance_label: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    regime_tags: Mapped[Any] = mapped_column(
+        JSONVariant, nullable=False, server_default=text("'[]'")
+    )
+    note_text: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("''")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("mode IN ('paper','live')", name="ck_diary_notes_mode"),
+        Index("ix_diary_notes_mode_session", "mode", "session_date"),
+        Index("ix_diary_notes_strategy", "mode", "strategy_name"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"<DiaryNote {self.note_id[:8]} {self.mode} "
+            f"{self.session_date.isoformat()}>"
+        )
+
+
+#: Tables owned by the PnL Diary journal (scoped ``create_all`` helper).
+DIARY_TABLES = (DiaryNote.__table__,)

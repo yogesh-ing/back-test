@@ -27,6 +27,7 @@
                 </div>
             </div>
             <div class="pcc-actions">
+                <a id="btn-open-diary" class="btn btn-ghost" href="/diary?mode={{ center_mode if center_mode in ('paper', 'live') else 'paper' }}" title="Open IST session PnL Diary for this book">{{ icon('calendar', 13) }} PnL diary</a>
                 <button id="btn-add" class="btn btn-primary" type="button">{{ icon('plus', 14) }} Add instance</button>
                 <button id="btn-pause-all" class="btn btn-warn" type="button">{{ icon('pause', 13) }} Pause all</button>
                 <button id="btn-resume-all" class="btn btn-ghost" type="button">{{ icon('play', 13) }} Resume all</button>
@@ -55,8 +56,9 @@
                 <div class="metric-sub" id="m-daily-pnl-pct"></div>
             </div>
             <div class="metric-card">
-                <div class="metric-label">Realized P&amp;L</div>
+                <div class="metric-label">Realized Today</div>
                 <div class="metric-value" id="m-realized-pnl">—</div>
+                <div class="metric-sub" id="m-realized-sub"></div>
             </div>
             <div class="metric-card">
                 <div class="metric-label">Open Positions</div>
@@ -440,17 +442,21 @@
         <div class="tab-panel" id="tab-aggregated-trades" hidden>
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
                 <div>
-                    <h3 style="margin:0;">📊 Aggregated Closed Trades</h3>
-                    <div class="muted">All closed trades across runners — the missing post-trade view. Use filters to slice by bucket or instrument.</div>
-                    <div id="agg-trades-summary" class="muted" style="margin-top:4px;"></div>
+                    <h3 style="margin:0;">📊 Closed Trade Ledger</h3>
+                    <div class="muted">Day-scoped IST trade ledger with single Commission sum (Gross − Commission = Net).</div>
+                    <div id="agg-trades-summary" class="muted" style="margin-top:4px; font-variant-numeric:tabular-nums;"></div>
                 </div>
                 <div style="display:flex; gap:8px; align-items:center;">
-                    <select id="agg-trade-kind" class="input input-select" style="min-width:110px;">
+                    <select id="agg-trade-scope" class="input input-select" style="min-width:135px;" aria-label="Session scope">
+                        <option value="today" selected>Today (IST)</option>
+                        <option value="all">All Sessions</option>
+                    </select>
+                    <select id="agg-trade-kind" class="input input-select" style="min-width:110px;" aria-label="Instrument kind">
                         <option value="all">All Kinds</option>
                         <option value="equity">Equity Only</option>
                         <option value="option">Option Only</option>
                     </select>
-                    <select id="agg-trade-limit" class="input input-select" style="min-width:90px;">
+                    <select id="agg-trade-limit" class="input input-select" style="min-width:90px;" aria-label="Row limit">
                         <option value="50">50</option>
                         <option value="100" selected>100</option>
                         <option value="200">200</option>
@@ -461,9 +467,9 @@
             </div>
             <div class="table-scroll">
                 <table class="matrix-table">
-                    <thead><tr><th>Symbol</th><th>Runner</th><th>Strategy</th><th>Kind</th><th>Side</th><th class="num">Qty</th><th class="num">Entry → Exit</th><th class="num">PnL</th><th>Exit Reason / Time</th></tr></thead>
+                    <thead><tr><th>Symbol</th><th>Runner</th><th>Strategy</th><th>Kind</th><th>Side</th><th class="num">Qty</th><th class="num">Entry → Exit</th><th class="num">Gross</th><th class="num">Commission</th><th class="num">Net P&amp;L</th><th>Exit / IST Time</th></tr></thead>
                     <tbody id="agg-trades-body">
-                        <tr><td colspan="9" class="muted" style="padding:16px">Click Refresh to load aggregated trades.</td></tr>
+                        <tr><td colspan="11" class="muted" style="padding:16px">Click Refresh to load closed trades.</td></tr>
                     </tbody>
                 </table>
             </div>
