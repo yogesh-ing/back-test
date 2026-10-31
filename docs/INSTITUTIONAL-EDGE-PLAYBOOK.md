@@ -99,3 +99,16 @@ Run this sequence after every **10–20 closed Paper trades** (changing **one pa
 - **Net Expectancy & Hyperbolic Breakeven Curve**:
   $$E_{\text{net}} = W \cdot \overline{W}_{\text{net}} - (1 - W) \cdot |\overline{L}_{\text{net}}|, \qquad R = \frac{\overline{W}_{\text{net}}}{|\overline{L}_{\text{net}}|}, \qquad R_{\text{BE}} = \frac{1 - W}{W}$$
 - **Strict Book & Clock Discipline**: `Paper` and `Live` books are strictly segregated; all session dates and intraday windows use **`Asia/Kolkata` (`IST`, `+05:30`)**.
+
+---
+
+## 6. Constrained Live Roster Selection Tournament (When 15–20 Paper Runners Pass)
+
+When 15–20 Paper instances run across 30–40 sessions and multiple pass all 6 Graduation Gates, `/diary` → **`Graduation & Journal`** (`GET /api/diary/roster-plan`) runs a 5-stage portfolio construction tournament:
+
+1. **Gate, Entitlement & Backtest Haircut Filter**: Requires `6/6` Graduation Gates (`PROMOTE_CANDIDATE`), Live option entitlement clearance (`long_call` / `long_put` baseline), and rejects severe curve-fit decay (`Backtest PF ≥ 1.50×` with `< 45%` Paper PF retention).
+2. **Composite Capital-Efficiency Ranking (`0–100`)**: `40 pts` Return-over-Drawdown (`Net P&L / Max DD`) + `25 pts` Net PF cushion + `15 pts` Friction efficiency (`1 − Drag`) + `20 pts` Backtest-to-Paper PF retention & sample depth.
+3. **Multi-Timeframe Family Deduplication**: Winner-Take-All per `(Strategy, Canonical Underlying)` across timeframes unless fast scalp (`≤ 5m`) vs swing (`≥ 1h/1day`) **and** daily IST P&L correlation `ρ < 0.50`.
+4. **Daily IST Net P&L De-Correlation**: Greedy selection skipping hidden clones whose daily IST Net P&L Pearson correlation `ρ > max_correlation` (default `0.65` across `≥ 5` active IST session days).
+5. **Reserve, Underlying Concentration & Slot Knapsack**: Holds `20%` margin reserve, caps single-underlying allocation at `40%` of total Live capital (catching `NIFTY` spot + `NIFTY` CE option overlap), and splits winners into **Wave 1 (Slots #1–#2)**, **Wave 2 (Slots #3+)**, and **Warm Paper Bench** rotation backups.
+

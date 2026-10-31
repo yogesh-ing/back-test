@@ -188,6 +188,15 @@
     regimesData: null,
     payoffData: null,
     graduationData: null,
+    rosterData: null,
+    rosterParams: {
+      liveCapital: 300000,
+      reservePct: 20,
+      maxUnderlyingPct: 40,
+      maxCorrelation: 0.65,
+      maxLiveRunners: 5,
+      dedupeTimeframes: true
+    },
     notesData: null,
     selectedJournalTags: {},
     expandedStrategies: {},
@@ -243,6 +252,12 @@
       gradTitleEl.innerHTML = mode === 'live'
         ? 'Live Runner Health &amp; Continuation Scorecard'
         : 'Paper &rarr; Live Graduation Scorecard';
+    }
+    var rosterTitleEl = document.getElementById('diary-roster-title');
+    if (rosterTitleEl) {
+      rosterTitleEl.innerHTML = mode === 'live'
+        ? 'Active Live Roster Capital &amp; Correlation Audit'
+        : 'Constrained Live Roster Optimizer &amp; Backtest-vs-Paper Matrix';
     }
     try {
       localStorage.setItem('trading-diary.mode', mode);
@@ -1577,6 +1592,218 @@
     tableWrap.innerHTML = buildGraduationTableHtml(data.instances || [], bookLabel);
   }
 
+  function buildRosterAllocStripHtml(rosterData) {
+    if (!rosterData || !rosterData.summary || !rosterData.constraints) {
+      return '<span class="muted">No portfolio allocation computed yet.</span>';
+    }
+    var sum = rosterData.summary;
+    var cfg = rosterData.constraints;
+    var mix = sum.underlying_mix || [];
+    var mixHtml = '';
+    for (var i = 0; i < mix.length; i++) {
+      var m = mix[i];
+      mixHtml +=
+        '<span class="diary-cfg-pill">' +
+        escapeHtml(m.underlying) + ': ' + fmtInrAbs(m.allocated_inr) +
+        ' (' + Number(m.share_of_live_pct || 0).toFixed(1) + '%)' +
+        '</span>';
+    }
+    if (!mixHtml) {
+      mixHtml = '<span class="muted">0 underlyings allocated</span>';
+    }
+    return (
+      '<span><strong>Deployable Used:</strong> ' + fmtInrAbs(sum.allocated_capital_inr) +
+      ' / ' + fmtInrAbs(cfg.deployable_budget) + '</span>' +
+      '<span class="muted">&middot;</span>' +
+      '<span><strong>Margin Reserve:</strong> ' + fmtInrAbs(sum.reserve_inr) +
+      ' (' + Number(cfg.reserve_pct || 0).toFixed(0) + '%)</span>' +
+      '<span class="muted">&middot;</span>' +
+      '<span><strong>Underlying Exposure:</strong> ' + mixHtml + '</span>' +
+      '<span class="muted">&middot;</span>' +
+      '<span class="muted">Saved Backtests Indexed: ' + Number(sum.backtest_runs_indexed || 0) + '</span>'
+    );
+  }
+
+  function buildRosterTableHtml(rosterData, bookLabel) {
+    var rows = (rosterData && rosterData.candidates) ? rosterData.candidates : [];
+    if (!rows.length) {
+      return '<div class="diary-empty">No ' + escapeHtml(bookLabel || 'Paper') +
+        ' instances in this IST window to rank for the Live Roster.</div>';
+    }
+
+    var html =
+      '<table class="diary-table">' +
+      '<thead><tr>' +
+      '<th>Tournament Decision</th>' +
+      '<th>Instance &amp; Capital</th>' +
+      '<th class="num">Composite</th>' +
+      '<th>Backtest &rarr; ' + escapeHtml(bookLabel || 'Paper') + ' Reality</th>' +
+      '<th class="num">Max Corr (&rho;)</th>' +
+      '<th class="num">Gates</th>' +
+      '<th class="num">Net P&amp;L</th>' +
+      '<th class="num">Commission</th>' +
+      '<th class="num">Max DD</th>' +
+      '</tr></thead><tbody>';
+
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var isSelected = r.decision === 'SELECTED_LIVE_ROSTER';
+      var rowCls = isSelected ? ' class="diary-roster-row-selected"' : '';
+      var sb = r.score_breakdown || {};
+      var sim = r.sim_to_real || {};
+      var bt = sim.benchmark || null;
+
+      var simCell = '<span class="diary-bt-pill" data-tone="' + escapeHtml(sim.status_tone || 'neutral') + '">' +
+        escapeHtml(sim.status_label || 'Paper-Only') + '</span>';
+      if (sim.has_backtest && bt) {
+        var btPfStr = bt.profit_factor !== null && bt.profit_factor !== undefined
+          ? Number(bt.profit_factor).toFixed(2) + '&times;'
+          : '—';
+        var papPfStr = r.unbounded_pf
+          ? '&infin;'
+          : (r.profit_factor !== null && r.profit_factor !== undefined ? Number(r.profit_factor).toFixed(2) + '&times;' : '0.00&times;');
+        var wrDriftStr = sim.win_rate_drift_pp !== null && sim.win_rate_drift_pp !== undefined
+          ? ((Number(sim.win_rate_drift_pp) >= 0 ? '+' : '') + Number(sim.win_rate_drift_pp).toFixed(1) + 'pp WR')
+          : '';
+        var mcStr = bt.monte_carlo_profit_prob_pct !== null && bt.monte_carlo_profit_prob_pct !== undefined
+          ? (' &middot; MC ' + Number(bt.monte_carlo_profit_prob_pct).toFixed(0) + '%')
+          : '';
+        simCell +=
+          '<div class="muted" style="font-size:10.5px;margin-top:2px;font-variant-numeric:tabular-nums;">' +
+          'BT PF ' + btPfStr + ' &rarr; ' + papPfStr +
+          (wrDriftStr ? ' &middot; ' + wrDriftStr : '') +
+          mcStr +
+          '</div>';
+      }
+
+      var corrCell = '—';
+      if (r.max_corr_with_selected !== null && r.max_corr_with_selected !== undefined) {
+        var cVal = Number(r.max_corr_with_selected);
+        var cSign = cVal >= 0 ? '+' : '';
+        corrCell = '<span style="font-family:var(--font-mono);font-variant-numeric:tabular-nums;">' +
+          cSign + cVal.toFixed(2) + '</span>' +
+          (r.max_corr_peer ? '<div class="muted" style="font-size:10px;">vs ' + escapeHtml(r.max_corr_peer) + '</div>' : '');
+      } else if (r.roster_slot === 1) {
+        corrCell = '<span class="muted" style="font-size:10.5px;">Anchor #1</span>';
+      }
+
+      var ddText = fmtInrAbs(r.max_drawdown_inr);
+      if (r.max_drawdown_pct !== null && r.max_drawdown_pct !== undefined) {
+        ddText += ' (' + Number(r.max_drawdown_pct).toFixed(1) + '%)';
+      }
+
+      var netNum = Number(r.net_pnl || 0);
+
+      html +=
+        '<tr' + rowCls + '>' +
+        '<td>' +
+          '<span class="diary-verdict-badge" data-tone="' + escapeHtml(r.decision_tone || 'neutral') + '">' +
+          escapeHtml(r.decision_label || r.decision) + '</span>' +
+          '<div class="muted" style="font-size:10.5px;margin-top:3px;max-width:260px;line-height:1.35;">' +
+          escapeHtml(r.decision_reason || '') + '</div>' +
+        '</td>' +
+        '<td>' +
+          '<div style="font-weight:700;color:var(--text-strong);">' + escapeHtml(r.instance_label || r.instance_id || 'Instance') + '</div>' +
+          '<div class="muted" style="font-size:10.5px;">' +
+            escapeHtml(r.strategy || '') + ' &middot; <strong>' + escapeHtml(r.primary_underlying || '') + '</strong>' +
+            (r.timeframe ? ' &middot; ' + escapeHtml(r.timeframe) : '') +
+            ' &middot; Req ' + fmtInrAbs(r.required_capital) +
+            (r.capital_is_estimated ? ' (est)' : '') +
+          '</div>' +
+        '</td>' +
+        '<td class="num tabular-nums">' +
+          '<span class="diary-roster-score-badge">' + Number(r.composite_score || 0).toFixed(1) + '</span>' +
+          '<div class="muted" style="font-size:10px;margin-top:2px;">' +
+          'R/DD ' + Number(sb.return_over_dd || 0).toFixed(1) + '&times;' +
+          '</div>' +
+        '</td>' +
+        '<td>' + simCell + '</td>' +
+        '<td class="num tabular-nums">' + corrCell + '</td>' +
+        '<td class="num tabular-nums">' +
+          Number(r.gates_passed || 0) + '/' + Number(r.gates_total || 6) +
+        '</td>' +
+        '<td class="num tabular-nums ' + pnlToneClass(netNum) + '">' + fmtInrSigned(netNum) + '</td>' +
+        '<td class="num tabular-nums">' + fmtInrAbs(r.commission) + '</td>' +
+        '<td class="num tabular-nums">' + ddText + '</td>' +
+        '</tr>';
+    }
+
+    html += '</tbody></table>';
+    return html;
+  }
+
+  function readRosterInputsIntoState() {
+    var capEl = document.getElementById('diary-roster-capital');
+    var resEl = document.getElementById('diary-roster-reserve');
+    var undEl = document.getElementById('diary-roster-und-cap');
+    var corrEl = document.getElementById('diary-roster-corr-cap');
+    var slotsEl = document.getElementById('diary-roster-max-slots');
+    var tfEl = document.getElementById('diary-roster-dedupe-tf');
+    if (capEl && capEl.value) state.rosterParams.liveCapital = Number(capEl.value) || 300000;
+    if (resEl && resEl.value !== '') state.rosterParams.reservePct = Number(resEl.value);
+    if (undEl && undEl.value !== '') state.rosterParams.maxUnderlyingPct = Number(undEl.value);
+    if (corrEl && corrEl.value !== '') state.rosterParams.maxCorrelation = Number(corrEl.value);
+    if (slotsEl && slotsEl.value !== '') state.rosterParams.maxLiveRunners = parseInt(slotsEl.value, 10) || 5;
+    if (tfEl) state.rosterParams.dedupeTimeframes = Boolean(tfEl.checked);
+  }
+
+  function buildRosterQueryString() {
+    readRosterInputsIntoState();
+    return buildQuery({
+      mode: state.mode,
+      from: state.selFrom,
+      to: state.selTo,
+      strategy: state.strategy,
+      live_capital: state.rosterParams.liveCapital,
+      reserve_pct: state.rosterParams.reservePct,
+      max_underlying_pct: state.rosterParams.maxUnderlyingPct,
+      max_correlation: state.rosterParams.maxCorrelation,
+      max_live_runners: state.rosterParams.maxLiveRunners,
+      dedupe_timeframes: state.rosterParams.dedupeTimeframes ? 'true' : 'false'
+    });
+  }
+
+  function renderRosterPanel() {
+    var data = state.rosterData;
+    var tableWrap = document.getElementById('diary-roster-table-wrap');
+    var stripWrap = document.getElementById('diary-roster-alloc-strip');
+    var pillsWrap = document.getElementById('diary-roster-summary-pills');
+    var bookLabel = state.mode === 'live' ? 'Live' : 'Paper';
+    if (!tableWrap) return;
+    if (!data) {
+      tableWrap.innerHTML = '<div class="diary-empty">No roster tournament loaded.</div>';
+      if (stripWrap) stripWrap.innerHTML = '';
+      return;
+    }
+
+    var sum = data.summary || {};
+    if (pillsWrap) {
+      pillsWrap.innerHTML =
+        '<span class="diary-verdict-badge" data-tone="positive">Live Roster: ' + Number(sum.selected_count || 0) + '</span>' +
+        '<span class="diary-verdict-badge" data-tone="neutral">Warm Bench: ' + Number(sum.warm_bench_count || 0) + '</span>' +
+        '<span class="diary-verdict-badge" data-tone="caution">Pruned Clones/TFs: ' + Number(sum.pruned_duplicate_or_corr_count || 0) + '</span>';
+    }
+    if (stripWrap) {
+      stripWrap.innerHTML = buildRosterAllocStripHtml(data);
+    }
+    tableWrap.innerHTML = buildRosterTableHtml(data, bookLabel);
+  }
+
+  function loadRosterOnly(ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    var qs = buildRosterQueryString();
+    return fetchJson('/api/diary/roster-plan?' + qs).then(function (data) {
+      state.rosterData = data;
+      renderRosterPanel();
+    }).catch(function (err) {
+      var wrap = document.getElementById('diary-roster-table-wrap');
+      if (wrap) {
+        wrap.innerHTML = '<div class="diary-empty">Roster optimizer error: ' +
+          escapeHtml(err && err.message ? err.message : String(err)) + '</div>';
+      }
+    });
+  }
+
   function syncJournalTagButtons() {
     var btns = document.querySelectorAll('[data-journal-tag]');
     for (var i = 0; i < btns.length; i++) {
@@ -1852,9 +2079,13 @@
       strategy: state.strategy,
       group_by: state.payoffGroupBy
     });
+    var rosterQs = buildRosterQueryString();
     var winCalPromise = (state.selFrom >= mb.from && state.selTo <= mb.to)
       ? null
       : fetchJson('/api/diary/calendar?' + winQs);
+    var rosterPromise = fetchJson('/api/diary/roster-plan?' + rosterQs).catch(function () {
+      return null;
+    });
 
     return Promise.all([
       fetchJson('/api/diary/calendar?' + calQs),
@@ -1864,7 +2095,8 @@
       fetchJson('/api/diary/edge/payoff?' + payQs),
       fetchJson('/api/diary/graduation?' + winQs),
       fetchJson('/api/diary/notes?' + winQs),
-      winCalPromise
+      winCalPromise,
+      rosterPromise
     ]).then(function (res) {
       var calData = res[0];
       var sumData = res[1];
@@ -1874,6 +2106,7 @@
       var gradData = res[5];
       var notesData = res[6];
       var winCal = res[7];
+      var rosterData = res[8];
 
       if (calData.today_ist) {
         state.todayIst = calData.today_ist;
@@ -1885,6 +2118,7 @@
       state.payoffData = payData;
       state.graduationData = gradData;
       state.notesData = notesData;
+      state.rosterData = rosterData;
 
       populateStrategies(sumData.available_strategies || calData.available_strategies || []);
       renderSummary(sumData);
@@ -1893,6 +2127,7 @@
       renderRegimesPanel();
       renderPayoffPanel();
       renderGraduationPanel();
+      renderRosterPanel();
       renderJournalPanel();
 
       var windowDays = [];
@@ -2194,6 +2429,11 @@
       journalFormEl.addEventListener('submit', saveJournalNote);
     }
 
+    var rosterFormEl = document.getElementById('diary-roster-form');
+    if (rosterFormEl) {
+      rosterFormEl.addEventListener('submit', loadRosterOnly);
+    }
+
     var cancelEditBtn = document.getElementById('diary-note-cancel');
     if (cancelEditBtn) {
       cancelEditBtn.addEventListener('click', function () {
@@ -2237,6 +2477,8 @@
     buildHoldDurationTableHtml: buildHoldDurationTableHtml,
     buildPayoffQuadrantSvg: buildPayoffQuadrantSvg,
     buildGraduationTableHtml: buildGraduationTableHtml,
+    buildRosterAllocStripHtml: buildRosterAllocStripHtml,
+    buildRosterTableHtml: buildRosterTableHtml,
     buildJournalFeedHtml: buildJournalFeedHtml,
     monthBounds: monthBounds,
     mondayOfWeekIso: mondayOfWeekIso,

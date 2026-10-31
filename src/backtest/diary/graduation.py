@@ -43,6 +43,8 @@ KNOWN_OPTION_STRUCTURES = (
     "bull_call_spread",
     "bear_put_spread",
     "long_straddle",
+    "long_strangle",
+    "short_strangle",
     "strangle",
     "short_straddle",
     "short_call",

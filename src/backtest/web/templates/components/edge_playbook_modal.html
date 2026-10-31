@@ -19,7 +19,8 @@
         <button type="button" class="epb-tab-btn" role="tab" id="epb-tab-btn-params" data-epb-tab="params" aria-controls="epb-panel-params" aria-selected="false" tabindex="-1">2. Institutional Parameters</button>
         <button type="button" class="epb-tab-btn" role="tab" id="epb-tab-btn-workflow" data-epb-tab="workflow" aria-controls="epb-panel-workflow" aria-selected="false" tabindex="-1">3. 5-Step Strategy Tuning</button>
         <button type="button" class="epb-tab-btn" role="tab" id="epb-tab-btn-prescriptions" data-epb-tab="prescriptions" aria-controls="epb-panel-prescriptions" aria-selected="false" tabindex="-1">4. Prescription Decoder</button>
-        <button type="button" class="epb-tab-btn" role="tab" id="epb-tab-btn-formulas" data-epb-tab="formulas" aria-controls="epb-panel-formulas" aria-selected="false" tabindex="-1">5. Equations &amp; Ledger Rules</button>
+        <button type="button" class="epb-tab-btn" role="tab" id="epb-tab-btn-roster" data-epb-tab="roster" aria-controls="epb-panel-roster" aria-selected="false" tabindex="-1">5. Live Roster Tournament</button>
+        <button type="button" class="epb-tab-btn" role="tab" id="epb-tab-btn-formulas" data-epb-tab="formulas" aria-controls="epb-panel-formulas" aria-selected="false" tabindex="-1">6. Equations &amp; Ledger Rules</button>
       </div>
     </div>
 
@@ -338,7 +339,60 @@
         </div>
       </div>
 
-      <!-- TAB 5: EQUATIONS, BREAKEVEN HURDLE TABLE & E2 LEDGER RULES -->
+      <!-- TAB 5: CONSTRAINED LIVE ROSTER TOURNAMENT (WHEN 15-20 PAPER RUNNERS PASS) -->
+      <div id="epb-panel-roster" role="tabpanel" aria-labelledby="epb-tab-btn-roster" hidden>
+        <p class="epb-section-lead">
+          Passing the 6 Graduation Gates proves a runner is <strong>individually viable</strong> — not that all 15–20 passing Paper strategies belong in Live simultaneously.
+          The <strong>Constrained Live Roster Optimizer</strong> (`/diary` &rarr; `Graduation &amp; Journal`) runs a 5-stage prop-desk tournament to pick a capital-safe, uncorrelated Live Roster and keep runners #6+ warm in Paper as rotation backups.
+        </p>
+
+        <div class="epb-table-wrap">
+          <table class="epb-table">
+            <thead>
+              <tr>
+                <th>Tournament Stage</th>
+                <th>Default Rule / Threshold</th>
+                <th>What It Prevents</th>
+                <th>Tournament Outcome</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr data-epb-searchable>
+                <td><strong>1. Gate, Entitlement &amp; BT Haircut Filter</strong></td>
+                <td class="epb-num">`6/6` Gates &middot; `PF Retention ≥ 45%` &middot; Live Entitlement OK</td>
+                <td>Promoting curve-fit Paper flukes (`BT PF 2.4× &rarr; Paper 0.9×`) or unentitled option structures (`entitlement.live`).</td>
+                <td><span class="epb-pill epb-pill-neg">Disqualified / Hold</span></td>
+              </tr>
+              <tr data-epb-searchable>
+                <td><strong>2. Composite Capital-Efficiency Score</strong></td>
+                <td class="epb-num">`40` R/DD + `25` PF + `15` (1&minus;Drag) + `20` Sim-to-Real</td>
+                <td>Picking volatile high-rupee winners with deep drawdowns over smooth compounding edges.</td>
+                <td><span class="epb-pill epb-pill-info">0–100 Rank Order</span></td>
+              </tr>
+              <tr data-epb-searchable>
+                <td><strong>3. Multi-Timeframe Family Dedupe</strong></td>
+                <td class="epb-num">1 winner per `(Strategy, Underlying)` unless fast-scalp vs `≥1h` swing &amp; `&rho; &lt; 0.50`</td>
+                <td>Secretly running `3×` leverage on the exact same signal (`5m` + `15m` ORB on `NIFTY`).</td>
+                <td><span class="epb-pill epb-pill-warn">Pruned &middot; Same Strat+Symbol TF</span></td>
+              </tr>
+              <tr data-epb-searchable>
+                <td><strong>4. Daily IST Net P&amp;L De-Correlation</strong></td>
+                <td class="epb-num">Pairwise Pearson `&rho; ≤ 0.65` (`≥ 5` active IST days)</td>
+                <td>Deploying 4 differently named momentum strategies that all suffer max loss on the same choppy session.</td>
+                <td><span class="epb-pill epb-pill-warn">Pruned &middot; Corr &rho; &gt; Cap</span></td>
+              </tr>
+              <tr data-epb-searchable>
+                <td><strong>5. Reserve, Underlying &amp; Slot Knapsack</strong></td>
+                <td class="epb-num">`20%` Cash Reserve &middot; `≤ 40%` per Underlying &middot; `≤ 5` Live Slots</td>
+                <td>Margin starvation, single-index wipeouts (`NIFTY` spot + `NIFTY` CE stacked), and execution overload.</td>
+                <td><span class="epb-pill epb-pill-pos">#1–#2 Wave 1 / #3+ Wave 2</span> vs <span class="epb-pill epb-pill-neutral">Warm Bench</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- TAB 6: EQUATIONS, BREAKEVEN HURDLE TABLE & E2 LEDGER RULES -->
       <div id="epb-panel-formulas" role="tabpanel" aria-labelledby="epb-tab-btn-formulas" hidden>
         <div class="epb-grid-2">
           <div class="epb-card" data-epb-searchable>

@@ -75,7 +75,7 @@ function buildPlaybookDom({ search = "" } = {}) {
   makeEl("epb-filter-input");
   makeEl("epb-search-banner", { hidden: true });
 
-  const tabKeys = ["synergy", "params", "workflow", "prescriptions", "formulas"];
+  const tabKeys = ["synergy", "params", "workflow", "prescriptions", "roster", "formulas"];
   const tabButtons = tabKeys.map((k, idx) =>
     makeEl("epb-tab-btn-" + k, {
       attrs: { "data-epb-tab": k, "aria-selected": idx === 0 ? "true" : "false" },
@@ -90,6 +90,7 @@ function buildPlaybookDom({ search = "" } = {}) {
     params: ["Net Profit Factor >= 1.35x and Sample >= 20 trades"],
     workflow: ["11:30-13:30 Midday Chop entry blackout window"],
     prescriptions: ["CHURN_FRICTION_DRAG positive gross flipped by commission"],
+    roster: ["Constrained Live Roster Optimizer daily correlation 0.65 cap"],
     formulas: ["Net P&L = Gross P&L - Commission single combined sum"],
   };
 

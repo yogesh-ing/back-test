@@ -7,7 +7,7 @@
 (function (root) {
   "use strict";
 
-  const VALID_TABS = ["synergy", "params", "workflow", "prescriptions", "formulas"];
+  const VALID_TABS = ["synergy", "params", "workflow", "prescriptions", "roster", "formulas"];
 
   function byId(id) {
     return typeof document !== "undefined" && document ? document.getElementById(id) : null;

@@ -42,6 +42,7 @@ from backtest.diary.regimes import (
     validate_regime_clock,
     validate_regime_group_by,
 )
+from backtest.diary.roster_selector import build_live_roster_plan
 from backtest.forward.portfolio_manager import get_portfolio_manager
 from backtest.live.market_status import NSE_HOLIDAYS_2026
 from backtest.timekeeping import (
@@ -899,6 +900,191 @@ class DiaryService:
             payload["reconcile_anomalies"],
         )
         return payload
+
+    @staticmethod
+    def _extract_mc_prob_pct(readiness: Any, metrics: Any) -> Optional[float]:
+        if isinstance(metrics, dict) and metrics.get("monte_carlo_profit_prob_pct") is not None:
+            try:
+                return float(metrics["monte_carlo_profit_prob_pct"])
+            except (TypeError, ValueError):
+                pass
+        if isinstance(readiness, dict):
+            for chk in readiness.get("checks") or ():
+                if isinstance(chk, dict) and chk.get("id") == "monte_carlo_p_profit":
+                    raw_val = str(chk.get("value") or "").replace("%", "").strip()
+                    try:
+                        return float(raw_val)
+                    except (TypeError, ValueError):
+                        return None
+        return None
+
+    def _load_backtest_benchmarks(
+        self,
+        *,
+        strategy: Optional[str] = None,
+        limit: int = 300,
+    ) -> list[dict[str, Any]]:
+        """Read-only scan of persisted BacktestRun benchmarks for Sim-to-Real matching."""
+        rows_out: list[dict[str, Any]] = []
+        ephemeral = getattr(self.mgr, "_diary_backtest_runs", None)
+        if isinstance(ephemeral, (list, tuple)):
+            for item in ephemeral:
+                if isinstance(item, dict):
+                    rows_out.append(dict(item))
+
+        if self.db is not None:
+            try:
+                from backtest.db.models import BacktestRun
+
+                with self.db.session() as session:
+                    q = session.query(BacktestRun)
+                    if strategy is not None:
+                        q = q.filter(BacktestRun.strategy_id == strategy)
+                    db_rows = (
+                        q.order_by(BacktestRun.created_at.desc())
+                        .limit(int(limit))
+                        .all()
+                    )
+                    for row in db_rows:
+                        metrics = row.metrics if isinstance(row.metrics, dict) else {}
+                        pf = (
+                            metrics.get("profit_factor")
+                            if metrics.get("profit_factor") is not None
+                            else (
+                                float(row.profit_factor)
+                                if row.profit_factor is not None
+                                else None
+                            )
+                        )
+                        wr = (
+                            metrics.get("win_rate_pct")
+                            if metrics.get("win_rate_pct") is not None
+                            else (float(row.win_rate) if row.win_rate is not None else None)
+                        )
+                        # BacktestRun.max_drawdown & total_return are stored as decimal fractions
+                        if metrics.get("max_drawdown_pct") is not None:
+                            dd_pct: Optional[float] = abs(float(metrics["max_drawdown_pct"]))
+                        elif row.max_drawdown is not None:
+                            dd_pct = abs(float(row.max_drawdown)) * 100.0
+                        else:
+                            dd_pct = None
+
+                        if metrics.get("total_return_pct") is not None:
+                            ret_pct: Optional[float] = float(metrics["total_return_pct"])
+                        elif row.total_return is not None:
+                            ret_pct = float(row.total_return) * 100.0
+                        else:
+                            ret_pct = None
+
+                        sharpe = (
+                            metrics.get("sharpe")
+                            if metrics.get("sharpe") is not None
+                            else (float(row.sharpe) if row.sharpe is not None else None)
+                        )
+                        c_utc = (
+                            from_stored_utc(row.created_at)
+                            if row.created_at is not None
+                            else None
+                        )
+                        rows_out.append(
+                            {
+                                "run_id": row.run_id,
+                                "engine": row.engine,
+                                "strategy_id": row.strategy_id,
+                                "symbol": row.symbol,
+                                "timeframe": row.timeframe,
+                                "date_from": row.date_from.isoformat() if row.date_from else None,
+                                "date_to": row.date_to.isoformat() if row.date_to else None,
+                                "profit_factor": float(pf) if pf is not None else None,
+                                "win_rate_pct": float(wr) if wr is not None else None,
+                                "max_drawdown_pct": dd_pct,
+                                "total_return_pct": ret_pct,
+                                "sharpe": float(sharpe) if sharpe is not None else None,
+                                "total_trades": int(row.total_trades or 0),
+                                "monte_carlo_profit_prob_pct": self._extract_mc_prob_pct(
+                                    row.readiness, metrics
+                                ),
+                                "created_at": iso_utc(c_utc) if c_utc is not None else "",
+                            }
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("DiaryService._load_backtest_benchmarks skipped: %s", exc)
+
+        return rows_out
+
+    def get_live_roster_plan(
+        self,
+        *,
+        mode: str = "paper",
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        strategy: Optional[str] = None,
+        today_ist: Optional[date] = None,
+        live_capital: Any = None,
+        reserve_pct: Any = None,
+        max_underlying_pct: Any = None,
+        max_correlation: Any = None,
+        max_live_runners: Any = None,
+        dedupe_timeframes: Any = True,
+    ) -> dict[str, Any]:
+        """Slice 6: Constrained Live Roster Tournament & Backtest-vs-Paper Matrix."""
+        book_mode = validate_diary_mode(mode)
+        resolved_today = today_ist or current_session_date()
+        start_d, end_d = parse_ist_date_range(
+            from_date, to_date, default_span="month", today_ist=resolved_today
+        )
+        strat_filter = _normalize_strategy_filter(strategy)
+
+        loaded = self.load_book_trades(
+            mode=book_mode,
+            start_date=start_d,
+            end_date=end_d,
+            strategy=strat_filter,
+        )
+        tree = build_attribution_tree(
+            book_mode=book_mode,
+            start_d=start_d,
+            end_d=end_d,
+            today_ist=resolved_today,
+            selected_strategy=strat_filter,
+            available_strategies=loaded["available_strategies"],
+            trades=loaded["trades"],
+            active_instances=loaded["active_instances"],
+            runner_lookup=getattr(self.mgr, "get_runner", None),
+            duplicates_collapsed=loaded["duplicates_collapsed"],
+            inline_trade_limit=100_000,
+        )
+        grad = build_graduation_scorecard(
+            book_mode=book_mode,
+            start_d=start_d,
+            end_d=end_d,
+            today_ist=resolved_today,
+            selected_strategy=strat_filter,
+            available_strategies=loaded["available_strategies"],
+            attribution_tree=tree,
+            active_instances=loaded["active_instances"],
+            runner_lookup=getattr(self.mgr, "get_runner", None),
+        )
+        bt_runs = self._load_backtest_benchmarks(strategy=strat_filter)
+        plan = build_live_roster_plan(
+            book_mode=book_mode,
+            start_d=start_d,
+            end_d=end_d,
+            graduation_scorecard=grad,
+            attribution_tree=tree,
+            backtest_runs=bt_runs,
+            live_capital=live_capital,
+            reserve_pct=reserve_pct,
+            max_underlying_pct=max_underlying_pct,
+            max_correlation=max_correlation,
+            max_live_runners=max_live_runners,
+            dedupe_timeframes=dedupe_timeframes,
+        )
+        plan["ledger_health"] = self._ledger_health(
+            loaded["duplicates_collapsed"],
+            grad["reconcile_anomalies"],
+        )
+        return plan
 
     def _ensure_diary_tables(self) -> None:
         if self.db is None or getattr(self.db, "_diary_tables_ready", False):
