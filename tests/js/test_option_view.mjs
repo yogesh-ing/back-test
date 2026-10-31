@@ -89,7 +89,7 @@ function optionRunner(overrides = {}) {
             closed_count: 0,
             closed_structures: 0,
             wins: 0, losses: 0, win_rate: 0,
-            total_pnl: 0, costs_paid: 80,
+            total_pnl: 0, net_realized_pnl: 0, costs_paid: 80,
             settled_count: 0,
             unrealized_pnl: 7578.0,
             open_structures_detail: [STRUCTURE],
@@ -284,11 +284,14 @@ test("closed-book stats summarise wins and settlements", () => {
     const traded = optionRunner({
         options: Object.assign({}, optionRunner().options, {
             closed_structures: 4, wins: 1, losses: 3, win_rate: 0.25,
-            total_pnl: -8051.25, settled_count: 1,
+            total_pnl: -8051.25, net_realized_pnl: -8231.6, settled_count: 1,
         }),
     });
     const closed = OptionView.bookStats(traded).find((s) => s.key === "book_realized");
-    assert.equal(closed.value, -8051.25);
+    // B9: the card binds the NET half. `total_pnl` is the gross the bridge
+    // still reports for its own history, and the number the portfolio rows
+    // stopped publishing — reading it here made one runner cost two P&Ls.
+    assert.equal(closed.value, -8231.6);
     assert.match(closed.sub, /25% won/);
     assert.match(closed.sub, /settled 1/);
 });

@@ -411,10 +411,14 @@
         theta.toLocaleString("en-IN", { maximumFractionDigits: 1 }) + "</span>") + "</td>";
   }
 
-  // Execution times arrive as UTC ISO strings (datetime.now(timezone.utc) on
-  // the backend). The broker terminal speaks IST, so render browser-local
-  // time — a bare "06:57" next to a broker's "12:27" is the same instant.
-  // Some books persist naive UTC (no +00:00 suffix); assume UTC when absent.
+  // Execution times arrive as aware-UTC ISO strings (datetime.now(timezone.utc)
+  // on the backend) and some books still persist them naive. IST is this app's
+  // presentation zone (the 2026-10-27 clock policy), so the label is rendered in
+  // Asia/Kolkata regardless of where the browser sits — a bare "06:57" next to a
+  // broker terminal's "12:27" is the same instant. B6: the Orders tab used to
+  // print the UTC hour while this table printed IST; both now share one clock.
+  const IST_ZONE = "Asia/Kolkata";
+
   function parseExecDate(iso) {
     let s = String(iso || "");
     if (s && !/([zZ]|[+-]\d{2}:?\d{2})$/.test(s)) s += "Z";
@@ -424,10 +428,19 @@
     if (!iso) return "";
     const d = parseExecDate(iso);
     if (isNaN(d.getTime())) return "";
-    const t = d.toLocaleTimeString("en-IN", { hour12: false });
-    if (d.toDateString() === new Date().toDateString()) return t;
-    return String(d.getDate()).padStart(2, "0") + "-" +
-      String(d.getMonth() + 1).padStart(2, "0") + " " + t;
+    const istParts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: IST_ZONE, hour12: false,
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      day: "2-digit", month: "2-digit",
+      year: "numeric",
+    }).formatToParts(d).reduce((acc, p) => (acc[p.type] = p.value, acc), {});
+    const t = `${istParts.hour}:${istParts.minute}:${istParts.second}`;
+    const today = new Intl.DateTimeFormat("en-GB", {
+      timeZone: IST_ZONE, day: "2-digit", month: "2-digit", year: "numeric",
+    }).format(new Date());
+    if (`${istParts.day}-${istParts.month}-${istParts.year}` ===
+        today.replace(/\//g, "-")) return t;
+    return istParts.day + "-" + istParts.month + " " + t;
   }
 
   function positionRowHtml(row) {

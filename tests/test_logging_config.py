@@ -540,3 +540,68 @@ def test_no_swallowed_exceptions_in_the_debuggable_layers(module_dir):
             if not logs:
                 offenders.append(f"{path.relative_to(root)}:{node.lineno}")
     assert not offenders, f"silent except blocks (log them or re-raise): {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# B8 — the server's own console must not hold lines back
+# ---------------------------------------------------------------------------
+
+
+def test_the_server_entry_installs_line_buffering_before_serving():
+    src = (
+        pathlib.Path(__file__).resolve().parents[1] / "src" / "backtest" / "web" / "app.py"
+    ).read_text(encoding="utf-8")
+    body = src[src.index("def main() -> None:") :]
+    assert "_unbuffer_console()" in body, "the CLI entry must un-buffer the console (B8)"
+    assert body.index("_unbuffer_console()") < body.index(
+        "run_app("
+    ), "line buffering has to be installed before anything is served"
+
+
+def test_server_stdout_reaches_a_redirected_file_without_waiting_for_exit(tmp_path):
+    """The log file is the only witness an off-hours operator has.
+
+    A redirected stdio stream is block-buffered, so a server started without
+    ``python -u`` can serve all day while its own log has not moved (30-Oct: the
+    gate that said "grep the session-clock sweep line" had nothing after 08:15).
+    This drives the real helper in a child whose stdout points at a file, and
+    reads the line while that child is still awake — so a pass proves the flush
+    came from the process, not from the buffer draining at exit.
+    """
+    import os
+    import subprocess
+    import sys
+    import time
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    ready = tmp_path / "ready.txt"
+    log = tmp_path / "stdout.txt"
+    script = (
+        "from backtest.web.app import _unbuffer_console\n"
+        "_unbuffer_console()\n"
+        "print('B8-LINE')\n"
+        f"open(r{str(ready)!r}, 'w').write('ready')\n"
+        "import time; time.sleep(60)\n"
+    )
+    env = dict(os.environ, PYTHONPATH=str(root / "src"))
+    with open(log, "w", encoding="utf-8") as sink:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            cwd=str(root),
+            stdout=sink,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        try:
+            deadline = time.time() + 120
+            while not ready.exists() and time.time() < deadline:
+                time.sleep(0.1)
+            assert ready.exists(), "the child never reached the print"
+            written = log.read_text(encoding="utf-8")
+        finally:
+            proc.kill()
+            proc.wait(timeout=15)
+    assert "B8-LINE" in written, (
+        "the line was still in the buffer while the process ran — a server log "
+        "that lags the clock is exactly the B8 complaint"
+    )

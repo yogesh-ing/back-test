@@ -187,6 +187,71 @@ class TestCloseStructureApi:
         assert "error" in resp.get_json()
 
 
+# ---------------------------------------------------------------------------
+# B9 — the published realized half must be NET, like every other surface
+# ---------------------------------------------------------------------------
+
+
+class TestSummaryRealizedIsNet:
+    """``realized_pnl`` used to be a bare ``float(broker.total_realized_pnl)``.
+
+    That is price P&L with the whole cost stack still in front of it, while
+    portfolio rows, bucket aggregates and the dashboard book all emit the BUG-04
+    NET half — so the same runner's day read differently on two pages. The
+    endpoint now publishes the ``{gross, fees, net}`` triple, and the fees still
+    sitting on an open book stay on the mark instead of being charged to
+    realized (the same attribution as
+    ``PortfolioManager.get_dashboard_book_summary``).
+    """
+
+    def test_gross_and_fees_are_published_alongside_net(self, client):
+        _seed_two_structures()
+        data = client.get("/api/options/summary").get_json()
+        broker = get_option_broker()
+        for key in ("realized_pnl", "gross_realized_pnl", "total_fees_paid"):
+            assert key in data
+        assert data["gross_realized_pnl"] == pytest.approx(
+            float(broker.total_realized_pnl)
+        )
+        assert data["total_fees_paid"] == pytest.approx(float(broker.total_costs_paid))
+
+    def test_closed_fees_come_out_of_realized(self, client):
+        _seed_two_structures()
+        structure_id = client.get("/api/options/summary").get_json()["structures"][0][
+            "structure_id"
+        ]
+        client.post(f"/api/options/structures/{structure_id}/close")
+
+        data = client.get("/api/options/summary").get_json()
+        closed = get_option_broker().get_closed_structures()
+        assert closed, "the close produced no closed structure"
+        # NET is the closed book's own per-structure net, paisa for paisa.
+        expected = sum(float(s.net_pnl) for s in closed)
+        assert data["realized_pnl"] == pytest.approx(expected, abs=0.01)
+        assert data["gross_realized_pnl"] - data["realized_pnl"] > 0, (
+            "no fee came off the gross half — the test would pass on the old bug"
+        )
+
+    def test_fees_on_a_still_open_book_stay_off_realized(self, client):
+        """Close one of two: the open one's entry cost is the mark's problem."""
+        _seed_two_structures()
+        structure_id = client.get("/api/options/summary").get_json()["structures"][0][
+            "structure_id"
+        ]
+        client.post(f"/api/options/structures/{structure_id}/close")
+
+        data = client.get("/api/options/summary").get_json()
+        broker = get_option_broker()
+        open_fees = sum(
+            float(s.total_commission) + float(s.statutory_fees or 0)
+            for s in broker.get_open_structures()
+        )
+        assert open_fees > 0, "fixture left an open book with no cost on it"
+        assert data["realized_pnl"] == pytest.approx(
+            data["gross_realized_pnl"] - (data["total_fees_paid"] - open_fees), abs=0.01
+        )
+
+
 class TestGreeksApi:
     def test_greeks_endpoint(self, client):
         _seed_two_structures()

@@ -788,7 +788,27 @@ def run_app(
     app.run(host=host, port=port, debug=debug, use_reloader=False)
 
 
+def _unbuffer_console(streams: tuple | None = None) -> None:
+    """Put every line on the wire the moment it is written (B8).
+
+    A redirected stream is block-buffered (8 KiB on Windows), so a server started
+    without ``python -u`` parks its stdout half in the buffer while it trades: on
+    30-Oct the running server's log had not moved since 08:15:38 even though every
+    request was served, and the gate that says "grep the session-clock sweep line"
+    became unusable. Line buffering belongs here rather than in a launch flag
+    nobody remembers — the log file is the only witness an operator has off-hours.
+    """
+    for stream in (streams if streams is not None else (sys.stdout, sys.stderr)):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError, OSError):  # noqa: BLE001
+            # A replaced stream (pytest capture, an embedded runner) that cannot
+            # be reconfigured is not a reason to refuse to serve.
+            pass
+
+
 def main() -> None:
+    _unbuffer_console()
     import argparse
 
     parser = argparse.ArgumentParser(description="Unified Trading Bot Platform")
