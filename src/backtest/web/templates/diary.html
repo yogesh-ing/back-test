@@ -4,6 +4,7 @@
 
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diary.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/edge_playbook.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -13,6 +14,12 @@
       'PnL Diary',
       'IST-scoped session calendar, Gross − Commission = Net ledger reconciliation, and book-segregated performance tracking.'
   ) %}
+    <button id="diary-open-playbook" class="btn btn-ghost" type="button" data-open-edge-playbook="synergy" title="Open Institutional Edge &amp; Performance Playbook">
+      {{ icon('help', 14) }} Edge playbook
+    </button>
+    <a id="diary-open-analytics" class="btn btn-ghost" href="/analytics">
+      {{ icon('chart', 14) }} Performance analytics
+    </a>
     <a id="diary-open-book" class="btn btn-ghost" href="/portfolio/{{ initial_mode }}">
       {{ icon('portfolio', 14) }}
       <span id="diary-open-book-label">Open {{ 'Live' if initial_mode == 'live' else 'Paper' }} book</span>
@@ -259,6 +266,7 @@
         </div>
         <div class="diary-attr-toolbar-right">
           <span class="muted" style="font-size:11.5px;">Single Commission sum · Row &amp; column totals reconciled to 2dp</span>
+          <button type="button" class="btn btn-ghost btn-small" id="diary-help-regimes" data-open-edge-playbook="workflow">{{ icon('help', 12) }} Tuning guide</button>
         </div>
       </div>
 
@@ -311,6 +319,7 @@
               <option value="instance">By Spawned Instance</option>
               <option value="strategy">By Strategy</option>
             </select>
+            <button type="button" class="btn btn-ghost btn-small" id="diary-help-payoff" data-open-edge-playbook="prescriptions">{{ icon('help', 12) }} Prescription decoder</button>
           </div>
         </div>
 
@@ -339,7 +348,10 @@
               6 institutional gates: Sample &ge; 20 &middot; Expectancy &gt; ₹0 &middot; PF &ge; 1.35 &middot; Fee Drag &le; 35% &middot; Max DD &le; 10% &middot; 0 Ledger Anomalies
             </span>
           </div>
-          <div class="diary-grad-summary-pills" id="diary-grad-summary-pills"></div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <div class="diary-grad-summary-pills" id="diary-grad-summary-pills"></div>
+            <button type="button" class="btn btn-ghost btn-small" id="diary-help-graduation" data-open-edge-playbook="params">{{ icon('help', 12) }} Gate parameters</button>
+          </div>
         </div>
         <div class="diary-table-wrap" id="diary-graduation-table-wrap">
           <div class="diary-empty">Loading 6-gate graduation scorecard…</div>
@@ -429,9 +441,11 @@
     </div>
   </section>
 </div>
+{% include "components/edge_playbook_modal.html" %}
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/components/edge_playbook.js') }}"></script>
 <script src="{{ url_for('static', filename='js/diary.js') }}"></script>
 <script>
   if (window.PnLDiary && typeof window.PnLDiary.init === 'function') {
