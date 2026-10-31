@@ -38,6 +38,8 @@ const BrokerStatus = (() => {
 
     let current = null;           // last payload from /api/broker/status
     let prevState = null;         // last applied status string
+    let prevFingerprint = null;   // multi-broker auth fingerprint for cross-tab wake
+    let pollTimer = null;         // governed setTimeout handle when PollCadence is present
     let expiryToastShown = false; // once per expiry cycle (Task 3.3)
     let suppressExpiryToast = false; // set by expectLogout() (modal logout)
     let started = false;
@@ -206,12 +208,46 @@ const BrokerStatus = (() => {
 
     // ---- polling ---------------------------------------------------------
 
+    function authFingerprint(payload) {
+        if (!payload) return "";
+        const parts = [String(payload.status || "")];
+        const sessions = payload.sessions;
+        if (sessions && typeof sessions === "object") {
+            for (const k of Object.keys(sessions).sort()) {
+                const row = sessions[k] || {};
+                parts.push(`${k}:${row.status || ""}:${row.authenticated ? 1 : 0}`);
+            }
+        }
+        return parts.join("|");
+    }
+
+    function schedulePoll(payload) {
+        const pc = typeof window !== "undefined" && window.PollCadence;
+        if (!pc) return;
+        if (pollTimer) {
+            clearTimeout(pollTimer);
+            pollTimer = null;
+        }
+        const delay = pc.brokerStatusDelay(payload || current);
+        if (delay === null) return;
+        pollTimer = setTimeout(refresh, delay);
+    }
+
     function apply(payload) {
         current = payload;
         const next = payload && payload.status;
+        const fp = authFingerprint(payload);
+        // Schedule next governed poll BEFORE handleTransition so toast timers
+        // remain the most recently queued timer in deterministic tests.
+        schedulePoll(payload);
         render(next);
         handleTransition(prevState, next);
         handleExpiryEvents(payload);
+        if (prevFingerprint !== null && fp !== prevFingerprint) {
+            const pc = typeof window !== "undefined" && window.PollCadence;
+            if (pc) pc.notifyBrokerAuthChanged(fp);
+        }
+        prevFingerprint = fp;
         prevState = next;
         document.dispatchEvent(new CustomEvent("broker:status", { detail: payload }));
     }
@@ -227,6 +263,7 @@ const BrokerStatus = (() => {
             // Keep the last known state; grey dot only while never fetched.
             console.warn("[broker-status] status poll failed:", err && err.message);
             if (!prevState) render("unknown");
+            schedulePoll(current);
             return null;
         }
     }
@@ -234,8 +271,25 @@ const BrokerStatus = (() => {
     function start() {
         if (started) return;
         started = true;
+        const pc = typeof window !== "undefined" && window.PollCadence;
         refresh();
-        setInterval(refresh, POLL_MS);
+        if (!pc) {
+            setInterval(refresh, POLL_MS);
+        } else {
+            pc.onBrokerAuthWake(() => { refresh(); });
+            if (document && typeof document.addEventListener === "function") {
+                document.addEventListener("visibilitychange", () => {
+                    if (!document.hidden) {
+                        refresh();
+                    } else {
+                        schedulePoll(current);
+                    }
+                });
+                document.addEventListener("market:state", () => {
+                    schedulePoll(current);
+                });
+            }
+        }
         const btn = byId("broker-status");
         if (btn) btn.addEventListener("click", openAuthPopup);
     }

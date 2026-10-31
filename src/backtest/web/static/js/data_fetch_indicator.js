@@ -10,33 +10,67 @@
     
     if (!indicator || !countEl) return;
     
-    let pollInterval = null;
-    
     let pollTimer = null;
     let lastKnownRunning = false;
-    
+    let lastCheckTs = 0;
+
+    function clearScheduled() {
+        if (pollTimer) {
+            clearTimeout(pollTimer);
+            pollTimer = null;
+        }
+    }
+
     function scheduleCheck(delayMs) {
-        if (pollTimer) clearTimeout(pollTimer);
+        clearScheduled();
+        if (delayMs === null || delayMs === undefined) return;
         pollTimer = setTimeout(checkStatus, delayMs);
+    }
+
+    function computeDelay(isRunning) {
+        const pc = typeof window !== "undefined" && window.PollCadence;
+        if (pc) return pc.dataStatusDelay(isRunning);
+        return (typeof document.hidden === "boolean" && document.hidden)
+            ? (isRunning ? 6000 : 45000)
+            : (isRunning ? 3000 : 20000);
     }
 
     function startPolling() {
         checkStatus(); // immediate check
+        const pc = typeof window !== "undefined" && window.PollCadence;
+        if (pc) {
+            pc.onDataJobWake(() => { checkStatus(); });
+        }
+        if (typeof document !== "undefined" && document && typeof document.addEventListener === "function") {
+            document.addEventListener("visibilitychange", () => {
+                if (!document.hidden) {
+                    if (lastKnownRunning || (Date.now() - lastCheckTs >= 30000)) {
+                        checkStatus();
+                    } else {
+                        scheduleCheck(computeDelay(lastKnownRunning));
+                    }
+                } else {
+                    scheduleCheck(computeDelay(lastKnownRunning));
+                }
+            });
+        }
     }
-    
+
     async function checkStatus() {
+        clearScheduled();
         let isRunning = false;
         const wasRunning = lastKnownRunning;
+        lastCheckTs = Date.now();
         try {
             const resp = await fetch('/api/data/status');
             const data = await resp.json();
-            
+
             if (data.status === 'running') {
                 isRunning = true;
                 // Show indicator
                 indicator.hidden = false;
                 countEl.textContent = `${data.fetched || 0}/${data.total || 0}`;
-                
+
                 // Update tooltip with current symbol
                 if (data.symbol) {
                     indicator.title = `Fetching ${data.symbol}... Click to stop`;
@@ -54,10 +88,7 @@
         if (wasRunning && !isRunning && window.refreshDataFreshnessChip) {
             window.refreshDataFreshnessChip();
         }
-        const delay = (typeof document.hidden === "boolean" && document.hidden)
-            ? (isRunning ? 6000 : 45000)
-            : (isRunning ? 3000 : 20000);
-        scheduleCheck(delay);
+        scheduleCheck(computeDelay(isRunning));
     }
     
     // Click to stop

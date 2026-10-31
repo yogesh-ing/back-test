@@ -402,9 +402,18 @@
   }
 
   function schedule() {
-    if (state.timer) clearTimeout(state.timer);
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
     const hidden = typeof document.hidden === "boolean" && document.hidden;
-    state.timer = setTimeout(async () => { await poll(); schedule(); }, hidden ? HIDDEN_POLL_MS : POLL_MS);
+    const pc = typeof window !== "undefined" && window.PollCadence;
+    const pathname = (typeof window !== "undefined" && window.location && window.location.pathname) || "/";
+    const delay = pc
+      ? pc.alertWidgetDelay({ pathname })
+      : (hidden ? HIDDEN_POLL_MS : POLL_MS);
+    if (delay === null) return;
+    state.timer = setTimeout(async () => { await poll(); schedule(); }, delay);
   }
 
   async function lifecycle(id, action) {
@@ -454,6 +463,14 @@
     if (document.addEventListener) {
       document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetail(); });
       document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); schedule(); });
+      document.addEventListener("market:state", (ev) => {
+        const detail = ev && ev.detail;
+        if (detail && (detail.session_state === "OPEN" || detail.session_state === "PRE_OPEN") && !document.hidden) {
+          poll().then(schedule);
+        } else {
+          schedule();
+        }
+      });
     }
     render();
     poll().then(schedule);

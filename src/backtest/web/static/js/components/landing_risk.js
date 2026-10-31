@@ -230,11 +230,35 @@
       };
     }
 
-    // Adaptive fallback polling (10s active, skips when tab is hidden or SSE is live)
-    setInterval(() => {
-      if (document.hidden) return;
-      fetchAll();
-    }, 10000);
+    // Adaptive fallback polling (10s active, 5m post-close idle, paused when hidden or SSE fresh)
+    let landingPollTimer = null;
+    function scheduleLandingPoll() {
+      if (landingPollTimer) {
+        clearTimeout(landingPollTimer);
+        landingPollTimer = null;
+      }
+      const delay = window.PollCadence
+        ? window.PollCadence.landingRiskDelay()
+        : (document.hidden ? null : 10000);
+      if (delay === null) return;
+      landingPollTimer = setTimeout(async () => {
+        if (!document.hidden) await fetchAll();
+        scheduleLandingPoll();
+      }, delay);
+    }
+    scheduleLandingPoll();
+
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        fetchAll().then(scheduleLandingPoll);
+      } else {
+        scheduleLandingPoll();
+      }
+    });
+
+    document.addEventListener("market:state", () => {
+      scheduleLandingPoll();
+    });
   });
 
   window.LandingRisk = { updateGlobalHeader, updateBucketMiniRisk, fetchAll };
