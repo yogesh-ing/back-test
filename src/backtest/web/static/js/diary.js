@@ -2461,7 +2461,36 @@
   function init() {
     state.mode = resolveInitialMode();
     syncModeChrome(state.mode);
-    applyPreset('mtd');
+    var qPreset = '';
+    var qFrom = '';
+    var qTo = '';
+    var qTab = '';
+    try {
+      var params = new URLSearchParams(window.location.search || '');
+      qPreset = (params.get('preset') || '').trim().toLowerCase();
+      qFrom = (params.get('from') || '').trim();
+      qTo = (params.get('to') || '').trim();
+      qTab = (params.get('tab') || '').trim().toLowerCase();
+    } catch (_e) { /* ignore */ }
+
+    if (qFrom && qTo && qFrom <= qTo) {
+      state.selFrom = qFrom;
+      state.selTo = qTo;
+      var fp = parseIsoDate(qTo);
+      state.calYear = fp.year;
+      state.calMonth = fp.month;
+      state.anchorDate = qFrom;
+      setPresetPills('');
+      syncDateInputs();
+    } else if (qPreset === 'today' || qPreset === '7d' || qPreset === '30d' || qPreset === 'mtd') {
+      applyPreset(qPreset);
+    } else {
+      var tp = parseIsoDate(state.todayIst || istTodayIso());
+      applyPreset(tp.day <= 3 ? '30d' : 'mtd');
+    }
+    if (qTab) {
+      switchTab(qTab);
+    }
     bindEvents();
     return loadAll();
   }

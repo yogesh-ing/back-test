@@ -60,6 +60,10 @@ _OPTION_SUFFIX_RE = re.compile(
 
 _INTRADAY_FAST_TFS = frozenset({"1m", "1min", "3m", "3min", "5m", "5min"})
 _SWING_SLOW_TFS = frozenset({"1h", "1hour", "60m", "60min", "4h", "1d", "1day", "day"})
+_TF_IN_LABEL_RE = re.compile(
+    r"\b(1min|3min|5min|10min|15min|30min|60min|1hour|1day|1m|3m|5m|10m|15m|30m|1h|4h|1d)\b",
+    re.IGNORECASE,
+)
 
 
 def canonical_underlying(raw_symbol: Any) -> str:
@@ -126,6 +130,15 @@ def normalize_timeframe_token(raw_tf: Any) -> str:
         "day": "1day",
     }
     return aliases.get(t, t)
+
+
+def resolve_instance_timeframe(raw_tf: Any, instance_label: Any = None) -> str:
+    """Resolve normalized timeframe from explicit field or instance label hint."""
+    norm = normalize_timeframe_token(raw_tf)
+    if norm:
+        return norm
+    m = _TF_IN_LABEL_RE.search(str(instance_label or ""))
+    return normalize_timeframe_token(m.group(1)) if m else ""
 
 
 def are_timeframes_orthogonal(tf_a: Any, tf_b: Any) -> bool:
@@ -549,6 +562,9 @@ def build_live_roster_plan(
 
         underlyings = resolve_instance_underlyings(row.get("symbols") or (), inst_trades)
         primary_underlying = underlyings[0]
+        resolved_tf = resolve_instance_timeframe(
+            row.get("timeframe"), row.get("instance_label")
+        )
 
         alloc = row.get("allocated_capital")
         req_cap = (
@@ -561,7 +577,7 @@ def build_live_roster_plan(
         bt_match = match_backtest_benchmark(
             strategy_name=str(row.get("strategy") or ""),
             primary_underlying=primary_underlying,
-            timeframe=row.get("timeframe"),
+            timeframe=resolved_tf,
             backtest_runs=backtest_runs,
         )
         sim_to_real = evaluate_sim_to_real(
@@ -586,6 +602,7 @@ def build_live_roster_plan(
         enriched.append(
             {
                 **row,
+                "timeframe": row.get("timeframe") or (resolved_tf or None),
                 "primary_underlying": primary_underlying,
                 "underlyings": underlyings,
                 "required_capital": req_cap,

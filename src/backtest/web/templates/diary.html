@@ -4,7 +4,6 @@
 
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diary.css') }}">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/edge_playbook.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -14,12 +13,6 @@
       'PnL Diary',
       'IST-scoped session calendar, Gross − Commission = Net ledger reconciliation, and book-segregated performance tracking.'
   ) %}
-    <button id="diary-open-playbook" class="btn btn-ghost" type="button" data-open-edge-playbook="synergy" title="Open Institutional Edge &amp; Performance Playbook">
-      {{ icon('help', 14) }} Edge playbook
-    </button>
-    <a id="diary-open-analytics" class="btn btn-ghost" href="/analytics">
-      {{ icon('chart', 14) }} Performance analytics
-    </a>
     <a id="diary-open-book" class="btn btn-ghost" href="/portfolio/{{ initial_mode }}">
       {{ icon('portfolio', 14) }}
       <span id="diary-open-book-label">Open {{ 'Live' if initial_mode == 'live' else 'Paper' }} book</span>
@@ -266,7 +259,6 @@
         </div>
         <div class="diary-attr-toolbar-right">
           <span class="muted" style="font-size:11.5px;">Single Commission sum · Row &amp; column totals reconciled to 2dp</span>
-          <button type="button" class="btn btn-ghost btn-small" id="diary-help-regimes" data-open-edge-playbook="workflow">{{ icon('help', 12) }} Tuning guide</button>
         </div>
       </div>
 
@@ -319,7 +311,6 @@
               <option value="instance">By Spawned Instance</option>
               <option value="strategy">By Strategy</option>
             </select>
-            <button type="button" class="btn btn-ghost btn-small" id="diary-help-payoff" data-open-edge-playbook="prescriptions">{{ icon('help', 12) }} Prescription decoder</button>
           </div>
         </div>
 
@@ -348,63 +339,10 @@
               6 institutional gates: Sample &ge; 20 &middot; Expectancy &gt; ₹0 &middot; PF &ge; 1.35 &middot; Fee Drag &le; 35% &middot; Max DD &le; 10% &middot; 0 Ledger Anomalies
             </span>
           </div>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <div class="diary-grad-summary-pills" id="diary-grad-summary-pills"></div>
-            <button type="button" class="btn btn-ghost btn-small" id="diary-help-graduation" data-open-edge-playbook="params">{{ icon('help', 12) }} Gate parameters</button>
-          </div>
+          <div class="diary-grad-summary-pills" id="diary-grad-summary-pills"></div>
         </div>
         <div class="diary-table-wrap" id="diary-graduation-table-wrap">
           <div class="diary-empty">Loading 6-gate graduation scorecard…</div>
-        </div>
-      </div>
-
-      <!-- Slice 6: Constrained Live Roster Optimizer & Backtest-vs-Paper Reality Matrix -->
-      <div class="diary-matrix-block" id="diary-roster-block" style="margin-top:16px;">
-        <div class="diary-section-head">
-          <div>
-            <h2 id="diary-roster-title" style="margin:0;">Constrained Live Roster Optimizer &amp; Backtest-vs-Paper Matrix</h2>
-            <span class="muted" id="diary-roster-subtitle" style="font-size:11.5px;">
-              5-stage tournament: Composite efficiency rank &middot; Backtest-to-Paper PF retention &middot; Multi-TF dedupe &middot; Daily P&amp;L de-correlation (&rho;) &middot; Reserve &amp; underlying caps
-            </span>
-          </div>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <div class="diary-grad-summary-pills" id="diary-roster-summary-pills"></div>
-            <button type="button" class="btn btn-ghost btn-small" id="diary-help-roster" data-open-edge-playbook="roster">{{ icon('help', 12) }} Roster rules</button>
-          </div>
-        </div>
-
-        <form class="diary-roster-controls" id="diary-roster-form" novalidate>
-          <div class="diary-roster-field">
-            <label for="diary-roster-capital">Live Capital (&#8377;)</label>
-            <input id="diary-roster-capital" class="diary-roster-input" type="number" min="25000" step="25000" value="300000">
-          </div>
-          <div class="diary-roster-field">
-            <label for="diary-roster-reserve">Reserve %</label>
-            <input id="diary-roster-reserve" class="diary-roster-input" type="number" min="0" max="80" step="5" value="20">
-          </div>
-          <div class="diary-roster-field">
-            <label for="diary-roster-und-cap">Max Underlying %</label>
-            <input id="diary-roster-und-cap" class="diary-roster-input" type="number" min="10" max="100" step="5" value="40">
-          </div>
-          <div class="diary-roster-field">
-            <label for="diary-roster-corr-cap">Max Daily Corr (&rho;)</label>
-            <input id="diary-roster-corr-cap" class="diary-roster-input" type="number" min="0.10" max="1.00" step="0.05" value="0.65">
-          </div>
-          <div class="diary-roster-field">
-            <label for="diary-roster-max-slots">Max Live Slots</label>
-            <input id="diary-roster-max-slots" class="diary-roster-input" type="number" min="1" max="25" step="1" value="5">
-          </div>
-          <label class="diary-roster-check" for="diary-roster-dedupe-tf">
-            <input id="diary-roster-dedupe-tf" type="checkbox" checked>
-            <span>Dedupe multi-TF</span>
-          </label>
-          <button type="submit" class="btn btn-primary btn-small" id="diary-roster-apply">Recompute roster</button>
-        </form>
-
-        <div class="diary-roster-alloc-strip" id="diary-roster-alloc-strip" aria-live="polite"></div>
-
-        <div class="diary-table-wrap" id="diary-roster-table-wrap" style="margin-top:8px;">
-          <div class="diary-empty">Computing constrained Live roster &amp; Backtest-vs-Paper comparison…</div>
         </div>
       </div>
 
@@ -491,11 +429,9 @@
     </div>
   </section>
 </div>
-{% include "components/edge_playbook_modal.html" %}
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/components/edge_playbook.js') }}"></script>
 <script src="{{ url_for('static', filename='js/diary.js') }}"></script>
 <script>
   if (window.PnLDiary && typeof window.PnLDiary.init === 'function') {

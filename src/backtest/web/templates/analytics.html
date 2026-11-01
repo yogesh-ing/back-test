@@ -2,15 +2,9 @@
 {% from "_macros.html" import icon, page_header %}
 {% block title %}Strategy Performance Analytics · Trading Bot{% endblock %}
 
-{% block head %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/edge_playbook.css') }}">
-{% endblock %}
-
 {% block content %}
 <div class="analytics-page">
     {% call page_header('Workspace / Performance & execution', 'Strategy analytics', 'Understand your edge, execution quality and risk across paper and live trading.') %}
-        <button id="analytics-open-playbook" class="btn btn-ghost" type="button" data-open-edge-playbook="synergy" title="Open Institutional Edge &amp; Performance Playbook">{{ icon('help', 14) }} Edge playbook</button>
-        <a id="analytics-open-diary" href="/diary" class="btn btn-ghost">{{ icon('calendar', 14) }} PnL diary</a>
         <a href="/compare" class="btn btn-ghost">{{ icon('compare', 14) }} Compare backtests</a>
         <button id="refreshAnalyticsBtn" class="btn" type="button" title="Refresh data">{{ icon('refresh', 14) }} Refresh</button>
     {% endcall %}
@@ -554,11 +548,9 @@
     </div>
   </div>
 </div>
-{% include "components/edge_playbook_modal.html" %}
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/components/edge_playbook.js') }}"></script>
 <script src="{{ url_for('static', filename='js/analytics.js') }}"></script>
 <script src="{{ url_for('static', filename='js/cross_broker.js') }}"></script>
 {% endblock %}
