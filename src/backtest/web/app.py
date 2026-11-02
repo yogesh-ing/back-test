@@ -826,8 +826,19 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Unified Trading Bot Platform")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=5000)
+    parser.add_argument(
+        "--host",
+        default=os.getenv("BACKTEST_HOST", "0.0.0.0"),
+        help="Bind address (env: BACKTEST_HOST)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("BACKTEST_PORT", "5000")),
+        help="Bind port (env: BACKTEST_PORT). Second checkouts — the QA mirror "
+        "pins 5001 — so an extra instance can never contend with the "
+        "production listener or be silently shadowed by it.",
+    )
     parser.add_argument(
         "--source",
         default=os.getenv("BACKTEST_SOURCE", ""),
