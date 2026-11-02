@@ -64,6 +64,7 @@ from backtest.data.sources_policy import (
 from backtest.forward.feed_quality import get_quality_monitor
 from backtest.options.quote_providers import (
     BidAskQuoteProvider,
+    DisconnectedQuoteProvider,
     SyntheticChainGenerator,
     SyntheticQuoteProvider,
 )
@@ -373,6 +374,7 @@ def option_quote_provider_for(
     quote_broker: Any | None = None,
     *,
     wing_distance_pct: Optional[float] = None,
+    allow_disconnected: bool = False,
 ) -> tuple[Any, str]:
     """``(quote_provider, label)`` for an option runner's bridge — P1.1.
 
@@ -384,6 +386,16 @@ def option_quote_provider_for(
       held legs mark off the far side (PRD §4.1/§4.2).
     * otherwise → the synthetic pair (``"synthetic:bs"``), **but only if the
       data-source policy allows synthetic at all**.
+    * ``allow_disconnected=True`` + no session + synthetic off → the
+      :class:`DisconnectedQuoteProvider` frozen-mark stub
+      (``"disconnected:<broker>"``), which is what lets a runner be *built*
+      while its broker is logged out (Sprint A1). The caller — the forward
+      runner — is the only one that passes it: a book restored before the
+      operator logs in stays on screen with its strikes, lots and levels
+      instead of vanishing into ``_parked_snapshots``, and it can neither
+      price a fake mark nor open anything. **No ChainBus entry is taken**, so
+      there is nothing to release; the stub is per-runner and upgrades to the
+      live chain the moment the broker authenticates.
 
     The bus wraps broker feeds once, at entry creation, rather than leaving it
     to each call site, because "paper filled at LTP" is not evidence of
@@ -420,6 +432,20 @@ def option_quote_provider_for(
             )
             return provider, provider.source_name
         if not synthetic_enabled():
+            if allow_disconnected:
+                stub = DisconnectedQuoteProvider(source_key, underlying)
+                logger.warning(
+                    "option runner on %s requested source=%s with no authenticated "
+                    "%s session — building it on the frozen-mark stub (%s): the book "
+                    "stays visible and unpriceable, and refuses every new entry, "
+                    "until %s logs in",
+                    underlying,
+                    source_key,
+                    source_key,
+                    stub.source_name,
+                    source_key,
+                )
+                return stub, stub.source_name
             raise SourceDisabledError(
                 f"option runner on {underlying} asked for source={source_key} but there is "
                 f"no authenticated {source_key} session, and synthetic chains are disabled "

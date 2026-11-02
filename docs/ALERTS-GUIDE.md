@@ -149,6 +149,21 @@ expiry unless someone re-authenticates.
 auth popup (password → TOTP) without leaving the page; the alert
 auto-resolves when the re-login verifies.
 
+### 🟠 `broker_session_expiring_urgent` — Broker login expires in minutes
+**Fires when** the same monitor sees a session inside its last 10 minutes
+(checked on every 30-second tick, not only on a status change, so the
+crossing cannot be stepped over). One alert per expiry cycle.
+**Means** this is the last moment a re-login costs nothing. After it the
+feed drops mid-session and every runner on that broker prices off a frozen
+mark — which is exactly what the `🔴 Broker login needed` topbar banner is
+showing.
+**Shows** broker, minutes remaining, expiry timestamp.
+**Typical responses** click **Re-login** immediately (password + TOTP); the
+alert auto-resolves when the re-login verifies. If nobody can re-login, pause
+that broker's runners yourself rather than leaving them on a frozen mark.
+Raised CRITICAL, so it bypasses quiet hours and the hourly alert rate limit.
+Only pages inside the active market window (09:00–15:30 IST).
+
 ### 🔴 `broker_session_expired` — Broker session expired
 **Fires when** a broker session dies (the expiry monitor clears the token;
 the expiring alert, if still open, is superseded).
@@ -157,8 +172,10 @@ are paused — re-login (password + TOTP) is required; the session never
 auto-renews.
 **Typical responses** use the alert's **Re-login** button (same auth popup)
 or the broker board; a verified re-login resolves the alert.
-Both session alerts are also fanned out through the outbound notifier
-(Telegram/email per `config/alerts.yaml` routing).
+All three session alerts are also fanned out through the outbound notifier
+(Telegram/email per `config/alerts.yaml` routing). They page only inside the
+active market window: a session that dies at 20:00 is held back and reported
+at the next 09:00 open rather than paging overnight.
 
 ---
 

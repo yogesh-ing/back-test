@@ -30,6 +30,11 @@ class AlertType(str, Enum):
     RISK_LIMIT_BREACH = "risk_limit_breach"
     #: Broker login session entering its last 30 minutes (state alert per broker).
     BROKER_SESSION_EXPIRING = "broker_session_expiring"
+    #: Broker login session inside its last 10 minutes — the action gate. Raised
+    #: CRITICAL so it bypasses quiet hours and the notifier's rate limit, and
+    #: routed to every configured channel: at this point a dropped tick is
+    #: minutes away and a throttled Telegram is not good enough.
+    BROKER_SESSION_EXPIRING_URGENT = "broker_session_expiring_urgent"
     #: Broker login session dead — feeds/orders paused until re-login.
     BROKER_SESSION_EXPIRED = "broker_session_expired"
 
@@ -76,6 +81,7 @@ AUDIENCE: Dict[str, tuple] = {
     AlertType.DATA_FEED_STALE.value: ("trader",),
     AlertType.RISK_LIMIT_BREACH.value: ("trader",),
     AlertType.BROKER_SESSION_EXPIRING.value: ("trader",),
+    AlertType.BROKER_SESSION_EXPIRING_URGENT.value: ("trader",),
     AlertType.BROKER_SESSION_EXPIRED.value: ("trader",),
 }
 

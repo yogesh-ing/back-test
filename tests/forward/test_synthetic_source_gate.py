@@ -386,3 +386,113 @@ def test_the_options_bridge_still_builds_for_the_testing_profile():
         assert bridge._generator() is bridge.quote_provider.generator
     finally:
         sp.reset_source_policy()
+
+
+# -- Sprint A1: the frozen-mark stub is not a synthetic door ----------------
+
+
+def test_the_default_answer_to_a_logged_out_broker_is_still_a_refusal(production_policy):
+    """``allow_disconnected`` is opt-in, and only the forward runner opts in.
+
+    A caller that did not ask for a visible-but-blind book gets exactly what it
+    got before A1: no provider at all. Nothing else in the codebase may learn to
+    build runners on a stub by accident.
+    """
+    from backtest.forward.feed_registry import option_quote_provider_for
+
+    with pytest.raises(SourceDisabledError, match="no authenticated mstock session"):
+        option_quote_provider_for("mstock", "NIFTY")
+
+
+def test_the_opt_in_stub_is_not_a_chain_bus_entry(production_policy):
+    """The stub takes no refcount, so nothing may be released for it later."""
+    from backtest.forward.feed_registry import (
+        get_chain_bus,
+        option_quote_provider_for,
+        reset_data_bus,
+    )
+
+    reset_data_bus()
+    try:
+        provider, label = option_quote_provider_for(
+            "mstock", "NIFTY", allow_disconnected=True
+        )
+        assert label == "disconnected:mstock"
+        assert provider.source_name == "disconnected:mstock"
+        assert provider.disconnected is True
+        assert get_chain_bus().generator_count() == 0, "no bus entry was taken"
+        assert get_chain_bus().subscriber_count("NIFTY", source="mstock") == 0
+    finally:
+        reset_data_bus()
+
+
+def test_the_stub_can_never_price_anything(production_policy):
+    """Every surface answers "unavailable"; the one that fills raises.
+
+    ``mark_quote`` returns a *failed* row rather than throwing so the bridge's
+    existing fail-closed MTM keeps the last honest mark and counts the failure —
+    the same path a dead session takes. A zero row that looked like a quote
+    would re-price a held leg to ₹0.
+    """
+    from backtest.options.quote_providers import (
+        DisconnectedQuoteProvider,
+        NoExecutableQuoteError,
+    )
+
+    stub = DisconnectedQuoteProvider("mstock", "NIFTY")
+    assert stub.reason == "WAITING_FOR_FEED"
+    assert "NIFTY" in stub.detail and "mstock" in stub.detail
+
+    quote = stub.get_quote("28845")
+    assert (quote["ltp"], quote["bid"], quote["ask"]) == (0.0, 0.0, 0.0)
+    assert quote["error"] == stub.detail and quote["disconnected"] is True
+
+    bulk = stub.get_quotes_bulk(["28845", "28846"])
+    assert set(bulk) == {"28845", "28846"}
+    assert all(row["disconnected"] is True for row in bulk.values())
+
+    assert stub.mark_quote("28845", "long")["error"] == stub.detail
+    for side in ("buy", "sell"):
+        with pytest.raises(NoExecutableQuoteError, match="while disconnected"):
+            stub.execution_quote("28845", side)
+
+
+def test_a_bridge_on_the_stub_is_never_fitted_with_a_generated_chain():
+    """The hard zero-synthetic invariant — and it must hold **under the test
+    profile too**, where synthetic chains are enabled and ``OptionsBridge`` is
+    free to build one for a provider that has no ``.generator``.
+
+    Fitting a generated chain behind a book whose whole purpose is that it
+    cannot price is the 29-Oct-vs-27-Oct class of bug wearing a new hat: the
+    operator reads a made-up mark as a market.
+    """
+    from backtest.data import sources_policy as sp
+    from backtest.forward.options_bridge import OptionsBridge
+    from backtest.options.quote_providers import DisconnectedQuoteProvider
+
+    _V2 = {
+        "expression_version": 2,
+        "type": "long_call",
+        "quantity": 1,
+        "exit": {"stop_loss_points": 10_000.0, "min_days_to_expiry": None},
+    }
+    sp.reset_source_policy()
+    sp._POLICY = sp.build_policy(profile="testing")
+    try:
+        assert sp.synthetic_enabled() is True, "this is the profile that could leak"
+        bridge = OptionsBridge(
+            capital=100_000,
+            expression=_V2,
+            quote_provider=DisconnectedQuoteProvider("mstock", "NIFTY"),
+        )
+        assert getattr(bridge.quote_provider, "generator", None) is None
+        assert bridge.feed_disconnected is True
+        assert bridge.summary()["feed_disconnected"] is True
+        # The second door: the policy is ON here, so ``synthetic_chain_generator``
+        # would happily hand back a generator and ``_generator()`` would then
+        # *assign* it onto the provider. The disconnected guard fires first.
+        with pytest.raises(SourceDisabledError, match="is disconnected"):
+            bridge._generator()
+        assert getattr(bridge.quote_provider, "generator", None) is None, "not fitted"
+    finally:
+        sp.reset_source_policy()

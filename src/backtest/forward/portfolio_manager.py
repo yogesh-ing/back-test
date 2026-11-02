@@ -50,6 +50,8 @@ from backtest.forward.state_store import (
     restore_runner,
 )
 from backtest.forward.paper_runner import (
+    FEED_STATE_LIVE,
+    FEED_STATE_WAITING,
     ORDER_AGING_ALERT_S,
     ORDER_AGING_WARN_S,
     ORDER_CANCELLED,
@@ -1270,6 +1272,182 @@ class PortfolioManager:
             self.warmup_runner(rid, background=self._async_warmup)
         return rid
 
+    # ------------------------------------------------------------------
+    # Sprint A2: broker login wakes the books that were waiting on it
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _waits_on_broker(config: Any, broker_key: str) -> bool:
+        """True when a runner config trades on ``broker_key``.
+
+        Accepts a :class:`RunnerConfig` or its serialized dict form — the
+        parked-snapshot path only ever has the dict. Both the quote source and
+        the execution venue count: a book priced off mStock but routed through
+        Dhan is waiting on either one.
+        """
+        values = (
+            (config.get("source"), config.get("execution_broker"))
+            if isinstance(config, dict)
+            else (getattr(config, "source", None), getattr(config, "execution_broker", None))
+        )
+        return any(str(v or "").strip().lower() == broker_key for v in values)
+
+    def count_runners_waiting_on(self, broker_name: Optional[str]) -> int:
+        """How many live books are stuck on a frozen mark for want of ``broker_name``.
+
+        Sprint A4 — the topbar banner and the auto-open login popup are gated on
+        "a runner actually needs this broker", so the status poll has to carry
+        the number. Only runners that *built* on the frozen stub count: a parked
+        snapshot is a restore refusal with a dozen possible causes, and claiming
+        all of them need a login would put a red banner up for a book that a
+        re-login cannot fix.
+
+        Cheap by construction — two dict scans, no I/O and no chain acquire —
+        because ``/api/broker/status`` is polled by every open tab.
+        """
+        key = str(broker_name or "").strip().lower()
+        if not key:
+            return 0
+        with self._lock:
+            return sum(
+                1
+                for runner in self._runners.values()
+                if getattr(runner, "feed_state", None) == FEED_STATE_WAITING
+                and self._waits_on_broker(runner.config, key)
+            )
+
+    def on_broker_authenticated(self, broker_name: Optional[str]) -> Dict[str, Any]:
+        """Wake every book that was waiting on ``broker_name``.
+
+        Fires the moment a session becomes valid: ``verify_totp`` success, the
+        monitor loop's unauthenticated→authenticated edge, or a remembered
+        session restored at boot. Three jobs, in order:
+
+        1. Hot-swap the frozen-mark stub for the live chain on runners that are
+           already constructed, so a book that booted ``WAITING_FOR_FEED``
+           prices again immediately rather than at its next resume.
+        2. Re-construct runners *parked* at restore because construction
+           refused without a session. They come back PAUSED — waking the feed
+           is not the operator's intent to trade.
+        3. Re-mark the books that woke, then re-run the risk pass. Frozen marks
+           make the fuses stale in both directions: a halt that fired on a
+           frozen number may no longer hold, and a fresh number may fire one
+           that should.
+
+        Never raises — a login must not fail because waking a book did.
+        """
+        key = str(broker_name or "").strip().lower()
+        out: Dict[str, Any] = {
+            "broker": key,
+            "woken": [],
+            "unparked": [],
+            "still_waiting": [],
+            "marked": 0,
+            "risk_evaluated": False,
+        }
+        if not key:
+            return out
+
+        # Snapshot the work under the lock, then release it. The chain acquire
+        # below is a network call; holding ``_lock`` across it would stall
+        # every SSE poll and control action for a broker round-trip.
+        with self._lock:
+            candidates = [
+                (rid, runner)
+                for rid, runner in self._runners.items()
+                if getattr(runner, "feed_state", None) == FEED_STATE_WAITING
+                and self._waits_on_broker(runner.config, key)
+            ]
+            parked = [
+                (park_key, snap)
+                for park_key, snap in self._parked_snapshots.items()
+                if self._waits_on_broker(snap.get("config") or {}, key)
+            ]
+        if not candidates and not parked:
+            return out
+
+        woke: List[StrategyRunner] = []
+        for rid, runner in candidates:
+            try:
+                runner._maybe_upgrade_to_live_chain()
+            except Exception:  # noqa: BLE001 — one stuck book cannot stop the rest
+                logger.exception("[login-wake] chain hot-swap failed for %s", rid[:8])
+                out["still_waiting"].append(rid)
+                continue
+            if getattr(runner, "feed_state", None) == FEED_STATE_LIVE:
+                out["woken"].append(rid)
+                woke.append(runner)
+            else:
+                out["still_waiting"].append(rid)
+
+        for park_key, snap in parked:
+            name = str((snap.get("config") or {}).get("name", "?"))
+            try:
+                from backtest.forward.state_store import _config_from_dict
+
+                config = _config_from_dict(snap["config"])
+                self.add_runner(config, start=False)
+            except (ValueError, KeyError, RuntimeError) as exc:
+                logger.warning(
+                    "[login-wake] parked runner %s still refused after %s login: %s",
+                    name, key, exc,
+                )
+                continue
+            runner = self._runners.get(config.instance_id)
+            if runner is None:
+                continue
+            try:
+                restore_runner(runner, snap)
+            except Exception:  # noqa: BLE001 — a corrupt snapshot must not fail a login
+                logger.exception(
+                    "[login-wake] parked runner %s re-created but could not be "
+                    "rehydrated — leaving it parked", name,
+                )
+                # ``remove_runner`` also drops the parked entry, which would
+                # destroy the only record of this book's positions and the
+                # operator's manual SL/TP levels. Take the half-built runner off
+                # screen, then put the snapshot back so the next boot retries.
+                self.remove_runner(config.instance_id)
+                with self._lock:
+                    self._parked_snapshots[park_key] = snap
+                continue
+            with self._lock:
+                self._parked_snapshots.pop(park_key, None)
+            out["unparked"].append(config.instance_id)
+            if getattr(runner, "feed_state", None) == FEED_STATE_LIVE:
+                woke.append(runner)
+
+        for runner in woke:
+            try:
+                self._repair_runner_marks_internal(runner, force=True)
+                out["marked"] += 1
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[login-wake] mark refresh failed for %s", runner.config.name
+                )
+
+        if out["woken"] or out["unparked"]:
+            try:
+                self._evaluate_risk()
+                out["risk_evaluated"] = True
+            except Exception:  # noqa: BLE001
+                logger.exception("[login-wake] risk re-evaluation failed")
+            self._audit_log(
+                f"BROKER_LOGIN_WAKE {key}",
+                scope="dashboard",
+                detail=(
+                    f"woken={len(out['woken'])} unparked={len(out['unparked'])} "
+                    f"still_waiting={len(out['still_waiting'])} marked={out['marked']}"
+                ),
+            )
+            self._persist_state()
+        logger.info(
+            "[login-wake] %s authenticated: %d book(s) pricing again, %d parked "
+            "snapshot(s) re-created, %d still waiting",
+            key, len(out["woken"]), len(out["unparked"]), len(out["still_waiting"]),
+        )
+        return out
+
     def remove_runner(self, instance_id: str) -> bool:
         with self._lock:
             runner = self._runners.pop(instance_id, None)
@@ -1436,6 +1614,10 @@ class PortfolioManager:
                 "segment": runner.config.segment,
                 "status": runner.status,
                 "stale": runner.status != STATUS_RUNNING,
+                # Sprint A1: a row on a book whose broker is logged out is a
+                # frozen last mark, not a paused-but-priced one. Same table,
+                # different fix (log in), so the row says which.
+                "feed_state": runner.feed_state,
                 "target_label": runner.target_label,
             }
             try:
@@ -2682,13 +2864,23 @@ class PortfolioManager:
                 restored = self._apply_state_payload(payload)
             finally:
                 self._restoring = False
+            waiting = sum(
+                1
+                for runner in self._runners.values()
+                if getattr(runner, "feed_state", None) == FEED_STATE_WAITING
+            )
             logger.warning(
-                "[state] restored %d of %d runner(s) (%d parked, still saved) "
+                "[state] restored %d of %d runner(s) (%d parked, still saved)%s "
                 "+ breaker latches from %s — restored runners are PAUSED; "
                 "resume explicitly",
                 restored,
                 len(payload.get("runners", [])),
                 len(self._parked_snapshots),
+                (
+                    f", {waiting} built on a frozen mark awaiting broker login"
+                    if waiting
+                    else ""
+                ),
                 self._state_store.path,
             )
         except Exception:  # noqa: BLE001 — a bad restore must not block boot
@@ -2747,17 +2939,20 @@ class PortfolioManager:
             )
 
             # Per-runner isolation: a runner that cannot be re-created —
-            # a 'live' runner with no armed broker session (ValueError), or
-            # a strategy retired/renamed since the state was written, whose
-            # lookup raises KeyError from the registry — is skipped and
-            # logged. It must never abort the loop: before this catch was
-            # widened, one retired name (e.g. a pre-Phase-2 strategy)
-            # silently dropped every later runner plus the manager scalars
-            # below, all reported as "starting clean".
+            # a 'live' runner with no armed broker session
+            # (BrokerSessionExpired, a RuntimeError), or a strategy
+            # retired/renamed since the state was written, whose lookup raises
+            # KeyError from the registry — is skipped and logged. It must never
+            # abort the loop: before this catch was widened, one retired name
+            # (e.g. a pre-Phase-2 strategy) silently dropped every later runner
+            # plus the manager scalars below, all reported as "starting clean".
+            # The same widening applies to the session error — a live runner
+            # whose broker logged out used to escape the (ValueError, KeyError)
+            # tuple, blow through the loop, and take every paper runner with it.
             try:
                 config = _config_from_dict(runner_snap["config"])
                 self.add_runner(config, start=False)
-            except (ValueError, KeyError) as exc:
+            except (ValueError, KeyError, RuntimeError) as exc:
                 logger.warning(
                     "[state] runner (%s) refused on restore: %s — parked, "
                     "kept in the state file for the next boot",
@@ -3750,6 +3945,19 @@ def get_portfolio_manager() -> PortfolioManager:
     with _MANAGER_LOCK:
         if _MANAGER is None:
             _MANAGER = PortfolioManager()
+        return _MANAGER
+
+
+def peek_portfolio_manager() -> Optional[PortfolioManager]:
+    """Return the live singleton **without constructing one**.
+
+    A broker login calls this to wake the books waiting on it. Going through
+    :func:`get_portfolio_manager` instead would mean a TOTP check on a process
+    that never opened the portfolio page building feeds, restoring state and
+    booking capital as a side effect of authenticating — so the honest answer
+    when nothing has been built yet is ``None``.
+    """
+    with _MANAGER_LOCK:
         return _MANAGER
 
 

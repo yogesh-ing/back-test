@@ -56,10 +56,12 @@ Anything importing these old `StrategyAdapter` names must switch:
   fresh process) requires a fresh broker login (password + TOTP). Logging
   into the mStock app itself can invalidate the API session.
 - **Session expiry is loud now (PR #41).** The expiry monitor raises
-  `broker_session_expiring` (warning) and `broker_session_expired`
-  (critical) platform alerts — surfaced in the in-app alert widget (with a
-  Re-login button that opens the broker auth popup) and fanned out through
-  the outbound notifier (Telegram/email).
+  `broker_session_expiring` (warning), `broker_session_expiring_urgent`
+  (critical, at T − 10m) and `broker_session_expired` (critical) platform
+  alerts — surfaced in the in-app alert widget (with a Re-login button that
+  opens the broker auth popup), in a persistent topbar `🔴 Broker login
+  needed` banner, and fanned out through the outbound notifier
+  (Telegram/email). They page only inside the active market window.
 - **Runners are currently PAUSED**; the live server runs on **:5000**.
 - **Data routing (2026-09-30 policy, enforced at every source decision).**
   Forward/paper/portfolio runners bar from the broker feed (mStock/dhan/Upstox);
