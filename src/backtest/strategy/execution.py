@@ -116,6 +116,12 @@ _SELECTABLE_FIELDS = frozenset(
         "squareoff_minutes_before",
         "max_loss_per_trade",
         "stale_after_seconds",
+        # Naming a field is not the same as changing it: the menu check below
+        # turns a restatement of the strategy's own value into a no-op and
+        # refuses anything that would move it. Without this entry, a client
+        # that echoes the strategy's full expression (playbook snapshots do)
+        # would be refused for naming the strategy's own ``carry_policy``.
+        "carry_policy",
     }
 )
 
@@ -123,7 +129,16 @@ _SELECTABLE_FIELDS = frozenset(
 #: legacy expression surface that must survive v2 conversion with no key
 #: loss — plan Phase 0 round-trip requirement).
 _DECLAREABLE_EXTRAS = frozenset(
-    {"squareoff_minutes_before", "max_loss_per_trade", "stale_after_seconds"}
+    {
+        "squareoff_minutes_before",
+        "max_loss_per_trade",
+        "stale_after_seconds",
+        # The bridge owns the meanings (``CARRY_POLICIES``); declaring it here is
+        # what lets a fast-timeframe strategy hold to expiry instead of being
+        # squared off at 15:10. Value validity is enforced at bridge
+        # construction, so a typo cannot silently decide a book's risk horizon.
+        "carry_policy",
+    }
 )
 
 _EXIT_KEYS = frozenset(

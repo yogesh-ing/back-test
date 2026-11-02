@@ -184,6 +184,33 @@ def test_declared_intraday_overrides_a_swing_timeframe():
     assert bridge.intraday_squareoff_minutes_before == 20
 
 
+@pytest.mark.parametrize(
+    "strategy_name", ["strangle_wing_points", "straddle_short_atm"]
+)
+def test_a_strategy_declaration_reaches_the_bridge_as_positional_carry(
+    strategy_name,
+):
+    """The premium-selling books must ride to expiry on an intraday cadence.
+
+    ``_DECLAREABLE_EXTRAS`` used to omit ``carry_policy``, so a strategy could
+    never reach ``_resolve_carry_policy`` rule 1: carry fell through to rule 4
+    (the runner timeframe), and a ``1min`` book was flattened at 15:10 every
+    session. This pins the whole path — plugin declaration -> ExecutionSpec ->
+    expression -> bridge — so the opt-out cannot be lost at any hop.
+    """
+    from backtest.plugins import discover_plugins
+    from backtest.strategy.registry import get_strategy
+
+    discover_plugins()
+    expression = get_strategy(strategy_name).execution_spec().to_expression()
+    assert expression.get("carry_policy") == CARRY_POSITIONAL
+
+    bridge = _bridge(expression, timeframe="1min")
+    assert bridge.carry_policy == CARRY_POSITIONAL
+    assert bridge.intraday_squareoff_minutes_before is None
+    assert bridge.carries_intraday is False
+
+
 def test_unknown_carry_policy_is_refused_at_construction():
     with pytest.raises(ExecutionSpecError, match="carry_policy must be one of"):
         _bridge({"carry_policy": "day"}, timeframe="5min")
