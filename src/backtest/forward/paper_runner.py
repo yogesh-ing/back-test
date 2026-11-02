@@ -4279,6 +4279,10 @@ class StrategyRunner:
         current_session = self._pnl_session_now()
         if created_session is not None and created_session >= current_session:
             return
+        # Stamping the session keeps the first read out of the
+        # ``_pnl_session is None`` branch, which returns without promoting
+        # ``prev`` — that left the anchors at 0 across the boot window.
+        self._pnl_session = current_session
         self._prev_close_realized_net = self.realized_pnl
         self._prev_close_open_pnl = self.open_pnl()
         self._last_session_realized = self.realized_pnl

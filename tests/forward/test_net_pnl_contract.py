@@ -418,6 +418,79 @@ class TestAnchorsAcrossARestart:
         assert revived.realized_pnl_today == pytest.approx(0.0, abs=TOLERANCE)
         assert revived.daily_pnl() == pytest.approx(0.0, abs=TOLERANCE)
 
+    def test_pre_contract_option_snapshot_does_not_claim_its_lifetime(self):
+        """The option twin of the equity test above — its money is in the bridge.
+
+        An option runner's realized and open P&L do not live in ``portfolio``,
+        they live in ``options_bridge``, which ``restore_runner`` rehydrates
+        AFTER the anchor block. Baselining against a still-empty bridge wrote
+        anchors of 0, so the first reader after boot — the risk sweep — saw
+        each book's whole lifetime as today's move. On 2026-11-02 that tripped
+        the global fuse at −₹3,80,625.85 while the session's real realized was
+        −₹3,609.78, and the latch paused the paper book until a human reset it.
+        """
+        from decimal import Decimal
+        from zoneinfo import ZoneInfo
+
+        from backtest.plugins import discover_plugins
+        from backtest.strategy.registry import get_strategy
+
+        discover_plugins()
+        ist = ZoneInfo("Asia/Kolkata")
+        runner = StrategyRunner(
+            RunnerConfig(
+                name="OPT-PRE-CONTRACT",
+                strategy_name="immediate_strangle",
+                allocated_capital=500_000,
+                symbols=["NIFTY"],
+                timeframe="1hour",
+                mode="paper",
+                source="synthetic",
+                instrument={
+                    "type": "option",
+                    "expression": get_strategy(
+                        "immediate_strangle"
+                    ).execution_spec().to_expression(),
+                },
+            ),
+            ledger=OrderLedger(),
+        )
+        runner.start()
+        runner.on_tick("NIFTY", price=24500.0, ts="2026-10-24T04:45:10+00:00")
+        bridge = runner.options_bridge
+        assert bridge._has_open_structure(), "fixture failed to open a structure"
+        closed_at = datetime(2026, 10, 24, 11, 0, tzinfo=ist)
+        bridge._sync_market("NIFTY", 24200.0, closed_at.isoformat())
+        bridge.option_broker.close_structure(
+            bridge.open_structure_id,
+            bridge.quote_provider,
+            timestamp=closed_at,
+            reason="stop_loss",
+        )
+        bridge.open_structure_id = None
+        bridge.last_unrealized_pnl = Decimal("0")
+        lifetime = runner.realized_pnl
+        assert lifetime != 0.0, "fixture produced no realized history"
+
+        snapshot = capture_runner(runner)
+        for key in (
+            "pnl_session",
+            "last_session_realized",
+            "last_session_open",
+            "prev_close_realized_net",
+            "prev_close_open_pnl",
+        ):
+            snapshot.pop(key, None)
+        snapshot["created_ts"] = "2026-09-01T09:15:00"
+
+        revived = StrategyRunner(runner.config, ledger=OrderLedger())
+        restore_runner(revived, snapshot)
+        assert revived.realized_pnl == pytest.approx(lifetime, abs=TOLERANCE)
+        assert revived.daily_pnl() == pytest.approx(0.0, abs=TOLERANCE), (
+            "a pre-contract option book must not report its lifetime as today"
+        )
+        assert revived._pnl_session is not None, "baseline must stamp the session"
+
     def test_snapshot_created_today_keeps_its_own_day(self):
         """The other branch: a book born this session must keep its realized.
 
