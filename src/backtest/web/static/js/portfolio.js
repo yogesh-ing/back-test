@@ -357,6 +357,7 @@
           (posCell.sub ? '<div class="cell-sub">' + posCell.sub + '</div>' : "") + '</td>' +
         '<td><span class="status-cell">' + (STATUS_DOT[r.status] || "⚪") + " " + r.status + "</span>" +
           warmupSubHtml(r) +
+          OptionView.feedStateBadgeHtml(r) +
           (r.duplicate_of
             ? '<div class="cell-sub cell-error" title="Duplicates active runner ' +
               String(r.duplicate_of).slice(0, 8) + '">⚠ duplicate</div>'
@@ -486,7 +487,7 @@
         (row.broker ? " · <span class=\"pos-broker\" title=\"Execution broker\">" +
           row.broker + "</span>" : "") +
         (row.segment ? " · " + row.segment : "") +
-        "</div></td>" +
+        "</div>" + OptionView.feedStateBadgeHtml(row) + "</td>" +
       '<td class="cell-name">' + label + sub + "</td>" +
       "<td>" + (row.side || "") + "</td>" +
       '<td class="num">' + Number(row.qty || 0).toLocaleString("en-IN") + "</td>" +

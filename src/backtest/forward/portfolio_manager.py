@@ -50,6 +50,7 @@ from backtest.forward.state_store import (
     restore_runner,
 )
 from backtest.forward.paper_runner import (
+    FEED_STATE_WAITING,
     ORDER_AGING_ALERT_S,
     ORDER_AGING_WARN_S,
     ORDER_CANCELLED,
@@ -1436,6 +1437,10 @@ class PortfolioManager:
                 "segment": runner.config.segment,
                 "status": runner.status,
                 "stale": runner.status != STATUS_RUNNING,
+                # Sprint A1: a row on a book whose broker is logged out is a
+                # frozen last mark, not a paused-but-priced one. Same table,
+                # different fix (log in), so the row says which.
+                "feed_state": runner.feed_state,
                 "target_label": runner.target_label,
             }
             try:
@@ -2682,13 +2687,23 @@ class PortfolioManager:
                 restored = self._apply_state_payload(payload)
             finally:
                 self._restoring = False
+            waiting = sum(
+                1
+                for runner in self._runners.values()
+                if getattr(runner, "feed_state", None) == FEED_STATE_WAITING
+            )
             logger.warning(
-                "[state] restored %d of %d runner(s) (%d parked, still saved) "
+                "[state] restored %d of %d runner(s) (%d parked, still saved)%s "
                 "+ breaker latches from %s — restored runners are PAUSED; "
                 "resume explicitly",
                 restored,
                 len(payload.get("runners", [])),
                 len(self._parked_snapshots),
+                (
+                    f", {waiting} built on a frozen mark awaiting broker login"
+                    if waiting
+                    else ""
+                ),
                 self._state_store.path,
             )
         except Exception:  # noqa: BLE001 — a bad restore must not block boot
@@ -2747,17 +2762,20 @@ class PortfolioManager:
             )
 
             # Per-runner isolation: a runner that cannot be re-created —
-            # a 'live' runner with no armed broker session (ValueError), or
-            # a strategy retired/renamed since the state was written, whose
-            # lookup raises KeyError from the registry — is skipped and
-            # logged. It must never abort the loop: before this catch was
-            # widened, one retired name (e.g. a pre-Phase-2 strategy)
-            # silently dropped every later runner plus the manager scalars
-            # below, all reported as "starting clean".
+            # a 'live' runner with no armed broker session
+            # (BrokerSessionExpired, a RuntimeError), or a strategy
+            # retired/renamed since the state was written, whose lookup raises
+            # KeyError from the registry — is skipped and logged. It must never
+            # abort the loop: before this catch was widened, one retired name
+            # (e.g. a pre-Phase-2 strategy) silently dropped every later runner
+            # plus the manager scalars below, all reported as "starting clean".
+            # The same widening applies to the session error — a live runner
+            # whose broker logged out used to escape the (ValueError, KeyError)
+            # tuple, blow through the loop, and take every paper runner with it.
             try:
                 config = _config_from_dict(runner_snap["config"])
                 self.add_runner(config, start=False)
-            except (ValueError, KeyError) as exc:
+            except (ValueError, KeyError, RuntimeError) as exc:
                 logger.warning(
                     "[state] runner (%s) refused on restore: %s — parked, "
                     "kept in the state file for the next boot",

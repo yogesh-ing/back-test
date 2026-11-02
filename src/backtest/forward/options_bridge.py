@@ -185,6 +185,13 @@ _DETERMINISTIC_ENTRY_REJECTIONS = frozenset(
 _BLOCKED_BY_RISK_THRESHOLD = 3
 _REJECTION_LOG_THROTTLE_SECONDS = 900.0
 
+#: Sprint A1 — what a book with no authenticated broker session answers every
+#: new entry with. Deliberately NOT in ``_DETERMINISTIC_ENTRY_REJECTIONS``:
+#: that set promotes a runner to ``BLOCKED_BY_RISK`` after three repeats, and a
+#: book waiting for a login is not stuck on risk, it is blind. Different badge
+#: (``feed_state=WAITING_FOR_FEED``), different fix (log the broker in).
+WAITING_FOR_FEED = "WAITING_FOR_FEED"
+
 
 def _market_is_open(now_utc: Optional[datetime] = None) -> bool:
     """Whether the NSE session is trading right now (marks are only expected then).
@@ -378,6 +385,12 @@ class OptionsBridge:
                     "test profile)."
                 )
             self.quote_provider = SyntheticQuoteProvider(generated)
+        elif getattr(self.quote_provider, "disconnected", False):
+            # Sprint A1: the frozen-mark stub is never fitted with a generated
+            # chain surface. Fitting one would put synthetic strikes and
+            # premiums behind a book whose entire point is that it cannot
+            # price — the operator would read a made-up mark as a market.
+            pass
         elif getattr(self.quote_provider, "generator", None) is None:
             generated = synthetic_chain_generator("options bridge chain surface")
             if generated is not None:
@@ -599,6 +612,15 @@ class OptionsBridge:
             return None if from_tick else self.on_market_view(None, strategy_name)
         if self._has_open_structure():
             return None if from_tick else self.on_market_view(view, strategy_name)
+        # Sprint A1 — a blind book opens nothing. This sits AFTER the
+        # open-structure branch on purpose: exits are never blocked by an entry
+        # rule, so a held structure keeps being managed off its last honest
+        # mark (stops, targets, expiry) while the broker is logged out. Only
+        # opening is refused — there is no chain to select a strike from and no
+        # side to cross, so a fill here could only be fabricated.
+        feed_refusal = self._disconnected_entry_refusal()
+        if feed_refusal is not None:
+            return feed_refusal
         tick_entry_dt: Optional[datetime] = None
         entry_bucket: Optional[str] = None
         # The market instant this entry is being judged on. Every entry gate
@@ -990,6 +1012,11 @@ class OptionsBridge:
             "stale_episode_id": self._stale_episode_id if self.mark_stale else 0,
             "last_refresh": self.last_refresh_result,
             "quote_source": str(getattr(self.quote_provider, "source_name", "unknown")),
+            # Sprint A1: a book priced off the frozen-mark stub. The UI reads
+            # this to say "waiting for <broker> login" instead of showing a
+            # mark that has not moved and letting the operator guess why.
+            "feed_disconnected": self.feed_disconnected,
+            "feed_refusal": self.feed_refusal,
             "last_exit": dict(self.last_exit) if self.last_exit else None,
             "settled_count": self._settlement_count,
             # -- BUG-02 day-count budget + BUG-15 health --------------------
@@ -1109,6 +1136,32 @@ class OptionsBridge:
             if s.quote_error:
                 return s.quote_error
         return None
+
+    @property
+    def feed_disconnected(self) -> bool:
+        """Whether this book is priced off the frozen-mark stub (Sprint A1).
+
+        True means the broker this runner trades on has no authenticated
+        session right now: held legs keep their last honest mark, and every
+        new entry is refused with :data:`WAITING_FOR_FEED`. It is a *feed*
+        state, not a risk state — nothing here is wrong with the book, and the
+        bridge starts pricing the instant the broker logs in (the runner
+        hot-swaps the stub for the live chain).
+        """
+        if bool(getattr(self.quote_provider, "disconnected", False)):
+            return True
+        inner = getattr(self.quote_provider, "inner", None)
+        return bool(getattr(inner, "disconnected", False))
+
+    @property
+    def feed_refusal(self) -> Optional[str]:
+        """The operator-facing reason this book cannot price, or ``None``."""
+        if not self.feed_disconnected:
+            return None
+        provider = self.quote_provider
+        if not bool(getattr(provider, "disconnected", False)):
+            provider = getattr(provider, "inner", None)
+        return str(getattr(provider, "detail", "") or WAITING_FOR_FEED)
 
     @property
     def net_pnl(self) -> Decimal:
@@ -2398,6 +2451,19 @@ class OptionsBridge:
         logger.warning("[options-bridge] OPTION_BLOCKED %s: %s", code, reason)
         return True
 
+    def _disconnected_entry_refusal(self) -> Optional[dict[str, Any]]:
+        """Refuse a new entry while this book has no broker session (Sprint A1).
+
+        Edge-triggered through :meth:`_journal_halt_once`, so a blind book
+        seeing a bar every minute writes one journal row, not 375. The state
+        itself is the runner's ``feed_state=WAITING_FOR_FEED``.
+        """
+        if not self.feed_disconnected:
+            return None
+        reason = self.feed_refusal or WAITING_FOR_FEED
+        self._journal_halt_once(WAITING_FOR_FEED, reason)
+        return {"rejected": True, "reason": reason, "code": WAITING_FOR_FEED}
+
     # ------------------------------------------------------------------ #
     # Position analytics (Greeks) — Live Order Management
     # ------------------------------------------------------------------ #
@@ -2508,6 +2574,20 @@ class OptionsBridge:
         generator = getattr(self.quote_provider, "generator", None) or getattr(
             getattr(self.quote_provider, "inner", None), "generator", None
         )
+        if generator is None and getattr(self.quote_provider, "disconnected", False):
+            # Sprint A1 — the second of the two doors that could fit a generated
+            # chain onto the frozen-mark stub (the constructor is the first).
+            # Refusing here rather than gating on the policy is the point: this
+            # bridge has no broker session, so the only chain a policy could
+            # offer is a synthetic one, and a synthetic strike behind a book
+            # labelled ``WAITING_FOR_FEED`` is a fabricated market.
+            raise SourceDisabledError(
+                f"no option chain feed for {self.underlying}: the quote provider "
+                f"({type(self.quote_provider).__name__}) is disconnected "
+                f"({getattr(self.quote_provider, 'source_name', '')}) and cannot "
+                f"select a strike until its broker authenticates. Refusing to "
+                f"price or open on a generated chain."
+            )
         if generator is None:
             generator = synthetic_chain_generator(f"options bridge ({self.underlying})")
             if generator is None:

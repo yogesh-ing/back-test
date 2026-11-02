@@ -1145,6 +1145,16 @@ STATUS_PAUSED = "PAUSED"
 STATUS_STOPPED = "STOPPED"
 STATUS_ERROR = "ERROR"
 
+#: Feed readiness (Sprint A1) — orthogonal to ``status``. ``status`` says
+#: whether the operator wants this book trading; ``feed_state`` says whether
+#: the market pipe behind it is actually connected. A runner can be RUNNING
+#: and still blind, which is exactly the combination that used to be
+#: invisible: an unauthenticated broker made option runners fail construction
+#: and vanish into ``_parked_snapshots`` rather than show up waiting.
+FEED_STATE_LIVE = "LIVE"
+FEED_STATE_WAITING = "WAITING_FOR_FEED"
+FEED_STATE_SYNTHETIC = "SYNTHETIC"
+
 MAX_BARS_PER_SYMBOL = 600  # Sized for EMA(200) 3x IIR convergence + 2yr 1day VCP/RS
 MAX_SIGNAL_LOG = 200
 MAX_TRADE_LOG = 200
@@ -1426,6 +1436,16 @@ class StrategyRunner:
         # overwrites this with the store the acquire actually landed in; the
         # starting value is the runner's own (already policy-resolved) source.
         self._chain_source = str(config.source)
+        #: Sprint A1 — is the market pipe behind this book connected? Starts
+        #: honest for an equity runner (its bar feed is the manager's shared
+        #: broker poll thread) and is re-decided below for an option book,
+        #: whose chain/quote feed is the part that needs an authenticated
+        #: broker session.
+        self.feed_state = (
+            FEED_STATE_SYNTHETIC
+            if policy_key(str(config.source)) == "synthetic"
+            else FEED_STATE_LIVE
+        )
         if str(config.instrument.get("type", "equity")) == "option":
             from backtest.forward.feed_registry import option_quote_provider_for
 
@@ -1435,10 +1455,16 @@ class StrategyRunner:
             # API budget per underlying); anything else → the synthetic pair.
             # The fallback is deliberate and labelled ("synthetic:bs") so a
             # synthetic-priced runner can never pass as live.
+            # Sprint A1: ``allow_disconnected`` — with no session and synthetic
+            # off this hands back the frozen-mark stub instead of raising, so
+            # the book is BUILT (visible, unpriceable, refusing entries) rather
+            # than parked out of sight. Constructing it is not the same as
+            # trading it: nothing here can fabricate a mark.
             provider, quote_label = option_quote_provider_for(
                 config.source,
                 self._chain_underlying,
                 wing_distance_pct=_infer_wing_distance_pct(self.strategy),
+                allow_disconnected=True,
             )
             # The bus STORE the acquire landed in (synthetic|mstock|dhan|upstox) —
             # derived from the resolved provider, not from config.source: a
@@ -1446,10 +1472,20 @@ class StrategyRunner:
             # release the synthetic entry, or stop() leaks the refcount.
             # Live labels are ``live:<source>`` (+ ``+bidask`` when the bus
             # handed out the spread-crossing wrapper).
-            self._chain_source = (
-                str(config.source).lower() if quote_label.startswith("live:") else "synthetic"
-            )
-            self._chain_released = False  # one release per acquire (stop is idempotent)
+            if quote_label.startswith("live:"):
+                self._chain_source = str(config.source).lower()
+                self._chain_released = False  # one release per acquire
+                self.feed_state = FEED_STATE_LIVE
+            elif quote_label.startswith("disconnected"):
+                # The stub took NO ChainBus entry — it is per-runner and owns
+                # no subscription — so stop() must not release anything.
+                self._chain_source = "disconnected"
+                self._chain_released = True
+                self.feed_state = FEED_STATE_WAITING
+            else:
+                self._chain_source = "synthetic"
+                self._chain_released = False
+                self.feed_state = FEED_STATE_SYNTHETIC
             try:
                 resolved_opt_broker = option_broker
                 fee_calc = CommissionCalculator.for_broker("zerodha")
@@ -1466,11 +1502,18 @@ class StrategyRunner:
                                 "LiveOptionBrokerAdapter when mode='live'"
                             )
                     else:
-                        if self._chain_source == "synthetic":
+                        if self._chain_source in ("synthetic", "disconnected"):
+                            # A live book may not be priced by anything but the
+                            # venue it trades on. The frozen-mark stub keeps a
+                            # *paper* book visible while logged out; building a
+                            # live one on it would mean a live gateway executing
+                            # against legs nobody priced.
                             raise ValueError(
                                 f"live option runner {config.name!r} refused: live option "
-                                f"chain for {config.source!r} is unavailable (refusing "
-                                "synthetic chain fallback in mode='live')"
+                                f"chain for {config.source!r} is unavailable (resolved to "
+                                f"{quote_label!r}) — refusing synthetic chain fallback in "
+                                "mode='live', and refusing to arm a live gateway against an "
+                                "unpriced WAITING_FOR_FEED chain"
                             )
                         raw_live_broker = getattr(self.broker, "broker", None)
                         if raw_live_broker is None:
@@ -1514,12 +1557,13 @@ class StrategyRunner:
                 self.options_bridge.entry_bucket_timeframe = config.timeframe
             except Exception:
                 try:
-                    from backtest.forward.feed_registry import get_chain_bus
+                    if not self._chain_released:
+                        from backtest.forward.feed_registry import get_chain_bus
 
-                    get_chain_bus().release(
-                        self._chain_underlying, source=self._chain_source
-                    )
-                    self._chain_released = True
+                        get_chain_bus().release(
+                            self._chain_underlying, source=self._chain_source
+                        )
+                        self._chain_released = True
                 except Exception:  # noqa: BLE001
                     pass
                 raise
@@ -1950,7 +1994,7 @@ class StrategyRunner:
     # ------------------------------------------------------------------ #
 
     def _maybe_upgrade_to_live_chain(self) -> None:
-        """Upgrade a synthetic-priced option runner to its live chain (bug #2).
+        """Upgrade an unpriced option runner to its live chain (bug #2 + A1).
 
         A restored mstock/dhan option runner resolves its quote provider ONCE,
         in ``__init__``. If the broker session was not yet authenticated at
@@ -1961,23 +2005,35 @@ class StrategyRunner:
         bars in, MOCK-token prices out. This is the "random expiry / random
         tick / random PnL" the owner reported.
 
-        Called from :meth:`resume` (restored runners come back PAUSED) and from
-        :meth:`start`. It is a no-op unless every guard passes:
+        With synthetic disabled the same moment now yields the frozen-mark stub
+        instead (Sprint A1), which is honest but blind — so this is also the
+        seam that turns a ``WAITING_FOR_FEED`` book into a priced one.
 
-        * it is an option runner currently on a SYNTHETIC chain whose
-          ``config.source`` is a live broker (mstock/dhan);
+        Called from :meth:`resume` (restored runners come back PAUSED), from
+        :meth:`start`, and from the manager's ``on_broker_authenticated`` hook
+        (Sprint A2 — a login must wake the book without a server restart). It
+        is a no-op unless every guard passes:
+
+        * it is an option runner currently NOT on its live chain — either the
+          labelled synthetic one, or the Sprint A1 frozen-mark stub — whose
+          ``config.source`` is a live broker (mstock/dhan/upstox);
         * that broker is authenticated RIGHT NOW (pre-checked via
           ``_default_quote_broker`` so a still-missing session never triggers a
           second synthetic acquire inside ``option_quote_provider_for``);
-        * the bridge has NO open structure — a live swap would orphan the
-          MOCK-token legs (they don't resolve on the real chain), so we refuse
-          and log, advising flatten-then-resume.
+        * coming off SYNTHETIC, the bridge has NO open structure — a live swap
+          would orphan the MOCK-token legs (they don't resolve on the real
+          chain), so we refuse and log, advising flatten-then-resume. Coming
+          off the DISCONNECTED stub the opposite is true: the open legs carry
+          the venue's own tokens (they were opened on the live chain before the
+          session dropped), so swapping is not just safe, it is the whole point
+          — "never go blind on an open position".
 
-        On success: release the synthetic ChainBus entry, acquire the live one
-        (``option_quote_provider_for`` does the acquire), swap the bridge's
-        quote provider, and re-point ``_chain_source`` so ``stop()`` releases
-        the entry we now hold. State is only mutated after the live acquire
-        succeeds, so a failure leaves the runner exactly as it was.
+        On success: release any synthetic ChainBus entry (the stub holds none),
+        acquire the live one (``option_quote_provider_for`` does the acquire),
+        swap the bridge's quote provider, and re-point ``_chain_source`` /
+        ``feed_state`` so ``stop()`` releases the entry we now hold. State is
+        only mutated after the live acquire succeeds, so a failure leaves the
+        runner exactly as it was.
         """
         bridge = self.options_bridge
         if bridge is None:
@@ -1985,8 +2041,10 @@ class StrategyRunner:
         src = str(self.config.source or "").lower()
         if src not in ("mstock", "dhan", "upstox"):
             return
-        if self._chain_source != "synthetic":
+        if self._chain_source not in ("synthetic", "disconnected"):
             return  # already live (or never fell back) — nothing to upgrade
+        # The stub is not a bus entry: nothing was acquired, nothing to release.
+        was_disconnected = self._chain_source == "disconnected"
 
         try:
             from backtest.forward.feed_registry import (
@@ -2003,17 +2061,21 @@ class StrategyRunner:
         if _default_quote_broker(src) is None:
             logger.info(
                 "Runner %s (%s) still has no authenticated %s session — "
-                "keeping synthetic chain",
+                "keeping %s chain",
                 self.instance_id[:8],
                 self.config.name,
                 src,
+                "the frozen-mark" if was_disconnected else "synthetic",
             )
             return
 
         # Never swap the pricing source under an open structure: its legs carry
-        # MOCK tokens that don't exist on the live chain.
+        # MOCK tokens that don't exist on the live chain. A book that came off
+        # the disconnected stub is the opposite case — its legs were opened on
+        # the live chain and hold the venue's own tokens, so the swap is what
+        # puts them back under a real mark.
         try:
-            if bridge._has_open_structure():
+            if not was_disconnected and bridge._has_open_structure():
                 logger.warning(
                     "Runner %s (%s) has an OPEN structure — refusing synthetic→"
                     "live chain upgrade (MOCK-token legs won't price on the "
@@ -2029,35 +2091,40 @@ class StrategyRunner:
 
         try:
             provider, label = option_quote_provider_for(src, self._chain_underlying)
-        except Exception:  # noqa: BLE001 — a failed upgrade keeps the runner synthetic
+        except Exception:  # noqa: BLE001 — a failed upgrade keeps the runner as it was
             logger.exception(
-                "live chain acquire failed for %s — staying synthetic",
+                "live chain acquire failed for %s — staying %s",
                 self.instance_id[:8],
+                "disconnected" if was_disconnected else "synthetic",
             )
             return
 
         if not label.startswith("live:"):
             # Session vanished between the pre-check and the acquire; the helper
             # already re-acquired synthetic, so release that extra ref and bail.
-            try:
-                get_chain_bus().release(self._chain_underlying, source="synthetic")
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    "synthetic re-release failed for %s", self.instance_id[:8], exc_info=True
-                )
+            if not was_disconnected:
+                try:
+                    get_chain_bus().release(self._chain_underlying, source="synthetic")
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "synthetic re-release failed for %s", self.instance_id[:8], exc_info=True
+                    )
             logger.info(
-                "Runner %s (%s) live chain not available (%s) — staying synthetic",
+                "Runner %s (%s) live chain not available (%s) — staying %s",
                 self.instance_id[:8],
                 self.config.name,
                 label,
+                "disconnected" if was_disconnected else "synthetic",
             )
             return
 
         # Live acquire succeeded — now drop the synthetic entry we were holding.
-        try:
-            get_chain_bus().release(self._chain_underlying, source="synthetic")
-        except Exception:  # noqa: BLE001 — release must never block the upgrade
-            logger.exception("synthetic chain release failed for %s", self.instance_id[:8])
+        # The disconnected stub never took one.
+        if not was_disconnected:
+            try:
+                get_chain_bus().release(self._chain_underlying, source="synthetic")
+            except Exception:  # noqa: BLE001 — release must never block the upgrade
+                logger.exception("synthetic chain release failed for %s", self.instance_id[:8])
 
         bridge.quote_provider = provider
         trader_obj = getattr(bridge.option_broker, "trader", None)
@@ -2065,10 +2132,12 @@ class StrategyRunner:
             trader_obj.quote_provider = provider
         self._chain_source = src
         self._chain_released = False  # we now hold the live entry; stop() releases it
+        self.feed_state = FEED_STATE_LIVE
         logger.info(
-            "Runner %s (%s) upgraded synthetic→live chain (%s) on %s",
+            "Runner %s (%s) upgraded %s→live chain (%s) on %s",
             self.instance_id[:8],
             self.config.name,
+            "disconnected" if was_disconnected else "synthetic",
             label,
             self._chain_underlying,
         )
@@ -4504,6 +4573,12 @@ class StrategyRunner:
                 "open_positions": len(self.positions) + open_structures,
                 "equity_positions": len(self.positions),
                 "status": self.status,
+                # Sprint A1 — feed readiness, orthogonal to ``status``. An
+                # operator needs two answers: "do I want this book trading?"
+                # (status) and "can it see the market?" (feed_state). RUNNING
+                # and blind used to be invisible — the book was parked out of
+                # the runner list entirely.
+                "feed_state": self.feed_state,
                 "mode": self.config.mode,
                 "source": self.config.source,
                 # Multi-broker PRD Phase B: which capital segment this runner
@@ -4542,6 +4617,10 @@ class StrategyRunner:
                 "mark_ts": (options_summary or {}).get("mark_ts"),
                 "mark_stale": bool((options_summary or {}).get("mark_stale")),
                 "quote_error": (options_summary or {}).get("quote_error"),
+                "feed_disconnected": bool(
+                    (options_summary or {}).get("feed_disconnected")
+                ),
+                "feed_refusal": (options_summary or {}).get("feed_refusal"),
                 "stale_positions": int((options_summary or {}).get("stale_positions") or 0),
                 # BUG-15: same-contract, same-code refusals are a stuck runner,
                 # not a trading one. Mirror the bridge's health so a UI/list row
