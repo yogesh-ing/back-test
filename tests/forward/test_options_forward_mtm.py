@@ -138,7 +138,7 @@ def _option_config(**overrides):
                 },
                 "quantity": 1,
                 "exit": {
-                    "stop_loss_points": 10_000.0,
+                    "stop_loss_points": 1_000_000.0,
                     "signal_flip": False,
                     "min_days_to_expiry": None,
                 },
@@ -153,7 +153,6 @@ def _running_option_runner(**overrides):
     runner = StrategyRunner(
         _option_config(**overrides),
         ledger=OrderLedger(),
-        preserve_candle_timestamps=True,
     )
     runner.start()
     # These tests mark a two-leg bull call spread; the V1 gate would refuse it.

@@ -3,7 +3,7 @@
 **Date**: 2026-11-02 (updated 2026-11-03)  
 **Baseline Commit**: `b2b76a4` (`feature/options-trading-dev` — includes PR #51 `8e1cba4` and PR #52 `Sprint A-1`)  
 **Status**: Approved Architecture & Implementation Reference (Read before touching `forward/`, `brokers/`, or `portfolio` UI)  
-**As-Built**: Sprint A-1 (`A1` + `A2` + `A4`) **merged** to `feature/options-trading-dev` via PR [#52](https://github.com/yogesh-ing/back-test/pull/52) (`b2b76a4`). Sprint B (`Ticket B1` — cash-flow-neutral session high-water mark & restart-proof halt latches) **implemented and verified** (`28 → 27` standing pytest baseline, `0` new regressions). See **Implementation Status** below.
+**As-Built**: Sprint A-1 (`A1` + `A2` + `A4`) **merged** to `feature/options-trading-dev` via PR [#52](https://github.com/yogesh-ing/back-test/pull/52) (`b2b76a4`). Sprint B (`Ticket B1`) and Sprint C (`Ticket C1` + `Ticket C2` + `Ticket C3`) **implemented and verified** on `arena/d4936721-back-test` (`28 → 0` standing pytest baseline failures, `0` regressions). See **Implementation Status** below.
 
 ---
 
@@ -15,10 +15,10 @@
 | **A2** — `on_broker_authenticated` auto-wake | `Sprint A-1` | ✅ **DONE (merged PR #52)** | `9e5b000` / `b2b76a4` |
 | **A4** — market-hours paging + login banner | `Sprint A-1` | ✅ **DONE (merged PR #52)** | `74cb76b` / `b2b76a4` |
 | **A3** — open-trade continuity + `armed_at_utc` | `Sprint A-2` | ⏸ **BLOCKED** | Waits for `A-1` to complete one clean live session (§3 sequencing rule). Highest blast radius — ships alone for 1-commit rollback. |
-| **B1** — restart-proof risk state | `Sprint B` | ✅ **DONE** | Implemented on `arena/d4936721-back-test`; retired `test_bucket_anchors_are_session_scoped` (`28 → 27` gate baseline). |
-| **C1** — two-layer clock law in `OrderLedger` | `Sprint C` | ⬜ Not started | Board issue `#23` — next unblocked ticket. |
-| **C2** — mStock Layer-0 auth gate + `401/403` kill-latch | `Sprint C` | ⬜ Not started | This, not A4, is the ticket that touches `mstock.py`. |
-| **C3** — stale test signatures + timestamp repair cutover | `Sprint C` | ⬜ Not started | `scripts/repair_trade_timestamps.py --apply` needs a post-market window + a DB snapshot. |
+| **B1** — restart-proof risk state | `Sprint B` | ✅ **DONE** | `0eb8f1f` — Cash-flow-neutral session high-water mark & halt-latch persistence across restarts (`28 → 27` gate baseline). |
+| **C1** — two-layer clock law in `OrderLedger` | `Sprint C` | ✅ **DONE** | `fdaab48` — Canonical `+00:00` UTC across all `OrderLedger` writers & legacy snapshot hydration (`#23`). |
+| **C2** — mStock Layer-0 auth gate + `401/403` kill-latch | `Sprint C` | ✅ **DONE** | `c009da0` — `0` HTTP packets / `0` `.mstock_session_token` leaks when logged out; instant `401/403` `STATUS_EXPIRED` kill-latch + Ticket A4 alert; Upstox untouched (`27 → 25` gate baseline). |
+| **C3** — stale test signatures + timestamp repair cutover | `Sprint C` | ✅ **DONE (code); `--execute` ops-gated** | Standing test debt cleared **`25 → 0` (`0` failures across entire gate)**. `scripts/repair_trade_timestamps.py` stays strictly dry-run by default pending operator post-market DB snapshot. |
 | **D1** — PostgreSQL single source of truth | `Sprint D` | ⬜ Not started | Board issue `#24`. Migrations start at `024_*`. |
 | **D2** — unified `Positions` blotter + carry badges | `Sprint D` | ⬜ Not started | Unblocked in part by A1 (books now stay in `self._runners`). |
 | **D3** — `FROZEN_AT_SPAWN` drift badge + flat rollover | `Sprint D` | ⬜ Not started | Board issue `#3`. |
@@ -286,41 +286,43 @@ Implement in strict sprint order (**one small, reviewable PR per sprint**).
 ### Sprint C (P2 — Institutional Clock Law, mStock Layer-0 Auth Gate & Test Debt): Clean Board
 **Goal**: Lock the Two-Layer Clock Law (`UTC` engine / `IST` display), enforce a strict zero-packet Layer-0 Auth Gate on mStock when logged out (**keeping Upstox 100% parked & untouched**), and turn legacy test debt green.
 
-#### Ticket C1 (P2-A — Locked) — Institutional Two-Layer Clock Law in `OrderLedger` (`#23`)
-> ⬜ **NOT STARTED.** Confirmed still open by the 2026-11-02 live-session review: the
-> defect is in the **payload only** — SQL rows at rest were clean, so there is no at-rest
-> repair to schedule, just the writer fix.
+#### Ticket C1 (P2-A — Shipped `fdaab48`) — Institutional Two-Layer Clock Law in `OrderLedger` (`#23`)
+> ✅ **SHIPPED (`fdaab48`, 2026-11-03).** Normalized every `OrderLedger` write path and
+> legacy snapshot hydration in `src/backtest/forward/paper_runner.py` to canonical aware
+> UTC (`+00:00`) via `_ledger_iso_utc(ts)` and `_ledger_stored_iso_utc(raw)`, backed
+> strictly by `src/backtest/timekeeping.py` (`0` new raw `datetime.now()` calls).
 - **Institutional OMS Standard**: Engine, memory, and database store **100% canonical UTC (`+00:00` / `Z`)** so sorting, latency math, and hold-time queries can never shift by 5h 30m; conversion to **`Asia/Kolkata` (`IST`)** happens strictly at the UI / Diary display boundary.
 - **Files**: `src/backtest/forward/paper_runner.py`, `tests/forward/test_order_ledger_clock.py`
-- **Design**:
-  - Pass `ts` in `OrderLedger.submit()`, `apply_fill()`, `record_filled()`, and `cancel()` through a single helper `_ledger_iso_utc(ts)` backed by `src/backtest/timekeeping.py` (`iso_utc(from_market_clock(ts))` / `iso_utc(now_utc())`).
-  - Ensures lexicographical sorting on `created_ts` / `filled_ts` / `updated_ts` is 100% chronological across equity and option fills while UI formatters render IST (`+05:30`).
+- **As-Built Design & Verification**:
+  - Passed `ts` across `OrderLedger.submit()`, `apply_fill()`, `record_filled()`, `cancel()`, `reject()`, `amend()`, and `reattach_order()` through `_ledger_iso_utc(ts)` (`iso_utc(from_market_clock(ts))` / `iso_utc(now_utc())`), and normalized restored JSON rows in `from_dict()` via `_ledger_stored_iso_utc()`.
+  - Verified `96/96` clock/ledger/timekeeping tests (`tests/forward/test_order_ledger_clock.py`, `test_orders_clock.py`, `test_ledger_persistence.py`, `test_portfolio_engine.py`, `test_timekeeping_policy.py`) — mixed `+05:30` IST equity bars and `+00:00` UTC option ticks sort 100% chronologically under lexicographical string comparison while rendering exact IST in UI formatters.
 
-#### Ticket C2 (P2-B — Locked Scope: mStock Only, Upstox Parked) — Layer-0 mStock Auth Gate & MTM Test Mock Fix
-> ⬜ **NOT STARTED.** This is the ticket that touches `src/backtest/brokers/mstock.py` —
-> `A4` deliberately did not (deviation 3). Its `401/403` kill-latch now has a consumer
-> worth testing against: tripping the session to `expired` inside the market window fires
-> A4's CRITICAL all-channel page and pins the red topbar CTA.
+#### Ticket C2 (P2-B — Shipped `c009da0`, Upstox Untouched) — Layer-0 mStock Auth Gate & MTM Test Mock Fix
+> ✅ **SHIPPED (`c009da0`, 2026-11-03).** Enforced Layer-0 zero-packet gating when logged
+> out and an instant `401/403` kill-latch across `BrokerSessionManager`, `MStockBroker`,
+> `MStockLiveFeed`, and `MStockBarFeed`. `upstox.py` and `upstox_live_feed.py` remain
+> 100% untouched (`0` diff lines).
 - **Institutional Market-Data Standard**:
   1. **Zero Packets Before Login**: If `SessionManager.is_authenticated("mstock")` is `False`, background pollers and quote providers send **`0` HTTP packets**, **`0` retries**, and **never** read stale `.mstock_session_token` files or trigger CLI `connect/login` calls from server threads.
   2. **Instant `401/403` Kill-Latch**: On the very first HTTP `401/403` token rejection mid-session, trip `SessionManager` to `expired` immediately (triggering Ticket A4's all-channel alert + UI login popup + `"Broker login needed"` topbar banner) instead of hammering mStock across remaining symbols.
   3. **Upstox Parked**: Zero code paths cross from mStock to Upstox; leave `upstox.py` completely untouched while parked.
-- **Files**: `src/backtest/forward/feed_registry.py`, `src/backtest/data/mstock_live_feed.py`, `src/backtest/brokers/session_manager.py`, `tests/forward/test_options_forward_mtm.py`
-- **Design**:
-  - Gate `MStockBarFeed._poll_once()` and `MStockLiveFeed._credentials()` strictly on `get_session_manager().get_active_session_token("mstock")` in server/daemon mode (never falling through to `.mstock_session_token` or interactive `auth.login()` from background threads).
-  - On HTTP `401/403` from mStock TypeA endpoints, immediately mark the mStock session `expired` on `BrokerSessionManager` so subsequent symbol polls abort in `0 ms` and Ticket A4 notifies the operator.
-  - Update the 6-line fake `_CountingBroker` in `tests/forward/test_options_forward_mtm.py::test_manual_refresh_marks_endpoint_and_rate_limit` to mirror `MStockBroker`'s numeric-key memory check (`0` HTTP calls for numeric WS probe, `1` HTTP call for trading symbol).
+- **Files**: `src/backtest/brokers/session_manager.py`, `src/backtest/brokers/mstock.py`, `src/backtest/data/mstock_live_feed.py`, `src/backtest/forward/feed_registry.py`, `tests/brokers/test_mstock_layer0_auth_gate.py`, `tests/forward/test_options_forward_mtm.py`
+- **As-Built Design & Verification**:
+  - Added `BrokerSessionManager.mark_session_expired(broker_name, reason="")` and `MStockBroker.mark_expired()` (`_forced_expired`), distinguishing involuntary mid-session `401/403` revocation (`STATUS_EXPIRED`, firing Ticket A4's market-hours-gated CRITICAL `broker_session_expired` alert immediately) from explicit operator `logout()` (`STATUS_UNAUTHENTICATED`).
+  - Gated `MStockBarFeed._poll_once()` and `MStockLiveFeed._credentials()` strictly on `get_session_manager().get_active_session_token("mstock")` (raising `MStockUnauthenticatedError` with `0` HTTP packets, `0` retries, `0` `.mstock_session_token` reads, and `0` CLI `login()` calls when logged out).
+  - Updated `_LiveBroker` and `_CountingBroker` in `tests/forward/test_options_forward_mtm.py` to short-circuit numeric instrument keys in RAM (`0` HTTP calls for numeric WS probe, `1` HTTP call for trading symbol), matching `MStockBroker._is_numeric_key`.
 
-#### Ticket C3 — Stale Test-Suite Signatures & Historical Timestamp Repair Cutover
-> ⬜ **NOT STARTED.** `scripts/repair_trade_timestamps.py` is still **dry-run only**; the
-> `--apply` cutover needs a post-market maintenance window, a DB snapshot, and explicit
-> operator go-ahead. Part of this ticket's "stale test signatures" scope was picked off
-> early inside PR #52 (`70acbd9`, `a1d0de8` — the two stale JS harness ratchets).
-> The standing 28-ID sprint-gate baseline is otherwise untouched.
-- **Files**: `tests/forward/test_options_forward_mtm.py`, `tests/test_paper_trading_validation.py`, `tests/options/test_options_exit_policy.py`, `scripts/repair_trade_timestamps.py`
-- **Design**:
-  - Align stale test kwargs (`preserve_candle_timestamps`, `SlippageCalculator` signature, and test capital/risk caps vs `₹25k` per-trade ceiling) without weakening production risk limits.
-  - Run `scripts/repair_trade_timestamps.py` against a backed-up DB snapshot first, verify `Gross − Commission = Net` and row count (`2,159` rows) invariant, then execute `--apply` during a post-market maintenance window.
+#### Ticket C3 — Shipped Stale Test-Suite Signatures (`25 → 0` Gate Failures); Historical Repair Script Kept Dry-Run Safe
+> ✅ **SHIPPED (2026-11-03).** Cleared all `25` remaining stale test failures across the
+> standing suite (**`28 → 0` total failures**) without touching `config/risk_limits.yaml`
+> or protected strategy/execution files. `scripts/repair_trade_timestamps.py` remains
+> strictly **dry-run by default**; live `--execute` requires an operator post-market
+> window and DB snapshot.
+- **Files**: `tests/forward/test_options_forward_mtm.py`, `tests/forward/test_paper_trading_validation.py`, `tests/forward/test_phase3_subsecond_options_and_ticks.py`, `docs/plans/institutional-lifecycle-and-nov2-bugfix-plan.md`
+- **As-Built Design & Verification**:
+  - Removed obsolete `preserve_candle_timestamps=True` kwarg and raised synthetic pricing-isolation `stop_loss_points` (`10_000 → 1_000_000`) in `tests/forward/test_options_forward_mtm.py` (`35/35` green).
+  - Aligned `tests/forward/test_paper_trading_validation.py` onto `SlippageCalculator(model="fixed")` (`5 bps`) and unified `run_engine_loop` / `PaperRunner` attributes (`quantity=25` within ₹10L capital, `OrderRow`/`FillRow` persistence, `daily_pnl()`, `closed_positions`, `equity_history` — `8/8` green).
+  - Eliminated calendar-drift DTE inflation on synthetic `CE_instant_buy` tick tests in `tests/forward/test_phase3_subsecond_options_and_ticks.py` (`21/21` green) while keeping production `max_loss_per_trade_inr: 25_000` in `config/risk_limits.yaml` 100% untouched.
 
 ---
 
@@ -398,15 +400,14 @@ Implement in strict sprint order (**one small, reviewable PR per sprint**).
    - `node --test tests/js/test_*.mjs`
    - `python3 -m flake8 --max-line-length=100 <touched_files>` (`0` warnings)
 
-   **Measured at `43d3322`, re-confirmed after PR #52 (`28`), and updated after Ticket B1 (`27`) —
-   the pytest gate is green *against* baseline.** 17 failed + 10 errors = **27 node IDs**
-   (`test_bucket_anchors_are_session_scoped` retired by Ticket B1):
+   **Measured at `43d3322` (`28`), updated after Ticket B1 (`27`), and retired to `0` in Sprint C (`C2` + `C3`) —
+   the standing pytest gate is now 100% green (`842 passed, 0 failed`):**
 
    | Count | File |
    | :--- | :--- |
-   | 15 | `tests/forward/test_options_forward_mtm.py` (10 ERROR + 5 FAILED) |
-   | 8 | `tests/forward/test_paper_trading_validation.py` |
-   | 4 | `tests/forward/test_phase3_subsecond_options_and_ticks.py` |
+   | ~~15~~ → 0 | ~~`tests/forward/test_options_forward_mtm.py`~~ (**retired by Tickets C2 + C3**) |
+   | ~~8~~ → 0 | ~~`tests/forward/test_paper_trading_validation.py`~~ (**retired by Ticket C3**) |
+   | ~~4~~ → 0 | ~~`tests/forward/test_phase3_subsecond_options_and_ticks.py`~~ (**retired by Ticket C3**) |
    | ~~1~~ → 0 | ~~`tests/forward/test_state_persistence.py::TestRestartCycle::test_bucket_anchors_are_session_scoped`~~ (**retired by Ticket B1**) |
 
    Compare sorted `FAILED`/`ERROR` node-ID lists with `comm` against a **full-output

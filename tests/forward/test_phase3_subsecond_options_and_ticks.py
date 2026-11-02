@@ -569,12 +569,13 @@ class TestTickCadenceEntriesAndGuards:
         assert runner.evaluation_cadence == "tick"
         assert len(runner._bars["NIFTY"]) == 0
 
-        res = runner.on_tick("NIFTY", price=24500.0, ts="2026-10-24T04:44:23+00:00")
+        tick_ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        res = runner.on_tick("NIFTY", price=20000.0, ts=tick_ts)
         assert res is not None and res.get("structure_id")
         assert runner.options_bridge.executed_count == 1
         # Caveat Q-2: _bars remains strictly closed timeframe bars (0 bars yet)!
         assert len(runner._bars["NIFTY"]) == 0
-        assert runner._forming_bar["NIFTY"]["close"] == 24500.0
+        assert runner._forming_bar["NIFTY"]["close"] == 20000.0
 
     def test_bar_close_strategy_never_enters_intrabar_on_ticks(self):
         spec = get_strategy("banknifty_ema_momentum").execution_spec().to_expression()
@@ -651,9 +652,10 @@ class TestTickCadenceEntriesAndGuards:
         t.start()
         assert entered_first.wait(timeout=2.0)
         second_attempt_result.append(runner._try_begin_entry())
+        t0 = datetime.now(timezone.utc).replace(microsecond=0)
         # While in-flight, a tick entry attempt cleanly no-ops without blocking
         in_flight_res = runner._process_option_tick_entry(
-            "NIFTY", 24500.0, "2026-10-24T04:45:10+00:00"
+            "NIFTY", 20000.0, t0.isoformat()
         )
         assert in_flight_res is None
         release_first.set()
@@ -662,7 +664,9 @@ class TestTickCadenceEntriesAndGuards:
         assert second_attempt_result == [False]
         assert runner.options_bridge.executed_count == 0
         # Once released, normal tick entry succeeds cleanly
-        res = runner.on_tick("NIFTY", price=24500.0, ts="2026-10-24T04:45:11+00:00")
+        res = runner.on_tick(
+            "NIFTY", price=20000.0, ts=(t0 + timedelta(seconds=1)).isoformat()
+        )
         assert res is not None and runner.options_bridge.executed_count == 1
 
     def test_reentry_cooldown_blocks_machine_gun_reentry_after_tick_stopout(self):
@@ -979,9 +983,10 @@ class TestLiveMinuteBarBuilderAndPortfolioTickFanout:
 
 class TestOptionSessionDateRollAndCommissionAccounting:
     def _open_and_close_option(
-        self, runner: StrategyRunner, close_dt: datetime, exit_spot: float = 24300.0
+        self, runner: StrategyRunner, close_dt: datetime, exit_spot: float = 19800.0
     ):
-        runner.on_tick("NIFTY", price=24500.0, ts="2026-10-24T04:45:10+00:00")
+        entry_ts = (close_dt - timedelta(minutes=2)).astimezone(timezone.utc).isoformat()
+        runner.on_tick("NIFTY", price=20000.0, ts=entry_ts)
         bridge = runner.options_bridge
         assert bridge._has_open_structure()
         sid = bridge.open_structure_id
@@ -1022,14 +1027,19 @@ class TestOptionSessionDateRollAndCommissionAccounting:
         yesterday_close = datetime.combine(
             ist_today - timedelta(days=1), dt_time(23, 30), tzinfo=IST
         )
-        s_prev = self._open_and_close_option(runner, yesterday_close, exit_spot=24200.0)
+        runner._last_bar_ts["NIFTY"] = yesterday_close.isoformat()
+        s_prev = self._open_and_close_option(runner, yesterday_close, exit_spot=19700.0)
         assert s_prev.session_date == (ist_today - timedelta(days=1)).isoformat()
+        runner._capture_pnl_session()  # anchor yesterday's close
+
+        # Roll session clock across 00:00 IST into today -> yesterday's loss is excluded!
+        after_midnight = datetime.combine(ist_today, dt_time(0, 20), tzinfo=IST)
+        runner._last_bar_ts["NIFTY"] = after_midnight.isoformat()
         assert runner.daily_pnl() == pytest.approx(0.0, abs=1e-9)
 
         # 2) Close at 00:20 IST today (18:50 UTC yesterday!) -> stamps TODAY's IST session_date!
         runner.options_bridge._last_exit_mono = None
-        after_midnight = datetime.combine(ist_today, dt_time(0, 20), tzinfo=IST)
-        s_today = self._open_and_close_option(runner, after_midnight, exit_spot=24350.0)
+        s_today = self._open_and_close_option(runner, after_midnight, exit_spot=19850.0)
         assert s_today.session_date == ist_today.isoformat()
         expected_net = s_today.gross_pnl - s_today.total_commission - s_today.statutory_fees
         assert s_today.net_pnl == expected_net
@@ -1063,7 +1073,7 @@ class TestOptionSessionDateRollAndCommissionAccounting:
         )
         runner.start()
         ist_now = datetime.now(IST)
-        closed = self._open_and_close_option(runner, ist_now, exit_spot=24650.0)
+        closed = self._open_and_close_option(runner, ist_now, exit_spot=20150.0)
 
         trades = runner.closed_option_trades
         assert len(trades) == 1
