@@ -734,6 +734,61 @@ class BrokerSessionManager:
             return None
         return None
 
+    def mark_session_expired(self, broker_name: str, reason: str = "") -> bool:
+        """Instant kill-latch when a broker rejects an active token (HTTP 401/403).
+
+        Sprint C / Ticket C2: flips ``broker_name`` immediately to ``STATUS_EXPIRED``,
+        clears its in-memory + remembered token, sets the one-shot ``expired`` UI
+        event flag, and triggers Ticket A4's market-hours-gated CRITICAL alert
+        without waiting up to 30 seconds for ``_monitor_loop``.
+        """
+        key = self._normalize(broker_name)
+        if key is None:
+            return False
+        display = key
+        transitioned = False
+        with self._lock:
+            try:
+                broker = self._broker_for(key)
+            except UnknownBrokerError:
+                return False
+            display = getattr(broker, "broker_display_name", key)
+            previous = self._last_observed_status.get(key)
+            mark_fn = getattr(broker, "mark_expired", None)
+            if callable(mark_fn):
+                mark_fn()
+            else:
+                broker.logout()
+            self._expiring_soon_flags[key] = False
+            if previous != STATUS_EXPIRED:
+                self._expired_flags[key] = True
+                transitioned = True
+            self._last_observed_status[key] = STATUS_EXPIRED
+
+        detail = f" ({reason})" if reason else ""
+        logger.warning(
+            "%s session invalidated%s — token cleared, manual re-authentication required",
+            key,
+            detail,
+        )
+        try:
+            from backtest.brokers.remember_session import delete_saved_session
+
+            delete_saved_session(key if key in _BROKER_REGISTRY else None)
+        except Exception:  # noqa: BLE001 — cleanup is best-effort
+            pass
+        if not _session_alert_open("broker_session_expired", key):
+            _resolve_session_alerts(key)
+            _raise_session_alert(
+                "broker_session_expired",
+                "critical",
+                key,
+                f"{display} session EXPIRED{detail} — live feeds, forward entries and "
+                "portfolio marks are paused. Re-login (password + TOTP) now.",
+                {"broker": key, "broker_display_name": display, "expires_at": None},
+            )
+        return transitioned
+
     # ------------------------------------------------------------------
     # Expiry notifications (consumed by the API layer for toasts)
     # ------------------------------------------------------------------

@@ -536,6 +536,8 @@ class TestMtmStalenessObservability:
                 return []
 
             def get_option_quote(self, symbol, exchange="NFO"):
+                if str(symbol).isdigit():
+                    return {}  # numeric WS probe returns {} in RAM (mirrors MStockBroker)
                 self.quote_calls.append((symbol, exchange))
                 return {"ltp": self.quotes[symbol]}
 
@@ -947,6 +949,8 @@ class TestMtmStalenessObservability:
                 return []
 
             def get_option_quote(self, symbol, exchange="NFO"):
+                if str(symbol).isdigit():
+                    return {}  # numeric WS probe returns {} in RAM (mirrors MStockBroker)
                 self.calls += 1
                 return {"ltp": 155.0}
 

@@ -40,13 +40,61 @@ import pandas as pd
 import requests
 
 from backtest.data.base import MSTOCK_INTERVAL_MAP, normalize_candles
+from backtest.live import auth as _live_auth
 
 logger = logging.getLogger("backtest.data.mstock_live_feed")
 
+#: Original CLI ``get_session_token`` identity captured at import time so
+#: server/daemon mode never falls through to ``.mstock_session_token`` or
+#: interactive CLI login, while unit tests that explicitly monkeypatch
+#: ``backtest.live.auth.get_session_token`` continue to work seamlessly.
+_ORIG_LIVE_AUTH_GET_SESSION_TOKEN = _live_auth.get_session_token
+
+
+class MStockUnauthenticatedError(RuntimeError):
+    """Raised when mStock has no active authenticated session (Layer-0 Auth Gate)."""
+
+
+def has_mstock_live_auth() -> bool:
+    """True when an active mStock token is available without touching disk or CLI."""
+    if _live_auth.get_session_token is not _ORIG_LIVE_AUTH_GET_SESSION_TOKEN:
+        return True
+    try:
+        from backtest.brokers.session_manager import get_session_manager
+
+        return bool(get_session_manager().get_active_session_token("mstock"))
+    except Exception:  # noqa: BLE001 — fail closed on auth gate errors
+        return False
+
+
+def _trip_mstock_auth_kill_latch(status_code: int, context: str) -> None:
+    """Trip SessionManager's mStock session to ``expired`` on HTTP 401/403 (Ticket C2)."""
+    try:
+        from backtest.brokers.session_manager import get_session_manager
+
+        get_session_manager().mark_session_expired(
+            "mstock", reason=f"HTTP {status_code} on {context}"
+        )
+    except Exception:  # noqa: BLE001 — never mask caller error
+        logger.debug("mstock kill-latch notify failed", exc_info=True)
+
+
+def _raise_if_auth_rejected(resp: Any, context: str) -> None:
+    """Abort immediately with zero retry sleep on HTTP 401/403."""
+    code = getattr(resp, "status_code", None)
+    if code in (401, 403):
+        _trip_mstock_auth_kill_latch(int(code), context)
+        raise MStockUnauthenticatedError(
+            f"mStock rejected token with HTTP {code} on {context} — session marked expired"
+        )
+
+
 __all__ = [
     "MStockLiveFeed",
+    "MStockUnauthenticatedError",
     "ScriptMasterCache",
     "clear_scriptmaster_cache",
+    "has_mstock_live_auth",
     "MARKET_OPEN_HOUR",
     "MARKET_OPEN_MINUTE",
     "MARKET_CLOSE_HOUR",
@@ -158,10 +206,13 @@ def _fetch_bars(
             resp = requests.get(
                 url, headers=_typea_headers(api_key, token), params=params, timeout=15
             )
+            _raise_if_auth_rejected(resp, "instruments/historical")
             resp.raise_for_status()
             rows = _extract_candles(resp.json())
             bars = [_candle_row_to_bar(row) for row in rows]
             return [b for b in bars if b is not None]
+        except MStockUnauthenticatedError:
+            return []
         except Exception as exc:  # noqa: BLE001 — feed hiccups are logged, not fatal
             last_exc = exc
             if attempt == 0:
@@ -291,6 +342,7 @@ class ScriptMasterCache:
             headers=_typea_headers(api_key, token),
             timeout=30,
         )
+        _raise_if_auth_rejected(resp, "instruments/scriptmaster")
         resp.raise_for_status()
         frame = pd.read_csv(io.StringIO(resp.text), low_memory=False)
         if frame.empty:
@@ -423,16 +475,34 @@ class MStockLiveFeed:
     # -- credentials (lazy) ------------------------------------------------
 
     def _credentials(self) -> tuple[str, str]:
-        """Session token + API key, resolved at query time (never at build)."""
-        from backtest.live.auth import get_session_token
+        """Session token + API key, gated strictly on active SessionManager auth (Ticket C2).
 
+        Never reads stale ``.mstock_session_token`` files from disk and never
+        triggers interactive CLI ``login()`` / ``input()`` prompts from background
+        threads. Unit tests that explicitly monkeypatch
+        ``backtest.live.auth.get_session_token`` continue to resolve via that
+        seam.
+        """
         api_key = os.getenv("MSTOCK_API_KEY", "").strip()
         if not api_key:
             raise RuntimeError(
                 "MSTOCK_API_KEY is not configured — set it (or inject mstock_client) "
                 "before querying the live feed"
             )
-        return get_session_token(), api_key
+        if _live_auth.get_session_token is not _ORIG_LIVE_AUTH_GET_SESSION_TOKEN:
+            token = _live_auth.get_session_token()
+            if not token:
+                raise MStockUnauthenticatedError("mStock session is not authenticated")
+            return token, api_key
+
+        from backtest.brokers.session_manager import get_session_manager
+
+        token = get_session_manager().get_active_session_token("mstock")
+        if not token:
+            raise MStockUnauthenticatedError(
+                "mStock session is not authenticated — waiting for operator login"
+            )
+        return token, api_key
 
     def _base_url(self) -> str:
         url = self._base_url_override or os.getenv("MSTOCK_BASE_URL", "https://api.mstock.trade")
@@ -465,6 +535,7 @@ class MStockLiveFeed:
                     params=[("i", quote_name)],
                     timeout=15,
                 )
+                _raise_if_auth_rejected(resp, "instruments/quote/ohlc")
                 resp.raise_for_status()
                 payload = resp.json().get("data") or {}
                 entry = payload.get(quote_name)
@@ -489,6 +560,8 @@ class MStockLiveFeed:
                     "close": float(last),
                     "volume": 0,
                 }
+            except MStockUnauthenticatedError:
+                return None
             except Exception as exc:  # noqa: BLE001 — transient: back off, retry once
                 last_exc = exc
                 if attempt == 0:
@@ -538,6 +611,8 @@ class MStockLiveFeed:
             raw_script = row.get("instrument_token") or row.get("securitytoken")
             if raw_script is not None and str(raw_script).strip():
                 script = str(raw_script).strip()
+        except MStockUnauthenticatedError:
+            return None
         except Exception as exc:  # noqa: BLE001 — resolution failure must not stop the poll
             logger.debug(
                 "mstock feed: intraday key resolution for %s failed (%s); using NSE default",
@@ -569,9 +644,12 @@ class MStockLiveFeed:
                     headers=_typea_headers(api_key, token),
                     timeout=15,
                 )
+                _raise_if_auth_rejected(resp, "instruments/intraday")
                 resp.raise_for_status()
                 rows = _extract_candles(resp.json())
                 return [b for b in (_candle_row_to_bar(row) for row in rows) if b]
+            except MStockUnauthenticatedError:
+                return []
             except Exception as exc:  # noqa: BLE001 — transient: back off, retry once
                 last_exc = exc
                 if attempt == 0:
@@ -649,6 +727,9 @@ class MStockLiveFeed:
         if self.client is not None:
             return self.client.get_latest_bar(symbol)
 
+        if not has_mstock_live_auth():
+            return None
+
         # Prefer genuine 1-minute OHLCV candles from instruments/intraday for
         # BOTH indices (via INDEX_SECURITY_TOKENS) and equities (via scriptmaster)
         # so full-day session OHL from quote/ohlc never corrupts 1-min candle
@@ -656,6 +737,9 @@ class MStockLiveFeed:
         intraday_bar = self._fetch_intraday_bar(symbol)
         if intraday_bar is not None:
             return intraday_bar
+
+        if not has_mstock_live_auth():
+            return None
 
         quote_bar = self._fetch_quote_bar(symbol)
         if quote_bar is not None:
@@ -669,7 +753,11 @@ class MStockLiveFeed:
                 "volume": 0,
             }
 
-        token, api_key = self._credentials()
+        try:
+            token, api_key = self._credentials()
+            sec_token = self._security_token_for(symbol)
+        except MStockUnauthenticatedError:
+            return None
         # API window rules (all verified live 2026-09-18):
         #   * ``to`` must be strictly in the past (clock skew ⇒ 400);
         #   * full datetimes required — date-only strings ⇒ 400;
@@ -684,7 +772,7 @@ class MStockLiveFeed:
             self._base_url(),
             token,
             api_key,
-            self._security_token_for(symbol),
+            sec_token,
             start,
             to_dt.strftime("%Y-%m-%d %H:%M:%S"),
             self.segment,
@@ -755,11 +843,16 @@ class MStockLiveFeed:
                 f"interval {interval!r} not supported by the mStock live feed "
                 f"(supported: {', '.join(_INTERVAL_MAP)})"
             )
+        try:
+            sec_token = self._security_token_for(symbol)
+        except MStockUnauthenticatedError as exc:
+            logger.warning("live feed unavailable for %s: %s", symbol, exc)
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
         bars = _fetch_bars(
             self._base_url(),
             token,
             api_key,
-            self._security_token_for(symbol),
+            sec_token,
             str(start),
             str(end),
             self.segment,
