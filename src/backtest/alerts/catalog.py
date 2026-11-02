@@ -180,6 +180,25 @@ CATALOG: Dict[str, Dict[str, Any]] = {
             "Ignore only if the feed is genuinely not needed right now.",
         ],
     },
+    AlertType.BROKER_SESSION_EXPIRING_URGENT.value: {
+        "title": "Broker login expires in minutes",
+        "section": "pi-root",
+        "what_it_means": [
+            "Stage 2 of the session ladder: under 10 minutes of validity left. "
+            "This is the last moment a re-login costs nothing — after it the "
+            "feed drops mid-session and every runner on that broker goes "
+            "fail-closed.",
+            "Raised CRITICAL, so it bypasses quiet hours and the hourly alert "
+            "rate limit and reaches every configured channel. Only fires inside "
+            "the active market window (09:00–15:30 IST).",
+        ],
+        "typical_responses": [
+            "Re-login now: the banner in the topbar and the alert both open the "
+            "broker popup — password + TOTP, nothing else stops.",
+            "If you cannot re-login, pause the runners on that broker yourself "
+            "rather than letting them sit on a frozen mark.",
+        ],
+    },
     AlertType.BROKER_SESSION_EXPIRED.value: {
         "title": "Broker session expired",
         "section": "pi-root",

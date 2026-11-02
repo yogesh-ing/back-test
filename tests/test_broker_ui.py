@@ -10,6 +10,8 @@
 * Browser logic: ``broker_auth_modal.js`` view transitions, error paths,
   password clearing, logout wiring — verified by
   ``tests/js/test_broker_auth_modal.mjs``.
+* Sprint A4: the market-hours login CTA (banner markup on every page, plus the
+  prompt/auto-open logic in ``tests/js/test_broker_login_prompt.mjs``).
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _JS_HARNESS = _REPO_ROOT / "tests" / "js" / "test_broker_status.mjs"
 _MODAL_HARNESS = _REPO_ROOT / "tests" / "js" / "test_broker_auth_modal.mjs"
 _ALERT_WIDGET_HARNESS = _REPO_ROOT / "tests" / "js" / "test_alert_widget_relogin.mjs"
+_LOGIN_PROMPT_HARNESS = _REPO_ROOT / "tests" / "js" / "test_broker_login_prompt.mjs"
 
 _PAGES = ["/", "/backtest", "/compare", "/forward"]
 
@@ -146,3 +149,29 @@ def test_forward_auth_gate_js_behaviour():
         result.returncode == 0
     ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "12 tests passed" in result.stdout
+
+
+@pytest.mark.parametrize("page", _PAGES)
+def test_login_banner_cta_is_on_every_page_and_starts_hidden(client, page):
+    """Sprint A4 — the CTA is nav chrome, so it exists before any poll returns."""
+    html = client.get(page).get_data(as_text=True)
+    assert (
+        'id="broker-login-banner" class="broker-login-banner" type="button" hidden'
+        in html
+    )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_broker_login_prompt_js_behaviour():
+    """Sprint A4 — market-hours banner + one auto-opened login popup per stage."""
+    result = subprocess.run(
+        ["node", str(_LOGIN_PROMPT_HARNESS)],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "13 tests passed" in result.stdout

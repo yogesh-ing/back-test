@@ -4,13 +4,15 @@ A dead mStock session silently stops feeds and pauses runner entries, so the
 expiry monitor publishes platform alerts on transitions:
 
 * ``expiring_soon`` → ``broker_session_expiring`` (warning, per broker)
+* inside T − 10m    → ``broker_session_expiring_urgent`` (critical; the action
+  gate — every configured channel, rate-limit exempt)
 * ``expired``       → ``broker_session_expired`` (critical; supersedes the
-  expiring alert and fires exactly once per cycle — Telegram must not get a
-  message every 5-minute tick)
-* re-login / logout / recovery → both keys resolve for that broker.
+  expiring alerts and fires once per cycle — Telegram must not get a message
+  every monitor tick)
+* re-login / logout / recovery → all three keys resolve for that broker.
 
 Publishing is best-effort: a broken alerts layer must never kill the monitor
-thread.
+thread, and Sprint A4 holds every page back outside the active market window.
 """
 
 from __future__ import annotations
@@ -29,6 +31,27 @@ from backtest.brokers.base import (
     BrokerAuthBase,
 )
 from backtest.brokers.session_manager import BrokerSessionManager
+
+#: Every key the monitor can publish for a session lifecycle, in ladder order.
+_SESSION_TYPES = (
+    AlertType.BROKER_SESSION_EXPIRING.value,
+    AlertType.BROKER_SESSION_EXPIRING_URGENT.value,
+    AlertType.BROKER_SESSION_EXPIRED.value,
+)
+
+
+@pytest.fixture(autouse=True)
+def market_window_open(monkeypatch):
+    """Pin the Sprint A4 market-hours gate open for this whole file.
+
+    These tests are about *what* gets published, not *when*. Without the pin
+    the file passes or fails on the wall clock at run time — every session page
+    is held back outside 09:00–15:30 IST. The gate itself is covered by
+    ``tests/test_broker_session_alert_window.py``.
+    """
+    monkeypatch.setattr(
+        "backtest.brokers.session_manager._market_window_open", lambda: True
+    )
 
 
 class _StubBroker(BrokerAuthBase):
@@ -131,7 +154,7 @@ def test_expired_supersedes_expiring_and_is_critical(manager, stub, alert_broker
 
 
 def test_expired_raises_once_even_if_state_persists(manager, stub, alert_broker):
-    """Telegram must not get one message per 5-minute monitor tick."""
+    """Telegram must not get one message per 30-second monitor tick."""
     notified: list[tuple[str, dict]] = []
     alert_broker.subscribe(
         AlertType.BROKER_SESSION_EXPIRED.value,
@@ -208,25 +231,28 @@ def test_resolve_failure_does_not_break_verify_totp(manager, stub, monkeypatch, 
 
 
 def test_alert_types_and_routing_registered(alert_broker):
-    """The vocabulary and the Telegram route exist for both session types."""
+    """The vocabulary and the Telegram route exist for all three session types."""
     import yaml
     from pathlib import Path
 
     assert AlertType.BROKER_SESSION_EXPIRING.value == "broker_session_expiring"
+    assert (
+        AlertType.BROKER_SESSION_EXPIRING_URGENT.value == "broker_session_expiring_urgent"
+    )
     assert AlertType.BROKER_SESSION_EXPIRED.value == "broker_session_expired"
 
     cfg = yaml.safe_load(Path("config/alerts.yaml").read_text(encoding="utf-8"))
     default = cfg["default"]
     routing = default["routing"]
-    assert "telegram" in routing["broker_session_expiring"]
-    assert "telegram" in routing["broker_session_expired"]
+    for t in _SESSION_TYPES:
+        assert "telegram" in routing[t]
     templates = default["templates"]
-    assert "{broker_display_name}" in templates["broker_session_expiring"]
-    assert "{broker_display_name}" in templates["broker_session_expired"]
+    for t in _SESSION_TYPES:
+        assert "{broker_display_name}" in templates[t]
 
     from backtest.alerts.catalog import CATALOG
 
-    for t in (AlertType.BROKER_SESSION_EXPIRING.value, AlertType.BROKER_SESSION_EXPIRED.value):
+    for t in _SESSION_TYPES:
         assert t in CATALOG and CATALOG[t]["typical_responses"]
 
 
@@ -237,7 +263,6 @@ def test_expired_session_reaches_telegram_once_with_the_real_config():
     high-priority outbound message, sent exactly once per expiry cycle.
     """
     import json
-    import urllib.parse
     from pathlib import Path
 
     from backtest.alerts.notifier import AlertNotifier, load_notifier_config

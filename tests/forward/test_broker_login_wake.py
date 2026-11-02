@@ -782,3 +782,136 @@ def test_peek_does_not_construct_a_manager(monkeypatch):
     monkeypatch.setattr(pm, "_MANAGER", None)
     assert pm.peek_portfolio_manager() is None
     assert pm._MANAGER is None, "peeking built nothing"
+
+
+# ---------------------------------------------------------------------------
+# 6. Sprint A4: the count the login banner is gated on
+# ---------------------------------------------------------------------------
+
+
+def _boot_session_manager(monkeypatch) -> BrokerSessionManager:
+    """A session manager in the shape a cold boot has: nothing restored.
+
+    ``__init__`` replays the remembered-session store, which would construct a
+    real broker (and its WebSocket feed) from whatever this checkout happens to
+    have saved. These tests are about the poll's payload, not about restoring.
+    """
+    monkeypatch.setattr(
+        BrokerSessionManager, "_restore_remembered_sessions", lambda self: 0
+    )
+    return BrokerSessionManager(broker_factory=lambda: _AuthBroker())
+
+
+class TestWaitingRunnerCount:
+    """/api/broker/status carries "how many books are stuck on this broker".
+
+    The topbar CTA and the auto-opened login popup only appear when a runner
+    genuinely needs that broker, so the poll has to say how many do — the client
+    has no other way to know, and a second heavier endpoint polled from every
+    page would be worse than one integer in the payload it already fetches.
+    """
+
+    def test_blind_books_count_against_the_broker_they_need(self, tmp_path, logged_out):
+        manager = _manager(tmp_path / "state.json")
+        try:
+            manager.add_runner(_option_config("COUNT-1"), start=False)
+            manager.add_runner(_option_config("COUNT-2"), start=False)
+
+            assert manager.count_runners_waiting_on("mstock") == 2
+            assert manager.count_runners_waiting_on("MSTOCK") == 2, "the key is normalized"
+            assert manager.count_runners_waiting_on("dhan") == 0
+            assert manager.count_runners_waiting_on("") == 0
+            assert manager.count_runners_waiting_on(None) == 0
+        finally:
+            manager.shutdown()
+
+    def test_the_execution_venue_counts_as_waiting_too(self, tmp_path, logged_out):
+        """Both sides of the routing count: quotes and orders.
+
+        A book priced off Upstox but routed through mStock is stuck until either
+        one arrives — the frozen chain is the quote source, and the entry would
+        still be refused on the execution venue. So it is reported against both,
+        and only against brokers it actually names.
+        """
+        manager = _manager(tmp_path / "state.json")
+        try:
+            manager.add_runner(
+                _option_config("ROUTE-1", source="upstox", execution_broker="mstock"),
+                start=False,
+            )
+            assert manager.count_runners_waiting_on("mstock") == 1
+            assert manager.count_runners_waiting_on("upstox") == 1
+            assert manager.count_runners_waiting_on("dhan") == 0
+        finally:
+            manager.shutdown()
+
+    def test_a_woken_book_stops_counting(self, tmp_path, logged_out, authenticate):
+        manager = _manager(tmp_path / "state.json")
+        try:
+            manager.add_runner(_option_config("COUNT-3"), start=False)
+            assert manager.count_runners_waiting_on("mstock") == 1
+
+            authenticate()
+            manager.on_broker_authenticated("mstock")
+
+            assert manager.count_runners_waiting_on("mstock") == 0, (
+                "a live book is not waiting — leaving it counted would keep the "
+                "red banner up after the login that cleared it"
+            )
+        finally:
+            manager.shutdown()
+
+    def test_a_parked_snapshot_is_not_claimed_as_waiting_on_a_login(
+        self, tmp_path, logged_out
+    ):
+        """Parked means "a restore refused this", for any of a dozen reasons.
+
+        Claiming all of them as broker-shaped would put a red banner up for a
+        book that a re-login cannot fix (a retired strategy name, a code change
+        at spawn) — and the operator would log in, see the banner still there,
+        and stop trusting it.
+        """
+        manager = _manager(tmp_path / "state.json")
+        try:
+            _plant_parked(manager, _option_config("PARK-1"))
+            assert len(manager._parked_snapshots) == 1
+            assert manager.count_runners_waiting_on("mstock") == 0
+        finally:
+            manager.shutdown()
+
+    def test_the_status_poll_carries_the_count(self, tmp_path, logged_out, monkeypatch):
+        manager = _manager(tmp_path / "state.json")
+        try:
+            manager.add_runner(_option_config("POLL-1"), start=False)
+            manager.add_runner(_option_config("POLL-2"), start=False)
+            monkeypatch.setattr(pm_module, "_MANAGER", manager)
+
+            sessions = _boot_session_manager(monkeypatch).get_all_status()
+
+            assert sessions["mstock"]["waiting_runners"] == 2
+            assert sessions["mstock"]["status"] == "unauthenticated"
+            # Every row carries the key, so the client never has to special-case
+            # a broker the portfolio has never heard of.
+            assert all("waiting_runners" in row for row in sessions.values())
+            assert sessions["dhan"]["waiting_runners"] == 0
+        finally:
+            manager.shutdown()
+
+    def test_the_count_never_builds_a_portfolio(self, monkeypatch):
+        """A status poll runs on every open tab — it must not construct the
+        singleton (feeds, restore, capital) to answer it."""
+        monkeypatch.setattr(pm_module, "_MANAGER", None)
+
+        sessions = _boot_session_manager(monkeypatch).get_all_status()
+
+        assert pm_module._MANAGER is None, "counting built a portfolio"
+        assert all(row["waiting_runners"] == 0 for row in sessions.values())
+
+    def test_a_portfolio_that_raises_still_answers_zero(self, monkeypatch):
+        class _Broken:
+            def count_runners_waiting_on(self, key):
+                raise RuntimeError("portfolio on fire")
+
+        monkeypatch.setattr(pm_module, "_MANAGER", _Broken())
+        sessions = _boot_session_manager(monkeypatch).get_all_status()
+        assert all(row["waiting_runners"] == 0 for row in sessions.values())

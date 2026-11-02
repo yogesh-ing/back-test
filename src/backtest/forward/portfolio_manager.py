@@ -1292,6 +1292,30 @@ class PortfolioManager:
         )
         return any(str(v or "").strip().lower() == broker_key for v in values)
 
+    def count_runners_waiting_on(self, broker_name: Optional[str]) -> int:
+        """How many live books are stuck on a frozen mark for want of ``broker_name``.
+
+        Sprint A4 — the topbar banner and the auto-open login popup are gated on
+        "a runner actually needs this broker", so the status poll has to carry
+        the number. Only runners that *built* on the frozen stub count: a parked
+        snapshot is a restore refusal with a dozen possible causes, and claiming
+        all of them need a login would put a red banner up for a book that a
+        re-login cannot fix.
+
+        Cheap by construction — two dict scans, no I/O and no chain acquire —
+        because ``/api/broker/status`` is polled by every open tab.
+        """
+        key = str(broker_name or "").strip().lower()
+        if not key:
+            return 0
+        with self._lock:
+            return sum(
+                1
+                for runner in self._runners.values()
+                if getattr(runner, "feed_state", None) == FEED_STATE_WAITING
+                and self._waits_on_broker(runner.config, key)
+            )
+
     def on_broker_authenticated(self, broker_name: Optional[str]) -> Dict[str, Any]:
         """Wake every book that was waiting on ``broker_name``.
 

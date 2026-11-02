@@ -57,8 +57,15 @@ __all__ = [
 
 logger = logging.getLogger("backtest.brokers.session_manager")
 
-# Task 2.2: poll session expiry every 5 minutes.
-MONITOR_INTERVAL_SECONDS = 300.0
+# Sprint A4: poll session expiry every 30 seconds. The 5-minute cadence this
+# replaced could step straight over the T−10m action gate — a session expiring
+# at 10:07 polled at 10:05 and again at 10:10 is already dead at the second
+# tick, so the operator was told after the feed had stopped rather than before.
+MONITOR_INTERVAL_SECONDS = 30.0
+
+#: Stage 2 of the escalation ladder: inside this many minutes of expiry the
+#: alert goes CRITICAL and fans out to every configured channel.
+EXPIRING_URGENT_WINDOW_MINUTES = 10
 
 
 class UnknownBrokerError(ValueError):
@@ -154,7 +161,142 @@ def _alert_broker():
     return get_alert_broker()
 
 
-def _raise_session_alert(alert_type_value: str, severity: str, key: str, message: str, data: dict) -> None:
+def _peek_portfolio():
+    """The live portfolio singleton, or ``None`` — never constructs one.
+
+    Sprint A4. A status poll runs on every open tab; going through
+    ``get_portfolio_manager`` would build feeds, restore state and book capital
+    as a side effect of asking how many runners are waiting on a broker.
+    """
+    try:
+        from backtest.forward.portfolio_manager import peek_portfolio_manager
+
+        return peek_portfolio_manager()
+    except Exception:  # noqa: BLE001 — the portfolio is an optional neighbour
+        return None
+
+
+def _count_waiting(manager: Any, broker_key: str) -> int:
+    """Runners stuck on a frozen mark for want of ``broker_key`` (0 on any doubt)."""
+    if manager is None:
+        return 0
+    try:
+        return int(manager.count_runners_waiting_on(broker_key))
+    except Exception:  # noqa: BLE001 — a count must never break the status poll
+        logger.debug("waiting-runner count failed for %s", broker_key, exc_info=True)
+        return 0
+
+
+def _market_window_open() -> bool:
+    """True inside the NSE active window (``PRE_OPEN``/``OPEN``, 09:00–15:30 IST).
+
+    Sprint A4 — market-hours-only operator paging. Tokens expire naturally when
+    nothing is trading, and an evening of backtesting, research or diary review
+    must not be interrupted by a login popup or a Telegram. Outside the window
+    the session is still cleared and the flags still move; only the *paging* is
+    held back, and ``_session_alert_open`` below is what makes the held-back
+    alert fire at 09:00 instead of being lost.
+
+    Fails open: a market-status read that breaks during session hours must not
+    silently swallow the one alert that keeps the feed alive.
+    """
+    try:
+        from backtest.live.market_status import get_market_day_state
+
+        return get_market_day_state().get("session_state") in ("PRE_OPEN", "OPEN")
+    except Exception:  # noqa: BLE001 — an unreadable calendar must not mute paging
+        logger.debug("market window check failed — paging anyway", exc_info=True)
+        return True
+
+
+def _session_alert_open(alert_type_value: str, key: str) -> bool:
+    """True when that session alert is already unresolved for this broker.
+
+    The publish decision has to be "is it already open", not "is this the first
+    tick that saw it". A first-observation edge that lands outside the market
+    window is held back by :func:`_market_window_open` — and if the edge were
+    the only trigger, a session that died at 20:00 would never be reported at
+    all, because 09:00 the next morning is not a first observation.
+
+    ``open_alerts()`` includes dismissed ones, so an operator dismissing the
+    alert stops the outbound re-paging; the persistent topbar banner is driven
+    by the status poll instead and stays until a TOTP actually succeeds.
+    """
+    try:
+        wanted = f"{alert_type_value}:{key}"
+        return any(a.key == wanted for a in _alert_broker().open_alerts())
+    except Exception:  # noqa: BLE001 — an unreadable broker must not mute paging
+        logger.debug("session alert lookup failed (%s)", alert_type_value, exc_info=True)
+        return False
+
+
+def _minutes_until(expires_at: Any) -> float | None:
+    """Minutes left on a session, or ``None`` when the payload carries no expiry.
+
+    Brokers hand back ``expires_at`` as an ISO string on their own clock —
+    mStock's is naive local (its ``_now()`` is ``datetime.now()`` and
+    ``restore_session`` strips the offset), which on this box is exchange time.
+    ``from_market_clock`` is the declared door for exactly that reading, and it
+    passes an already-aware value straight through, so one call covers both.
+    """
+    if not expires_at:
+        return None
+    try:
+        from backtest.timekeeping import from_market_clock, now_utc
+
+        instant = from_market_clock(expires_at)
+        if instant is None:
+            return None
+        return (instant - now_utc()).total_seconds() / 60.0
+    except Exception:  # noqa: BLE001 — an unparseable expiry must not break the tick
+        logger.debug("could not parse session expiry %r", expires_at, exc_info=True)
+        return None
+
+
+def _raise_expiring_urgent(key: str, display: str, expires_at: Any) -> None:
+    """Stage 2 of the escalation ladder: T − 10m, CRITICAL, every channel.
+
+    Sprint A4. Called on *every* tick that reports ``expiring_soon``, not on a
+    status edge — the 10-minute crossing happens twenty minutes after the broker
+    first said ``expiring_soon``, so an edge-only check would step over the one
+    moment the operator can still act on. :func:`_session_alert_open` is the
+    once-per-expiry latch, and it also lets a first sighting that fell outside
+    the market window fire at 09:00 instead of being lost.
+    """
+    minutes = _minutes_until(expires_at)
+    if minutes is None or not 0 < minutes <= EXPIRING_URGENT_WINDOW_MINUTES:
+        # Past the deadline the ``expired`` alert owns the story; a negative
+        # remainder here would only page "expires in under a minute" for a
+        # session that is already gone.
+        return
+    if _session_alert_open("broker_session_expiring_urgent", key):
+        return
+    whole = int(minutes)
+    when = f"in {whole} minute{'s' if whole != 1 else ''}" if whole >= 1 else "in under a minute"
+    _raise_session_alert(
+        "broker_session_expiring_urgent",
+        "critical",
+        key,
+        f"{display} login expires {when} — re-authenticate NOW (password + TOTP). "
+        "Live feeds, forward entries and portfolio marks stop when it does.",
+        {
+            "broker": key,
+            "broker_display_name": display,
+            "expires_at": expires_at,
+            "minutes_remaining": round(minutes, 1),
+        },
+    )
+
+
+def _raise_session_alert(
+    alert_type_value: str, severity: str, key: str, message: str, data: dict
+) -> None:
+    if not _market_window_open():
+        logger.info(
+            "session alert %s for %s held back — outside the active market window",
+            alert_type_value, key,
+        )
+        return
     try:
         _alert_broker().raise_alert(alert_type_value, severity, message, data=data, subject=key)
     except Exception:  # noqa: BLE001 — publishing must never break the monitor
@@ -162,12 +304,13 @@ def _raise_session_alert(alert_type_value: str, severity: str, key: str, message
 
 
 def _resolve_session_alerts(key: str) -> None:
-    """Close both session alerts for one broker (re-auth / logout / recovery)."""
+    """Close every session alert for one broker (re-auth / logout / recovery)."""
     try:
         from backtest.alerts.types import AlertType
 
         broker = _alert_broker()
         broker.resolve_key(AlertType.BROKER_SESSION_EXPIRING.value, key)
+        broker.resolve_key(AlertType.BROKER_SESSION_EXPIRING_URGENT.value, key)
         broker.resolve_key(AlertType.BROKER_SESSION_EXPIRED.value, key)
     except Exception:  # noqa: BLE001
         logger.debug("session alert resolve failed for %s", key, exc_info=True)
@@ -531,6 +674,16 @@ class BrokerSessionManager:
             if self._ui_active:
                 for name in out:
                     out[name]["ui_active"] = name == self._ui_active
+
+        # Sprint A4: the banner and the auto-open popup are gated on "a runner
+        # actually needs this broker", so the poll carries the count. Outside
+        # ``self._lock`` — the portfolio has its own lock and the wake path runs
+        # the other way round. ``peek`` and not ``get``: a status poll must never
+        # construct the portfolio as a side effect, so on a process that never
+        # opened the page the honest answer is 0.
+        manager = _peek_portfolio()
+        for name, row in out.items():
+            row["waiting_runners"] = _count_waiting(manager, name)
         return out
 
     def is_authenticated(self, broker_name: str | None = None) -> bool:
@@ -789,23 +942,31 @@ class BrokerSessionManager:
                 expires_at = info.get("expires_at")
 
                 previous = self._last_observed_status.get(key)
-                if status == STATUS_EXPIRING_SOON and previous != STATUS_EXPIRING_SOON:
-                    self._expiring_soon_flags[key] = True
-                    logger.warning(
-                        "%s session expiring soon — re-authentication advised", key
-                    )
-                    _raise_session_alert(
-                        "broker_session_expiring",
-                        "warning",
-                        key,
-                        f"{display} login expires in under 30 minutes"
-                        f" ({expires_at or 'shortly'}) — re-authenticate (password + TOTP)"
-                        " to keep live feeds and runners running.",
-                        {"broker": key, "broker_display_name": display, "expires_at": expires_at},
-                    )
+                if status == STATUS_EXPIRING_SOON:
+                    if previous != STATUS_EXPIRING_SOON:
+                        self._expiring_soon_flags[key] = True
+                        logger.warning(
+                            "%s session expiring soon — re-authentication advised", key
+                        )
+                        _raise_session_alert(
+                            "broker_session_expiring",
+                            "warning",
+                            key,
+                            f"{display} login expires in under 30 minutes"
+                            f" ({expires_at or 'shortly'}) — re-authenticate (password + TOTP)"
+                            " to keep live feeds and runners running.",
+                            {
+                                "broker": key,
+                                "broker_display_name": display,
+                                "expires_at": expires_at,
+                            },
+                        )
+                    # Sprint A4: the T−10m action gate, checked every tick.
+                    _raise_expiring_urgent(key, display, expires_at)
                 elif status == STATUS_EXPIRED:
                     first_observation = previous != STATUS_EXPIRED
                     if first_observation:
+                        # Feeds the API's one-shot ``expiry_events`` toast queue.
                         self._expired_flags[key] = True
                     broker.logout()  # clear the token; no auto-renew
                     logger.warning(
@@ -818,10 +979,12 @@ class BrokerSessionManager:
                         delete_saved_session(key)
                     except Exception:  # noqa: BLE001 — cleanup is best-effort
                         pass
-                    if first_observation:
-                        # The expiring alert (if still open) is superseded.
-                        # Raise only on the transition: resolving + re-raising
-                        # every tick would re-notify Telegram every 5 minutes.
+                    if not _session_alert_open("broker_session_expired", key):
+                        # The expiring alerts (if still open) are superseded.
+                        # Re-raising every tick would re-notify Telegram every
+                        # 30 seconds; the latch is "already open", not "first
+                        # sighting", so an expiry that happened outside the
+                        # market window still gets reported at the next open.
                         _resolve_session_alerts(key)
                         _raise_session_alert(
                             "broker_session_expired",
@@ -831,15 +994,15 @@ class BrokerSessionManager:
                             "portfolio marks are paused. Re-login (password + TOTP) now.",
                             {"broker": key, "broker_display_name": display, "expires_at": None},
                         )
-                elif status in (STATUS_AUTHENTICATED, STATUS_EXPIRING_SOON):
-                    if status == STATUS_AUTHENTICATED:
-                        # Recovered (re-login / renewed token): close any open
-                        # session alerts so the widget and Telegram clear.
-                        _resolve_session_alerts(key)
-                        # Sprint A2: wake on the TRANSITION only. Every tick is
-                        # authenticated once a session exists, and each wake
-                        # re-acquires an option chain over the network.
-                        woke = previous != STATUS_AUTHENTICATED
+                elif status == STATUS_AUTHENTICATED:
+                    # Recovered (re-login / renewed token): close any open
+                    # session alerts so the widget and Telegram clear.
+                    _resolve_session_alerts(key)
+                    # Sprint A2: wake on the TRANSITION only. Every tick is
+                    # authenticated once a session exists, and each wake
+                    # re-acquires an option chain over the network.
+                    woke = previous != STATUS_AUTHENTICATED
+                if status in (STATUS_AUTHENTICATED, STATUS_EXPIRING_SOON):
                     # Keep the remembered entry fresh (remaining validity
                     # shrinks every tick; a stale entry would restore a
                     # soon-dead session).

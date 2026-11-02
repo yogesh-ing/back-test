@@ -90,7 +90,11 @@
   // Broker-session alerts carry a direct fix: open the SAME auth popup the
   // nav chip uses (password → TOTP), so the feed can be revived without
   // leaving the page. The alert auto-resolves on verified re-login.
-  const SESSION_ALERTS = { broker_session_expiring: 1, broker_session_expired: 1 };
+  const SESSION_ALERTS = {
+    broker_session_expiring: 1,
+    broker_session_expiring_urgent: 1,
+    broker_session_expired: 1,
+  };
 
   function isSessionAlert(a) {
     return !!(a && SESSION_ALERTS[a.alert_type]);

@@ -44,13 +44,17 @@ The mStock session has behaviours beyond the logout button:
   app invalidates the web session without the server knowing — the next broker
   call fails even though the UI still looks logged in.
 - **Expiry is detected, not assumed.** `src/backtest/brokers/session_manager.py`
-  runs a 5-minute monitor (`MONITOR_INTERVAL_SECONDS = 300.0`) that classifies
+  runs a 30-second monitor (`MONITOR_INTERVAL_SECONDS = 30.0`) that classifies
   the session as expiring-soon or expired and publishes platform alerts
-  (`broker_session_expiring` / `broker_session_expired`).
-- **The operator is told three ways:** the in-app alert widget on every page,
-  Telegram (outbound alert channels), and a re-login popup —
+  (`broker_session_expiring`, `broker_session_expiring_urgent` at T − 10m,
+  `broker_session_expired`). All three page only inside the active market
+  window; one held back overnight is reported at the next open.
+- **The operator is told four ways:** the in-app alert widget on every page,
+  Telegram (outbound alert channels), a persistent `🔴 Broker login needed`
+  topbar banner, and a re-login popup the banner opens itself —
   `src/backtest/web/static/js/components/alert_widget.js` surfaces
-  `SESSION_ALERTS` and wires the "re-login" button.
+  `SESSION_ALERTS` and wires the "re-login" button;
+  `src/backtest/web/static/js/broker_status.js` owns the banner.
 
 ## How to Stop a Running Data Fetch
 
