@@ -173,6 +173,63 @@ def _resolve_session_alerts(key: str) -> None:
         logger.debug("session alert resolve failed for %s", key, exc_info=True)
 
 
+# Sprint A2: every path that makes a session valid tells the portfolio, so the
+# books that were waiting on that broker start pricing again without a restart
+# or a manual resume. Kept module-level (not a method) because the portfolio is
+# an optional neighbour — this module must stay importable without it.
+_WAKE_LOCK = threading.Lock()
+_WAKE_INFLIGHT: set[str] = set()
+
+
+def _notify_portfolio_authenticated(broker_key: str) -> None:
+    """Hand a freshly-valid session to the portfolio manager, in the background.
+
+    Waking a book acquires its option chain, which is a broker round-trip — so
+    this never runs inline on the caller's thread. A TOTP response must not
+    take seconds, and a monitor tick must not hold the session lock across it.
+    """
+    key = str(broker_key or "").strip().lower()
+    if not key:
+        return
+    with _WAKE_LOCK:
+        if key in _WAKE_INFLIGHT:
+            # A wake for this broker is already running; it will see the same
+            # session this one would have, so queueing a second is pure work.
+            return
+        _WAKE_INFLIGHT.add(key)
+    threading.Thread(
+        target=_run_portfolio_wake,
+        args=(key,),
+        name=f"login-wake-{key}",
+        daemon=True,
+    ).start()
+
+
+def _run_portfolio_wake(key: str) -> None:
+    try:
+        from backtest.forward.portfolio_manager import peek_portfolio_manager
+
+        manager = peek_portfolio_manager()
+        if manager is None:
+            # Nothing has built the portfolio in this process yet. When it is
+            # built, its own restore finds this session and constructs every
+            # runner on the live chain directly — there is nothing to wake.
+            return
+        result = manager.on_broker_authenticated(key)
+        woken = len(result.get("woken") or [])
+        unparked = len(result.get("unparked") or [])
+        if woken or unparked:
+            logger.info(
+                "%s login woke %d book(s) and re-created %d parked snapshot(s)",
+                key, woken, unparked,
+            )
+    except Exception:  # noqa: BLE001 — a wake must never surface on a login
+        logger.exception("portfolio wake failed after %s login", key)
+    finally:
+        with _WAKE_LOCK:
+            _WAKE_INFLIGHT.discard(key)
+
+
 class BrokerSessionManager:
     """Holds ALL live broker sessions and their lifecycles (v2).
 
@@ -388,6 +445,11 @@ class BrokerSessionManager:
             # Remember-session-today: when the toggle is ON the freshly
             # established session is persisted (per broker) for the next boot.
             self._save_remembered_session(key)
+            # Sprint A2: this is the fast path. The operator has just typed a
+            # TOTP and is watching the screen — books frozen on
+            # ``WAITING_FOR_FEED`` should start pricing without a restart.
+            # Outside ``self._lock``: the wake asks this manager for a broker.
+            _notify_portfolio_authenticated(key)
         return result
 
     def logout(self, broker_name: str | None = None) -> None:
@@ -636,8 +698,10 @@ class BrokerSessionManager:
                 key,
                 saved["expires_at"].isoformat(),
             )
+            _notify_portfolio_authenticated(key)
             return 1
         restored = 0
+        restored_keys: list[str] = []
         for name, saved in saved_map.items():
             key = self._normalize(name)
             if key is None:
@@ -655,11 +719,21 @@ class BrokerSessionManager:
                 continue
             setter(saved["token"], saved["expires_at"])
             restored += 1
+            restored_keys.append(key)
             logger.info(
                 "remember-session: %s session restored from disk (expires %s)",
                 key,
                 saved["expires_at"].isoformat(),
             )
+        # Sprint A2: a session restored at boot is a session that just became
+        # valid, so it gets the same treatment as a TOTP login. Normally a
+        # no-op — this runs inside ``__init__``, before any portfolio exists,
+        # and that portfolio's own restore then finds the session and builds
+        # every runner on the live chain directly. It stays wired so the rule
+        # "every path that authenticates notifies" survives a bootstrap
+        # reordering instead of silently depending on one.
+        for key in restored_keys:
+            _notify_portfolio_authenticated(key)
         return restored
 
     def _save_remembered_session(self, broker_name: str | None = None) -> None:
@@ -703,6 +777,7 @@ class BrokerSessionManager:
                 sessions = [(self._ui_active or broker.broker_name, broker)]
 
         for key, broker in sessions:
+            woke = False
             with self._lock:
                 try:
                     info = broker.get_session_status()
@@ -761,6 +836,10 @@ class BrokerSessionManager:
                         # Recovered (re-login / renewed token): close any open
                         # session alerts so the widget and Telegram clear.
                         _resolve_session_alerts(key)
+                        # Sprint A2: wake on the TRANSITION only. Every tick is
+                        # authenticated once a session exists, and each wake
+                        # re-acquires an option chain over the network.
+                        woke = previous != STATUS_AUTHENTICATED
                     # Keep the remembered entry fresh (remaining validity
                     # shrinks every tick; a stale entry would restore a
                     # soon-dead session).
@@ -769,6 +848,10 @@ class BrokerSessionManager:
                     except Exception:  # noqa: BLE001 — refresh must never break the monitor
                         logger.debug("remember-session refresh failed", exc_info=True)
                 self._last_observed_status[key] = status
+            if woke:
+                # Outside ``self._lock``: the wake asks this manager for a
+                # broker, which would wait on the lock this tick is holding.
+                _notify_portfolio_authenticated(key)
 
 
 # ----------------------------------------------------------------------
