@@ -1,9 +1,9 @@
 # Institutional Runner Lifecycle, Late-Login Auto-Wake & Nov-02 Bug-Fix Plan
 
-**Date**: 2026-11-02  
-**Baseline Commit**: `43d3322` (`feature/options-trading-dev` — includes PR #51 `8e1cba4`, `7fc3a08`, and `3ae2888`)  
+**Date**: 2026-11-02 (updated 2026-11-03)  
+**Baseline Commit**: `b2b76a4` (`feature/options-trading-dev` — includes PR #51 `8e1cba4` and PR #52 `Sprint A-1`)  
 **Status**: Approved Architecture & Implementation Reference (Read before touching `forward/`, `brokers/`, or `portfolio` UI)  
-**As-Built**: Sprint A-1 (`A1` + `A2` + `A4`) **implemented and under review** — PR [#52](https://github.com/yogesh-ing/back-test/pull/52) → `feature/options-trading-dev`, branch `sprint/A1-waiting-for-feed`, 5 commits off this baseline. Not merged, not deployed (`:5000` still runs `5f5cdf8`). Everything else is unstarted. See **Implementation Status** below.
+**As-Built**: Sprint A-1 (`A1` + `A2` + `A4`) **merged** to `feature/options-trading-dev` via PR [#52](https://github.com/yogesh-ing/back-test/pull/52) (`b2b76a4`). Sprint B (`Ticket B1` — cash-flow-neutral session high-water mark & restart-proof halt latches) **implemented and verified** (`28 → 27` standing pytest baseline, `0` new regressions). See **Implementation Status** below.
 
 ---
 
@@ -11,12 +11,12 @@
 
 | Ticket | Sub-PR | Status | Commit / Blocker |
 | :--- | :--- | :--- | :--- |
-| **A1** — `WAITING_FOR_FEED` + frozen-mark stub | `Sprint A-1` | ✅ **DONE** | `cb91d41` |
-| **A2** — `on_broker_authenticated` auto-wake | `Sprint A-1` | ✅ **DONE** | `9e5b000` |
-| **A4** — market-hours paging + login banner | `Sprint A-1` | ✅ **DONE** | `74cb76b` |
+| **A1** — `WAITING_FOR_FEED` + frozen-mark stub | `Sprint A-1` | ✅ **DONE (merged PR #52)** | `cb91d41` / `b2b76a4` |
+| **A2** — `on_broker_authenticated` auto-wake | `Sprint A-1` | ✅ **DONE (merged PR #52)** | `9e5b000` / `b2b76a4` |
+| **A4** — market-hours paging + login banner | `Sprint A-1` | ✅ **DONE (merged PR #52)** | `74cb76b` / `b2b76a4` |
 | **A3** — open-trade continuity + `armed_at_utc` | `Sprint A-2` | ⏸ **BLOCKED** | Waits for `A-1` to complete one clean live session (§3 sequencing rule). Highest blast radius — ships alone for 1-commit rollback. |
-| **B1** — restart-proof risk state | `Sprint B` | ⬜ Not started | Also retires the stale `test_bucket_anchors_are_session_scoped`. |
-| **C1** — two-layer clock law in `OrderLedger` | `Sprint C` | ⬜ Not started | Board issue `#23`. |
+| **B1** — restart-proof risk state | `Sprint B` | ✅ **DONE** | Implemented on `arena/d4936721-back-test`; retired `test_bucket_anchors_are_session_scoped` (`28 → 27` gate baseline). |
+| **C1** — two-layer clock law in `OrderLedger` | `Sprint C` | ⬜ Not started | Board issue `#23` — next unblocked ticket. |
 | **C2** — mStock Layer-0 auth gate + `401/403` kill-latch | `Sprint C` | ⬜ Not started | This, not A4, is the ticket that touches `mstock.py`. |
 | **C3** — stale test signatures + timestamp repair cutover | `Sprint C` | ⬜ Not started | `scripts/repair_trade_timestamps.py --apply` needs a post-market window + a DB snapshot. |
 | **D1** — PostgreSQL single source of truth | `Sprint D` | ⬜ Not started | Board issue `#24`. Migrations start at `024_*`. |
@@ -247,11 +247,25 @@ Implement in strict sprint order (**one small, reviewable PR per sprint**).
 4. **Session Lockout vs. Next-Day Roll**: An auto-tripped breaker stays locked (`halted = True`) across all restarts for the rest of `today_ist` until an explicit operator **Risk Override / Reset Breaker** action, and rolls clean automatically on the next IST session date (`saved_session_date_ist < today_ist`).
 
 #### Ticket B1 — Persist `(session_date_ist, session_peak_daily_pnl, halted)` Across Same-Day Restarts
-> ⬜ **NOT STARTED.** Next unblocked ticket once `A-2` is sequenced. Note it also
-> retires `test_state_persistence.py::TestRestartCycle::test_bucket_anchors_are_session_scoped`,
-> which is one of the 28 node IDs in the standing sprint-gate failure baseline — that
-> baseline should drop to 27 when B1 lands, and the three replacement RMS contract tests
-> must not be written to pass against the current wipe-on-restart behaviour.
+> ✅ **DONE (2026-11-03).** Implemented in `src/backtest/forward/portfolio_manager.py` and
+> verified in `tests/forward/test_state_persistence.py` (`29 passed`), dropping the
+> standing sprint-gate baseline from **`28 → 27`** (`0` new regressions via `comm`).
+> As-built refinements recorded alongside the spec:
+> 1. **Immediate Halt Durability**: `_evaluate_risk()` now calls `self._persist_state()`
+>    immediately whenever any fresh bucket, `segment:*`, or master halt trips (`any_fresh_halt`),
+>    closing the prior up-to-5-tick (`self.tick_index % 5 == 0`, ~5 min on 60s sweeps)
+>    crash window.
+> 2. **Full `segment:*` Serialization & Live `00:00 IST` Rollover**: `_snapshot_payload()`
+>    persists all active `segment:*` keys inside `buckets` alongside `"paper"` and `"live"`,
+>    and `_maybe_roll_risk_session_ist()` clears session high-water marks + auto-halt
+>    latches cleanly across `00:00 IST` in long-running processes.
+> 3. **In-Process `remove_runner` Alignment & Bar-Clock Guard**: `_record_capital_flow()`
+>    adjusts `_session_peak_daily_pnl` / `_bucket_session_peak_pnl` when a profitable
+>    runner is removed in-process so smaller surviving runners never inherit phantom
+>    drawdown ceilings, and `_safe_runner_daily_pnl()` avoids calling `runner.daily_pnl()`
+>    on freshly spawned un-marked runners so multi-day historical bar replays roll
+>    `runner._pnl_session` cleanly (`test_breaker_independence.py` & `test_cross_broker_risk.py`
+>    100% green).
 - **Files**: `src/backtest/forward/portfolio_manager.py`, `tests/forward/test_state_persistence.py`
 - **Design**:
   1. Stamp `session_date_ist = current_session_date().isoformat()` plus `session_peak_daily_pnl` (`>= 0.0`) and `halted` / `halt_reason` / `halt_mode` / `halted_ts` into `manager`, `buckets[mode]`, and `segment:*` inside `portfolio_state.json`.
@@ -384,16 +398,16 @@ Implement in strict sprint order (**one small, reviewable PR per sprint**).
    - `node --test tests/js/test_*.mjs`
    - `python3 -m flake8 --max-line-length=100 <touched_files>` (`0` warnings)
 
-   **Measured at `43d3322`, re-confirmed after PR #52 — the pytest gate is not green at
-   baseline, it is green *against* baseline.** 18 failed + 10 errors = **28 node IDs**,
-   unchanged by Sprint A-1:
+   **Measured at `43d3322`, re-confirmed after PR #52 (`28`), and updated after Ticket B1 (`27`) —
+   the pytest gate is green *against* baseline.** 17 failed + 10 errors = **27 node IDs**
+   (`test_bucket_anchors_are_session_scoped` retired by Ticket B1):
 
    | Count | File |
    | :--- | :--- |
    | 15 | `tests/forward/test_options_forward_mtm.py` (10 ERROR + 5 FAILED) |
    | 8 | `tests/forward/test_paper_trading_validation.py` |
    | 4 | `tests/forward/test_phase3_subsecond_options_and_ticks.py` |
-   | 1 | `tests/forward/test_state_persistence.py::TestRestartCycle::test_bucket_anchors_are_session_scoped` (retired by Ticket B1) |
+   | ~~1~~ → 0 | ~~`tests/forward/test_state_persistence.py::TestRestartCycle::test_bucket_anchors_are_session_scoped`~~ (**retired by Ticket B1**) |
 
    Compare sorted `FAILED`/`ERROR` node-ID lists with `comm` against a **full-output
    file**. Piping pytest through `tail` and eyeballing it once produced 22 phantom
