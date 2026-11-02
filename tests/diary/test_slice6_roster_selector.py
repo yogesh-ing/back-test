@@ -34,7 +34,12 @@ from backtest.db.config import DatabaseConfig
 from backtest.db.models import BacktestRun, Base
 from backtest.diary import (
     canonical_underlying,
+    compute_daily_pnl_correlation,
+    compute_tail_crash_overlap,
+    count_active_ist_sessions,
+    evaluate_edge_trajectory,
     evaluate_sim_to_real,
+    extract_worst_red_days,
     match_backtest_benchmark,
 )
 from backtest.diary.service import DiaryService
@@ -540,5 +545,271 @@ class TestRosterPlanApiEndpoint:
         html = html_resp.get_data(as_text=True)
         assert 'id="diary-roster-block"' in html
         assert 'id="diary-roster-form"' in html
+        assert 'id="diary-roster-min-sessions"' in html
+        assert 'id="diary-roster-block-decay"' in html
+        assert 'id="diary-roster-log-journal"' in html
         assert 'id="diary-roster-table-wrap"' in html
         assert 'data-open-edge-playbook="roster"' in html
+        assert "Tail Co-Crash" in html
+        assert "Recent Half Decay" in html
+
+        # New safeguard parameter bounds
+        ok_guards = client.get(
+            "/api/diary/roster-plan?mode=paper&min_session_days=7"
+            "&block_decaying_edge=false&max_tail_overlap=2"
+        )
+        assert ok_guards.status_code == 200
+        gbody = ok_guards.get_json()
+        assert gbody["constraints"]["min_session_days"] == 7
+        assert gbody["constraints"]["block_decaying_edge"] is False
+        assert gbody["constraints"]["max_tail_overlap"] == 2
+
+        bad_sess = client.get("/api/diary/roster-plan?mode=paper&min_session_days=0")
+        assert bad_sess.status_code == 400
+        bad_tail = client.get("/api/diary/roster-plan?mode=paper&max_tail_overlap=9")
+        assert bad_tail.status_code == 400
+
+
+class TestInstitutionalRosterSafeguards:
+    """Tests for Session Breadth, H1->H2 Edge Decay, and Tail Co-Crash Overlap."""
+
+    def test_count_active_sessions_and_half_split_trajectory(self):
+        # 16 trades on 1 day: H1 strongly positive, H2 net negative -> DECAYING_RECENT_EDGE
+        trades_decay: list[dict[str, Any]] = []
+        base_dt = datetime(2026, 10, 29, 9, 20, tzinfo=EXCHANGE_TZ)
+        for idx in range(16):
+            net = 600.0 if idx < 8 else -120.0
+            exit_dt = base_dt + timedelta(minutes=12 * (idx + 1))
+            trades_decay.append(
+                {
+                    "entry_date_ist": "2026-10-29",
+                    "exit_date_ist": "2026-10-29",
+                    "exit_ts_utc": exit_dt.astimezone(timezone.utc).isoformat(),
+                    "net_pnl": net,
+                }
+            )
+        assert count_active_ist_sessions(trades_decay) == 1
+        traj = evaluate_edge_trajectory(trades_decay)
+        assert traj["status"] == "DECAYING_RECENT_EDGE"
+        assert traj["h1_expectancy_net"] > 0
+        assert traj["h2_expectancy_net"] < 0
+
+        # Steady positive trajectory across both halves
+        trades_steady = [
+            {
+                "exit_date_ist": f"2026-10-{10 + (idx % 10):02d}",
+                "exit_ts_utc": (
+                    base_dt + timedelta(days=idx)
+                ).astimezone(timezone.utc).isoformat(),
+                "net_pnl": 350.0 if idx % 3 != 0 else -150.0,
+            }
+            for idx in range(18)
+        ]
+        assert count_active_ist_sessions(trades_steady) == 10
+        assert evaluate_edge_trajectory(trades_steady)["status"] == "STEADY_OR_EXPANDING"
+
+    def test_tail_crash_overlap_detects_shared_worst_red_days_despite_low_linear_corr(self):
+        days = _make_weekdays(date(2026, 9, 28), 20)
+        crash_idx = {3, 10, 16}
+        map_a: dict[str, Decimal] = {}
+        map_b: dict[str, Decimal] = {}
+        for idx, d in enumerate(days):
+            iso = d.isoformat()
+            if idx in crash_idx:
+                map_a[iso] = Decimal("-900.00")
+                map_b[iso] = Decimal("-880.00")
+            else:
+                map_a[iso] = Decimal("1400.00") if idx % 2 == 0 else Decimal("100.00")
+                map_b[iso] = Decimal("100.00") if idx % 2 == 0 else Decimal("1400.00")
+
+        day_strs = [d.isoformat() for d in days]
+        rho = compute_daily_pnl_correlation(map_a, map_b, all_session_days=day_strs)
+        assert rho is not None and rho < 0.45
+        assert len(extract_worst_red_days(map_a, top_k=3)) == 3
+        tail = compute_tail_crash_overlap(map_a, map_b, top_k=3)
+        assert tail["shared_count"] == 3
+        assert len(tail["shared_dates"]) == 3
+
+    def test_tournament_enforces_session_breadth_h2_decay_and_tail_cocrash(self, sqlite_db):
+        days = _make_weekdays(date(2026, 9, 25), 22)
+        today_ist = date(2026, 10, 30)
+
+        # Anchor winner: higher R/DD & PF on NIFTY, crashes on idx {4, 11, 18}
+        pat_anchor = [
+            -550.0 if i in (4, 11, 18) else (1750.0 if i % 2 == 0 else 350.0)
+            for i in range(22)
+        ]
+        # Tail co-crash peer on HDFCBANK: opposite sign on normal days (low rho < 0.45),
+        # but shares the EXACT 3 worst crash days {4, 11, 18}!
+        pat_tail_clone = [
+            -700.0 if i in (4, 11, 18) else (200.0 if i % 2 == 0 else 1200.0)
+            for i in range(22)
+        ]
+        # Front-loaded luck runner on SBIN: +1800 on first 11 sessions, -150 on last 11 sessions
+        # Total Net > 0, PF > 2.0, passes 6/6 gates, but E[H2] < 0!
+        pat_h2_decay = [1800.0 if i < 11 else -150.0 for i in range(22)]
+
+        # 1-day scalper on AXISBANK: 22 trades all on 2026-10-28 (18 wins, 4 small losses)
+        one_day_trades: list[dict[str, Any]] = []
+        one_day_base = datetime(2026, 10, 28, 9, 20, tzinfo=EXCHANGE_TZ)
+        for t_idx in range(22):
+            gross = 450.0 if t_idx % 5 != 4 else -220.0
+            comm = 20.0
+            ent = one_day_base + timedelta(minutes=10 * t_idx)
+            ext = ent + timedelta(minutes=6)
+            one_day_trades.append(
+                {
+                    "symbol": "AXISBANK",
+                    "side": "BUY",
+                    "quantity": 25,
+                    "entry_price": 1150.0,
+                    "exit_price": 1158.0 if gross > 0 else 1141.0,
+                    "entry_time": ent.astimezone(timezone.utc).isoformat(),
+                    "exit_time": ext.astimezone(timezone.utc).isoformat(),
+                    "gross_pnl": gross,
+                    "commission": comm,
+                    "pnl": round(gross - comm, 2),
+                    "exit_reason": "take_profit" if gross > 0 else "stop_loss",
+                }
+            )
+
+        runners_list = [
+            _StubRunner(
+                "1010aaaa-0000",
+                "Anchor Trend NIFTY",
+                _StubConfig(
+                    strategy_name="orb_breakout",
+                    symbols=["NIFTY"],
+                    timeframe="5min",
+                    initial_capital=75_000.0,
+                ),
+                _build_series_trades(
+                    symbol="NIFTY",
+                    session_days=days,
+                    daily_gross_pattern=pat_anchor,
+                ),
+            ),
+            _StubRunner(
+                "2020bbbb-0000",
+                "Tail CoCrash HDFCBANK",
+                _StubConfig(
+                    strategy_name="vwap_revert",
+                    symbols=["HDFCBANK"],
+                    timeframe="15min",
+                    initial_capital=65_000.0,
+                ),
+                _build_series_trades(
+                    symbol="HDFCBANK",
+                    session_days=days,
+                    daily_gross_pattern=pat_tail_clone,
+                ),
+            ),
+            _StubRunner(
+                "3030cccc-0000",
+                "FrontLoaded SBIN",
+                _StubConfig(
+                    strategy_name="ema_cross",
+                    symbols=["SBIN"],
+                    timeframe="5min",
+                    initial_capital=60_000.0,
+                ),
+                _build_series_trades(
+                    symbol="SBIN",
+                    session_days=days,
+                    daily_gross_pattern=pat_h2_decay,
+                ),
+            ),
+            _StubRunner(
+                "4040dddd-0000",
+                "OneDay Scalper AXISBANK",
+                _StubConfig(
+                    strategy_name="scalp_burst",
+                    symbols=["AXISBANK"],
+                    timeframe="1min",
+                    initial_capital=50_000.0,
+                ),
+                one_day_trades,
+            ),
+        ]
+
+        class _GuardMgr:
+            def __init__(self):
+                self._by_id = {r.runner_id: r for r in runners_list}
+
+            def get_runner(self, rid: str):
+                return self._by_id.get(rid)
+
+            def list_instances(self, mode: str | None = None):
+                if mode == "live":
+                    return []
+                return [
+                    {
+                        "instance_id": r.runner_id,
+                        "name": r.name,
+                        "strategy_name": r.config.strategy_name,
+                        "symbols": r.config.symbols,
+                        "timeframe": r.config.timeframe,
+                        "allocated_capital": r.config.initial_capital,
+                        "instrument": r.config.instrument,
+                        "mode": "paper",
+                        "status": "RUNNING",
+                        "trade_health": "OK",
+                        "open_pnl": 0.0,
+                        "open_positions": 0,
+                    }
+                    for r in runners_list
+                ]
+
+        svc = DiaryService(manager=_GuardMgr(), db_manager=sqlite_db)
+        plan = svc.get_live_roster_plan(
+            mode="paper",
+            from_date="2026-09-20",
+            to_date="2026-10-30",
+            today_ist=today_ist,
+            live_capital=300_000.0,
+        )
+        by_label = {c["instance_label"]: c for c in plan["candidates"]}
+
+        # All 4 pass individual 6/6 gates (backwards-compatible gates_total == 6)
+        for row in plan["candidates"]:
+            assert row["gates_total"] == 6
+            assert row["verdict"] == "PROMOTE_CANDIDATE"
+
+        assert by_label["Anchor Trend NIFTY [1010aaaa]"]["decision"] == "SELECTED_LIVE_ROSTER"
+
+        tail_row = by_label["Tail CoCrash HDFCBANK [2020bbbb]"]
+        assert tail_row["max_corr_with_selected"] < 0.65
+        assert tail_row["max_tail_overlap_days"] == 3
+        assert tail_row["decision"] == "PRUNED_TAIL_CRASH_OVERLAP"
+
+        decay_row = by_label["FrontLoaded SBIN [3030cccc]"]
+        assert decay_row["trajectory"]["status"] == "DECAYING_RECENT_EDGE"
+        assert decay_row["decision"] == "HOLD_RECENT_DECAY"
+
+        sess_row = by_label["OneDay Scalper AXISBANK [4040dddd]"]
+        assert sess_row["active_session_days"] == 1
+        assert sess_row["decision"] == "HOLD_SESSION_BREADTH"
+
+        assert plan["summary"]["held_session_breadth_count"] == 1
+        assert plan["summary"]["held_recent_decay_count"] == 1
+        assert plan["summary"]["pruned_tail_crash_count"] == 1
+
+        # Relaxing min_session_days=1 and block_decaying_edge=False unblocks SBIN & AXISBANK
+        relaxed = svc.get_live_roster_plan(
+            mode="paper",
+            from_date="2026-09-20",
+            to_date="2026-10-30",
+            today_ist=today_ist,
+            live_capital=300_000.0,
+            min_session_days=1,
+            block_decaying_edge=False,
+        )
+        relaxed_by_label = {c["instance_label"]: c for c in relaxed["candidates"]}
+        assert (
+            relaxed_by_label["FrontLoaded SBIN [3030cccc]"]["decision"]
+            == "SELECTED_LIVE_ROSTER"
+        )
+        assert (
+            relaxed_by_label["OneDay Scalper AXISBANK [4040dddd]"]["decision"]
+            == "SELECTED_LIVE_ROSTER"
+        )

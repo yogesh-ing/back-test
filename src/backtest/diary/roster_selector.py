@@ -34,12 +34,20 @@ import re
 from datetime import date, timedelta
 from typing import Any, Mapping, Optional, Sequence
 
+from backtest.diary.graduation import (
+    count_active_ist_sessions,
+    evaluate_edge_trajectory,
+)
+
 DEFAULT_LIVE_CAPITAL_INR = 300_000.0
 DEFAULT_RUNNER_CAPITAL_FALLBACK_INR = 50_000.0
 DEFAULT_RESERVE_PCT = 20.0
 DEFAULT_MAX_UNDERLYING_PCT = 40.0
 DEFAULT_MAX_CORRELATION = 0.65
 DEFAULT_MAX_LIVE_RUNNERS = 5
+DEFAULT_MIN_SESSION_DAYS = 5
+DEFAULT_MAX_TAIL_OVERLAP = 3
+TAIL_WORST_RED_DAYS_WINDOW = 3
 MIN_CORRELATION_OVERLAP_DAYS = 5
 
 _INDEX_ROOTS: tuple[tuple[str, str], ...] = (
@@ -384,6 +392,36 @@ def compute_daily_pnl_correlation(
     return round(corr, 3)
 
 
+def extract_worst_red_days(
+    daily_pnl: Mapping[str, float],
+    *,
+    top_k: int = TAIL_WORST_RED_DAYS_WINDOW,
+) -> list[str]:
+    """Return up to ``top_k`` worst losing IST session dates (`daily_pnl < -0.01`)."""
+    losing = [(d, float(v)) for d, v in daily_pnl.items() if float(v) < -0.01]
+    losing.sort(key=lambda kv: (kv[1], kv[0]))
+    return [d for d, _ in losing[: max(1, int(top_k))]]
+
+
+def compute_tail_crash_overlap(
+    daily_a: Mapping[str, float],
+    daily_b: Mapping[str, float],
+    *,
+    top_k: int = TAIL_WORST_RED_DAYS_WINDOW,
+) -> dict[str, Any]:
+    """Check whether two runners suffer their worst red sessions on the same IST days."""
+    worst_a = extract_worst_red_days(daily_a, top_k=top_k)
+    worst_b = extract_worst_red_days(daily_b, top_k=top_k)
+    shared = sorted(set(worst_a).intersection(worst_b))
+    return {
+        "shared_count": len(shared),
+        "shared_dates": shared,
+        "window_k": int(top_k),
+        "red_days_a": len(worst_a),
+        "red_days_b": len(worst_b),
+    }
+
+
 def compute_composite_rank_score(
     *,
     net_pnl: float,
@@ -394,6 +432,7 @@ def compute_composite_rank_score(
     commission_drag_pct: Optional[float],
     trade_count: int,
     retention_unit_score: float,
+    trajectory_status: Optional[str] = None,
 ) -> dict[str, float]:
     """Compute 0..100 institutional capital-efficiency & edge score."""
     # 1. Return-over-Drawdown Efficiency (0..40 pts)
@@ -419,13 +458,21 @@ def compute_composite_rank_score(
     sample_factor = min(1.0, max(0.0, float(trade_count) / 30.0))
     honesty_pts = 20.0 * (0.65 * float(retention_unit_score) + 0.35 * sample_factor)
 
-    total = round(eff_pts + pf_pts + drag_pts + honesty_pts, 1)
+    # 5. Recent-Half Trajectory Haircut (penalize cooling/decaying H2)
+    traj_penalty = 0.0
+    if trajectory_status == "DECAYING_RECENT_EDGE":
+        traj_penalty = 15.0
+    elif trajectory_status == "COOLING_RECENT_EDGE":
+        traj_penalty = 6.0
+
+    total = max(0.0, round(eff_pts + pf_pts + drag_pts + honesty_pts - traj_penalty, 1))
     return {
         "composite_score": total,
         "efficiency_pts": round(eff_pts, 1),
         "pf_pts": round(pf_pts, 1),
         "friction_pts": round(drag_pts, 1),
         "honesty_pts": round(honesty_pts, 1),
+        "trajectory_penalty_pts": round(traj_penalty, 1),
         "return_over_dd": round(calmar_like, 2),
     }
 
@@ -440,6 +487,14 @@ def _enumerate_weekdays(start_d: date, end_d: date) -> list[str]:
     return days
 
 
+def _parse_bool_flag(raw: Any, *, default: bool = True) -> bool:
+    if raw is None or raw == "":
+        return default
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("0", "false", "no", "off")
+    return bool(raw)
+
+
 def validate_roster_constraints(
     *,
     live_capital: Any = None,
@@ -448,6 +503,9 @@ def validate_roster_constraints(
     max_correlation: Any = None,
     max_live_runners: Any = None,
     dedupe_timeframes: Any = True,
+    min_session_days: Any = None,
+    block_decaying_edge: Any = True,
+    max_tail_overlap: Any = None,
     default_runner_capital: Any = None,
 ) -> dict[str, Any]:
     """Validate and clamp operator portfolio-construction parameters."""
@@ -483,6 +541,22 @@ def validate_roster_constraints(
     if not (1 <= slots <= 25):
         raise ValueError("max_live_runners must be between 1 and 25")
 
+    min_sess = (
+        int(min_session_days)
+        if min_session_days not in (None, "")
+        else DEFAULT_MIN_SESSION_DAYS
+    )
+    if not (1 <= min_sess <= 60):
+        raise ValueError("min_session_days must be between 1 and 60")
+
+    tail_cap = (
+        int(max_tail_overlap)
+        if max_tail_overlap not in (None, "")
+        else DEFAULT_MAX_TAIL_OVERLAP
+    )
+    if not (1 <= tail_cap <= 5):
+        raise ValueError("max_tail_overlap must be between 1 and 5")
+
     fallback_cap = (
         float(default_runner_capital)
         if default_runner_capital not in (None, "")
@@ -490,10 +564,8 @@ def validate_roster_constraints(
     )
     fallback_cap = max(5_000.0, fallback_cap)
 
-    if isinstance(dedupe_timeframes, str):
-        dedupe_tf = dedupe_timeframes.strip().lower() not in ("0", "false", "no", "off")
-    else:
-        dedupe_tf = bool(dedupe_timeframes)
+    dedupe_tf = _parse_bool_flag(dedupe_timeframes, default=True)
+    block_decay = _parse_bool_flag(block_decaying_edge, default=True)
 
     deployable_budget = round(cap * (1.0 - res_pct / 100.0), 2)
     reserve_inr = round(cap - deployable_budget, 2)
@@ -509,6 +581,9 @@ def validate_roster_constraints(
         "max_correlation": round(corr_cap, 2),
         "max_live_runners": slots,
         "dedupe_timeframes": dedupe_tf,
+        "min_session_days": min_sess,
+        "block_decaying_edge": block_decay,
+        "max_tail_overlap": tail_cap,
         "default_runner_capital": round(fallback_cap, 2),
     }
 
@@ -527,6 +602,9 @@ def build_live_roster_plan(
     max_correlation: Any = None,
     max_live_runners: Any = None,
     dedupe_timeframes: Any = True,
+    min_session_days: Any = None,
+    block_decaying_edge: Any = True,
+    max_tail_overlap: Any = None,
     default_runner_capital: Any = None,
 ) -> dict[str, Any]:
     """Run the 5-stage constrained Live Roster Selection Tournament."""
@@ -537,6 +615,9 @@ def build_live_roster_plan(
         max_correlation=max_correlation,
         max_live_runners=max_live_runners,
         dedupe_timeframes=dedupe_timeframes,
+        min_session_days=min_session_days,
+        block_decaying_edge=block_decaying_edge,
+        max_tail_overlap=max_tail_overlap,
         default_runner_capital=default_runner_capital,
     )
 
@@ -597,11 +678,28 @@ def build_live_roster_plan(
             commission_drag_pct=row.get("commission_drag_pct"),
             trade_count=int(row.get("trade_count") or 0),
             retention_unit_score=float(sim_to_real["retention_unit_score"]),
+            trajectory_status=(
+                (row.get("trajectory") or {}).get("status")
+                if isinstance(row.get("trajectory"), Mapping)
+                else evaluate_edge_trajectory(inst_trades)["status"]
+            ),
+        )
+        active_sess = (
+            int(row["active_session_days"])
+            if row.get("active_session_days") is not None
+            else count_active_ist_sessions(inst_trades)
+        )
+        traj = (
+            dict(row["trajectory"])
+            if isinstance(row.get("trajectory"), Mapping)
+            else evaluate_edge_trajectory(inst_trades)
         )
 
         enriched.append(
             {
                 **row,
+                "active_session_days": active_sess,
+                "trajectory": traj,
                 "timeframe": row.get("timeframe") or (resolved_tf or None),
                 "primary_underlying": primary_underlying,
                 "underlyings": underlyings,
@@ -638,11 +736,16 @@ def build_live_roster_plan(
         adv = cand.get("entitlement_advisory") or {}
         sim = cand["sim_to_real"]
 
-        # Compute max correlation against currently selected roster
+        # Compute max correlation & worst-red-day tail overlap against selected roster
         max_corr_val: Optional[float] = None
         max_corr_peer: Optional[str] = None
+        max_tail_shared = 0
+        max_tail_peer: Optional[str] = None
+        max_tail_dates: list[str] = []
+        tail_k = max(TAIL_WORST_RED_DAYS_WINDOW, cfg["max_tail_overlap"])
         for sel in selected:
             sel_key = str(sel.get("instance_key") or "")
+            peer_tag = f"#{sel['roster_slot']} {sel.get('instance_label')}"
             corr = compute_daily_pnl_correlation(
                 daily_maps.get(ikey, {}),
                 daily_maps.get(sel_key, {}),
@@ -650,9 +753,26 @@ def build_live_roster_plan(
             )
             if corr is not None and (max_corr_val is None or corr > max_corr_val):
                 max_corr_val = corr
-                max_corr_peer = f"#{sel['roster_slot']} {sel.get('instance_label')}"
+                max_corr_peer = peer_tag
 
-        # Stage 1: Gate + Sim-to-Real Haircut + Live Entitlement Qualification
+            tail_ov = compute_tail_crash_overlap(
+                daily_maps.get(ikey, {}),
+                daily_maps.get(sel_key, {}),
+                top_k=tail_k,
+            )
+            if (
+                tail_ov["red_days_a"] >= cfg["max_tail_overlap"]
+                and tail_ov["red_days_b"] >= cfg["max_tail_overlap"]
+                and tail_ov["shared_count"] > max_tail_shared
+            ):
+                max_tail_shared = int(tail_ov["shared_count"])
+                max_tail_peer = peer_tag
+                max_tail_dates = list(tail_ov["shared_dates"])
+
+        active_sess = int(cand.get("active_session_days") or 0)
+        traj = cand.get("trajectory") or {}
+
+        # Stage 1: Gate + Entitlement + Session Breadth + H2 Decay + BT Haircut
         if cand.get("verdict") != "PROMOTE_CANDIDATE":
             decision = "DISQUALIFIED_GATES"
             decision_label = "Disqualified · Gate Fail"
@@ -667,6 +787,28 @@ def build_live_roster_plan(
             decision_reason = str(
                 adv.get("message")
                 or "Option structure requires explicit Live risk entitlement sign-off."
+            )
+            roster_slot = None
+            rollout_wave = None
+        elif active_sess < cfg["min_session_days"]:
+            decision = "HOLD_SESSION_BREADTH"
+            decision_label = f"Hold · {active_sess}d Sessions (<{cfg['min_session_days']}d)"
+            decision_tone = "caution"
+            decision_reason = (
+                f"Closed {int(cand.get('trade_count') or 0)} trades across only "
+                f"{active_sess} IST session(s); require >= {cfg['min_session_days']} "
+                f"sessions to rule out single-day regime luck."
+            )
+            roster_slot = None
+            rollout_wave = None
+        elif cfg["block_decaying_edge"] and traj.get("status") == "DECAYING_RECENT_EDGE":
+            decision = "HOLD_RECENT_DECAY"
+            decision_label = "Hold · Recent H2 Decay"
+            decision_tone = "caution"
+            decision_reason = (
+                f"Front-loaded luck: H1 made ₹{float(traj.get('h1_net_pnl') or 0):,.0f}, "
+                f"but recent H2 expectancy fell to "
+                f"₹{float(traj.get('h2_expectancy_net') or 0):,.2f}/trade."
             )
             roster_slot = None
             rollout_wave = None
@@ -721,7 +863,7 @@ def build_live_roster_plan(
                 )
                 roster_slot = None
                 rollout_wave = None
-            # Stage 3: Daily Net P&L Correlation Pruning
+            # Stage 3: Daily Net P&L Correlation & Worst-Red-Day Tail Co-Crash Pruning
             elif max_corr_val is not None and max_corr_val > cfg["max_correlation"]:
                 decision = "PRUNED_CORRELATED_CLONE"
                 decision_label = f"Pruned · Corr ρ={max_corr_val:+.2f}"
@@ -729,6 +871,17 @@ def build_live_roster_plan(
                 decision_reason = (
                     f"Daily IST Net P&L correlation ρ={max_corr_val:+.2f} exceeds "
                     f"{cfg['max_correlation']:.2f} cap against {max_corr_peer}."
+                )
+                roster_slot = None
+                rollout_wave = None
+            elif max_tail_shared >= cfg["max_tail_overlap"]:
+                dates_csv = ", ".join(max_tail_dates[:3])
+                decision = "PRUNED_TAIL_CRASH_OVERLAP"
+                decision_label = f"Pruned · Tail Crash ({max_tail_shared}/{tail_k}d)"
+                decision_tone = "caution"
+                decision_reason = (
+                    f"Co-crash tail risk: shares {max_tail_shared}/{tail_k} worst red "
+                    f"IST sessions ({dates_csv}) with {max_tail_peer}."
                 )
                 roster_slot = None
                 rollout_wave = None
@@ -812,9 +965,14 @@ def build_live_roster_plan(
             "capital_is_estimated": cand["capital_is_estimated"],
             "composite_score": cand["composite_score"],
             "score_breakdown": cand["score"],
+            "active_session_days": active_sess,
+            "trajectory": traj,
             "sim_to_real": sim,
             "max_corr_with_selected": max_corr_val,
             "max_corr_peer": max_corr_peer,
+            "max_tail_overlap_days": max_tail_shared,
+            "max_tail_overlap_peer": max_tail_peer,
+            "shared_tail_dates": max_tail_dates,
             "gates_passed": cand.get("gates_passed"),
             "gates_total": cand.get("gates_total"),
             "verdict": cand.get("verdict"),
@@ -847,18 +1005,39 @@ def build_live_roster_plan(
     pruned_count = sum(
         1
         for c in candidates_out
-        if c["decision"] in ("PRUNED_TIMEFRAME_DUPLICATE", "PRUNED_CORRELATED_CLONE")
+        if c["decision"]
+        in (
+            "PRUNED_TIMEFRAME_DUPLICATE",
+            "PRUNED_CORRELATED_CLONE",
+            "PRUNED_TAIL_CRASH_OVERLAP",
+        )
     )
-    bench_count = sum(
-        1
+    warm_bench = [
+        c
         for c in candidates_out
         if c["decision"] in ("DEFERRED_UNDERLYING_CAP", "DEFERRED_SLOT_CAP", "DEFERRED_CAPITAL_CAP")
+    ]
+    bench_count = len(warm_bench)
+    held_session_breadth_count = sum(
+        1 for c in candidates_out if c["decision"] == "HOLD_SESSION_BREADTH"
+    )
+    held_recent_decay_count = sum(
+        1 for c in candidates_out if c["decision"] == "HOLD_RECENT_DECAY"
+    )
+    pruned_tail_crash_count = sum(
+        1 for c in candidates_out if c["decision"] == "PRUNED_TAIL_CRASH_OVERLAP"
     )
     disqualified_count = sum(
         1
         for c in candidates_out
         if c["decision"]
-        in ("DISQUALIFIED_GATES", "DISQUALIFIED_HAIRCUT", "HOLD_ENTITLEMENT_REVIEW")
+        in (
+            "DISQUALIFIED_GATES",
+            "DISQUALIFIED_HAIRCUT",
+            "HOLD_ENTITLEMENT_REVIEW",
+            "HOLD_SESSION_BREADTH",
+            "HOLD_RECENT_DECAY",
+        )
     )
 
     return {
@@ -872,6 +1051,9 @@ def build_live_roster_plan(
             "selected_count": len(selected),
             "warm_bench_count": bench_count,
             "pruned_duplicate_or_corr_count": pruned_count,
+            "pruned_tail_crash_count": pruned_tail_crash_count,
+            "held_session_breadth_count": held_session_breadth_count,
+            "held_recent_decay_count": held_recent_decay_count,
             "disqualified_count": disqualified_count,
             "allocated_capital_inr": round(total_allocated, 2),
             "unallocated_deployable_inr": round(
@@ -883,5 +1065,6 @@ def build_live_roster_plan(
             "backtest_runs_indexed": len(backtest_runs),
         },
         "selected_roster": selected,
+        "warm_bench": warm_bench,
         "candidates": candidates_out,
     }

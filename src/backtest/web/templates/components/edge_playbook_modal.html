@@ -343,14 +343,14 @@
       <div id="epb-panel-roster" role="tabpanel" aria-labelledby="epb-tab-btn-roster" hidden>
         <p class="epb-section-lead">
           Passing the 6 Graduation Gates proves a runner is <strong>individually viable</strong> — not that all 15–20 passing Paper strategies belong in Live simultaneously.
-          The <strong>Constrained Live Roster Optimizer</strong> (`/diary` &rarr; `Graduation &amp; Journal`) runs a 5-stage prop-desk tournament to pick a capital-safe, uncorrelated Live Roster and keep runners #6+ warm in Paper as rotation backups.
+          The <strong>Constrained Live Roster Optimizer</strong> (`/diary` &rarr; `Graduation &amp; Journal`) runs a 5-stage prop-desk tournament with temporal breadth, H1&rarr;H2 decay, and tail-crash guards, then snapshots the audit trail via <strong>Log Roster to Journal</strong>.
         </p>
 
         <div class="epb-table-wrap">
           <table class="epb-table">
             <thead>
               <tr>
-                <th>Tournament Stage</th>
+                <th>Tournament Stage / Guard</th>
                 <th>Default Rule / Threshold</th>
                 <th>What It Prevents</th>
                 <th>Tournament Outcome</th>
@@ -358,15 +358,27 @@
             </thead>
             <tbody>
               <tr data-epb-searchable>
-                <td><strong>1. Gate, Entitlement &amp; BT Haircut Filter</strong></td>
+                <td><strong>1A. Gate, Entitlement &amp; BT Haircut</strong></td>
                 <td class="epb-num">`6/6` Gates &middot; `PF Retention ≥ 45%` &middot; Live Entitlement OK</td>
                 <td>Promoting curve-fit Paper flukes (`BT PF 2.4× &rarr; Paper 0.9×`) or unentitled option structures (`entitlement.live`).</td>
-                <td><span class="epb-pill epb-pill-neg">Disqualified / Hold</span></td>
+                <td><span class="epb-pill epb-pill-neg">Disqualified / Entitlement Hold</span></td>
+              </tr>
+              <tr data-epb-searchable>
+                <td><strong>1B. Temporal Session Breadth (`min_session_days`)</strong></td>
+                <td class="epb-num">`≥ 5` distinct active IST session days (`N ≥ 20` trades)</td>
+                <td>Promoting a 1-minute scalper that fired 25 lucky trades during a single trendy Tuesday (`1d`) with zero multi-regime proof.</td>
+                <td><span class="epb-pill epb-pill-warn">Hold &middot; &lt; 5 IST Sessions</span></td>
+              </tr>
+              <tr data-epb-searchable>
+                <td><strong>1C. Chronological Half-Split (`H1 &rarr; H2` Decay)</strong></td>
+                <td class="epb-num">`E[H2] &gt; ₹0` when `Block H2 decay` is ON (`N ≥ 12`); `−6` / `−15` pt penalty</td>
+                <td>Promoting a "front-loaded luck" runner that made `+₹18k` in week 1 (`H1`) and bled `−₹3k` across weeks 2–4 (`H2`) as volatility shifted.</td>
+                <td><span class="epb-pill epb-pill-warn">Hold &middot; Recent Half Decay</span></td>
               </tr>
               <tr data-epb-searchable>
                 <td><strong>2. Composite Capital-Efficiency Score</strong></td>
-                <td class="epb-num">`40` R/DD + `25` PF + `15` (1&minus;Drag) + `20` Sim-to-Real</td>
-                <td>Picking volatile high-rupee winners with deep drawdowns over smooth compounding edges.</td>
+                <td class="epb-num">`40` R/DD + `25` PF + `15` (1&minus;Drag) + `20` Sim-to-Real &minus; H2 Penalty</td>
+                <td>Picking volatile high-rupee winners or cooling edges over smooth, steady compounding runners.</td>
                 <td><span class="epb-pill epb-pill-info">0–100 Rank Order</span></td>
               </tr>
               <tr data-epb-searchable>
@@ -376,15 +388,21 @@
                 <td><span class="epb-pill epb-pill-warn">Pruned &middot; Same Strat+Symbol TF</span></td>
               </tr>
               <tr data-epb-searchable>
-                <td><strong>4. Daily IST Net P&amp;L De-Correlation</strong></td>
+                <td><strong>4A. Daily IST Net P&amp;L De-Correlation (`&rho;`)</strong></td>
                 <td class="epb-num">Pairwise Pearson `&rho; ≤ 0.65` (`≥ 5` active IST days)</td>
-                <td>Deploying 4 differently named momentum strategies that all suffer max loss on the same choppy session.</td>
+                <td>Deploying 4 differently named momentum strategies that move in lockstep on normal sessions.</td>
                 <td><span class="epb-pill epb-pill-warn">Pruned &middot; Corr &rho; &gt; Cap</span></td>
               </tr>
               <tr data-epb-searchable>
-                <td><strong>5. Reserve, Underlying &amp; Slot Knapsack</strong></td>
-                <td class="epb-num">`20%` Cash Reserve &middot; `≤ 40%` per Underlying &middot; `≤ 5` Live Slots</td>
-                <td>Margin starvation, single-index wipeouts (`NIFTY` spot + `NIFTY` CE stacked), and execution overload.</td>
+                <td><strong>4B. Worst-Red-Day Tail Co-Crash Overlap</strong></td>
+                <td class="epb-num">`&lt; 3 / 3` shared worst losing IST session days (`≥ 3` red days each)</td>
+                <td>Tail correlation spikes to `1.0` during gap/VIX shocks even when normal-day Pearson `&rho; ≈ 0.35` looks benign.</td>
+                <td><span class="epb-pill epb-pill-warn">Pruned &middot; Tail Co-Crash 3/3d</span></td>
+              </tr>
+              <tr data-epb-searchable>
+                <td><strong>5. Reserve, Underlying &amp; Slot Knapsack + Audit Log</strong></td>
+                <td class="epb-num">`20%` Cash Reserve &middot; `≤ 40%` per Underlying &middot; `≤ 5` Slots &middot; `Log Roster to Journal`</td>
+                <td>Margin starvation, single-index wipeouts (`NIFTY` spot + `NIFTY` CE), and undocumented Live promotions.</td>
                 <td><span class="epb-pill epb-pill-pos">#1–#2 Wave 1 / #3+ Wave 2</span> vs <span class="epb-pill epb-pill-neutral">Warm Bench</span></td>
               </tr>
             </tbody>

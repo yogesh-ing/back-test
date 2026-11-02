@@ -192,6 +192,9 @@ def diary_roster_plan() -> Tuple[Response, int]:
     max_correlation = request.args.get("max_correlation")
     max_live_runners = request.args.get("max_live_runners")
     dedupe_timeframes = request.args.get("dedupe_timeframes", "true")
+    min_session_days = request.args.get("min_session_days")
+    block_decaying_edge = request.args.get("block_decaying_edge", "true")
+    max_tail_overlap = request.args.get("max_tail_overlap")
     try:
         payload = DiaryService().get_live_roster_plan(
             mode=mode,
@@ -204,6 +207,9 @@ def diary_roster_plan() -> Tuple[Response, int]:
             max_correlation=max_correlation,
             max_live_runners=max_live_runners,
             dedupe_timeframes=dedupe_timeframes,
+            min_session_days=min_session_days,
+            block_decaying_edge=block_decaying_edge,
+            max_tail_overlap=max_tail_overlap,
         )
         return jsonify({"success": True, **payload}), 200
     except ValueError as exc:

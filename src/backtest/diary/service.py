@@ -1026,6 +1026,9 @@ class DiaryService:
         max_correlation: Any = None,
         max_live_runners: Any = None,
         dedupe_timeframes: Any = True,
+        min_session_days: Any = None,
+        block_decaying_edge: Any = True,
+        max_tail_overlap: Any = None,
     ) -> dict[str, Any]:
         """Slice 6: Constrained Live Roster Tournament & Backtest-vs-Paper Matrix."""
         book_mode = validate_diary_mode(mode)
@@ -1079,6 +1082,9 @@ class DiaryService:
             max_correlation=max_correlation,
             max_live_runners=max_live_runners,
             dedupe_timeframes=dedupe_timeframes,
+            min_session_days=min_session_days,
+            block_decaying_edge=block_decaying_edge,
+            max_tail_overlap=max_tail_overlap,
         )
         plan["ledger_health"] = self._ledger_health(
             loaded["duplicates_collapsed"],

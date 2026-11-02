@@ -1410,6 +1410,46 @@
     color: var(--muted);
 }
 
+.diary-tele-strip {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+    margin-top: 3px;
+}
+
+.diary-tele-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    border: 1px solid var(--border-soft);
+    background: var(--surface-2);
+    color: var(--muted);
+}
+
+.diary-tele-pill[data-tone="positive"] {
+    background: var(--success-tint);
+    border-color: var(--success-shade);
+    color: var(--success-text, var(--success));
+}
+
+.diary-tele-pill[data-tone="caution"] {
+    background: var(--warn-tint, var(--warning-tint));
+    border-color: var(--warning-shade);
+    color: var(--warn-ink, #9a6700);
+}
+
+.diary-tele-pill[data-tone="negative"] {
+    background: var(--danger-tint);
+    border-color: var(--danger-shade);
+    color: var(--danger-text, var(--danger));
+}
+
+
 
 
 
