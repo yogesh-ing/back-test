@@ -643,7 +643,7 @@ the caption "stored run …, source db", and the form pre-filled; the `NOT STORE
 Recent Runs ledger (`total_trades`) are consistent. F3 and S5 hold here — "No broker feed", ₹ en-IN
 grouping, and "Bollinger reversion" rather than the registry key.
 
-### BT-01 — trade stamps render UTC, not exchange time (OPEN, needs a scope decision)
+### BT-01 — trade stamps render UTC, not exchange time
 
 ```
 Issue ID / task ID: BT-01
@@ -661,12 +661,64 @@ Classification: data/clock, surfaced in the UI
 Files: src/backtest/engine/trades.py, src/backtest/data/db_source.py
 ```
 
-Deliberately **not** fixed in this pass. Layer 2 is the correct fix ("fix at source, not on read") and
-`get_candles()` has ~14 callers spanning forward, live, optimization and the simulator — converting
-there moves every resample boundary on those paths, which is a clock-policy change under
-`agents.md` → `src/backtest/timekeeping.py`. Layer 1 alone would make the ledger *look* right while the
-bars under it stayed UTC, which is the exact read-side compensation this repo forbids. Needs an
-operator scope call: accept the blast radius on the trading paths, or keep BT-01 open.
+**Status: DONE (2026-11-04).** Fixed at layer 2, the loader, because layer 1 alone is the read-side
+compensation this repo forbids. `to_exchange_wall_clock()` (src/backtest/data/db_source.py:67) converts
+an aware index to Asia/Kolkata and drops the zone, and BOTH read paths now call it — the bulk path
+(line 229) already did the conversion inline, `get_candles()` (line 328) did not, and that asymmetry *was*
+the bug: two callers of the same source got two different clocks. A naive series is returned untouched,
+which is what every SQLite-backed test (and `tests/data/test_window_bounds.py::two_utc_days`) relies on.
+
+The blast radius was mapped before editing, and one path genuinely broke: `forward/engine.py` hands each
+replay bar to the real `DataValidator`, whose contract is "naive means UTC" (it compares against
+`datetime.now(timezone.utc)`) — a naive 09:15 relabelled as UTC is 5h15m in the future, and a future bar is
+dropped in silence, emptying the replay. It now goes through the declared door,
+`from_market_clock(idx)` (src/backtest/forward/engine.py:1961), so the replay path keeps byte-for-byte the
+shape it had before the fix. The validator itself was left alone: its docstring documents UTC because that
+is what the live mStock hand-off gives it.
+
+Gate `scripts/diagnose_timeframe_alignment.py` (RELIANCE), before → after: storage reads "naive UTC" →
+"naive IST (session starts ~09:15)"; `1hour` 08:30 grid → `09:00,10:00,…`; `4hour` 1271 bars riddled with
+stub buckets → 848 bars, exactly 2 per session on the `08:00/12:00` grid. Daily and weekly look identical
+either way — the UTC day boundary sits outside the session — which is why this survived months: a daily
+backtest could never show it.
+
+Live on the mirror (:5001 restarted, Python changed), `sma_crossover` on RELIANCE 1min Sep-2026: the trade
+ledger reads `2026-09-02 09:45 → 10:51` (was 03:45 for a trade at the open), the first bar is 09:15 and the
+last 15:28, and the rendered DOM table agrees. `1hour` → 91 bars on the 09:00 grid; `4hour` → 26 bars
+(2 per session × 13), down from the 39 the stub buckets produced.
+
+Ratchets: `tests/data/test_db_source_clock.py` (8 tests — helper, naive passthrough, both read paths
+stamping one session identically, and the hour/4-hour bucket grids; 5 of them fail on the pre-fix tree),
+plus `tests/test_forward_engine.py::test_a_replay_of_the_current_session_is_not_emptied_by_the_clock`,
+which fails with "Backtest replay finished: 0 loops" if `from_market_clock` is dropped.
+
+Two things deliberately left open, neither a clock bug:
+- **BT-05 (new, P3):** `_fmt()`/`_fmt_dt()` print date-only only for a midnight stamp, so a `1day` ledger row
+  now reads `2026-09-01 09:15` — truthful (daily bars are anchored to the session open by `bar_timestamp`)
+  but noisy where the reader thinks in days. It read `03:45` before, so this is not a regression; making
+  coarse bars date-only is a display decision that needs the operator's call, not a silent heuristic.
+- Stored ledger rows written before this fix keep their UTC stamps. `PAYLOAD_VERSION` did not change (the
+  shape is the same, only the clock), so an old run still reads back — with its old, frozen stamps. The
+  ledger is an immutable record of what one build produced (`code_fingerprint`), so the repair belongs in
+  a new run, not in rewriting history.
+
+### BT-06 — section 3 of the timeframe gate still reports a volume MISMATCH (OPEN, not a clock bug)
+
+```
+Issue ID / task ID: BT-06
+Priority: P3 (data content, found while proving BT-01)
+Actual: scripts/diagnose_timeframe_alignment.py section 3 compares resampled-1day against the native 1day
+  rows for RELIANCE and still reports MISMATCH after the clock fix.
+Root cause: not the clock. OHLC is identical and there are no duplicate minute rows, but the sum of the
+  session's 1min volume is roughly 2x the volume stored on the native 1day row — one source tag, so this
+  is a disagreement about what "volume" means between the two ingest paths, not double-counted bars.
+Classification: data/fetch
+Files: the 1day writer and the mStock export, upstream of this repo's loader
+```
+
+Present before BT-01 (measured on the pre-fix tree), so it is recorded separately rather than folded into
+that fix. Out of scope for the /backtest behavioural pass: no run here is being certified, and a volume
+definition question belongs to whoever owns the fetch path.
 
 ### BT-02 — a failed run left its own "Running backtest…" spinner on screen
 
@@ -730,7 +782,7 @@ at 390×844 with a completed run on screen: `docW 386, overflow false, unclipped
 | S5 | F9 (one money formatter + ratchet test) — **DONE 2026-11-03** | Touches many files; land before other template edits |
 | S6 | F6 (diary truncation) **DONE 2026-11-03** + F8 (analytics states) **DONE 2026-11-03** | Per-page, independent |
 | S7 | F10 (description spacing sweep) **DONE 2026-11-03** + F11 (label resolver) **DONE 2026-11-03** + F12 | Copy/consistency batch |
-| S8 | F13 (topbar at 561–1100px) **DONE 2026-11-04** + BT-02/BT-04 (backtest-page pass) | Same rule as S3, wrong breakpoint band |
+| S8 | F13 (topbar at 561–1100px) **DONE 2026-11-04** + BT-02/BT-04 (backtest-page pass) + BT-01 (loader clock) **DONE 2026-11-04** | Same rule as S3, wrong breakpoint band |
 | S9 | F14 (risk_page.js escaping) — found during S7 | One file, no visual change; needs its own static rule so it cannot be half-done |
 
 Regression command for every slice (from [UI-REDESIGN-PLAN.md](UI-REDESIGN-PLAN.md):217-227), run in
@@ -756,6 +808,13 @@ synced to 23 by a1d0de8).
 `tests/js/test_mtm_staleness.mjs` fails on its `portfolio.js` SSE assertion — its four `option_view.js`
 unit tests pass, including after F11 made `option_view.js` depend on `labels.js`, and none of the files
 it loads were touched by this pass. It is not wrapped by pytest, so the slice gate stays green.
+23 failures across `tests/forward/` + `tests/optimization/` (`test_bucket_risk`, `test_capital_ledger_identity`,
+`test_live_engine`, `test_net_pnl_contract`, `test_phase4_straddles_and_live_adapter`) are the same list
+with the BT-01 diff reverted in place — every one of them arms live and is refused by the global
+kill-switch in Cost & Risk Settings, which the QA DB keeps OFF on purpose. The 7 setup ERRORs in
+`tests/test_real_reliance_september.py` are Windows-only: its `ingested` fixture runs the ingest CLI in a
+subprocess with `env={"PATH": "/usr/bin:/bin"}`, so the child dies at `import asyncio` → `_overlapped`
+(`OSError: [WinError 10106]`) before any repo code loads — reproduced with that env alone.
 
 Static edits (CSS/JS) are served from disk, but **Python and template edits need a mirror restart** —
 the reporting fix measured 157.8 s until PID 21136 was replaced, and F11's `data-raw-key` markers only

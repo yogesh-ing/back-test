@@ -12,6 +12,7 @@ from sqlalchemy import bindparam, text
 
 from backtest.data.base import (
     CANONICAL_TIMEFRAMES,
+    EXCHANGE_TZ,
     canonical_rank,
     derive_serviceable_timeframes,
     finest_timeframe,
@@ -61,6 +62,30 @@ _INTERVAL_TO_RULE = {
 #: produced a spurious "not found in database" for a timeframe it could have
 #: resampled perfectly well.
 _SOURCE_TF_PRIORITY = list(CANONICAL_TIMEFRAMES)
+
+
+def to_exchange_wall_clock(ts: pd.Series) -> pd.Series:
+    """Stamp bars on the clock the session is actually traded on.
+
+    ``market_data_cache.ts`` is ``timestamptz`` and holds the bar's *instant* —
+    correct at rest, since 09:15 IST is 03:45Z — but handing that column to the
+    engine reads as aware UTC, and two things follow, both silent:
+
+    * ``resample`` bins a tz-aware index on the **UTC** grid, so a ``1hour`` bar
+      starts at 08:30 IST and a ``4hour`` one gains stub bars built from
+      quarter-hour fragments (39 bars where 26 exist — the table in
+      docs/DATA-INGEST-AND-TIMEFRAMES.md). ``1day``/``1week`` are unaffected,
+      which is why a daily check never caught it.
+    * every clock face downstream prints UTC: the trade ledger's entry stamp
+      read ``03:45`` for a trade taken at the open (finding BT-01).
+
+    A naive series is returned untouched: exports, CSV sources and the SQLite
+    test fixtures already carry wall-clock text, and localising those would
+    invent an offset for a value that has never had one.
+    """
+    if getattr(ts.dt, "tz", None) is None:
+        return ts
+    return ts.dt.tz_convert(EXCHANGE_TZ).dt.tz_localize(None)
 
 
 def base_stored_timeframe(interval: str | None) -> str:
@@ -201,10 +226,7 @@ class DbSource:
             return {}
 
         df_all["symbol"] = df_all["symbol"].astype(str).str.strip().str.upper()
-        ts_series = pd.to_datetime(df_all["ts"])
-        if getattr(ts_series.dt, "tz", None) is not None:
-            ts_series = ts_series.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
-        df_all["ts"] = ts_series
+        df_all["ts"] = to_exchange_wall_clock(pd.to_datetime(df_all["ts"]))
 
         out: dict[str, pd.DataFrame] = {}
         for sym, grp in df_all.groupby("symbol", sort=False):
@@ -303,7 +325,7 @@ class DbSource:
                 )
             )
 
-        df["ts"] = pd.to_datetime(df["ts"])
+        df["ts"] = to_exchange_wall_clock(pd.to_datetime(df["ts"]))
         df = df.set_index("ts")
 
         # Resample if the requested interval differs from what we stored

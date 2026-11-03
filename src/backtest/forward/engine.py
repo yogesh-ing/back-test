@@ -93,6 +93,7 @@ from backtest.data.sources_policy import synthetic_enabled
 from backtest.simulator.engine_loop import Bar, to_python_scalar
 from backtest.simulator.errors import ValidationError
 from backtest.simulator.money import ZERO, money
+from backtest.timekeeping import from_market_clock
 
 logger = logging.getLogger("backtest.forward.engine")
 
@@ -1948,7 +1949,16 @@ class ForwardTestingEngine:
 
                     bar = {
                         "symbol": symbol,
-                        "timestamp": idx,
+                        # The replay clock and the live clock must meet at the
+                        # validator's door: it documents a naive stamp as UTC
+                        # (live/mstock hand-offs), while a stored bar frame is
+                        # now stamped on the exchange wall clock. Read the bar
+                        # through the declared door so this path keeps handing
+                        # an aware instant, exactly as it did when the loader
+                        # returned UTC — a naive 09:15 relabelled as UTC reads
+                        # 5h15m in the future, and a future-dated bar is
+                        # dropped in silence, emptying the replay.
+                        "timestamp": from_market_clock(idx),
                         "open": float(row["open"]),
                         "high": float(row["high"]),
                         "low": float(row["low"]),
