@@ -2,9 +2,10 @@
  * Alert widget — broker-session "Re-login" action tests.
  *
  * The widget normally claims "information only: no action buttons". The one
- * deliberate exception: broker_session_expiring / broker_session_expired
- * alerts carry a Re-login button that opens the existing broker auth popup
- * (window.BrokerAuthUI) so the feed can be revived without leaving the page.
+ * deliberate exception: the broker_session_* alerts (expiring /
+ * expiring_urgent / expired) carry a Re-login button that opens the existing
+ * broker auth popup (window.BrokerAuthUI) so the feed can be revived without
+ * leaving the page.
  *
  * Runs under plain Node with a stub DOM; alert_widget.js is loaded with
  * auto-init suppressed and its exported pure render helpers are asserted.
@@ -88,6 +89,11 @@ const gammaAlert = {
 test("session alerts are recognised, others are not", () => {
     assert.equal(AW.isSessionAlert(sessionAlert), true);
     assert.equal(AW.isSessionAlert({ ...sessionAlert, alert_type: "broker_session_expired" }), true);
+    // The Sprint A4 T−10m rung of the ladder is a session alert too: without it
+    // here the most actionable page of the three would render with no fix button.
+    assert.equal(
+        AW.isSessionAlert({ ...sessionAlert, alert_type: "broker_session_expiring_urgent" }), true,
+    );
     assert.equal(AW.isSessionAlert(gammaAlert), false);
 });
 

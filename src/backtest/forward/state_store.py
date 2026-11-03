@@ -484,22 +484,6 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
     runner.last_price = dict(snapshot.get("last_price", {}))
     runner._last_bar_ts = dict(snapshot.get("last_bar_ts", {}))
     runner.last_option_pnl = float(snapshot.get("last_option_pnl", 0.0))
-    # BUG-04 day anchors. A snapshot written before the contract existed has
-    # no session history, and the book it restores is not flat: starting the
-    # anchors at 0 would report the whole lifetime as today's P&L until the
-    # first EOD. So baseline them at the restored book — the same
-    # "re-baseline from current equity" decision the manager's anchors made
-    # on 2026-10-15 — and let the session roll them forward from there.
-    # Read after the bar clock and marks are back, because baselining asks
-    # the runner for its current realized/open P&L.
-    if "pnl_session" in snapshot:
-        runner._pnl_session = snapshot.get("pnl_session")
-        runner._last_session_realized = float(snapshot.get("last_session_realized", 0.0))
-        runner._last_session_open = float(snapshot.get("last_session_open", 0.0))
-        runner._prev_close_realized_net = float(snapshot.get("prev_close_realized_net", 0.0))
-        runner._prev_close_open_pnl = float(snapshot.get("prev_close_open_pnl", 0.0))
-    else:
-        runner.baseline_pnl_anchors()
     runner.closed_trades_cache = list(snapshot.get("closed_trades_cache", []))
     runner.equity_curve = list(snapshot.get("equity_curve", []))
     runner.error = snapshot.get("error")
@@ -536,6 +520,25 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
                 # fail-safe: a level that cannot be armed must not be reported
                 # as armed.
                 runner.options_bridge.clear_manual_rules()
+
+    # BUG-04 day anchors. A snapshot written before the contract existed has
+    # no session history, and the book it restores is not flat: starting the
+    # anchors at 0 would report the whole lifetime as today's P&L until the
+    # first EOD. So baseline them at the restored book — the same
+    # "re-baseline from current equity" decision the manager's anchors made
+    # on 2026-10-15 — and let the session roll them forward from there.
+    # This MUST run after the bridge is back: an option runner's realized and
+    # open P&L live in the bridge, not in ``portfolio``, so baselining earlier
+    # reads 0/0, leaves the anchors at zero, and the boot risk sweep then sees
+    # the whole lifetime as today's loss (the 2026-11-02 false −3.8L breach).
+    if "pnl_session" in snapshot:
+        runner._pnl_session = snapshot.get("pnl_session")
+        runner._last_session_realized = float(snapshot.get("last_session_realized", 0.0))
+        runner._last_session_open = float(snapshot.get("last_session_open", 0.0))
+        runner._prev_close_realized_net = float(snapshot.get("prev_close_realized_net", 0.0))
+        runner._prev_close_open_pnl = float(snapshot.get("prev_close_open_pnl", 0.0))
+    else:
+        runner.baseline_pnl_anchors()
 
     gateway_state = snapshot.get("live_gateway")
     restore_gateway = getattr(runner.broker, "restore_state", None)

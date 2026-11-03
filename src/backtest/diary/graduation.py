@@ -43,6 +43,8 @@ KNOWN_OPTION_STRUCTURES = (
     "bull_call_spread",
     "bear_put_spread",
     "long_straddle",
+    "long_strangle",
+    "short_strangle",
     "strangle",
     "short_straddle",
     "short_call",
@@ -84,6 +86,100 @@ def _load_live_option_entitlements() -> tuple[str, ...]:
     except Exception:  # noqa: BLE001 — fallback to canonical live baseline
         pass
     return ("long_call", "long_put")
+
+
+def count_active_ist_sessions(trades: Sequence[Mapping[str, Any]]) -> int:
+    """Count distinct IST session dates (`YYYY-MM-DD`) across closed trades."""
+    days: set[str] = set()
+    for t in trades or ():
+        raw = (
+            t.get("session_date")
+            or t.get("session_date_ist")
+            or t.get("exit_date_ist")
+            or t.get("entry_date_ist")
+            or ""
+        )
+        day = str(raw).strip()[:10]
+        if day:
+            days.add(day)
+    return len(days)
+
+
+def evaluate_edge_trajectory(trades: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Compare First-Half (H1) vs Recent-Half (H2) chronological net expectancy.
+
+    Detects front-loaded luck where cumulative 30–40d metrics remain positive
+    solely from early wins while the most recent half of trades has decayed
+    into negative net expectancy (`DECAYING_RECENT_EDGE`).
+    """
+    ordered = sorted(
+        trades or (),
+        key=lambda t: (
+            str(t.get("exit_ts") or t.get("exit_ts_utc") or ""),
+            str(t.get("entry_ts") or t.get("entry_ts_utc") or ""),
+            str(
+                t.get("session_date")
+                or t.get("session_date_ist")
+                or t.get("exit_date_ist")
+                or ""
+            ),
+            str(t.get("symbol") or ""),
+        ),
+    )
+    n = len(ordered)
+    if n < 10:
+        return {
+            "status": "INSUFFICIENT_SAMPLE",
+            "label": "H2 Pending (<10 tr)",
+            "tone": "neutral",
+            "status_label": "H2 Pending (<10 tr)",
+            "status_tone": "neutral",
+            "h1_trade_count": n // 2,
+            "h2_trade_count": n - (n // 2),
+            "h1_net_pnl": 0.0,
+            "h2_net_pnl": 0.0,
+            "h1_expectancy_net": 0.0,
+            "h2_expectancy_net": 0.0,
+        }
+
+    mid = n // 2
+    h1 = ordered[:mid]
+    h2 = ordered[mid:]
+    h1_net = round(sum(float(t.get("net_pnl") or 0.0) for t in h1), 2)
+    h2_net = round(sum(float(t.get("net_pnl") or 0.0) for t in h2), 2)
+    h1_exp = round(h1_net / len(h1), 2)
+    h2_exp = round(h2_net / len(h2), 2)
+
+    if n >= 12 and h1_net > 0.0 and h2_exp <= 0.0:
+        status = "DECAYING_RECENT_EDGE"
+        label = "H2 Decay (E[H2] ≤ ₹0)"
+        tone = "negative"
+    elif n >= 12 and h1_exp > 0.0 and (0.0 < h2_exp < 0.45 * h1_exp):
+        status = "COOLING_RECENT_EDGE"
+        label = "H2 Cooling"
+        tone = "caution"
+    elif h2_exp > 0.0:
+        status = "STEADY_OR_EXPANDING"
+        label = "H2 Steady"
+        tone = "positive"
+    else:
+        status = "NEGATIVE_BOTH_HALVES"
+        label = "H1 & H2 Negative"
+        tone = "negative"
+
+    return {
+        "status": status,
+        "label": label,
+        "tone": tone,
+        "status_label": label,
+        "status_tone": tone,
+        "h1_trade_count": len(h1),
+        "h2_trade_count": len(h2),
+        "h1_net_pnl": h1_net,
+        "h2_net_pnl": h2_net,
+        "h1_expectancy_net": h1_exp,
+        "h2_expectancy_net": h2_exp,
+    }
 
 
 def compute_realized_drawdown(
@@ -269,6 +365,8 @@ def evaluate_instance_graduation(
     )
     dd_pct = dd["max_drawdown_pct"]
     dd_inr = dd["max_drawdown_inr"]
+    active_sessions = count_active_ist_sessions(trades)
+    trajectory = evaluate_edge_trajectory(trades)
 
     g_sample = trade_count >= MIN_GRADUATION_TRADES
     g_expectancy = trade_count > 0 and expectancy_net > 0.0
@@ -442,6 +540,8 @@ def evaluate_instance_graduation(
         "timeframe": instance.get("timeframe"),
         "allocated_capital": dd["allocated_capital"],
         "trade_count": trade_count,
+        "active_session_days": active_sessions,
+        "trajectory": trajectory,
         "win_rate_pct": round(float(instance.get("win_rate_pct") or 0.0), 2),
         "profit_factor": pf,
         "unbounded_pf": unbounded_pf,

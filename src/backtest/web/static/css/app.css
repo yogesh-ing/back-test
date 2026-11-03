@@ -1159,6 +1159,21 @@ textarea.input { line-height: 1.7; }
     cursor: help;
     vertical-align: middle;
 }
+/* Sprint A1: a book whose broker is logged out. Same table as a stale mark,
+   different situation and a different fix — the mark is not late, there is
+   nobody to ask. Dashed border reads as "not connected" rather than "alarm". */
+.badge-waiting-feed {
+    display: inline-block;
+    margin-top: 2px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: .7rem;
+    font-weight: 600;
+    background: rgba(148,163,184,.14);
+    color: var(--warning-text, #f59e0b);
+    border: 1px dashed rgba(245,158,11,.55);
+    cursor: help;
+}
 .matrix-table tr.stale-mark-row td,
 .dd-table tr.stale-mark-row td {
     background: rgba(245,158,11,.08);

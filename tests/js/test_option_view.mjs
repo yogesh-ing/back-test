@@ -337,6 +337,52 @@ test("equity trades keep their plain symbol", () => {
     assert.equal(OptionView.tradeLine({ kind: "equity", symbol: "RELIANCE" }), "RELIANCE");
 });
 
+// --- Sprint A1: feed readiness is its own axis, not a flavour of `status` ---
+
+test("a connected book gets no feed pill", () => {
+    assert.equal(OptionView.isFeedWaiting({ feed_state: "LIVE", source: "mstock" }), false);
+    assert.equal(OptionView.feedStateBadgeHtml({ feed_state: "LIVE", source: "mstock" }), "");
+    // An equity runner has no option payload at all and still reads connected.
+    assert.equal(OptionView.feedStateBadgeHtml({ status: "RUNNING" }), "");
+    assert.equal(OptionView.feedStateBadgeHtml(null), "");
+});
+
+test("WAITING_FOR_FEED is recognised from either field the API sends", () => {
+    // get_state() mirrors the bridge's flag; list_positions() carries the enum.
+    assert.equal(OptionView.isFeedWaiting({ feed_state: "WAITING_FOR_FEED" }), true);
+    assert.equal(OptionView.isFeedWaiting({ feed_disconnected: true }), true);
+    assert.equal(OptionView.isFeedWaiting({ feed_state: "SYNTHETIC" }), false);
+});
+
+test("the pill names the broker to log into and says the mark is frozen", () => {
+    const html = OptionView.feedStateBadgeHtml({
+        feed_state: "WAITING_FOR_FEED",
+        source: "mstock",
+        feed_refusal: "WAITING_FOR_FEED: no authenticated mstock session on NIFTY",
+    });
+    assert.match(html, /badge-waiting-feed/);
+    assert.match(html, /Waiting for mStock login/);
+    assert.match(html, /frozen mark/);
+    assert.match(html, /title="[^"]*no authenticated mstock session/);
+});
+
+test("an unknown or missing source still produces a usable pill", () => {
+    assert.match(OptionView.feedWaitLabel({ source: "dhan" }), /Dhan/);
+    assert.match(OptionView.feedWaitLabel({ source: "upstox" }), /Upstox/);
+    assert.equal(OptionView.feedWaitLabel({}), "Waiting for broker login");
+});
+
+test("a refusal string cannot break out of the title attribute", () => {
+    const html = OptionView.feedStateBadgeHtml({
+        feed_disconnected: true,
+        source: 'mstock" onload="alert(1)',
+        feed_refusal: '"><script>alert(1)</script>',
+    });
+    assert.equal(html.includes("<script>"), false);
+    assert.equal(html.includes('" onload="'), false);
+    assert.match(html, /&quot;/);
+});
+
 // ---------------------------------------------------------------------------
 
 if (process.exitCode) {

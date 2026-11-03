@@ -186,6 +186,44 @@ const OptionView = (function () {
     return openStructures(row).filter((s) => !!(s && s.mark_stale)).length;
   }
 
+  /**
+   * Sprint A1 — can this book see the market at all?
+   *
+   * `feed_state` is orthogonal to `status`: `status` is the operator's intent
+   * (do I want this trading), `feed_state` is the pipe (can it see the market).
+   * A book restored before its broker logged in is WAITING_FOR_FEED — on
+   * screen, holding its last honest mark, refusing every new entry. Before A1
+   * it was not on screen at all: construction failed and the manager filed it
+   * under `_parked_snapshots`, so ten live paper books vanished from boot until
+   * the next restart *after* a login.
+   *
+   * Distinct from a stale mark (the feed died mid-session) and from PAUSED (the
+   * operator's choice) — and it has a different fix: log the broker in.
+   */
+  function isFeedWaiting(row) {
+    if (!row) return false;
+    if (row.feed_disconnected) return true;
+    return String(row.feed_state || "").toUpperCase() === "WAITING_FOR_FEED";
+  }
+
+  const BROKER_LABELS = { mstock: "mStock", dhan: "Dhan", upstox: "Upstox" };
+
+  /** "Waiting for mStock login" — names the broker the operator must log into. */
+  function feedWaitLabel(row) {
+    const source = String((row && row.source) || "").toLowerCase();
+    return "Waiting for " + (BROKER_LABELS[source] || source || "broker") + " login";
+  }
+
+  /** Status-cell sub-line for a blind book; "" for a connected one. */
+  function feedStateBadgeHtml(row) {
+    if (!isFeedWaiting(row)) return "";
+    const detail = (row && row.feed_refusal) || "";
+    const title = "Marks are frozen at their last honest value and new entries are refused." +
+      (detail ? " " + detail : "");
+    return '<div class="cell-sub badge-waiting-feed" title="' + escAttr(title) + '">' +
+      "🔌 " + escAttr(feedWaitLabel(row)) + " · frozen mark</div>";
+  }
+
   /** Flat rows for the deep-dive open-position table. */
   function structureRows(row) {
     return openStructures(row).map((s) => ({
@@ -347,6 +385,9 @@ const OptionView = (function () {
     staleBadgeHtml,
     isMarkStale,
     staleCount,
+    isFeedWaiting,
+    feedWaitLabel,
+    feedStateBadgeHtml,
   };
 })();
 

@@ -45,6 +45,7 @@ __all__ = [
     "HotStrikeRing",
     "CachedQuoteProvider",
     "BidAskQuoteProvider",
+    "DisconnectedQuoteProvider",
     "NoExecutableQuoteError",
     "SyntheticChainGenerator",
     "bs_price",
@@ -830,6 +831,106 @@ class BidAskQuoteProvider:
         # provider offers, offer too (only called for names not found on
         # the wrapper itself).
         return getattr(self.inner, name)
+
+
+# ---------------------------------------------------------------------------
+# DisconnectedQuoteProvider (Sprint A1 — the frozen-mark stub)
+# ---------------------------------------------------------------------------
+
+class DisconnectedQuoteProvider:
+    """The quote feed of a book whose broker session is not authenticated.
+
+    An option runner restored before the operator logged in used to fail
+    construction and disappear into ``PortfolioManager._parked_snapshots``: its
+    open structures, strikes, lots and manual SL/TP levels went invisible, and
+    with them the risk they carry. This provider is what lets the book be built
+    anyway. It answers **every** quote with an explicit failure, so
+
+    * held legs keep their last honest mark — the fail-closed MTM refuses a
+      zero/``error`` row and flags staleness instead of re-pricing the leg off a
+      number nobody quoted;
+    * a new entry cannot fill: :meth:`execution_quote` raises
+      :class:`NoExecutableQuoteError`, and the bridge refuses the intent itself
+      with the ``WAITING_FOR_FEED`` code before it ever prices one.
+
+    It never generates a chain, a premium or a candle. There is deliberately no
+    ``generator`` attribute, so :meth:`OptionsBridge._generator` refuses rather
+    than fitting a synthetic chain behind a book that cannot price — fabricating
+    a mark is the one thing worse than showing a stale one.
+    """
+
+    #: Why every quote fails, and the code the bridge refuses an entry with.
+    reason = "WAITING_FOR_FEED"
+    #: Read by the bridge (keep this provider off the synthetic chain surface)
+    #: and by the runner (name its ``feed_state``).
+    disconnected = True
+
+    def __init__(self, source: str = "", underlying: str = "") -> None:
+        self.source = str(source or "").strip().lower()
+        self.underlying = str(underlying or "").strip().upper()
+        self._contracts: dict[str, Any] = {}
+
+    @property
+    def source_name(self) -> str:
+        return f"disconnected:{self.source}" if self.source else "disconnected"
+
+    @property
+    def detail(self) -> str:
+        """The operator-facing reason: what is missing and what it costs."""
+        where = f" on {self.underlying}" if self.underlying else ""
+        return (
+            f"{self.reason}: no authenticated {self.source or 'broker'} session{where} "
+            "— marks stay frozen at their last honest value and new entries are "
+            "refused until the broker logs in"
+        )
+
+    def _unavailable(self) -> dict[str, Any]:
+        return {
+            "ltp": 0.0,
+            "bid": 0.0,
+            "ask": 0.0,
+            "volume": 0,
+            "oi": 0,
+            "error": self.detail,
+            "disconnected": True,
+        }
+
+    # -- QuoteProvider protocol ------------------------------------------
+
+    def get_quote(
+        self, instrument_token: str, *, numeric_token: Any = None
+    ) -> dict[str, Any]:
+        return self._unavailable()
+
+    def get_quotes_bulk(self, tokens: list[str]) -> dict[str, dict[str, Any]]:
+        return {str(token): self._unavailable() for token in (tokens or [])}
+
+    def execution_quote(self, instrument_token: str, side: str) -> dict[str, Any]:
+        raise NoExecutableQuoteError(
+            f"{instrument_token}: cannot {str(side).upper()} while disconnected "
+            f"({self.detail})"
+        )
+
+    def mark_quote(self, instrument_token: str, position_side: str) -> dict[str, Any]:
+        # Failed row, not a fabricated one: the caller keeps the last honest
+        # mark and counts the failure (the same path a dead session takes).
+        return self._unavailable()
+
+    # -- registry (protocol symmetry; nothing here can price) -------------
+
+    def register_contract(self, contract: Any) -> None:
+        token = str(getattr(contract, "instrument_token", "") or "")
+        if token:
+            self._contracts[token] = contract
+
+    def register_chain(self, chain: Any) -> None:
+        contracts = chain.values() if hasattr(chain, "values") else chain
+        for contract in contracts:
+            self.register_contract(contract)
+
+    def invalidate(self, instrument_token: str | None = None) -> None:
+        """No cache to evict — every answer is already "unavailable"."""
+        return None
 
 
 # ---------------------------------------------------------------------------

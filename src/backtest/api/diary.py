@@ -180,6 +180,45 @@ def diary_graduation() -> Tuple[Response, int]:
         return _error(f"Failed to load graduation scorecard: {exc}", 500)
 
 
+@diary_bp.get("/api/diary/roster-plan")
+def diary_roster_plan() -> Tuple[Response, int]:
+    mode = request.args.get("mode", "paper")
+    from_arg = request.args.get("from") or None
+    to_arg = request.args.get("to") or None
+    strategy = request.args.get("strategy") or None
+    live_capital = request.args.get("live_capital")
+    reserve_pct = request.args.get("reserve_pct")
+    max_underlying_pct = request.args.get("max_underlying_pct")
+    max_correlation = request.args.get("max_correlation")
+    max_live_runners = request.args.get("max_live_runners")
+    dedupe_timeframes = request.args.get("dedupe_timeframes", "true")
+    min_session_days = request.args.get("min_session_days")
+    block_decaying_edge = request.args.get("block_decaying_edge", "true")
+    max_tail_overlap = request.args.get("max_tail_overlap")
+    try:
+        payload = DiaryService().get_live_roster_plan(
+            mode=mode,
+            from_date=from_arg,
+            to_date=to_arg,
+            strategy=strategy,
+            live_capital=live_capital,
+            reserve_pct=reserve_pct,
+            max_underlying_pct=max_underlying_pct,
+            max_correlation=max_correlation,
+            max_live_runners=max_live_runners,
+            dedupe_timeframes=dedupe_timeframes,
+            min_session_days=min_session_days,
+            block_decaying_edge=block_decaying_edge,
+            max_tail_overlap=max_tail_overlap,
+        )
+        return jsonify({"success": True, **payload}), 200
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("diary_roster_plan failed: %s", exc)
+        return _error(f"Failed to compute Live roster plan: {exc}", 500)
+
+
 @diary_bp.get("/api/diary/notes")
 def diary_notes_list() -> Tuple[Response, int]:
     mode = request.args.get("mode", "paper")
