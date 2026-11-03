@@ -14,6 +14,7 @@ const loadText = (rel) => readFileSync(path.join(root, rel), "utf8");
 
 const OptionView = new Function(
   loadText("src/backtest/web/static/js/components/option_config.js") + "\n" +
+  loadText("src/backtest/web/static/js/components/labels.js") + "\n" +
   loadText("src/backtest/web/static/js/components/option_view.js") + "\n" +
   "return OptionView;",
 )();
@@ -167,6 +168,7 @@ check("portfolio.js fires toast once per healthy → stale episode and renders R
   });
 
   new Function(loadText("src/backtest/web/static/js/components/option_config.js"))();
+  new Function(loadText("src/backtest/web/static/js/components/labels.js"))();
   new Function(loadText("src/backtest/web/static/js/components/option_view.js"))();
   new Function(loadText("src/backtest/web/static/js/deep_dive.js"))();
   new Function(loadText("src/backtest/web/static/js/portfolio.js"))();

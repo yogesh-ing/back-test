@@ -165,6 +165,27 @@ def test_generated_instrument_is_explicit_and_never_a_real_market_symbol(client,
     assert "fetch(" not in demo_handler
 
 
+def test_diary_never_ellipsizes_a_money_value():
+    """F6: the extremes KPI clipped 15px off the session's worst trade.
+
+    A number that does not fit may take a second line; it may not disappear
+    behind an ellipsis, because the truncated half was the riskier figure.
+    """
+    css = (WEB / "static" / "css" / "diary.css").read_text(encoding="utf-8")
+    block = css.split(".diary-kpi-value {", 1)[1].split("}", 1)[0]
+    assert "text-overflow: ellipsis" not in block
+    assert "overflow: hidden" not in block
+    assert "white-space: normal" in block
+
+
+def test_diary_table_columns_stay_reachable():
+    """F6: the tree table's unbreakable name column pushed "Running MTM" off-screen."""
+    css = (WEB / "static" / "css" / "diary.css").read_text(encoding="utf-8")
+    wrap = css.split(".diary-tree-table td:first-child {", 1)[1].split("}", 1)[0]
+    assert "white-space: normal" in wrap, "the name column must wrap, not widen the table"
+    assert ".diary-scroll-cue" in css and ".diary-table-wrap:focus-visible" in css
+
+
 def test_chrome_cannot_submit_a_trading_request():
     js = (WEB / "static" / "js" / "workspace.js").read_text()
     assert "fetch(" not in js

@@ -35,11 +35,11 @@
             <span class="bucket-mode-note">{{ 'Real capital · broker execution' if mode == 'live' else 'Simulated capital · no money at risk' }}</span>
         </div>
         <div class="bucket-equity-label">Portfolio equity</div>
-        <div class="bucket-equity" id="bucket-equity-{{ mode }}">{{ currency_symbol }}{{ "{:,.0f}".format(b.equity) }}</div>
+        <div class="bucket-equity" id="bucket-equity-{{ mode }}">{{ b.equity | money }}</div>
         <div class="bucket-summary-grid">
-            <div class="bucket-stat"><span>Allocated capital</span><strong id="bucket-allocated-{{ mode }}">{{ currency_symbol }}{{ "{:,.0f}".format(b.allocated) }}</strong></div>
-            <div class="bucket-stat"><span>Daily P&amp;L</span><strong id="bucket-daily-pnl-{{ mode }}" class="{{ 'pnl-pos' if b.daily_pnl > 0 else 'pnl-neg' if b.daily_pnl < 0 else '' }}">{{ currency_symbol }}{{ "{:,.0f}".format(b.daily_pnl) }}</strong></div>
-            <div class="bucket-stat"><span>Realized P&amp;L</span><strong id="bucket-realized-pnl-{{ mode }}" class="{{ 'pnl-pos' if b.realized_pnl > 0 else 'pnl-neg' if b.realized_pnl < 0 else '' }}">{{ currency_symbol }}{{ "{:,.0f}".format(b.realized_pnl) }}</strong></div>
+            <div class="bucket-stat"><span>Allocated capital</span><strong id="bucket-allocated-{{ mode }}">{{ b.allocated | money }}</strong></div>
+            <div class="bucket-stat"><span>Daily P&amp;L</span><strong id="bucket-daily-pnl-{{ mode }}" class="{{ 'pnl-pos' if b.daily_pnl > 0 else 'pnl-neg' if b.daily_pnl < 0 else '' }}">{{ b.daily_pnl | money }}</strong></div>
+            <div class="bucket-stat"><span>Realized P&amp;L</span><strong id="bucket-realized-pnl-{{ mode }}" class="{{ 'pnl-pos' if b.realized_pnl > 0 else 'pnl-neg' if b.realized_pnl < 0 else '' }}">{{ b.realized_pnl | money }}</strong></div>
             <div class="bucket-stat"><span>Instances</span><strong id="bucket-instances-{{ mode }}">{{ b.count }}</strong></div>
             <div class="bucket-stat"><span>Running</span><strong id="bucket-running-{{ mode }}">{{ b.running }}</strong></div>
             <div class="bucket-stat"><span>Open positions</span><strong id="bucket-openpos-{{ mode }}">{{ b.open_positions }}</strong></div>
@@ -66,7 +66,7 @@
         <div class="table-scroll">
             <table class="paper-summary-table">
                 <thead><tr><th>Instances</th><th>Allocated</th><th>Equity</th><th>Daily P&amp;L</th><th>Realized P&amp;L</th><th>Status</th></tr></thead>
-                <tbody>{% set pb = buckets.get("paper", {}) %}<tr><td>{{ pb.count or 0 }}</td><td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.allocated or 0) }}</td><td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.equity or 0) }}</td><td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.daily_pnl or 0) }}</td><td>{{ currency_symbol }}{{ "{:,.0f}".format(pb.realized_pnl or 0) }}</td><td>{{ pb.running or 0 }} running · {{ pb.paused or 0 }} paused</td></tr></tbody>
+                <tbody>{% set pb = buckets.get("paper", {}) %}<tr><td>{{ pb.count or 0 }}</td><td>{{ pb.allocated or 0 | money }}</td><td>{{ pb.equity or 0 | money }}</td><td>{{ pb.daily_pnl or 0 | money }}</td><td>{{ pb.realized_pnl or 0 | money }}</td><td>{{ pb.running or 0 }} running · {{ pb.paused or 0 }} paused</td></tr></tbody>
             </table>
         </div>
     </div>

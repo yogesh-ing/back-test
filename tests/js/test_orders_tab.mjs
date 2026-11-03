@@ -89,6 +89,12 @@ sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(load("src/backtest/web/static/js/components/currency.js"), sandbox);
+// labels.js before the subject: the segment sub-line resolves through it
+// (finding F11). Unwarmed, Labels.segment falls back to humanise(), so this
+// sandbox needs no fetch stub.
+vm.runInContext(
+    load("src/backtest/web/static/js/components/labels.js") + "\n;globalThis.Labels = Labels;",
+    sandbox);
 vm.runInContext(load("src/backtest/web/static/js/components/orders_tab.js"), sandbox);
 const OT = sandbox.OrdersTab;
 

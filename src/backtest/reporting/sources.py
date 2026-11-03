@@ -158,8 +158,9 @@ class DatabaseTradeSource:
             self._last_note = note or "no persisted trades in period"
             return []
         self._last_note = note or f"{len(rows)} persisted trade(s)"
+        broker_map = _runner_broker_map(self._manager)
         return [
-            self._to_record(row, has_broker_column=has_broker_column)
+            self._to_record(row, has_broker_column=has_broker_column, broker_map=broker_map)
             for row in rows
         ]
 
@@ -240,14 +241,22 @@ class DatabaseTradeSource:
         note = f"{len(out)} persisted trade(s)" if out else "no persisted trades in period"
         return out, has_broker_column, note
 
-    def _to_record(self, row: Mapping[str, Any], *, has_broker_column: bool) -> TradeRecord:
+    def _to_record(
+        self,
+        row: Mapping[str, Any],
+        *,
+        has_broker_column: bool,
+        broker_map: Mapping[str, str] | None = None,
+    ) -> TradeRecord:
         mode = str(row["portfolio_mode"] or "paper").strip().lower()
         symbol = str(row["symbol"] or "")
         trade_id = str(row["trade_id"])
 
         broker = str(row.get("broker") or "").strip().lower()
         if not broker and self._manager is not None:
-            broker = _broker_from_runner_name(self._manager, str(row.get("portfolio_name") or ""))
+            broker = _broker_from_runner_name(
+                broker_map or {}, str(row.get("portfolio_name") or "")
+            )
         if not broker:
             broker = UNATTRIBUTED_BROKER if mode == "live" else "paper"
 
@@ -554,28 +563,45 @@ def _runner_broker(manager: Any, runner: Any, config: Any, mode: str) -> str:
     return UNATTRIBUTED_BROKER
 
 
-def _broker_from_runner_name(manager: Any, portfolio_name: str) -> str:
+def _runner_broker_map(manager: Any) -> dict[str, str]:
+    """Map each live runner's ``"[<instance8>]"`` tag to its broker label — once.
+
+    ``list_instances()`` snapshots every runner under the manager lock, so it
+    belongs outside the per-row loop: calling it per trade row made a 1,645-row
+    report take 84s on a server with 16 runners (2026-11-03, /reporting hang).
+    """
+    resolved: dict[str, str] = {}
+    if manager is None:
+        return resolved
+    try:
+        for entry in manager.list_instances():
+            instance_id = str(entry.get("instance_id") or "")
+            if not instance_id:
+                continue
+            runner = manager.get_runner(instance_id)
+            if runner is None:
+                continue
+            mode = str(entry.get("mode") or "paper").lower()
+            label = _runner_broker(manager, runner, getattr(runner, "config", None), mode)
+            if label:
+                resolved[f"[{instance_id[:8]}]"] = label
+    except Exception:  # noqa: BLE001
+        return {}
+    return resolved
+
+
+def _broker_from_runner_name(broker_map: Mapping[str, str], portfolio_name: str) -> str:
     """Recover a broker from a persister-named portfolio row, if possible.
 
     The persister names portfolios ``"<run name> [<instance8>]"``; matching
     that back to a live runner is a best-effort repair for rows written before
     migration 008, and it returns "" (never a guess) when it cannot match.
     """
-    if not portfolio_name or manager is None:
+    if not portfolio_name:
         return ""
-    try:
-        for entry in manager.list_instances():
-            instance_id = str(entry.get("instance_id") or "")
-            name = str(entry.get("name") or "")
-            if not name or f"[{instance_id[:8]}]" not in portfolio_name:
-                continue
-            runner = manager.get_runner(instance_id)
-            if runner is None:
-                continue
-            mode = str(entry.get("mode") or "paper").lower()
-            return _runner_broker(manager, runner, getattr(runner, "config", None), mode)
-    except Exception:  # noqa: BLE001
-        return ""
+    for tag, label in broker_map.items():
+        if tag in portfolio_name:
+            return label
     return ""
 
 

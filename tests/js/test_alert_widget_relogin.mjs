@@ -49,6 +49,13 @@ sandbox.__toasts = [];
 sandbox.globalThis = sandbox;
 
 vm.createContext(sandbox);
+// labels.js first: alert_widget.js resolves a strategy key to its house label
+// through it (finding F11). The tail publishes it on the sandbox global,
+// because a top-level `const` inside runInContext is script-scoped only.
+vm.runInContext(
+    readFileSync(path.join(root, "src/backtest/web/static/js/components/labels.js"), "utf8")
+    + "\n;globalThis.Labels = Labels;",
+    sandbox, { filename: "labels.js" });
 vm.runInContext(code, sandbox, { filename: "alert_widget.js" });
 const AW = vm.runInContext("window.AlertWidget", sandbox);
 

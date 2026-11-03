@@ -358,7 +358,7 @@ function renderRecentRuns() {
             <div class="card recent-tile g-card-hover" data-idx="${i}" role="button" tabindex="0"
                  title="Open the stored result — read from the ledger, no re-run">
                 <div class="recent-tile-top">
-                    <strong>${esc(r.strategy_id)}</strong>
+                    <strong title="${esc(r.strategy_id)}">${esc(Labels.strategy(r.strategy_id))}</strong>
                     <span class="badge ${ret >= 0 ? "bg-light-success" : "bg-light-danger"}">${ret >= 0 ? "+" : ""}${ret.toFixed(1)}%</span>
                     ${status}
                 </div>
@@ -485,7 +485,7 @@ async function init() {
             return;
         }
         const seg = strat.default_segment || "equity_intraday";
-        let html = `<span>Linked segment:</span> <span class="badge badge-subtle" style="font-family:monospace;">${escapeHtml(seg)}</span> <span class="text-muted" style="font-size:11px;">(execution fees & margins follow Settings)</span>`;
+        let html = `<span>Linked segment:</span> <span class="badge badge-subtle" title="${escapeHtml(seg)}">${escapeHtml(Labels.segment(seg))}</span> <span class="text-muted" style="font-size:11px;">(execution fees & margins follow Settings)</span>`;
         if (strat.readable_criteria && (strat.readable_criteria.entry || strat.readable_criteria.entry_strike)) {
             const rc = strat.readable_criteria;
             html += `<div style="width:100%; font-size:11px; color:var(--muted); margin-top:2px;">`
@@ -497,14 +497,11 @@ async function init() {
                 + `</div>`;
         }
         infoEl.innerHTML = html;
-    }
-
-    function strategyDisplayName(name) {
-        const acronyms = new Set(["sma", "ema", "rsi", "macd", "roc", "vwap"]);
-        return name.split("_").map((part, index) =>
-            acronyms.has(part) ? part.toUpperCase() : index === 0
-                ? part.charAt(0).toUpperCase() + part.slice(1) : part
-        ).join(" ");
+        // the operator's own display name arrives with the segments read; repaint
+        // once it is in hand so this badge cannot disagree with Settings
+        Labels.warm().then(() => {
+            if ($("strategy") && $("strategy").value === stratName) infoEl.innerHTML = html;
+        });
     }
 
     // Strategy card: structured description shown above the performance
@@ -523,7 +520,7 @@ async function init() {
         const sections = strat && strat.description_sections ? strat.description_sections : null;
         const overview = (sections && sections.overview) || (strat && strat.description) || "";
         if (!strat || !overview) { card.hidden = true; return; }
-        $("strategyCardTitle").textContent = `About: ${strategyDisplayName(strat.name)}`;
+        $("strategyCardTitle").textContent = `About: ${Labels.strategy(strat.name)}`;
         $("strategyCardOverview").textContent = overview;
         const dl = $("strategyCardSections");
         dl.innerHTML = "";
@@ -566,7 +563,7 @@ async function init() {
             const option = document.createElement("option");
             option.value = strategy.name;
             option.title = strategy.name;
-            option.textContent = strategyDisplayName(strategy.name);
+            option.textContent = Labels.strategy(strategy.name);
             $("strategy").appendChild(option);
         });
     } catch (err) {

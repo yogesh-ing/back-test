@@ -20,6 +20,7 @@ const load = (rel) => readFileSync(path.join(root, rel), "utf8");
 
 const OptionView = new Function(
     load("src/backtest/web/static/js/components/option_config.js") + "\n" +
+    load("src/backtest/web/static/js/components/labels.js") + "\n" +
     load("src/backtest/web/static/js/components/option_view.js") + "\n" +
     "return OptionView;",
 )();
@@ -227,7 +228,10 @@ test("structure ids become the same labels the spawn form uses", () => {
     assert.equal(OptionView.structureLabel("bull_call_spread"), "Bull call spread");
     assert.equal(OptionView.structureLabel("long_put"), "Long put");
     assert.equal(OptionView.structureLabel("direction_aware"), "Direction-aware");
-    assert.equal(OptionView.structureLabel("exotic_thing"), "exotic thing");
+    // An id outside the vocabulary still gets the house casing, not the raw
+    // underscores-to-spaces guess this file used to make (finding F11).
+    assert.equal(OptionView.structureLabel("exotic_thing"), "Exotic thing");
+    assert.equal(OptionView.structureLabel(null), "Structure");
 });
 
 test("strikes are thousands-separated, index-style", () => {

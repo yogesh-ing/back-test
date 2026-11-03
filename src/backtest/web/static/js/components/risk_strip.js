@@ -106,17 +106,24 @@
     const state = getState(p);
     strip.className = "risk-strip risk-strip-" + state;
 
-    // Feed status
-    if (feedEl) {
-      const tick = p.tick || 0;
-      const running = p.running || 0;
-      feedEl.textContent = tick > 0 ? `Feed active · ${running} running · ${tick} ticks` : "Feed idle";
-    }
-
     const market = p.market || window.__lastMarketState || null;
     if (market && window.updateMarketChip) {
       window.updateMarketChip(market);
     }
+
+    // Feed status. p.tick is the persisted session counter, so it can never be the
+    // liveness signal — a restart restores it and the strip would claim "active" with
+    // no feed at all (docs/MARKET-STATUS-SPEC-2026-10-02.md: only server truth).
+    if (feedEl) {
+      const tick = p.tick || 0;
+      const running = p.running || 0;
+      const connected = !!(p.capability && p.capability.broker_connected);
+      const closed = market ? (market.day_state !== "TRADING_DAY" || market.session_state !== "OPEN") : false;
+      const feed = connected ? (closed ? "Feed paused (market closed)" : "Feed active")
+                              : "No broker feed";
+      feedEl.textContent = `${feed} · ${running} running · ${tick} ticks this session`;
+    }
+
     const isClosed = market ? (market.day_state !== "TRADING_DAY" || market.session_state !== "OPEN") : false;
     const isHolidayOrWeekend = market ? (market.day_state !== "TRADING_DAY") : false;
     const lossLabel = isHolidayOrWeekend ? "Daily Loss (prev session)" : "Daily Loss (today)";

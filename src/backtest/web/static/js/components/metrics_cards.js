@@ -39,7 +39,7 @@ function fmtMoney(v) {
     // Single money formatter for the app (₹ default) — this used to hard-code "$".
     return (typeof Money !== "undefined")
         ? Money.signed(v)
-        : `${v < 0 ? "-" : "+"}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+        : `${v < 0 ? "-" : "+"}$${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 }
 function fmtPct(v) { return `${v.toFixed(2)}%`; }
 function fmtNum(v) { return Number(v).toFixed(2); }

@@ -111,6 +111,7 @@ function load(rel) {
 }
 
 load("src/backtest/web/static/js/components/option_config.js");
+load("src/backtest/web/static/js/components/labels.js");
 load("src/backtest/web/static/js/components/option_view.js");
 load("src/backtest/web/static/js/deep_dive.js");
 load("src/backtest/web/static/js/portfolio.js");

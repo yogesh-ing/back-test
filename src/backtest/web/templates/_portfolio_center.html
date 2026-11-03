@@ -485,7 +485,10 @@
             <div id="playbooks-list" class="playbooks-grid">Loading playbooks…</div>
         </div>
         <div class="tab-panel" id="tab-log" hidden>
-            <div id="audit-log" class="audit-log"></div>
+            {# data-raw-key: a transcript of the stored audit records. The #}
+            {# strategy/segment keys here are the values that were written, so #}
+            {# the label resolver must not rewrite them (finding F11). #}
+            <div id="audit-log" class="audit-log" data-raw-key></div>
         </div>
     </div>
 {% if center_mode %}

@@ -205,7 +205,7 @@
 
   function paramsHtml(r) {
     const rows = [
-      ["Strategy", r.strategy_name],
+      ["Strategy", Labels.strategy(r.strategy_name)],
       ["Timeframe", r.timeframe],
       ["Target type", r.target_type],
       ["Symbols", r.symbol_count + (r.target_type === "SYMBOL_UNIVERSE" ? " (pool)" : "")],
@@ -330,7 +330,7 @@
 
   function render(r) {
     $("dd-title").textContent = r.name;
-    $("dd-subtitle").textContent = r.strategy_name + " · " + r.target_label +
+    $("dd-subtitle").textContent = Labels.strategy(r.strategy_name) + " · " + r.target_label +
       " · " + r.timeframe + " · " + r.status;
 
     $("dd-body").innerHTML =

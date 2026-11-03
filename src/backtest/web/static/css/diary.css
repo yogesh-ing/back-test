@@ -216,9 +216,11 @@
     font-weight: 700;
     line-height: 1.25;
     color: var(--text-strong);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    /* F6: this used to be nowrap + ellipsis, which silently deleted 15px of
+       "+₹17,630.76 / −₹62,567.76" — the worst trade of the session. A number
+       may take a second line, it never gets an ellipsis. */
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 .diary-kpi-sub {
@@ -488,6 +490,20 @@
     overflow-x: auto;
 }
 
+/* F6: a table wider than its card used to hide its right-hand columns with no
+   sign that anything was there. The cue names what is still off-screen, and the
+   wrap takes focus so ← → scrolls it without a mouse. */
+.diary-scroll-cue {
+    margin: 0 0 6px;
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.diary-table-wrap:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
 .diary-table {
     width: 100%;
     border-collapse: collapse;
@@ -599,6 +615,19 @@
 .diary-tree-table th,
 .diary-tree-table td {
     vertical-align: middle;
+    padding-left: 7px;
+    padding-right: 7px;
+}
+
+/* The strategy/instance name is the one column long enough to push the whole
+   table past the card (430px of it was an unbreakable identifier). It wraps now,
+   with a floor so wrapping never turns the label into a vertical ribbon, and the
+   tighter cell padding buys back the rest: all nine columns fit at 1440. */
+.diary-tree-table th:first-child,
+.diary-tree-table td:first-child {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    min-width: 200px;
 }
 
 .diary-row-strategy {

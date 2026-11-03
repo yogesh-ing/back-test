@@ -249,10 +249,10 @@
       ? `<tr><th>Runner</th><th>Strategy</th><th>Bucket</th><th class="num">${field === "delta" ? "Δ" : "Γ"}</th><th class="num">Share</th><th class="num">Pos</th></tr>`
       : `<tr><th>Runner</th><th>Strategy</th><th>Bucket</th><th>Note</th></tr>`;
     const rows = list.map((c) => hasMetric
-      ? `<tr><td>${esc(c.label)}</td><td>${esc(c.strategy)}</td><td>${esc(c.mode)}</td>
+      ? `<tr><td>${esc(c.label)}</td><td title="${esc(c.strategy)}">${esc(Labels.strategy(c.strategy))}</td><td>${esc(c.mode)}</td>
            <td class="num">${num(c[field], 1)}</td><td class="num">${c.share != null ? num(c.share * 100, 0) + "%" : "—"}</td>
            <td class="num">${esc(c.positions != null ? c.positions : "")}</td></tr>`
-      : `<tr><td>${esc(c.label)}</td><td>${esc(c.strategy)}</td><td>${esc(c.mode)}</td><td>${esc(c.fit || "")}</td></tr>`).join("");
+      : `<tr><td>${esc(c.label)}</td><td title="${esc(c.strategy)}">${esc(Labels.strategy(c.strategy))}</td><td>${esc(c.mode)}</td><td>${esc(c.fit || "")}</td></tr>`).join("");
     return `<table class="matrix-table pi-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
   }
 
@@ -265,11 +265,11 @@
       ? subs.map((s) => {
           const n = notified[s.subscriber_id];
           const status = n ? (n.ok ? "✅ notified" : `⚠️ callback failed: ${esc(n.error || "")}`) : "⏳ not notified (cooldown / subscribed later)";
-          return `<li>${esc(s.runner || s.subscriber_id)} <span class="muted">(${esc(s.strategy || "")})</span> — ${status}</li>`;
+          return `<li>${esc(s.runner || s.subscriber_id)} <span class="muted" title="${esc(s.strategy || "")}">(${esc(Labels.strategy(s.strategy || ""))})</span> — ${status}</li>`;
         }).join("")
       : `<li class="muted">No strategy subscribes to <code>${esc(a.alert_type)}</code>.</li>`;
     const notRows = notSubs.map((s) =>
-      `<li>${esc(s.runner || s.instance_id)} <span class="muted">(${esc(s.strategy || "")})</span> — contributes but is not subscribed</li>`).join("");
+      `<li>${esc(s.runner || s.instance_id)} <span class="muted" title="${esc(s.strategy || "")}">(${esc(Labels.strategy(s.strategy || ""))})</span> — contributes but is not subscribed</li>`).join("");
     return `<ul class="pi-list">${subRows}${notRows}</ul>
       <div class="muted pi-note">Subscribed strategies decide for themselves (pause entries, request an exit, or
       ignore) — see <code>docs/STRATEGY-ALERTS.md</code>.</div>`;

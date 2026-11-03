@@ -31,6 +31,9 @@ import assert from "node:assert/strict";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const src = readFileSync(path.join(root, "src/backtest/web/static/js/data_manager.js"), "utf8");
+// base.html loads currency.js before every script, so the sandbox must too.
+const currencyCode = readFileSync(
+    path.join(root, "src/backtest/web/static/js/components/currency.js"), "utf8");
 
 /** Any property read returns something callable, truthy, or empty — never throw. */
 function stubNode() {
@@ -84,6 +87,7 @@ const sandbox = {
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
+vm.runInContext(currencyCode, sandbox, { filename: "currency.js" });
 vm.runInContext(src, sandbox, { filename: "data_manager.js" });
 
 let passed = 0;
@@ -139,6 +143,7 @@ function mountWith(payload) {
     });
     box.globalThis = box;
     vm.createContext(box);
+    vm.runInContext(currencyCode, box, { filename: "currency.js" });
     vm.runInContext(src, box, { filename: "data_manager.js" });
     return {
         seen, built, nodes,

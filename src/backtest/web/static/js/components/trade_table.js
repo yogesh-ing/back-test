@@ -60,7 +60,7 @@ const TradeTable = (() => {
     function fmtTradePnl(v) {
         return (typeof Money !== "undefined")
             ? Money.signed(v)
-            : `${v >= 0 ? "+" : "-"}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+            : `${v >= 0 ? "+" : "-"}$${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
     }
 
     function renderTable(containerId, trades) {

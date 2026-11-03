@@ -46,7 +46,19 @@ const Money = (() => {
         return `${sign}${symbol()}${amount(value, dp)}`;
     }
 
-    return { cfg, symbol, amount, format, signed, DEFAULTS };
+    /** Locale-grouped decimal with no symbol — for counts-as-numbers and prices. */
+    function num(value, dp = 0) {
+        const n = Number(value);
+        const safe = Number.isFinite(n) ? n : 0;
+        return safe.toLocaleString(cfg().locale, {
+            minimumFractionDigits: dp, maximumFractionDigits: dp,
+        });
+    }
+
+    /** "1,23,456" — same grouping as the money above, for bars/trades/runs. */
+    function count(value) { return num(value, 0); }
+
+    return { cfg, symbol, amount, format, signed, num, count, DEFAULTS };
 })();
 
 if (typeof globalThis !== "undefined") globalThis.Money = Money;

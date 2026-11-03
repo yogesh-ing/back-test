@@ -108,7 +108,10 @@
       <div class="table-scroll" style="max-height:500px; overflow-y:auto;">
         <table class="audit-table">
           <thead><tr><th>Time</th><th>Scope</th><th>Action</th><th>Details</th><th>Runner</th></tr></thead>
-          <tbody id="audit-tbody"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
+          {# data-raw-key: a transcript of the stored audit records — the Details #}
+          {# column prints the value that was written, so the label resolver must #}
+          {# not rewrite it (finding F11). #}
+          <tbody id="audit-tbody" data-raw-key><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
         </table>
       </div>
       <div class="pagination" id="audit-pagination" style="margin-top:12px;"></div>

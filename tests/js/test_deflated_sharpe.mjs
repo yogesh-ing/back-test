@@ -27,6 +27,8 @@ const $ = (id) => nodes[id];
 const C = {
     isNum: (v) => typeof v === "number" && Number.isFinite(v),
     fmtNum: (v, d) => (v === null || v === undefined ? "—" : Number(v).toFixed(d)),
+    fmtCount: (v) => (v === null || v === undefined || !Number.isFinite(Number(v))
+        ? "—" : Number(v).toLocaleString("en-IN")),
     escapeHtml: (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;"),
 };
 const sandbox = { C, console, $ };

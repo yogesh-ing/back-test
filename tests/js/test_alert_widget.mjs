@@ -145,6 +145,12 @@ const warnAlert = {
 };
 
 // ------------------------------------------------------------ alert widget
+// labels.js first: both components below resolve a strategy key to its house
+// label through it (finding F11). The tail publishes it on the sandbox global,
+// because a top-level `const` inside runInContext is script-scoped only.
+vm.runInContext(
+    load("src/backtest/web/static/js/components/labels.js") + "\n;globalThis.Labels = Labels;",
+    sandbox);
 sandbox.__ALERT_WIDGET_NO_AUTOINIT__ = true;
 vm.runInContext(load("src/backtest/web/static/js/components/alert_widget.js"), sandbox);
 const AW = sandbox.AlertWidget;

@@ -41,36 +41,45 @@
         <div class="card" style="margin-bottom: 24px;">
             <div class="card-head" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
                 <h2 class="card-title inline" style="margin: 0;">Portfolio Overview</h2>
-                <span id="activeRunnersPill" class="badge" style="background: var(--surface-2); padding: 4px 10px; border-radius: 12px; font-size: 0.8rem;">0 Active Strategies</span>
+                <span id="activeRunnersPill" class="badge state-chip" data-state="fetching" aria-live="polite">Fetching…</span>
             </div>
             
             <div class="metric-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px;">
                 <div class="metric-card">
                     <div class="label">Total Return</div>
                     <div id="overviewTotalReturn" class="value">—</div>
-                    <div id="overviewTotalPnl" class="small muted">—</div>
+                    <div id="overviewTotalPnl" class="small muted state-note" data-state="fetching">fetching…</div>
                 </div>
                 <div class="metric-card">
                     <div class="label">Portfolio Sharpe</div>
                     <div id="overviewSharpe" class="value">—</div>
-                    <div id="overviewSharpeRating" class="small muted">—</div>
+                    <div id="overviewSharpeRating" class="small muted state-note" data-state="fetching">fetching…</div>
                 </div>
                 <div class="metric-card">
                     <div class="label">Win Rate</div>
                     <div id="overviewWinRate" class="value">—</div>
-                    <div id="overviewTradeCount" class="small muted">0 trades</div>
+                    <div id="overviewTradeCount" class="small muted state-note" data-state="fetching">fetching…</div>
                 </div>
                 <div class="metric-card">
                     <div class="label">Max Drawdown</div>
                     <div id="overviewMaxDd" class="value">—</div>
-                    <div id="overviewMaxDdAmt" class="small muted">—</div>
+                    <div id="overviewMaxDdAmt" class="small muted state-note" data-state="fetching">fetching…</div>
                 </div>
             </div>
 
             <div class="chart-section" style="margin-top: 16px;">
                 <div class="small muted" style="font-weight: 600; margin-bottom: 8px;">Portfolio Equity Curve</div>
                 <div style="height: 220px; position: relative;">
-                    <canvas id="portfolioEquityChart"></canvas>
+                    <canvas id="portfolioEquityChart" hidden></canvas>
+                    <div id="portfolioEquityEmpty" class="empty-chart" data-state="fetching" role="status">
+                        <div class="empty-chart-scale" aria-hidden="true"><span>—</span><span>—</span><span>—</span><span>—</span><span>—</span></div>
+                        <span class="empty-chart-caption">EQUITY OVER TIME</span>
+                        <div class="empty-canvas-center">
+                            <div class="empty-icon">{{ icon('chart', 20) }}</div>
+                            <h3 id="portfolioEquityEmptyTitle">Fetching the equity curve…</h3>
+                            <p id="portfolioEquityEmptyBody">Portfolio equity is built from the strategies below; it appears here as soon as the read finishes.</p>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -79,28 +88,28 @@
         <div class="card" style="margin-bottom: 24px;">
             <div class="card-head" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
                 <h2 class="card-title inline" style="margin: 0;">🌐 Cross-Broker Portfolio</h2>
-                <span id="crossBrokerScopePill" class="badge" style="background: var(--surface-2); padding: 4px 10px; border-radius: 12px; font-size: 0.8rem;">0 brokers</span>
+                <span id="crossBrokerScopePill" class="badge state-chip" data-state="fetching" aria-live="polite">Fetching…</span>
             </div>
             <div class="metric-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px;">
                 <div class="metric-card">
                     <div class="label">Total P&amp;L (all brokers)</div>
                     <div id="crossBrokerTotalPnl" class="value">—</div>
-                    <div id="crossBrokerTotalPnlSub" class="small muted">—</div>
+                    <div id="crossBrokerTotalPnlSub" class="small muted state-note" data-state="fetching">fetching…</div>
                 </div>
                 <div class="metric-card">
                     <div class="label">Portfolio Sharpe</div>
                     <div id="crossBrokerSharpe" class="value">—</div>
-                    <div id="crossBrokerSharpeSub" class="small muted">—</div>
+                    <div id="crossBrokerSharpeSub" class="small muted state-note" data-state="fetching">fetching…</div>
                 </div>
                 <div class="metric-card">
                     <div class="label">Max Drawdown</div>
                     <div id="crossBrokerMaxDd" class="value">—</div>
-                    <div id="crossBrokerMaxDdSub" class="small muted">—</div>
+                    <div id="crossBrokerMaxDdSub" class="small muted state-note" data-state="fetching">fetching…</div>
                 </div>
                 <div class="metric-card">
                     <div class="label">Trades / Orders</div>
                     <div id="crossBrokerTrades" class="value">—</div>
-                    <div id="crossBrokerTradesSub" class="small muted">—</div>
+                    <div id="crossBrokerTradesSub" class="small muted state-note" data-state="fetching">fetching…</div>
                 </div>
             </div>
             <div id="crossBrokerDataQuality" class="small muted" style="margin-top: 12px;"></div>
@@ -252,13 +261,13 @@
                         </tr>
                     </thead>
                     <tbody id="strategyTableBody">
-                        <tr><td colspan="9" class="muted" style="padding: 16px;">Loading strategies…</td></tr>
+                        <tr><td colspan="9" class="muted state-note" data-state="fetching" style="padding: 16px;">Fetching strategy performance…</td></tr>
                     </tbody>
                 </table>
             </div>
             <div class="small muted" style="margin-top: 6px;">Click a row for the full analytics · click a column header to sort · the health badge grades sample-size-adjusted Sharpe / drawdown / win rate.</div>
             <div id="noStrategiesEmpty" class="card empty-state" style="display: none; text-align: center; padding: 40px 20px;">
-                <p class="muted">No running strategy instances found.</p>
+                <p class="muted">No strategies deployed.</p>
                 <p class="small muted" style="margin-top: 8px;">Deploy a strategy in <a href="/portfolio">Portfolio</a> or test in <a href="/forward">Forward Test</a> to view live performance analytics.</p>
             </div>
         </div>
@@ -267,7 +276,7 @@
         <div class="card">
             <h3 class="card-title" style="margin-bottom: 12px;">🚨 Performance Alerts & Edge Degradation</h3>
             <div id="overviewAlertsList" style="display: flex; flex-direction: column; gap: 8px;">
-                <div class="muted small">No active risk or performance degradation alerts detected.</div>
+                <div class="muted small state-note" data-state="fetching">Fetching alerts…</div>
             </div>
         </div>
     </div>

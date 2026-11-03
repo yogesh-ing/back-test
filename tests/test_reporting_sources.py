@@ -136,8 +136,10 @@ class _Manager:
     def __init__(self, entries=None, runners=None):
         self._entries = entries or []
         self._runners = runners or {}
+        self.instance_calls = 0
 
     def list_instances(self):
+        self.instance_calls += 1
         return list(self._entries)
 
     def get_runner(self, instance_id):
@@ -217,6 +219,32 @@ class TestDatabaseTradeSource:
         record = DatabaseTradeSource(db_manager=db, manager=manager).fetch(JULY)[0]
 
         assert record.broker == "dhan"
+
+    def test_the_runner_lookup_happens_once_per_fetch_not_once_per_row(self, db):
+        """``list_instances()`` snapshots every runner under the manager lock.
+
+        Resolving it per row is what made /reporting take 84s for 1,645 rows on
+        a server with 16 runners; the lookup must be built once per fetch.
+        """
+        add_portfolio(db, mode="live", name="Live Dhan [abc12345]", pid="p-1")
+        for i in range(40):
+            add_trade(
+                db,
+                trade_id=f"t-{i}",
+                symbol=f"SYMB{i}",
+                commission="120",
+            )
+        config = _Config(execution_broker="dhan", mode="live", strategy_name="rsi_reversion")
+        manager = _Manager(
+            entries=[{"instance_id": "abc12345ef", "name": "Live Dhan", "mode": "live"}],
+            runners={"abc12345ef": _Runner(config)},
+        )
+
+        records = DatabaseTradeSource(db_manager=db, manager=manager).fetch(JULY)
+
+        assert len(records) == 40
+        assert manager.instance_calls == 1
+        assert {r.broker for r in records} == {"dhan"}
 
     def test_segments_are_inferred_from_symbol_and_session(self, db):
         add_portfolio(db, name="P1", mode="paper", pid="p-1")

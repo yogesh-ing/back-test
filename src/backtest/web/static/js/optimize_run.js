@@ -60,8 +60,8 @@
     function renderHeader() {
         const r = state.run;
         const bt = r.backtest_config || {};
-        $('runTitle').innerHTML = `${C.escapeHtml(r.strategy_id)} <span class="muted">· ${C.escapeHtml(r.method)}</span> ${C.statusBadge(r.status)}`;
-        document.title = `${r.strategy_id} optimization · Trading Bot`;
+        $('runTitle').innerHTML = `<span title="${C.escapeHtml(r.strategy_id)}">${C.escapeHtml(Labels.strategy(r.strategy_id))}</span> <span class="muted">· ${C.escapeHtml(r.method)}</span> ${C.statusBadge(r.status)}`;
+        document.title = `${Labels.strategy(r.strategy_id)} optimization · Trading Bot`;
         $('runSubtitle').textContent = `Maximize ${C.OBJECTIVE_LABELS[r.objective_function] || r.objective_function} · `
             + `${bt.symbol || ''} ${bt.timeframe || ''} ${bt.startDate || ''} → ${bt.endDate || ''} · `
             + `${bt.engine || 'driver'} engine · started ${C.fmtDate(r.started_at || r.created_at)}`;
@@ -99,9 +99,9 @@
         $('progPhase').textContent = `${p.phase}${p.phase_detail ? ' · ' + p.phase_detail : ''}${p.paused ? ' (paused)' : ''}`;
         $('progFill').style.width = `${p.percent}%`;
         $('progPct').textContent = `${p.percent.toFixed(1)}%`;
-        $('progTested').textContent = p.tested.toLocaleString();
-        $('progTestedSub').textContent = `of ~${(state.run.total_combinations || 0).toLocaleString()} planned`;
-        $('progValid').textContent = p.valid.toLocaleString();
+        $('progTested').textContent = C.fmtCount(p.tested);
+        $('progTestedSub').textContent = `of ~${C.fmtCount(state.run.total_combinations || 0)} planned`;
+        $('progValid').textContent = C.fmtCount(p.valid);
         $('progValidSub').textContent = p.tested ? `${((p.valid / p.tested) * 100).toFixed(0)}% meet constraints` : '';
         $('progElapsed').textContent = C.fmtDuration(p.elapsed_seconds);
         $('progEta').textContent = p.paused ? 'paused' : C.fmtDuration(p.eta_seconds);
@@ -196,9 +196,9 @@
 
         const pct = C.isNum(dsr.probability) ? `${(dsr.probability * 100).toFixed(0)}%` : '—';
         $('dsrFacts').innerHTML = [
-            ['Chances taken', C.isNum(dsr.trials) ? dsr.trials.toLocaleString() : '—'],
+            ['Chances taken', C.isNum(dsr.trials) ? C.fmtCount(dsr.trials) : '—'],
             ['Likely genuinely positive', pct],
-            ['Return observations', C.isNum(dsr.observations) ? dsr.observations.toLocaleString() : '—'],
+            ['Return observations', C.isNum(dsr.observations) ? C.fmtCount(dsr.observations) : '—'],
         ].map(([k, v]) => `<li><span>${C.escapeHtml(k)}</span><span>${C.escapeHtml(v)}</span></li>`).join('');
     }
 
@@ -253,7 +253,7 @@
             || '<li class="pos">No overfitting warning signs detected.</li>';
         const st = a.stats || {};
         $('runStats').textContent = st.evaluations
-            ? `${st.evaluations.toLocaleString()} backtests (${st.unique_results} unique, ${st.errors} errors) in ${C.fmtDuration(st.elapsed_seconds)} on ${st.workers} worker(s) · ${st.bars} bars ${st.data_from} → ${st.data_to}`
+            ? `${C.fmtCount(st.evaluations)} backtests (${st.unique_results} unique, ${st.errors} errors) in ${C.fmtDuration(st.elapsed_seconds)} on ${st.workers} worker(s) · ${st.bars} bars ${st.data_from} → ${st.data_to}`
             : '';
 
         drawLineChart('equityChart', [
@@ -355,7 +355,7 @@
 
         box.hidden = false;
         box.innerHTML = `<h2 class="card-title">Monte Carlo on best result</h2>
-            <p class="muted small">${mc.simulations.toLocaleString()} resamples of
+            <p class="muted small">${C.fmtCount(mc.simulations)} resamples of
                 <strong>${mc.trades}</strong> closed trades from
                 <code>${params || '—'}</code>. The same trades in different orders, and a fresh
                 draw from the same distribution.</p>
@@ -634,7 +634,7 @@
         }
         pg.total = res.total;
         const pnames = Array.from(new Set(res.results.flatMap((r) => Object.keys(r.params || {}))));
-        $('resTotal').textContent = `(${res.total.toLocaleString()})`;
+        $('resTotal').textContent = `(${C.fmtCount(res.total)})`;
         $('resHead').innerHTML = `<tr>${pnames.map((n) => `<th class="opt-nosort">${C.escapeHtml(n)}</th>`).join('')}${RESULT_COLS.map(([k, l]) =>
             `<th data-sort="${k}" class="${pg.sort === k ? 'opt-sorted' : ''}">${l}${pg.sort === k ? (pg.order === 'desc' ? ' ▼' : ' ▲') : ''}</th>`).join('')}<th class="opt-nosort"></th></tr>`;
         $('resBody').innerHTML = res.results.map((r, i) => `

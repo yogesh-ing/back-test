@@ -53,7 +53,8 @@
       ];
       const entitlement = Object.entries(lim.entitlement || {})
         .map(([mode, structs]) => "<tr><td class='muted'>Permitted · " + mode +
-          "</td><td>" + structs.join(", ") + "</td></tr>").join("");
+          "</td><td title='" + structs.join(", ") + "'>" +
+          structs.map((s) => Labels.structure(s)).join(", ") + "</td></tr>").join("");
       body.innerHTML = "<table class='dd-table dd-kv'><tbody>" +
         rows.map(([k, v]) => "<tr><td class='muted'>" + k + "</td><td>" + v + "</td></tr>").join("") +
         entitlement + "</tbody></table>";
@@ -343,11 +344,17 @@
         const isBreach = /BREACH|HALT|BREAKER/i.test(e.action || "");
         const cls = isBreach ? "audit-breach" : /WARN|BLOCK/i.test(e.action||"") ? "audit-warning" : "";
         const ts = e.ts || e.timestamp || "";
+        // The payload key is `detail`, not `details` — reading the wrong name
+        // made every row fall through to a truncated JSON.stringify of the
+        // whole record, so the Reason column showed `{"action":"SPAWN QA13_…`
+        // instead of `strategy=ema_pullback capital=500000.0`.
+        const reason = e.reason || e.detail;
+        const fallback = JSON.stringify(e);
         return `<tr class="${cls}">
           <td>${ts.slice(0,19).replace("T"," ")}</td>
           <td><span class="badge badge-${e.scope==='live'?'live':'paper'}">${e.scope||""}</span></td>
           <td><strong>${e.action||""}</strong></td>
-          <td>${e.reason || e.details || JSON.stringify(e).slice(0,120)}</td>
+          <td${reason ? "" : ` title="${fallback}"`}>${reason || "—"}</td>
           <td>${e.runner_id || e.instance_id || ""}</td>
         </tr>`;
       }).join("");

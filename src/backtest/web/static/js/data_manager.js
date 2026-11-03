@@ -74,7 +74,7 @@ function dmDetail(row) {
     const bits = [];
     const stored = row.timeframes_stored || [];
     if (stored.length) bits.push(stored.join('/'));
-    if (row.bars_count) bits.push(`${row.bars_count.toLocaleString()} bars`);
+    if (row.bars_count) bits.push(`${Money.count(row.bars_count)} bars`);
     const window = dmWindow(row);
     if (window) bits.push(window);
     return bits.join(' · ');
@@ -207,7 +207,7 @@ function dmRenderInventory() {
             tr.innerHTML = `
                 <td><strong>${dmEsc(r.symbol)}</strong></td>
                 <td>${dmEsc(stored)}</td>
-                <td>${bars.toLocaleString()}</td>
+                <td>${Money.count(bars)}</td>
                 <td>${dmEsc(r.from_date || '-')}</td>
                 <td>${dmEsc(r.to_date || '-')}</td>
             `;
@@ -237,7 +237,7 @@ function dmRenderInventory() {
     $('dm-inv-symbols').textContent =
         `${rows.length} symbol${rows.length === 1 ? '' : 's'}` +
         (dmState.total > dmState.rows.length ? ` (of ${dmState.total} shown)` : '');
-    $('dm-inv-bars').textContent = `${bars.toLocaleString()} bars`;
+    $('dm-inv-bars').textContent = `${Money.count(bars)} bars`;
     $('dm-inv-timeframes').textContent =
         [...timeframes].sort((a, b) => rank(a) - rank(b)).join(', ') || '-';
 }
@@ -419,7 +419,7 @@ async function pollStatus() {
                     // holes must never render as a clean success.
                     showToast(`Finished, but ${j.chunk_errors} chunk request(s) failed even after retries — data may be partial; re-run the same fetch, it only pulls the missing days`, 'error');
                 } else {
-                    showToast(`Fetch complete: ${j.fetched} symbols${skipNote}, ${j.bars_total.toLocaleString()} bars`, 'success');
+                    showToast(`Fetch complete: ${j.fetched} symbols${skipNote}, ${Money.count(j.bars_total)} bars`, 'success');
                 }
                 dmLoadSymbols();  // one request refreshes the list AND the table
             }
@@ -457,7 +457,7 @@ function updateProgress(j) {
     $('dm-fetched-count').textContent = j.chunk_total > 0 && j.status === 'running'
         ? `${j.fetched || 0} / ${j.total || 0} symbols · chunk ${j.chunk_done || 0}/${j.chunk_total}`
         : `${j.fetched || 0} / ${j.total || 0} symbols`;
-    $('dm-bars-count').textContent = `${(j.bars_total || 0).toLocaleString()} bars`;
+    $('dm-bars-count').textContent = `${Money.count(j.bars_total || 0)} bars`;
     $('dm-elapsed').textContent = dmElapsed(j);
 
     if (j.symbol) {

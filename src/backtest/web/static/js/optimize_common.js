@@ -42,8 +42,12 @@ const OptCommon = (() => {
 
     function fmtNum(v, dp = 2) {
         if (!isNum(v)) return '—';
-        return Number(v).toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp });
+        if (globalThis.Money) return Money.num(v, dp);
+        return Number(v).toFixed(dp);
     }
+
+    /** Integer counts (bars, combinations, backtests) in the app's grouping. */
+    function fmtCount(v) { return fmtNum(v, 0); }
 
     function fmtPct(v, dp = 1, { fraction = true, signed = false } = {}) {
         if (!isNum(v)) return '—';
@@ -78,7 +82,7 @@ const OptCommon = (() => {
         if (FRACTION_METRICS.has(name)) return fmtPct(n, 2, { signed: true });
         if (name === 'win_rate') return `${sign}${Math.abs(n).toFixed(1)} pp`;
         if (MONEY_METRICS.has(name)) return `${sign}${fmtMoney(Math.abs(n), 0)}`;
-        if (INTEGER_METRICS.has(name)) return `${sign}${Math.abs(Math.round(n)).toLocaleString()}`;
+        if (INTEGER_METRICS.has(name)) return `${sign}${fmtCount(Math.abs(n))}`;
         return `${sign}${fmtNum(Math.abs(n), name === 'profit_factor' ? 2 : 3)}`;
     }
 
@@ -96,7 +100,7 @@ const OptCommon = (() => {
         if (!iso) return '—';
         const d = new Date(iso);
         if (Number.isNaN(d.getTime())) return String(iso);
-        return d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: '2-digit',
+        return d.toLocaleString('en-IN', { year: 'numeric', month: 'short', day: '2-digit',
             hour: '2-digit', minute: '2-digit' });
     }
 
@@ -200,7 +204,8 @@ const OptCommon = (() => {
 
     return {
         OBJECTIVE_LABELS, METRIC_LABELS, FRACTION_METRICS,
-        isNum, escapeHtml, fmtNum, fmtPct, fmtMoney, fmtMetric, fmtDelta, fmtDuration, fmtDate, fmtParams,
+        isNum, escapeHtml, fmtNum, fmtCount, fmtPct, fmtMoney, fmtMetric, fmtDelta,
+        fmtDuration, fmtDate, fmtParams,
         gridCount, totalCombinations, statusBadge, heatColor, normalise, robustnessLabel,
         isImprovement, api, toast, debounce,
     };

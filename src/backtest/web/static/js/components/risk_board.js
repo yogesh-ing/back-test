@@ -287,7 +287,7 @@
           return `<tr class="${isOpt ? "matrix-row-option" : ""}" style="font-variant-numeric:tabular-nums;">` +
             `<td>${symCell}</td>` +
             `<td>${esc(t.runner_name || "")}</td>` +
-            `<td>${esc(t.strategy || "")}</td>` +
+            `<td title="${esc(t.strategy || "")}">${esc(Labels.strategy(t.strategy || ""))}</td>` +
             `<td>${esc(t.kind || "equity")}</td>` +
             `<td>${esc(t.side || "")}</td>` +
             `<td class="num">${qtyCell}</td>` +

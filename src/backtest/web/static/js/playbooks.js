@@ -37,15 +37,19 @@
   }
 
   function playbookCardHtml(pb) {
-    const structLabel = (() => {
+    // The card sub-line is read, not parsed: it carries the house label and
+    // keeps the stored structure code in a title, so the id is still one hover
+    // away for anyone matching the card against a spawn payload.
+    const structRaw = (() => {
       if (typeof pb.structure_type === "string") return pb.structure_type;
-      if (typeof pb.structure_type === "object") {
+      if (pb.structure_type && typeof pb.structure_type === "object") {
         const bull = pb.structure_type.BULLISH || "bull_call_spread";
         const bear = pb.structure_type.BEARISH || "bear_put_spread";
         return `${bull} / ${bear}`;
       }
-      return "direction-aware";
+      return "direction_aware";
     })();
+    const structLabel = structRaw.split(" / ").map((c) => Labels.structureShort(c)).join(" / ");
 
     const exit = pb.exit_config || {};
     const exitBits = [];
@@ -66,7 +70,7 @@
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
           <div>
             <div style="font-weight:600; font-size:14px;">${esc(pb.name)} ${versionBadge}</div>
-            <div class="muted" style="font-size:12px;">${esc(pb.underlying)} · ${esc(structLabel)} · ${esc(pb.strike_selection)}${pb.strike_selection === "delta" ? ` Δ${pb.delta_target}` : ""} · ${pb.quantity} lot(s)</div>
+            <div class="muted" style="font-size:12px;">${esc(pb.underlying)} · <span title="${esc(structRaw)}">${esc(structLabel)}</span> · ${esc(pb.strike_selection)}${pb.strike_selection === "delta" ? ` Δ${pb.delta_target}` : ""} · ${pb.quantity} lot(s)</div>
             <div class="muted" style="font-size:11px; margin-top:4px;">${esc(pb.description || "")}</div>
             <div class="muted" style="font-size:11px; margin-top:4px;">Exit: ${esc(exitBits.join(", ") || "flip only")}</div>
             ${riskCap ? `<div class="muted" style="font-size:11px;">Risk cap: ${riskCap} max loss / signal (per-signal, not per-day)</div>` : ""}
