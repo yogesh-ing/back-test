@@ -14,14 +14,14 @@
 | **A1** — `WAITING_FOR_FEED` + frozen-mark stub | `Sprint A-1` | ✅ **LIVE (`89962d1`)** | `cb91d41` / `b2b76a4` — Verified on-wire `2026-11-03 09:17 IST`: `restored 16 of 16 runner(s) (0 parked)`. |
 | **A2** — `on_broker_authenticated` auto-wake | `Sprint A-1` | ✅ **LIVE (`89962d1`)** | `9e5b000` / `b2b76a4` — Verified live with remembered mStock session (`depth=True` streaming). |
 | **A4** — market-hours paging + login banner | `Sprint A-1` | ✅ **LIVE (`89962d1`)** | `74cb76b` / `b2b76a4` |
-| **A3** — open-trade continuity + `armed_at_utc` | `Sprint A-2` | ✅ **DONE** | Standalone 1-commit `Sprint A-2` — `has_open_exposure() -> RUNNING`, `RESTART_FLAT_SAFETY`, `CODE_UPDATED_WHILE_IN_TRADE`, `< 1s` post-wake protective SL/TP/Expiry sweep, paused option bar-entry guard, and `bar_close_utc >= armed_at_utc` stale-signal gate. |
+| **A3** — open-trade continuity + `armed_at_utc` | `Sprint A-2` | ✅ **PUSHED (`e0781b2`); deploy gated on A-1 bake** | On `origin/arena/d4936721-back-test` — `has_open_exposure() -> RUNNING`, `RESTART_FLAT_SAFETY`, `CODE_UPDATED_WHILE_IN_TRADE`, `< 1s` post-wake protective SL/TP/Expiry sweep, paused option bar-entry guard, and `bar_close_utc >= armed_at_utc` stale-signal gate. Independent verification: `tests/forward` + clock policy `726/726`, flake8 clean; **one** new full-suite failure (a `STOPPED`-vs-`PAUSED` snapshot fixture) fixed in this branch. Shipped before `A-1`'s first live session closed, so the 1-commit rollback isolation is unproven in live digits. |
 | **B1** — restart-proof risk state | `Sprint B` | ✅ **LIVE (`89962d1`)** | `0eb8f1f` — Verified on-wire `09:17 IST`: undated prior peak rolled clean for `2026-11-03`; full-roster anchor `₹98,16,152.17`; dated intraday restart memory now armed. |
 | **C1** — two-layer clock law in `OrderLedger` | `Sprint C` | ✅ **LIVE (`89962d1`)** | `fdaab48` — Canonical `+00:00` UTC across all `OrderLedger` writers & legacy snapshot hydration (`#23`). |
 | **C2** — mStock Layer-0 auth gate + `401/403` kill-latch | `Sprint C` | ✅ **LIVE (`89962d1`)** | `c009da0` — `0` HTTP packets / `0` `.mstock_session_token` leaks when logged out; instant `401/403` `STATUS_EXPIRED` kill-latch + Ticket A4 alert; Upstox untouched. |
 | **C3** — stale test signatures + timestamp repair cutover | `Sprint C` | ✅ **LIVE (`89962d1`); `--execute` ops-gated** | `89962d1` — Standing test debt cleared **`28 → 0` (`0` failures across entire gate)**. `scripts/repair_trade_timestamps.py` stays dry-run pending post-market DB snapshot. |
-| **D1** — PostgreSQL single source of truth | `Sprint D` | ✅ **DONE (local commit, Phase D1-a)** | Local commit atop `89962d1` — Migration `024_open_option_positions_and_risk_session`, `PostgresStateStore`, 7-Event DB Touch Contract (`0` tick/SSE SQL), `prev_close_mark` `15:30 IST` settlement, and `STATE_STORE_PRIMARY=json\|postgres` parity verifier (`#24`). |
-| **D2** — unified `Positions` blotter + carry badges | `Sprint D` | ✅ **DONE (local commit)** | Local commit atop `89962d1` — Carry-horizon badges (`⏱ INTRADAY 15:10` vs `📅 POSITIONAL (HOLD TO EXPIRY)`), `#pos-carry-filter`, `15:30 prev close` anchor note, and `Today` vs `Total` Net Open P&L clarity. |
-| **D3** — `FROZEN_AT_SPAWN` drift badge + flat rollover | `Sprint D` | ✅ **DONE (local commit)** | Local commit atop `89962d1` — Compact carry badge on runner rows, amber `⚠️ Outdated config — respawn when flat` drift pill, and `POST /api/portfolio/runners/<id>/respawn` strictly gated on `open_positions == 0` (`#3`). |
+| **D1** — PostgreSQL single source of truth | `Sprint D` | ✅ **PUSHED (`9accce5`, Phase D1-a)** | On `origin/arena/d4936721-back-test` — Migration `024_open_option_positions_and_risk_session`, `PostgresStateStore`, 7-Event DB Touch Contract (`0` tick/SSE SQL; `60s` checkpoint is `09:15–15:30 IST` gated), `prev_close_mark` `15:30 IST` settlement, and `STATE_STORE_PRIMARY=json\|postgres` parity verifier (`#24`). **Not yet proven on a real PostgreSQL instance** — see Deploy Gate below. |
+| **D2** — unified `Positions` blotter + carry badges | `Sprint D` | ✅ **PUSHED (`d5ad052`)** | Carry-horizon badges (`⏱ INTRADAY 15:10` vs `📅 POSITIONAL (HOLD TO EXPIRY)`), `#pos-carry-filter`, `15:30 prev close` anchor note, and `Today` vs `Total` Net Open P&L clarity. |
+| **D3** — `FROZEN_AT_SPAWN` drift badge + flat rollover | `Sprint D` | ✅ **PUSHED (`88efcd9`)** | Compact carry badge on runner rows, amber `⚠️ Outdated config — respawn when flat` drift pill, and `POST /api/portfolio/runners/<id>/respawn` strictly gated on `open_positions == 0` (`#3`). |
 
 Two stale test ratchets were fixed inside PR #52 because they were red on the
 branch: `70acbd9` (`test_option_view.mjs` 24 → 29, caused by A1 itself) and
@@ -134,8 +134,8 @@ Implement in strict sprint order (**one small, reviewable PR per sprint**).
 **Goal**: Logging in before *or* after `09:15 IST` wakes all waiting runners automatically in `< 1s`, updates P&L immediately, pages the operator inside active market hours, and (in sub-PR `A-2` after `A-1` bakes cleanly in a live session) guarantees any instance with an open trade is actively `RUNNING` and protected.
 
 > **Release Sequencing Rule (Junior Review Guardrail)**:
-> - **PR `Sprint A-1` (`Tickets A1 + A2 + A4`)** ships **first**: unauthenticated boot visibility (`WAITING_FOR_FEED` with strict zero-synthetic invariant), `< 1s` `verify-totp` auto-wake, and market-hours-only `T − 10m` / expired operator paging + `"Broker login needed"` topbar banner. — ✅ **SHIPPED to review as PR #52 on 2026-11-03** (`cb91d41` + `9e5b000` + `74cb76b`, plus two stale-ratchet fixes). Awaiting merge; not deployed.
-> - **PR `Sprint A-2` (`Ticket A3`)** ships **second** (in its own isolated PR after `A-1` completes a live session): reverses the legacy blanket `RUNNING -> PAUSED` restore rule for open-exposure books (`has_open_exposure() -> RUNNING` + `armed_at_utc` stale-signal guard), giving 1-commit rollback isolation. — ⏸ **still gated**: `A-1` has not yet run a live session, so `A3` stays unstarted even though nothing in it is blocked technically.
+> - **PR `Sprint A-1` (`Tickets A1 + A2 + A4`)** ships **first**: unauthenticated boot visibility (`WAITING_FOR_FEED` with strict zero-synthetic invariant), `< 1s` `verify-totp` auto-wake, and market-hours-only `T − 10m` / expired operator paging + `"Broker login needed"` topbar banner. — ✅ **MERGED (`b2b76a4` → `89962d1`) and LIVE on `:5000`** since `2026-11-03 09:17:07 IST`; first live session in progress (`restored 16 of 16 runner(s) (0 parked)`, restore message still `PAUSED`-by-default).
+> - **PR `Sprint A-2` (`Ticket A3`)** ships **second** (in its own isolated PR after `A-1` completes a live session): reverses the legacy blanket `RUNNING -> PAUSED` restore rule for open-exposure books (`has_open_exposure() -> RUNNING` + `armed_at_utc` stale-signal guard), giving 1-commit rollback isolation. — ⚠️ **sequencing gate not honored**: `e0781b2` was committed while `A-1`'s first live session was still open (09:17 → 15:30 IST), so the bake that justified the isolation has not produced evidence yet. The rollback target remains `89962d1`; do not deploy `A3` until today's session closes clean. Verification found one new full-suite failure (`test_rehydration_with_changed_bundle_pauses_runner` asserted `PAUSED`, got `STOPPED`) — the restore block now keys off the snapshot's own status, so the fixture had to capture a `RUNNING` book; the flat-restart safety it was meant to prove is separately covered by `code_updated_while_in_trade_protects_open_position_then_pauses_when_flat`.
 
 #### Ticket A1 (`Sprint A-1`) — Construct Unauthenticated Runners in `WAITING_FOR_FEED` (Hard Zero-Synthetic Invariant)
 > ✅ **DONE — `cb91d41`, PR #52.** All three design points shipped as specified.
@@ -217,7 +217,7 @@ Implement in strict sprint order (**one small, reviewable PR per sprint**).
      - Outside `09:00–15:30 IST`, weekends, and NSE holidays: suppress all auto-popups and red `"Broker login needed"` banners (manual click on `Brokers` still works anytime).
 
 #### Ticket A3 (`Sprint A-2` — Isolated Sub-PR After `A-1` Live Session Bake) — Open-Trade Continuity Rule & No-Stale-Signal Entry Guard
-> ✅ **IMPLEMENTED (2026-11-03, standalone 1-commit `Sprint A-2` unit).**
+> ✅ **IMPLEMENTED (`e0781b2`, standalone 1-commit `Sprint A-2` unit — pushed, not merged, not deployed).**
 > `StrategyRunner.has_open_exposure()` (equity positions + open option structures + working
 > `OrderLedger` / `LiveGateway` orders), `restore_runner()` open-exposure continuity
 > (`STATUS_RUNNING` when carrying risk vs `STATUS_PAUSED` `RESTART_FLAT_SAFETY` when flat;
@@ -332,17 +332,17 @@ Implement in strict sprint order (**one small, reviewable PR per sprint**).
 **Goal**: Eliminate the `portfolio_state.json` split-brain so PostgreSQL is the sole durable source of truth while RAM serves sub-second live math at zero tick-level DB load, unify Equity + Option open positions across SQL and UI, and make frozen runner rulebooks explicit and 1-click upgradable when flat.
 
 #### Ticket D1 — Replace `portfolio_state.json` Split-Brain with PostgreSQL Single-Source-of-Truth (`#24` + Institutional Ledger)
-> ✅ **IMPLEMENTED (`4a187da`, local commit — Phase D1-a Shadow Dual-Write active by default under `STATE_STORE_PRIMARY=json`).**
+> ✅ **IMPLEMENTED (`9accce5`, pushed to `origin/arena/d4936721-back-test` — Phase D1-a Shadow Dual-Write active by default under `STATE_STORE_PRIMARY=json`).**
 > Additive migration `024_open_option_positions_and_risk_session.{sql,sqlite.sql}`, ORM models (`RunnerInstanceRecord`, `OptionOpenStructureRecord`, `OptionOpenLegRecord`, `RiskSessionStateRecord`), `PostgresStateStore`, `LiveTradePersister._mirror_option_book_slice`, `on_broker_authenticated` live `mStock.get_positions()` reconciliation, `60s` batch mark checkpoint + `15:30 IST` `prev_close_mark` settlement, and `verify_state_parity()` (`PARITY_OK` / `PARITY_DIFF` within `₹0.01`) are live and verified with `0` SQL queries on tick/SSE hot paths.
 - **Institutional PMS Standard**:
   - **PostgreSQL Is the Sole System of Record; RAM Is the Real-Time Calculator**: Never rely on a local flat JSON file for open trades, runner configs, or daily P&L anchors. Hydrate RAM 100% from PostgreSQL on startup (run a brief dual-write parity window, then retire `portfolio_state.json` dependency).
   - **The 7-Event Database Touch Contract (Zero Tick / Poll DB Load)**:
     1. **Server Boot (`READ` once)**: Hydrate active/paused `portfolios`, open Equity + Option `positions` (with `entry_price` & `prev_close_mark`), and today's `risk_session_state` into RAM via the shared SQLAlchemy pool.
     2. **Broker Login `verify-totp` (`READ/WRITE` once)**: For `mode="live"`, reconcile `mStock.get_positions()` against DB `positions` and raise a loud mismatch alert if external/phone-app trades occurred; record first live mark.
-    3. **Order / Fill Entry or Exit (`WRITE` atomic tx)**: Persist `orders` + `fills` + open/update/close `positions` (both Equity and Option structures/legs tagged `instrument_type = 'EQ' | 'OPT'` without mixing options into equity share-averaging) + closed `trades`.
+    3. **Order / Fill Entry or Exit (`WRITE` atomic tx)**: Persist `orders` + `fills` + open/update/close Equity `positions` + closed `trades`; option structures/legs mirror into the additive `option_open_structures` / `option_open_legs` tables (`instrument_type` `CHECK`-locked to `'OPT'`), so options never enter equity share-averaging. **Shipped deviation:** separation is by *table*, not by an `'EQ' | 'OPT'` tag on `positions` — `024_*` contains no `ALTER TABLE positions`, so `positions` still has neither `instrument_type` nor `prev_close_mark` (see Deploy Gate below).
     4. **Operator UI Action (`WRITE`)**: Spawn, Pause, Resume, Delete, manual SL/TP edit, Flatten, or Risk Override.
     5. **Risk Milestone (`WRITE` throttled/immediate)**: Throttled update on new `session_peak_daily_pnl`; immediate write on `halted = True`.
-    6. **60s Crash Checkpoint & `15:30 IST` EOD Settlement (`WRITE` 1 batch query/min during `09:15–15:30 IST`)**: Flush `last_mark_price` once per minute in one batch SQL statement; at `15:30 IST` stamp official `prev_close_mark` on all open carry positions.
+    6. **60s Crash Checkpoint & `15:30 IST` EOD Settlement (`WRITE` 1 transaction/min during `09:15–15:30 IST`)**: Flush `last_mark_price` once per minute from the mark-repair watchdog pass, gated by the same `_in_trading_window` check (so it is silent off-hours, weekends and holidays). **Shipped deviation:** it is an upsert loop — one `SELECT` per runner/structure/leg then `UPDATE`s in a single transaction — **not** a single batch statement, so per-minute statement count scales with open legs. At `15:30 IST`, stamp official `prev_close_mark` on all open carry positions; the settlement gate skips `WEEKEND` **and** `HOLIDAY` day-state, so a Mon–Fri holiday can no longer book yesterday's last marks as today's anchor.
     7. **Diary / Analytics / Reports Views (`READ`)**: Read via shared DB pool (`POOL-3` compliant — zero ad-hoc `create_engine`).
     - *Explicit Non-Touch Rule*: Live WebSocket ticks (`10–100/s`), non-trading 1-minute candle evaluations, and `/api/portfolio` SSE/HTTP UI refreshes run **100% in RAM (`0` DB queries)**.
   - **Canonical P&L Formulas (Zero JSON Anchors Required)**:
@@ -350,7 +350,7 @@ Implement in strict sprint order (**one small, reviewable PR per sprint**).
       - *Open*: `(Live Mark − Entry Price) × Signed Qty − Entry Commission`
       - *Closed (`trades`)*: `Gross P&L − Total Commission = Net P&L` (single combined `Commission = entry_fee + exit_fee`).
     - **Day's P&L (`09:15–15:30 IST` Session Slice)**:
-      - Anchor = `Entry Price` (if opened today) **or** `prev_close_mark` from `15:30 IST` DB settlement (if carried from a prior day; flat morning book = `₹0.00`).
+      - Anchor = `Entry Price` (if opened today) **or** `prev_close_mark` from `15:30 IST` DB settlement (if carried from a prior day; flat morning book = `₹0.00`). **Currently DB-backed for option structures/legs only** — a carried *equity* position still anchors from RAM/JSON, because `positions` gained no `prev_close_mark` column in `024_*`.
       - `Day P&L = Sum(Today's Closed Slices) + Sum((Live Mark − Anchor) × Signed Qty − Today's Fee Slice)` — guaranteeing `Sum of Daily P&L Slices == Lifetime Individual Trade Net P&L` to the paisa.
   - **3-Layer P&L Update Cadence**:
     1. *Engine & Risk Fuse (`RAM`)*: Every coalesced WebSocket tick (`~100–250 ms`) + 1-min bar close (`30s` HTTP repair watchdog fallback if a leg misses WS ticks).
@@ -359,15 +359,52 @@ Implement in strict sprint order (**one small, reviewable PR per sprint**).
   - **Repository Schema Constraints & Migration Safety Rules (Mandatory)**:
     1. **Migration Chain (`db/migrations/024_*.sql` + `024_*.sqlite.sql`)**: Current migration head is `db/migrations/023_diary_journal_notes.sql` (dual Postgres `.sql` + SQLite `.sqlite.sql` test-parity files — **not** Alembic). Sprint D starts at `024_`.
     2. **Append-Only PostgreSQL Views (`014`/`015` Lesson)**: Never reorder, rename, or drop existing columns in `CREATE OR REPLACE VIEW` statements (Postgres rejects in-place column shifts on fresh migration chains). Keep new state in **additive tables** (`option_open_structures`, `option_open_legs`, `risk_session_state`) or strictly additive nullable columns on `positions` — never mutating existing view column order.
-    3. **TimescaleDB Hypertable Non-Interference**: `market_data_cache` is a TimescaleDB hypertable where cross-chunk key `UPDATE`s fail and writes use `ON CONFLICT DO NOTHING`. Sprint D **never** touches `market_data_cache`; `last_mark_price` and `prev_close_mark` live strictly on relational `positions` / `option_open_structures` tables.
+    3. **TimescaleDB Hypertable Non-Interference**: `market_data_cache` is a TimescaleDB hypertable where cross-chunk key `UPDATE`s fail and writes use `ON CONFLICT DO NOTHING`. Sprint D **never** touches `market_data_cache`; `last_mark_price` and `prev_close_mark` live on the additive relational tables `runner_instances` / `option_open_structures` / `option_open_legs` (verified: `024_*.sql` has zero `ALTER TABLE`, zero `DROP`, and zero `CREATE OR REPLACE VIEW`).
   - **Institutional 3-Phase Dual-Write Parity & Zero-Downtime Rollback Plan**:
     - **Phase D1-a — Shadow Dual-Write (`STATE_STORE_PRIMARY=json`, 5 Live Sessions)**: `portfolio_state.json` remains the primary boot reader. All 7 state-change events dual-write to PostgreSQL (`024_*`) inside fail-soft wrappers. An automated parity verifier runs on every boot and `15:30 IST` close comparing JSON vs. PG (`runner count`, `open structures/legs`, `prev_close_mark`, `daily_pnl` within `₹0.01`) and logs `PARITY_OK` / `PARITY_DIFF`.
     - **Phase D1-b — Cutover with Hot-Standby Rollback (`STATE_STORE_PRIMARY=postgres`, 5 Live Sessions)**: Flip primary boot hydration to PostgreSQL while continuing to write `portfolio_state.json` as hot standby. **Rollback SLA (< 10 seconds, zero SQL rollback)**: flipping `STATE_STORE_PRIMARY=json` in `.env` immediately reverts boot authority to JSON without dropping a single table or row.
     - **Phase D1-c — Retire JSON Dependency**: Decommission `portfolio_state.json` writes only after **5 consecutive trading sessions under `STATE_STORE_PRIMARY=postgres` with `0` `PARITY_DIFF` events**.
 - **Files**: `db/migrations/024_open_option_positions_and_risk_session.sql`, `db/migrations/024_open_option_positions_and_risk_session.sqlite.sql`, `src/backtest/db/models.py`, `src/backtest/forward/trade_persistence.py`, `src/backtest/forward/state_store.py`, `src/backtest/forward/portfolio_manager.py`
 
+##### Deploy Gate — what must be true before `:5000` boots on `024`
+
+1. **`024` has never been applied to a real PostgreSQL instance.** Every `PostgresStateStore`
+   test in `tests/forward/test_pg_state_store.py` builds a `sqlite:///` database, so native
+   `UUID`/`JSONB` DDL, `ON CONFLICT` on a `uuid` PK, and `NUMERIC` read-back are unproven.
+   Prove it on a scratch database first (the repo's existing convention —
+   `tests/db/test_migrations_009_013.py` creates and drops one), not on `forward_test`.
+2. **`024_*` is raw SQL, not Alembic** (Alembic head is still `023_diary_journal_notes`). A
+   database built by `alembic upgrade head` — e.g. the QA mirror's `forward_test_qa` — will not
+   contain the four tables until `psql` applies `024` or `ensure_forward_ssot_schema()` runs at
+   boot. `ensure_forward_ssot_schema()` also `create_all`s `portfolios` alongside them, which can
+   silently build a partial schema against the wrong database; treat a boot-created schema as a
+   warning, not a pass.
+3. **Apply it with a psql-readable URL, from the PG 18 bin directory, while no fetch job is
+   running** — `FORWARD_TEST_DB_URL` holds a SQLAlchemy URL (`postgresql+psycopg2://…`) that
+   `psql` rejects, and `psql.exe` is not on `PATH` on this box:
+
+   ```powershell
+   # psql accepts the URI itself; only the SQLAlchemy "+psycopg2" driver tag has to go.
+   $url = (Select-String -Path .env -Pattern '^FORWARD_TEST_DB_URL=').Line.Split('=',2)[1] `
+          -replace '\+psycopg2',''
+   & 'C:\Program Files\PostgreSQL\18\bin\psql.exe' $url -v ON_ERROR_STOP=1 `
+       -f db/migrations/024_open_option_positions_and_risk_session.sql
+   ```
+
+   The migration is `BEGIN;…COMMIT;` wrapped, so `ON_ERROR_STOP=1` leaves the database unchanged
+   on any error. Verify after: `\dt runner_instances option_open_structures option_open_legs
+   risk_session_state` and `SELECT version FROM schema_migrations WHERE version='024';`
+4. **Day 1 needs no `.env` change.** `STATE_STORE_PRIMARY` defaults to `json`, so boot hydration
+   and every P&L number the operator reads stay on the JSON path; PostgreSQL only receives the
+   shadow writes. Flip to `postgres` (Phase D1-b) only after 5 consecutive sessions with
+   `0` `PARITY_DIFF`.
+5. **Open follow-up (not yet in schema):** the `positions`-level `instrument_type` /
+   `prev_close_mark` columns that Event 3 and the Day-P&L anchor originally specified. Closing it
+   needs a new additive migration plus a carry test for equity, because the day-anchor claim is
+   only honest for option structures today.
+
 #### Ticket D2 — Unified `Positions` Blotter & Carry-Horizon Badges (`#24` UI)
-> ✅ **IMPLEMENTED (`5de20fc`, local commit).** `options_bridge.open_structures_snapshot()` and
+> ✅ **IMPLEMENTED (`d5ad052`, pushed to `origin/arena/d4936721-back-test`).** `options_bridge.open_structures_snapshot()` and
 > `PortfolioManager.list_positions()` now expose `carry_policy`, `intraday_squareoff_minutes_before`,
 > `prev_close_mark`, `net_open_pnl`, `prior_close_net_pnl`, `today_pnl`, and `carried_overnight`
 > across both active and `WAITING_FOR_FEED` runners; the `Positions` tab renders `⏱ INTRADAY 15:10`
