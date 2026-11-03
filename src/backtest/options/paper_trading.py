@@ -187,6 +187,7 @@ class OptionPosition:
     quantity: int = 0  # number of lots
     entry_price: Decimal = ZERO  # premium per unit
     current_price: Decimal = ZERO  # latest MTM price
+    prev_close_mark: Decimal | None = None  # official 15:30 IST close mark for carried legs
     status: PositionStatus = PositionStatus.OPEN
 
     # P&L

@@ -39,19 +39,33 @@ from datetime import date, datetime
 from enum import Enum
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
-from backtest.timekeeping import from_stored_utc, now_utc
+from backtest.timekeeping import current_session_date, from_stored_utc, now_utc
 
 logger = logging.getLogger("backtest.forward.state_store")
 
 __all__ = [
     "PortfolioStateStore",
+    "PostgresStateStore",
     "STATE_SCHEMA_VERSION",
     "capture_runner",
     "restore_runner",
     "config_to_dict",
+    "resolve_state_store_primary",
+    "verify_state_parity",
 ]
+
+_NON_PERSISTENT_SOURCES = frozenset({"synthetic", "replay"})
+
+
+def resolve_state_store_primary() -> str:
+    """Active boot authority: ``'json'`` (D1-a default) or ``'postgres'`` (D1-b)."""
+    raw = str(os.environ.get("STATE_STORE_PRIMARY", "json") or "json").strip().lower()
+    if raw in ("postgres", "pg", "postgresql", "db"):
+        return "postgres"
+    return "json"
+
 
 #: Bump when the snapshot shape changes; loads of older files are refused
 #: (warn + start clean) rather than mis-rehydrated.
@@ -76,8 +90,12 @@ class PortfolioStateStore:
         tmp_name = None
         try:
             with tempfile.NamedTemporaryFile(
-                "w", dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp",
+                "w",
+                dir=self.path.parent,
+                prefix=f".{self.path.name}.",
+                suffix=".tmp",
                 delete=False,
+                encoding="utf-8",
             ) as tmp:
                 tmp_name = tmp.name
                 json.dump(payload, tmp, indent=2)
@@ -101,7 +119,7 @@ class PortfolioStateStore:
         if not self.path.exists():
             return None
         try:
-            payload = json.loads(self.path.read_text())
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             logger.error(
                 "state file %s unreadable (%s) — renaming aside and starting clean",
@@ -203,6 +221,9 @@ def _opt_position_to_snapshot(p: Any) -> Dict[str, Any]:
         "quantity": p.quantity,
         "entry_price": str(p.entry_price),
         "current_price": str(p.current_price),
+        "prev_close_mark": (
+            str(p.prev_close_mark) if getattr(p, "prev_close_mark", None) is not None else None
+        ),
         "status": p.status.value,
         "realized_pnl": str(p.realized_pnl),
         "unrealized_pnl": str(p.unrealized_pnl),
@@ -227,6 +248,7 @@ def _opt_position_from_snapshot(payload: Dict[str, Any]) -> Any:
     opened_at = _restore_ts(payload.get("opened_at")) or now_utc()
     closed_at = _restore_ts(payload.get("closed_at"))
     last_updated = _restore_ts(payload.get("last_updated")) or opened_at
+    raw_prev_close = payload.get("prev_close_mark")
     return OptionPosition(
         position_id=payload["position_id"],
         structure_id=payload.get("structure_id", ""),
@@ -244,6 +266,9 @@ def _opt_position_from_snapshot(payload: Dict[str, Any]) -> Any:
         quantity=int(payload.get("quantity", 0)),
         entry_price=Decimal(payload.get("entry_price", "0")),
         current_price=Decimal(payload.get("current_price", "0")),
+        prev_close_mark=(
+            Decimal(str(raw_prev_close)) if raw_prev_close is not None else None
+        ),
         status=PositionStatus(payload.get("status", "open")),
         realized_pnl=Decimal(payload.get("realized_pnl", "0")),
         unrealized_pnl=Decimal(payload.get("unrealized_pnl", "0")),
@@ -588,3 +613,760 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
 def _now_iso() -> str:
     """``saved_at`` — aware UTC, so a state file states its own clock."""
     return now_utc().isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Institutional PostgreSQL Single-Source-of-Truth Store (Sprint D / Ticket D1)
+# ---------------------------------------------------------------------------
+
+
+def _dec_or_none(value: Any) -> Optional[Decimal]:
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _dec_zero(value: Any) -> Decimal:
+    out = _dec_or_none(value)
+    return out if out is not None else Decimal("0")
+
+
+def _extract_carry_policy(cfg: Dict[str, Any]) -> Optional[str]:
+    inst = cfg.get("instrument")
+    if not isinstance(inst, dict) or str(inst.get("type", "")).lower() != "option":
+        return None
+    expr = inst.get("expression")
+    if isinstance(expr, dict):
+        exit_cfg = expr.get("exit")
+        if isinstance(exit_cfg, dict):
+            cp = str(exit_cfg.get("carry_policy") or "").strip().lower()
+            if cp in ("intraday", "positional"):
+                return cp
+        cp_top = str(expr.get("carry_policy") or "").strip().lower()
+        if cp_top in ("intraday", "positional"):
+            return cp_top
+    return "intraday"
+
+
+def _net_structure_mark(legs: List[Dict[str, Any]], key: str) -> Optional[Decimal]:
+    """Signed net structure premium per unit across legs for ``key``."""
+    if not legs:
+        return None
+    units = 0
+    for leg in legs:
+        u = int(leg.get("quantity", 0) or 0) * int(leg.get("lot_size", 0) or 0)
+        if u > units:
+            units = u
+    if units <= 0:
+        return None
+    total = Decimal("0")
+    seen = False
+    for leg in legs:
+        px = _dec_or_none(leg.get(key))
+        if px is None:
+            continue
+        seen = True
+        leg_units = Decimal(
+            str(int(leg.get("quantity", 0) or 0) * int(leg.get("lot_size", 0) or 0))
+        )
+        sign = Decimal("1") if str(leg.get("side", "BUY")).upper() == "BUY" else Decimal("-1")
+        total += px * leg_units * sign
+    if not seen:
+        return None
+    return (total / Decimal(str(units))).quantize(Decimal("0.0001"))
+
+
+class PostgresStateStore:
+    """Event-driven PostgreSQL Single-Source-of-Truth store (Sprint D / Ticket D1).
+
+    Honours the 7-Event Database Touch Contract:
+      * 0 SQL queries on live WebSocket ticks, non-trading candle checks, or
+        ``/api/portfolio`` SSE/HTTP UI refreshes.
+      * Uses the shared ``DatabaseManager`` connection pool exclusively (POOL-3).
+      * Skips ``synthetic`` / ``replay`` runners unless ``allow_synthetic=True``
+        so unit tests never pollute production history while hermetic SQLite
+        tests can opt in explicitly.
+    """
+
+    def __init__(self, db_manager: Any, *, allow_synthetic: bool = False) -> None:
+        self.db = db_manager
+        self.allow_synthetic = bool(allow_synthetic)
+        self._schema_ready = False
+
+    def ensure_schema(self) -> None:
+        if self.db is None or self._schema_ready:
+            return
+        from backtest.db.models import ensure_forward_ssot_schema
+
+        ensure_forward_ssot_schema(self.db)
+        self._schema_ready = True
+
+    def _eligible_runner_snap(self, snap: Dict[str, Any]) -> bool:
+        if self.allow_synthetic:
+            return True
+        cfg = snap.get("config") or {}
+        source = str(cfg.get("source") or "").strip().lower()
+        return source not in _NON_PERSISTENT_SOURCES
+
+    # -- Event 3 / Event 4: Snapshot & Structure/Leg Upsert ------------------
+
+    def save(self, payload: Dict[str, Any]) -> bool:
+        """Persist runner configs, open/closed option books, and risk state."""
+        if self.db is None:
+            return False
+        self.ensure_schema()
+        from backtest.db.models import (
+            OptionOpenLegRecord,
+            OptionOpenStructureRecord,
+            RiskSessionStateRecord,
+            RunnerInstanceRecord,
+        )
+
+        now = now_utc()
+        all_snaps: List[Dict[str, Any]] = []
+        for snap in payload.get("runners", []) or []:
+            if isinstance(snap, dict) and self._eligible_runner_snap(snap):
+                all_snaps.append(snap)
+        for snap in (payload.get("parked_runners") or {}).values():
+            if isinstance(snap, dict) and self._eligible_runner_snap(snap):
+                all_snaps.append(snap)
+
+        seen_ids: set[str] = set()
+        with self.db.session() as session:
+            for snap in all_snaps:
+                cfg = dict(snap.get("config") or {})
+                iid = str(cfg.get("instance_id") or "").strip()
+                if not iid:
+                    continue
+                seen_ids.add(iid)
+                mode = str(cfg.get("mode") or "paper").strip().lower()
+                if mode not in ("paper", "live"):
+                    mode = "paper"
+                status = str(snap.get("status") or "PAUSED").strip().upper()
+                if status not in ("RUNNING", "PAUSED", "STOPPED", "RETIRED"):
+                    status = "PAUSED"
+                carry_policy = _extract_carry_policy(cfg)
+
+                row = session.get(RunnerInstanceRecord, iid)
+                if row is None:
+                    row = RunnerInstanceRecord(
+                        instance_id=iid,
+                        created_at=_restore_ts(snap.get("created_ts")) or now,
+                    )
+                    session.add(row)
+
+                row.name = str(cfg.get("name") or iid)[:128]
+                row.strategy_name = str(cfg.get("strategy_name") or "unknown")[:64]
+                row.mode = mode
+                row.source = str(cfg.get("source") or "mstock")[:32]
+                row.segment = (
+                    str(cfg.get("segment"))[:32] if cfg.get("segment") else None
+                )
+                row.execution_broker = (
+                    str(cfg.get("execution_broker"))[:32]
+                    if cfg.get("execution_broker")
+                    else None
+                )
+                row.status = status
+                row.allocated_capital = _dec_zero(cfg.get("allocated_capital"))
+                row.carry_policy = carry_policy
+                row.config_json = cfg
+                # Store full snapshot for lossless restore while authoritative
+                # option marks & risk latches live in relational tables below.
+                row.runtime_state_json = {
+                    k: v for k, v in snap.items() if k != "config"
+                }
+                last_prices = snap.get("last_price") or {}
+                if isinstance(last_prices, dict) and last_prices:
+                    first_px = next(iter(last_prices.values()), None)
+                    row.last_mark_price = _dec_or_none(first_px)
+                    row.last_mark_at = now
+                row.updated_at = now
+
+                self._upsert_option_book_from_snap(
+                    session,
+                    OptionOpenStructureRecord,
+                    OptionOpenLegRecord,
+                    iid=iid,
+                    mode=mode,
+                    carry_policy=carry_policy or "intraday",
+                    snap=snap,
+                    now=now,
+                )
+
+            # Retire any DB runner rows that were explicitly deleted in memory:
+            existing_active = (
+                session.query(RunnerInstanceRecord)
+                .filter(RunnerInstanceRecord.status != "RETIRED")
+                .all()
+            )
+            for db_row in existing_active:
+                if db_row.instance_id not in seen_ids:
+                    if not self.allow_synthetic and db_row.source in _NON_PERSISTENT_SOURCES:
+                        continue
+                    db_row.status = "RETIRED"
+                    db_row.updated_at = now
+
+            # Persist today's cash-flow-neutral risk slices:
+            mgr_meta = payload.get("manager") or {}
+            sess_iso = str(
+                mgr_meta.get("session_date_ist")
+                or current_session_date().isoformat()
+            )
+            sess_date = date.fromisoformat(sess_iso)
+            self._upsert_risk_slice(
+                session,
+                RiskSessionStateRecord,
+                sess_date=sess_date,
+                slice_key="global",
+                peak_daily_pnl=_dec_zero(
+                    mgr_meta.get(
+                        "session_peak_daily_pnl", mgr_meta.get("peak_daily_pnl")
+                    )
+                ),
+                current_daily_pnl=_dec_zero(mgr_meta.get("current_daily_pnl")),
+                deployed_capital=_dec_zero(mgr_meta.get("total_capital")),
+                halted=bool(mgr_meta.get("halted", False)),
+                halt_reason=mgr_meta.get("halt_reason"),
+                now=now,
+            )
+            buckets = payload.get("buckets") or {}
+            for slice_key, bdata in buckets.items():
+                if not isinstance(bdata, dict):
+                    continue
+                self._upsert_risk_slice(
+                    session,
+                    RiskSessionStateRecord,
+                    sess_date=sess_date,
+                    slice_key=str(slice_key)[:64],
+                    peak_daily_pnl=_dec_zero(
+                        bdata.get(
+                            "session_peak_daily_pnl", bdata.get("peak_daily_pnl")
+                        )
+                    ),
+                    current_daily_pnl=_dec_zero(bdata.get("current_daily_pnl")),
+                    deployed_capital=_dec_zero(bdata.get("deployed_capital")),
+                    halted=bool(bdata.get("halted", False)),
+                    halt_reason=bdata.get("halt_reason"),
+                    now=now,
+                )
+        return True
+
+    def _upsert_option_book_from_snap(
+        self,
+        session: Any,
+        StructRow: Any,
+        LegRow: Any,
+        *,
+        iid: str,
+        mode: str,
+        carry_policy: str,
+        snap: Dict[str, Any],
+        now: datetime,
+    ) -> None:
+        bridge = snap.get("bridge")
+        if not isinstance(bridge, dict):
+            return
+        book = bridge.get("broker") or {}
+        manual = snap.get("bridge_manual_rules") or {}
+        open_sid = (bridge.get("scalars") or {}).get("open_structure_id")
+        for s_raw in book.get("structures") or []:
+            if not isinstance(s_raw, dict) or not s_raw.get("structure_id"):
+                continue
+            sid = str(s_raw["structure_id"])[:64]
+            legs_raw = [x for x in (s_raw.get("legs") or []) if isinstance(x, dict)]
+            closed_at = _restore_ts(s_raw.get("closed_at"))
+            opened_at = _restore_ts(s_raw.get("opened_at")) or now
+            status = "closed" if closed_at is not None else "open"
+            expiry_d = (
+                date.fromisoformat(s_raw["expiry"])
+                if s_raw.get("expiry")
+                else opened_at.date()
+            )
+            entry_sess = (
+                date.fromisoformat(s_raw["entry_session_date"])
+                if s_raw.get("entry_session_date")
+                else opened_at.date()
+            )
+            close_sess = (
+                date.fromisoformat(s_raw["session_date"])
+                if s_raw.get("session_date")
+                else None
+            )
+            entry_cost = Decimal("0")
+            comm_total = Decimal("0")
+            for leg in legs_raw:
+                qty_units = Decimal(
+                    str(int(leg.get("quantity", 0) or 0) * int(leg.get("lot_size", 0) or 0))
+                )
+                sign = (
+                    Decimal("1")
+                    if str(leg.get("side", "BUY")).upper() == "BUY"
+                    else Decimal("-1")
+                )
+                entry_cost += _dec_zero(leg.get("entry_price")) * qty_units * sign
+                comm_total += _dec_zero(leg.get("commission"))
+
+            s_row = session.get(StructRow, sid)
+            if s_row is None:
+                s_row = StructRow(structure_id=sid, opened_at=opened_at)
+                session.add(s_row)
+            s_row.instance_id = iid
+            s_row.mode = mode
+            s_row.strategy_name = str(s_raw.get("strategy_name") or "unknown")[:64]
+            s_row.structure_type = str(s_raw.get("structure_type") or "option")[:64]
+            s_row.underlying = str(s_raw.get("underlying") or "NIFTY")[:32]
+            s_row.expiry = expiry_d
+            s_row.carry_policy = carry_policy
+            s_row.status = status
+            s_row.entry_session_date = entry_sess
+            s_row.session_date = close_sess
+            s_row.entry_net_cost = entry_cost.quantize(Decimal("0.0001"))
+            s_row.commission_total = comm_total.quantize(Decimal("0.0001"))
+            s_row.statutory_fees = _dec_zero(s_raw.get("statutory_fees"))
+            s_row.last_mark_net_pnl = _dec_zero(s_raw.get("last_mark_net_pnl"))
+            s_row.prior_close_net_pnl = _dec_zero(s_raw.get("prior_close_net_pnl"))
+            net_prev = _net_structure_mark(legs_raw, "prev_close_mark")
+            if net_prev is not None:
+                s_row.prev_close_mark = net_prev
+            if sid == open_sid and isinstance(manual, dict):
+                s_row.stop_loss = _dec_or_none(manual.get("stop_loss"))
+                s_row.target = _dec_or_none(manual.get("target"))
+            s_row.opened_at = opened_at
+            s_row.closed_at = closed_at
+            s_row.last_mark_at = now
+            s_row.exit_reason = (
+                str(s_raw.get("exit_reason"))[:64] if s_raw.get("exit_reason") else None
+            )
+            session.flush()
+
+            for leg in legs_raw:
+                pid = str(leg.get("position_id") or "").strip()[:64]
+                if not pid:
+                    continue
+                l_row = session.get(LegRow, pid)
+                leg_opened = _restore_ts(leg.get("opened_at")) or opened_at
+                leg_closed = _restore_ts(leg.get("closed_at"))
+                leg_updated = _restore_ts(leg.get("last_updated")) or now
+                if l_row is None:
+                    l_row = LegRow(
+                        position_id=pid,
+                        structure_id=sid,
+                        opened_at=leg_opened,
+                    )
+                    session.add(l_row)
+                l_row.structure_id = sid
+                l_row.instance_id = iid
+                l_row.instrument_type = "OPT"
+                l_row.instrument_token = (
+                    str(leg.get("instrument_token"))[:64]
+                    if leg.get("instrument_token")
+                    else None
+                )
+                l_row.trading_symbol = str(
+                    leg.get("trading_symbol") or f"{s_row.underlying}_{leg.get('strike')}"
+                )[:64]
+                l_row.underlying = str(leg.get("underlying") or s_row.underlying)[:32]
+                opt_t = str(leg.get("option_type") or "CE").upper()
+                l_row.option_type = opt_t if opt_t in ("CE", "PE") else "CE"
+                l_row.strike = _dec_zero(leg.get("strike"))
+                l_row.expiry = (
+                    date.fromisoformat(leg["expiry"]) if leg.get("expiry") else expiry_d
+                )
+                side_s = str(leg.get("side") or "BUY").upper()
+                l_row.side = side_s if side_s in ("BUY", "SELL") else "BUY"
+                l_row.quantity = int(leg.get("quantity", 0) or 0)
+                l_row.lot_size = int(leg.get("lot_size", 25) or 25)
+                l_row.entry_price = _dec_zero(leg.get("entry_price"))
+                l_row.last_mark_price = _dec_or_none(leg.get("current_price"))
+                prev_m = _dec_or_none(leg.get("prev_close_mark"))
+                if prev_m is not None:
+                    l_row.prev_close_mark = prev_m
+                l_row.unrealized_pnl = _dec_zero(leg.get("unrealized_pnl"))
+                l_row.realized_pnl = _dec_zero(leg.get("realized_pnl"))
+                l_row.commission = _dec_zero(leg.get("commission"))
+                l_status = str(leg.get("status") or status).lower()
+                l_row.status = "closed" if l_status == "closed" else "open"
+                l_row.opened_at = leg_opened
+                l_row.closed_at = leg_closed
+                l_row.last_updated = leg_updated
+
+    @staticmethod
+    def _upsert_risk_slice(
+        session: Any,
+        RiskRow: Any,
+        *,
+        sess_date: date,
+        slice_key: str,
+        peak_daily_pnl: Decimal,
+        current_daily_pnl: Decimal,
+        deployed_capital: Decimal,
+        halted: bool,
+        halt_reason: Optional[str],
+        now: datetime,
+    ) -> None:
+        r_row = session.get(RiskRow, (sess_date, slice_key))
+        if r_row is None:
+            r_row = RiskRow(session_date=sess_date, slice_key=slice_key)
+            session.add(r_row)
+        r_row.peak_daily_pnl = peak_daily_pnl
+        r_row.current_daily_pnl = current_daily_pnl
+        r_row.deployed_capital = deployed_capital
+        r_row.halted = bool(halted)
+        r_row.halt_reason = str(halt_reason) if halt_reason else None
+        r_row.updated_at = now
+
+    # -- Event 5: Risk Milestone Write ---------------------------------------
+
+    def save_risk_milestone(
+        self, session_date_iso: str, slices: Dict[str, Dict[str, Any]]
+    ) -> bool:
+        """Persist high-water mark or halt-latch milestone in one lightweight tx."""
+        if self.db is None or not slices:
+            return False
+        self.ensure_schema()
+        from backtest.db.models import RiskSessionStateRecord
+
+        now = now_utc()
+        sess_date = date.fromisoformat(session_date_iso)
+        with self.db.session() as session:
+            for slice_key, bdata in slices.items():
+                if not isinstance(bdata, dict):
+                    continue
+                self._upsert_risk_slice(
+                    session,
+                    RiskSessionStateRecord,
+                    sess_date=sess_date,
+                    slice_key=str(slice_key)[:64],
+                    peak_daily_pnl=_dec_zero(bdata.get("peak_daily_pnl")),
+                    current_daily_pnl=_dec_zero(bdata.get("current_daily_pnl")),
+                    deployed_capital=_dec_zero(bdata.get("deployed_capital")),
+                    halted=bool(bdata.get("halted", False)),
+                    halt_reason=bdata.get("halt_reason"),
+                    now=now,
+                )
+        return True
+
+    # -- Event 6: 60s Crash Checkpoint & 15:30 IST Official EOD Settlement ---
+
+    def flush_mark_checkpoint(
+        self, runners: Iterable[Any], *, settle_prev_close: bool = False
+    ) -> int:
+        """Batch-flush live marks (and at 15:30 IST stamp ``prev_close_mark``)."""
+        if self.db is None:
+            return 0
+        self.ensure_schema()
+        from backtest.db.models import (
+            OptionOpenLegRecord,
+            OptionOpenStructureRecord,
+            RunnerInstanceRecord,
+        )
+
+        now = now_utc()
+        today_iso = current_session_date().isoformat()
+        updated = 0
+        with self.db.session() as session:
+            for runner in runners:
+                source = str(getattr(runner.config, "source", "") or "").lower()
+                if not self.allow_synthetic and source in _NON_PERSISTENT_SOURCES:
+                    continue
+                r_row = session.get(RunnerInstanceRecord, runner.instance_id)
+                if r_row is not None and runner.last_price:
+                    first_px = next(iter(runner.last_price.values()), None)
+                    px_dec = _dec_or_none(first_px)
+                    if px_dec is not None:
+                        r_row.last_mark_price = px_dec
+                        r_row.last_mark_at = now
+                        if settle_prev_close:
+                            r_row.prev_close_mark = px_dec
+                        updated += 1
+
+                bridge = getattr(runner, "options_bridge", None)
+                if bridge is None:
+                    continue
+                for s in bridge.option_broker.get_open_structures():
+                    if settle_prev_close:
+                        net_open = (
+                            s.total_unrealized_pnl
+                            - s.total_commission
+                            - getattr(s, "statutory_fees", Decimal("0"))
+                        )
+                        s.prior_close_net_pnl = net_open
+                        s.last_mark_net_pnl = net_open
+                        s.last_mark_session = today_iso
+                        for leg in s.legs:
+                            leg.prev_close_mark = leg.current_price
+
+                    s_row = session.get(OptionOpenStructureRecord, s.structure_id)
+                    if s_row is not None:
+                        s_row.last_mark_net_pnl = getattr(
+                            s, "last_mark_net_pnl", Decimal("0")
+                        )
+                        s_row.prior_close_net_pnl = getattr(
+                            s, "prior_close_net_pnl", Decimal("0")
+                        )
+                        s_row.last_mark_at = now
+                        if settle_prev_close:
+                            legs_snap = [_opt_position_to_snapshot(lg) for lg in s.legs]
+                            s_row.prev_close_mark = _net_structure_mark(
+                                legs_snap, "prev_close_mark"
+                            )
+                        updated += 1
+                    for leg in s.legs:
+                        l_row = session.get(OptionOpenLegRecord, leg.position_id)
+                        if l_row is not None:
+                            l_row.last_mark_price = leg.current_price
+                            l_row.unrealized_pnl = leg.unrealized_pnl
+                            l_row.last_updated = now
+                            if settle_prev_close and leg.prev_close_mark is not None:
+                                l_row.prev_close_mark = leg.prev_close_mark
+                            updated += 1
+        return updated
+
+    # -- Event 1: Boot Hydration (READ once) ---------------------------------
+
+    def load(self) -> Optional[Dict[str, Any]]:
+        """Hydrate full PortfolioManager state payload from PostgreSQL."""
+        if self.db is None:
+            return None
+        self.ensure_schema()
+        from backtest.db.models import (
+            OptionOpenStructureRecord,
+            RiskSessionStateRecord,
+            RunnerInstanceRecord,
+        )
+
+        today_d = current_session_date()
+        with self.db.session() as session:
+            r_rows = (
+                session.query(RunnerInstanceRecord)
+                .filter(RunnerInstanceRecord.status != "RETIRED")
+                .order_by(RunnerInstanceRecord.created_at.asc())
+                .all()
+            )
+            if not r_rows:
+                risk_rows = (
+                    session.query(RiskSessionStateRecord)
+                    .filter(RiskSessionStateRecord.session_date == today_d)
+                    .all()
+                )
+                if not risk_rows:
+                    return None
+            else:
+                risk_rows = (
+                    session.query(RiskSessionStateRecord)
+                    .filter(RiskSessionStateRecord.session_date == today_d)
+                    .all()
+                )
+
+            runners_out: List[Dict[str, Any]] = []
+            for r_row in r_rows:
+                cfg = dict(r_row.config_json or {})
+                cfg["instance_id"] = r_row.instance_id
+                snap = dict(r_row.runtime_state_json or {})
+                snap["config"] = cfg
+                snap["status"] = r_row.status
+
+                # Overlay authoritative relational option structures & legs:
+                s_rows = (
+                    session.query(OptionOpenStructureRecord)
+                    .filter(
+                        OptionOpenStructureRecord.instance_id == r_row.instance_id
+                    )
+                    .all()
+                )
+                if s_rows and isinstance(snap.get("bridge"), dict):
+                    by_sid = {sr.structure_id: sr for sr in s_rows}
+                    broker_book = snap["bridge"].setdefault("broker", {})
+                    for s_dict in broker_book.get("structures") or []:
+                        sr = by_sid.get(s_dict.get("structure_id"))
+                        if sr is None:
+                            continue
+                        s_dict["last_mark_net_pnl"] = str(sr.last_mark_net_pnl)
+                        s_dict["prior_close_net_pnl"] = str(sr.prior_close_net_pnl)
+                        s_dict["statutory_fees"] = str(sr.statutory_fees)
+                        if sr.closed_at is not None:
+                            s_dict["closed_at"] = sr.closed_at.isoformat()
+                        if sr.exit_reason:
+                            s_dict["exit_reason"] = sr.exit_reason
+                        leg_by_id = {lr.position_id: lr for lr in sr.legs}
+                        for l_dict in s_dict.get("legs") or []:
+                            lr = leg_by_id.get(l_dict.get("position_id"))
+                            if lr is None:
+                                continue
+                            if lr.last_mark_price is not None:
+                                l_dict["current_price"] = str(lr.last_mark_price)
+                            if lr.prev_close_mark is not None:
+                                l_dict["prev_close_mark"] = str(lr.prev_close_mark)
+                            l_dict["unrealized_pnl"] = str(lr.unrealized_pnl)
+                            l_dict["realized_pnl"] = str(lr.realized_pnl)
+                            l_dict["status"] = lr.status
+                        if sr.status == "open" and (
+                            sr.stop_loss is not None or sr.target is not None
+                        ):
+                            snap["bridge_manual_rules"] = {
+                                "stop_loss": (
+                                    float(sr.stop_loss)
+                                    if sr.stop_loss is not None
+                                    else None
+                                ),
+                                "target": (
+                                    float(sr.target) if sr.target is not None else None
+                                ),
+                            }
+                runners_out.append(snap)
+
+            buckets_out: Dict[str, Any] = {}
+            latest_sess = today_d.isoformat()
+            mgr_out: Dict[str, Any] = {"session_date_ist": latest_sess}
+            for rr in risk_rows:
+                if rr.slice_key == "global":
+                    mgr_out.update(
+                        {
+                            "session_peak_daily_pnl": float(rr.peak_daily_pnl),
+                            "halted": bool(rr.halted),
+                            "halt_reason": rr.halt_reason,
+                        }
+                    )
+                    continue
+                buckets_out[rr.slice_key] = {
+                    "session_date_ist": latest_sess,
+                    "session_peak_daily_pnl": float(rr.peak_daily_pnl),
+                    "peak_daily_pnl": float(rr.peak_daily_pnl),
+                    "current_daily_pnl": float(rr.current_daily_pnl),
+                    "deployed_capital": float(rr.deployed_capital),
+                    "halted": bool(rr.halted),
+                    "halt_reason": rr.halt_reason,
+                }
+
+        return {
+            "schema": STATE_SCHEMA_VERSION,
+            "saved_at": _now_iso(),
+            "manager": mgr_out,
+            "buckets": buckets_out,
+            "runners": runners_out,
+        }
+
+
+def verify_state_parity(
+    json_payload: Optional[Dict[str, Any]],
+    pg_payload: Optional[Dict[str, Any]],
+    *,
+    allow_synthetic: bool = False,
+    tolerance_inr: float = 0.01,
+) -> Dict[str, Any]:
+    """Compare JSON vs. PostgreSQL snapshots (Phase D1-a / D1-b Parity Gate).
+
+    Checks runner count, open structure/leg IDs, ``prev_close_mark``, and risk
+    slice ``peak_daily_pnl`` / ``halted`` within ``tolerance_inr`` (₹0.01).
+    """
+    diffs: List[str] = []
+
+    def _eligible_runners(payload: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return {}
+        out: Dict[str, Dict[str, Any]] = {}
+        items = list(payload.get("runners") or []) + list(
+            (payload.get("parked_runners") or {}).values()
+        )
+        for snap in items:
+            if not isinstance(snap, dict):
+                continue
+            cfg = snap.get("config") or {}
+            src = str(cfg.get("source") or "").strip().lower()
+            if not allow_synthetic and src in _NON_PERSISTENT_SOURCES:
+                continue
+            iid = str(cfg.get("instance_id") or "").strip()
+            if iid:
+                out[iid] = snap
+        return out
+
+    j_runners = _eligible_runners(json_payload)
+    p_runners = _eligible_runners(pg_payload)
+
+    if set(j_runners.keys()) != set(p_runners.keys()):
+        diffs.append(
+            f"runner_ids json={sorted(j_runners.keys())} pg={sorted(p_runners.keys())}"
+        )
+
+    for iid in sorted(set(j_runners.keys()) & set(p_runners.keys())):
+        jb = ((j_runners[iid].get("bridge") or {}).get("broker") or {}).get(
+            "structures"
+        ) or []
+        pb = ((p_runners[iid].get("bridge") or {}).get("broker") or {}).get(
+            "structures"
+        ) or []
+        j_open = {
+            s["structure_id"]: s
+            for s in jb
+            if isinstance(s, dict) and not s.get("closed_at")
+        }
+        p_open = {
+            s["structure_id"]: s
+            for s in pb
+            if isinstance(s, dict) and not s.get("closed_at")
+        }
+        if set(j_open.keys()) != set(p_open.keys()):
+            diffs.append(
+                f"runner {iid[:8]} open_structures json={sorted(j_open)} pg={sorted(p_open)}"
+            )
+            continue
+        for sid in sorted(j_open.keys()):
+            j_legs = {lg["position_id"]: lg for lg in j_open[sid].get("legs") or []}
+            p_legs = {lg["position_id"]: lg for lg in p_open[sid].get("legs") or []}
+            if set(j_legs.keys()) != set(p_legs.keys()):
+                diffs.append(f"structure {sid} leg_ids mismatch")
+                continue
+            for pid in sorted(j_legs.keys()):
+                for field_name in ("entry_price", "current_price", "prev_close_mark"):
+                    jp = _dec_or_none(j_legs[pid].get(field_name))
+                    pp = _dec_or_none(p_legs[pid].get(field_name))
+                    if (jp is None) != (pp is None) or (
+                        jp is not None
+                        and pp is not None
+                        and abs(float(jp - pp)) > tolerance_inr
+                    ):
+                        diffs.append(
+                            f"leg {pid} {field_name} json={jp} pg={pp}"
+                        )
+
+    # Compare today's risk session state when both sides carry today's IST session:
+    today_iso = current_session_date().isoformat()
+    j_sess = ((json_payload or {}).get("manager") or {}).get("session_date_ist")
+    p_sess = ((pg_payload or {}).get("manager") or {}).get("session_date_ist")
+    if j_sess == today_iso and p_sess == today_iso and j_runners:
+        j_buckets = (json_payload or {}).get("buckets") or {}
+        p_buckets = (pg_payload or {}).get("buckets") or {}
+        for sk in ("paper", "live"):
+            if sk in j_buckets and sk in p_buckets:
+                jb_s = j_buckets[sk] or {}
+                pb_s = p_buckets[sk] or {}
+                j_peak = float(
+                    jb_s.get(
+                        "session_peak_daily_pnl", jb_s.get("peak_daily_pnl", 0.0)
+                    )
+                    or 0.0
+                )
+                p_peak = float(
+                    pb_s.get(
+                        "session_peak_daily_pnl", pb_s.get("peak_daily_pnl", 0.0)
+                    )
+                    or 0.0
+                )
+                if abs(j_peak - p_peak) > tolerance_inr:
+                    diffs.append(f"risk[{sk}].peak_daily_pnl json={j_peak} pg={p_peak}")
+                if bool(jb_s.get("halted", False)) != bool(pb_s.get("halted", False)):
+                    diffs.append(
+                        f"risk[{sk}].halted json={jb_s.get('halted')} pg={pb_s.get('halted')}"
+                    )
+
+    ok = len(diffs) == 0
+    status = "PARITY_OK" if ok else "PARITY_DIFF"
+    if ok:
+        logger.info("[state-parity] %s (runners=%d)", status, len(p_runners))
+    else:
+        logger.warning("[state-parity] %s: %s", status, "; ".join(diffs))
+    return {"ok": ok, "status": status, "diffs": diffs, "runner_count": len(p_runners)}

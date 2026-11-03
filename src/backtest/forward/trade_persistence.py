@@ -413,6 +413,18 @@ class LiveTradePersister:
         write_slice = getattr(portfolio, "save_ledger_slice_to_db", None)
         if write_slice is None:
             return 0
+        bridge = getattr(runner, "options_bridge", None)
+        has_eq_activity = bool(
+            getattr(portfolio, "positions", None)
+            or getattr(portfolio, "closed_positions", None)
+            or getattr(portfolio, "filled_orders", None)
+        )
+        has_opt_activity = bool(
+            bridge is not None
+            and getattr(bridge.option_broker, "_structures", None)
+        )
+        if not has_eq_activity and not has_opt_activity:
+            return 0
 
         portfolio_id = self._ensure_portfolio_row(runner)
         if portfolio.portfolio_id != portfolio_id:
@@ -423,7 +435,87 @@ class LiveTradePersister:
             portfolio.portfolio_id = portfolio_id
 
         written = self._ledger_keys.setdefault(runner.instance_id, set())
-        return write_slice(self.db, written)
+        rows = write_slice(self.db, written)
+        rows += self._mirror_option_book_slice(runner, portfolio_id, written)
+        return rows
+
+    def _mirror_option_book_slice(
+        self, runner: Any, portfolio_id: str, written: set[str]
+    ) -> int:
+        """Event 3: sync changed option structures & legs to relational SQL (Ticket D1).
+
+        Checks an in-memory state fingerprint first so non-trading sweeps issue
+        0 SQL queries; writes only when a structure opens, closes, or changes
+        manual SL/TP protection.
+        """
+        bridge = getattr(runner, "options_bridge", None)
+        if bridge is None:
+            return 0
+        structures = list(getattr(bridge.option_broker, "_structures", {}).values())
+        if not structures:
+            return 0
+        manual = bridge.manual_rules() if hasattr(bridge, "manual_rules") else {}
+        changed = []
+        keys_to_mark: list[str] = []
+        for s in structures:
+            status = "closed" if getattr(s, "closed_at", None) is not None else "open"
+            key = (
+                f"opt_struct:{s.structure_id}:{status}:{len(s.legs)}:"
+                f"{manual.get('stop_loss')}:{manual.get('target')}"
+                if status == "open"
+                else f"opt_struct:{s.structure_id}:closed"
+            )
+            if key in written:
+                continue
+            changed.append(s)
+            keys_to_mark.append(key)
+        if not changed:
+            return 0
+
+        from backtest.db.models import (
+            OptionOpenLegRecord,
+            OptionOpenStructureRecord,
+            ensure_forward_ssot_schema,
+        )
+        from backtest.forward.state_store import (
+            PostgresStateStore,
+            _extract_carry_policy,
+            _structure_to_snapshot,
+            config_to_dict,
+        )
+
+        ensure_forward_ssot_schema(self.db)
+        cfg_dict = config_to_dict(runner.config)
+        mode = _resolve_runner_mode(runner.config)
+        carry_policy = _extract_carry_policy(cfg_dict) or "intraday"
+        snap = {
+            "bridge": {
+                "scalars": {"open_structure_id": bridge.open_structure_id},
+                "broker": {
+                    "structures": [_structure_to_snapshot(s) for s in changed]
+                },
+            },
+            "bridge_manual_rules": manual,
+        }
+        helper = PostgresStateStore(self.db, allow_synthetic=True)
+        now = now_utc()
+        with self.db.session() as session:
+            helper._upsert_option_book_from_snap(
+                session,
+                OptionOpenStructureRecord,
+                OptionOpenLegRecord,
+                iid=runner.instance_id,
+                mode=mode,
+                carry_policy=carry_policy,
+                snap=snap,
+                now=now,
+            )
+            for s in changed:
+                sr = session.get(OptionOpenStructureRecord, s.structure_id)
+                if sr is not None and portfolio_id:
+                    sr.portfolio_id = portfolio_id
+        written.update(keys_to_mark)
+        return len(changed)
 
     def _ensure_portfolio_row(self, runner: Any) -> str:
         """One `portfolios` row per runner instance (created once, cached)."""
