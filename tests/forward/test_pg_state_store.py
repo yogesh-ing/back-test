@@ -232,7 +232,8 @@ def test_dual_write_parity_and_postgres_primary_cold_restore(
     )
     restored = mgr2.get_runner("runnerd1opt001")
     assert restored is not None
-    assert restored.status == "PAUSED"
+    # Ticket A3: runner carries an open option structure -> wakes directly into RUNNING!
+    assert restored.status == "RUNNING"
     open_structs = restored.options_bridge.option_broker.get_open_structures()
     assert len(open_structs) == 1
     r_leg = open_structs[0].legs[0]

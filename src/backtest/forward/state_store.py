@@ -468,6 +468,10 @@ def capture_runner(runner: Any) -> Dict[str, Any]:
             key: dict(levels)
             for key, levels in (getattr(runner, "position_rules", {}) or {}).items()
         },
+        "pause_reason": getattr(runner, "pause_reason", None),
+        "code_updated_while_in_trade": bool(
+            getattr(runner, "code_updated_while_in_trade", False)
+        ),
     }
     bridge = getattr(runner, "options_bridge", None)
     if bridge is not None:
@@ -570,12 +574,16 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
     if gateway_state and callable(restore_gateway):
         restore_gateway(gateway_state)
 
-    # Phase 1 (Plan §8): a spawn snapshot freezes configuration, not code.
-    # If the strategy bundle (strategy file + template chain) changed while
-    # we were down, the runner must not trade new code under old paperwork:
-    # it comes back PAUSED with STRATEGY_CODE_CHANGED until an operator
-    # resumes it (resume() restamps the bundle — a conscious migration).
+    # Phase 1 (Plan §8) + Sprint A-2 / Ticket A3 (Open-Trade Continuity):
+    # A spawn snapshot freezes configuration, not code. Flat runners come back
+    # PAUSED (RESTART_FLAT_SAFETY or STRATEGY_CODE_CHANGED). However, an
+    # open-exposure container ("Never abandon a live trade") wakes directly
+    # into STATUS_RUNNING unless risk/execution halted — even if strategy code
+    # changed on disk (flagging CODE_UPDATED_WHILE_IN_TRADE to block new
+    # entries after the open position closes).
     runner.strategy_code_changed = False
+    runner.code_updated_while_in_trade = False
+    runner.pause_reason = snapshot.get("pause_reason")
     _bundle = getattr(runner.config, "strategy_bundle", None)
     if isinstance(_bundle, dict) and _bundle.get("bundle_files"):
         try:
@@ -594,16 +602,52 @@ def restore_runner(runner: Any, snapshot: Dict[str, Any]) -> None:
             runner.strategy_code_changed = False
 
     saved_status = snapshot.get("status", STATUS_STOPPED)
-    if runner.strategy_code_changed:
-        runner.status = STATUS_PAUSED
-    elif saved_status == STATUS_RUNNING:
-        runner.status = STATUS_PAUSED
-    else:
-        runner.status = (
-            saved_status
-            if saved_status in (STATUS_PAUSED, STATUS_STOPPED)
-            else STATUS_STOPPED
+    has_exposure = bool(getattr(runner, "has_open_exposure", lambda: False)())
+    err_text = str(snapshot.get("error") or "")
+    risk_or_exec_halted = bool(err_text) and any(
+        tok in err_text
+        for tok in (
+            "LIVE_EXECUTION_HALTED",
+            "daily loss",
+            "max drawdown",
+            "RISK_HALT",
+            "BLOCKED_BY_RISK",
+            "circuit breaker",
         )
+    )
+
+    if saved_status == STATUS_STOPPED:
+        runner.status = STATUS_STOPPED
+        runner.pause_reason = None
+    elif saved_status == STATUS_PAUSED or risk_or_exec_halted:
+        runner.status = STATUS_PAUSED
+        if not runner.pause_reason:
+            runner.pause_reason = (
+                "BLOCKED_BY_RISK" if risk_or_exec_halted else "OPERATOR_PAUSED"
+            )
+    elif saved_status == STATUS_RUNNING:
+        if has_exposure:
+            runner.status = STATUS_RUNNING
+            runner.pause_reason = None
+            if runner.strategy_code_changed:
+                runner.code_updated_while_in_trade = True
+                runner.error = (
+                    "CODE_UPDATED_WHILE_IN_TRADE: open position stays protected; "
+                    "new entries blocked after exit until resume/respawn"
+                )
+            arm_fn = getattr(runner, "arm_entries", None)
+            if callable(arm_fn):
+                arm_fn()
+        else:
+            runner.status = STATUS_PAUSED
+            runner.pause_reason = (
+                "STRATEGY_CODE_CHANGED"
+                if runner.strategy_code_changed
+                else "RESTART_FLAT_SAFETY"
+            )
+    else:
+        runner.status = STATUS_STOPPED
+        runner.pause_reason = None
     if runner.options_bridge is not None:
         runner.options_bridge.runner_running = runner.status == STATUS_RUNNING
         runner.options_bridge.runner_id = runner.instance_id

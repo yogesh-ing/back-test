@@ -1689,6 +1689,32 @@ class OptionsBridge:
         close_ts = ts_override if ts_override is not None else self._bar_ts(self._bar_dt)
         return self._exit_structure(decision, close_ts, strategy_name="", queue=True)
 
+    def evaluate_post_wake_exits(
+        self,
+        *,
+        strategy_name: str = "",
+        ts: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Sprint A-2 / Ticket A3: evaluate SL / Target / Expiry / Squareoff immediately after wake.
+
+        Called right after ``repair_marks(force=True)`` refreshes live leg quotes
+        on broker authentication so a morning gap past SL/Target/Expiry exits
+        within < 1s of login without waiting up to 60s for the next bar close.
+        """
+        if not self._has_open_structure() or not self.runner_running:
+            return None
+        close_ts = ts or now_utc().isoformat()
+        self._touch_market_clock(close_ts)
+        manual_evt = self._maybe_manual_exit(ts_override=close_ts)
+        if manual_evt is not None:
+            return manual_evt
+        decision = self._evaluate_exit(view=None)
+        if decision is not None and decision.reason in RISK_REASONS:
+            return self._exit_structure(
+                decision, close_ts, strategy_name=strategy_name, queue=True
+            )
+        return self._maybe_intraday_squareoff(close_ts, ts_override=close_ts)
+
     @property
     def carries_intraday(self) -> bool:
         """True when this book must be flat before the close (BUG-39)."""

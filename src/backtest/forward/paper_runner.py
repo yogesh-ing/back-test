@@ -1713,6 +1713,21 @@ class StrategyRunner:
         self.retries_recovered: int = 0
         self.retries_exhausted: int = 0
 
+        # -- Sprint A-2 / Ticket A3: Open-Trade Continuity & Entry Arming ----
+        #: Aware UTC horizon stamped on start/resume/live-feed attach for live
+        #: broker sources; bars/ticks closing strictly before ``armed_at_utc``
+        #: update lookback indicators and MTM only (never trigger new entries).
+        self.armed_at_utc: Optional[datetime] = None
+        self._armed_explicit: bool = False
+        #: Machine-readable reason when ``status == STATUS_PAUSED`` (e.g.
+        #: ``RESTART_FLAT_SAFETY``, ``OPERATOR_PAUSED``, ``BLOCKED_BY_RISK``,
+        #: ``CODE_UPDATED_WHILE_IN_TRADE``).
+        self.pause_reason: Optional[str] = None
+        #: True when strategy bundle code changed on disk while this runner
+        #: held open exposure across a restart: open risk stays protected in
+        #: ``STATUS_RUNNING`` and new entries are blocked once flat.
+        self.code_updated_while_in_trade: bool = False
+
         self._lock = threading.RLock()
         self.ledger.register_handler(self.instance_id, self.on_fill)
         self.ledger.register_runner(self.instance_id, self)
@@ -2179,6 +2194,7 @@ class StrategyRunner:
         self._chain_source = src
         self._chain_released = False  # we now hold the live entry; stop() releases it
         self.feed_state = FEED_STATE_LIVE
+        self.arm_entries()
         logger.info(
             "Runner %s (%s) upgraded %s→live chain (%s) on %s",
             self.instance_id[:8],
@@ -2187,6 +2203,146 @@ class StrategyRunner:
             label,
             self._chain_underlying,
         )
+
+    def has_open_exposure(self) -> bool:
+        """True when this runner holds open equity/option risk or working orders (Ticket A3)."""
+        if len(self.positions) > 0:
+            return True
+        if self.options_bridge is not None:
+            try:
+                if len(self.options_bridge.option_broker.get_open_structures()) > 0:
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+        if self.ledger is not None:
+            try:
+                orders_map = getattr(self.ledger, "_orders", None) or {}
+                for order in list(orders_map.values()):
+                    if (
+                        getattr(order, "instance_id", None) == self.instance_id
+                        and getattr(order, "status", None) == ORDER_PENDING
+                    ):
+                        return True
+            except Exception:  # noqa: BLE001
+                pass
+        snap_gw = getattr(self.broker, "snapshot_state", None)
+        if callable(snap_gw):
+            try:
+                gw_state = snap_gw() or {}
+                for item in gw_state.get("working") or []:
+                    if item.get("instance_id") == self.instance_id:
+                        return True
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+    def arm_entries(self, at_utc: Optional[datetime] = None) -> Optional[datetime]:
+        """Stamp ``armed_at_utc`` so pre-arm catch-up bars cannot trigger stale entries (Ticket A3).
+
+        When ``at_utc`` is passed explicitly (tests / deterministic clocks), it is
+        always applied across all dates. When omitted, auto-stamps ``now_utc()``
+        for live broker feeds (``mstock`` / ``dhan`` / ``upstox``) once live,
+        gating earlier bars/ticks from the same IST trading session.
+        """
+        if at_utc is not None:
+            self.armed_at_utc = from_stored_utc(at_utc)
+            self._armed_explicit = True
+            return self.armed_at_utc
+        src = str(self.config.source or "").strip().lower()
+        if src in ("mstock", "dhan", "upstox"):
+            if self.options_bridge is None or self.feed_state == FEED_STATE_LIVE:
+                self.armed_at_utc = now_utc()
+                self._armed_explicit = False
+        return self.armed_at_utc
+
+    def _within_armed_scope(self, event_utc: datetime) -> bool:
+        """True when ``armed_at_utc`` applies to ``event_utc``."""
+        if self.armed_at_utc is None:
+            return False
+        if self._armed_explicit:
+            return True
+        from backtest.timekeeping import to_exchange
+
+        return to_exchange(event_utc).date() == to_exchange(self.armed_at_utc).date()
+
+    def _is_entry_bar_stale(self, bar_ts: Any) -> bool:
+        """True when a bar closed strictly before ``self.armed_at_utc`` (Ticket A3)."""
+        if self.armed_at_utc is None or not bar_ts:
+            return False
+        try:
+            bar_open_utc = from_market_clock(bar_ts)
+            mins = float(TIMEFRAME_MINUTES.get(self.config.timeframe, 1) or 1)
+            bar_close_utc = bar_open_utc + timedelta(seconds=60.0 * mins)
+            if not self._within_armed_scope(bar_close_utc):
+                return False
+            return bar_close_utc < self.armed_at_utc
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _is_entry_tick_stale(self, tick_ts: Any) -> bool:
+        """True when a tick timestamp precedes ``self.armed_at_utc`` (Ticket A3)."""
+        if self.armed_at_utc is None or not tick_ts:
+            return False
+        try:
+            tick_utc = from_market_clock(tick_ts)
+            if not self._within_armed_scope(tick_utc):
+                return False
+            return tick_utc < self.armed_at_utc
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _maybe_pause_after_code_updated_exit(self) -> None:
+        """Once an open trade held across a code update exits, pause before new entries."""
+        if self.code_updated_while_in_trade and not self.has_open_exposure():
+            self.status = STATUS_PAUSED
+            self.pause_reason = "CODE_UPDATED_WHILE_IN_TRADE"
+            self._sync_bridge_runner_state()
+            logger.info(
+                "Runner %s (%s) closed open exposure under CODE_UPDATED_WHILE_IN_TRADE "
+                "— paused for conscious resume/respawn",
+                self.instance_id[:8],
+                self.config.name,
+            )
+
+    def evaluate_open_exposure_protection(
+        self, now_ts: Optional[str] = None
+    ) -> int:
+        """Immediately check SL / Target / Expiry / Squareoff on open exposure after wake."""
+        exits = 0
+        with self._lock:
+            if self.status != STATUS_RUNNING or not self.has_open_exposure():
+                return 0
+            self._sync_bridge_runner_state()
+            bridge = self.options_bridge
+            if bridge is not None and bridge._has_open_structure():
+                sym = self.config.symbols[0] if self.config.symbols else bridge.underlying
+                evt = bridge.evaluate_post_wake_exits(
+                    strategy_name=self.config.strategy_name,
+                    ts=now_ts,
+                )
+                if evt is not None:
+                    self.last_option_pnl = float(bridge.unrealized_pnl)
+                    spot = float(
+                        self.last_price.get(sym) or bridge.last_spot or 0.0
+                    )
+                    while True:
+                        popped = bridge.pop_exit_event()
+                        if popped is None:
+                            break
+                        exits += 1
+                        self._log_option_exit(sym, popped, spot)
+            for sym in list(self.positions.keys()):
+                px = self.last_price.get(sym)
+                if px is not None and px > 0:
+                    before = sym in self.positions
+                    self._check_position_rules(sym, float(px))
+                    if before and sym not in self.positions:
+                        exits += 1
+            if exits > 0:
+                self._mark_to_market(record=True)
+            self._check_instance_risk()
+            self._maybe_pause_after_code_updated_exit()
+        return exits
 
     def _sync_bridge_runner_state(self) -> None:
         bridge = self.options_bridge
@@ -2204,11 +2360,16 @@ class StrategyRunner:
                 logger.warning("Runner %s already stopped; start() ignored", self.instance_id)
                 return
             self.status = STATUS_RUNNING
+            self.pause_reason = None
             self.error = None
             self._sync_bridge_runner_state()
             # U6.2: re-acquire the chain subscription if this runner was
             # previously stopped (stop released it); start is idempotent.
-            if self.options_bridge is not None and self._chain_released:
+            if (
+                self.options_bridge is not None
+                and self._chain_released
+                and self._chain_source != "disconnected"
+            ):
                 try:
                     from backtest.forward.feed_registry import get_chain_bus
                     get_chain_bus().acquire(
@@ -2220,6 +2381,7 @@ class StrategyRunner:
             # Bug #2: a runner built while the broker was logged out is stuck on
             # the synthetic chain — try to upgrade it now that we're (re)starting.
             self._maybe_upgrade_to_live_chain()
+            self.arm_entries()
             logger.info(
                 "Runner %s (%s) started: %s on %s",
                 self.instance_id[:8],
@@ -2228,16 +2390,19 @@ class StrategyRunner:
                 self.target_label,
             )
 
-    def pause(self) -> None:
+    def pause(self, reason: str = "OPERATOR_PAUSED") -> None:
         with self._lock:
             if self.status == STATUS_RUNNING:
                 self.status = STATUS_PAUSED
+                self.pause_reason = reason
                 self._sync_bridge_runner_state()
-                logger.info("Runner %s paused", self.instance_id[:8])
+                logger.info("Runner %s paused (%s)", self.instance_id[:8], reason)
 
     def resume(self) -> None:
         with self._lock:
-            if getattr(self, "strategy_code_changed", False):
+            if getattr(self, "strategy_code_changed", False) or getattr(
+                self, "code_updated_while_in_trade", False
+            ):
                 # Plan §8: resuming after STRATEGY_CODE_CHANGED is the
                 # operator's explicit migration to the new code — restamp
                 # the bundle so the snapshot tells the truth from here.
@@ -2258,13 +2423,18 @@ class StrategyRunner:
                 except Exception:  # noqa: BLE001 — never block a resume on stamping
                     pass
                 self.strategy_code_changed = False
+                self.code_updated_while_in_trade = False
+                if self.error and "CODE_UPDATED_WHILE_IN_TRADE" in str(self.error):
+                    self.error = None
             if self.status == STATUS_PAUSED:
                 # Bug #2: restored runners come back PAUSED on whatever chain
                 # they resolved at construction. If the broker is authenticated
                 # now, upgrade synthetic→live before we start pricing again.
                 self._maybe_upgrade_to_live_chain()
                 self.status = STATUS_RUNNING
+                self.pause_reason = None
                 self.error = None
+                self.arm_entries()
                 self._sync_bridge_runner_state()
                 logger.info("Runner %s resumed", self.instance_id[:8])
 
@@ -3257,6 +3427,37 @@ class StrategyRunner:
                 symbol, "ERROR", None, self.last_price.get(symbol), f"view error: {exc}"
             )
             return
+        if not self.options_bridge._has_open_structure():
+            if self.status != STATUS_RUNNING:
+                if view is not None:
+                    self._log_signal(
+                        symbol,
+                        "OPTION_BLOCKED",
+                        None,
+                        bar["close"],
+                        f"entry blocked while {self.status}",
+                    )
+                return
+            if self.code_updated_while_in_trade:
+                self._maybe_pause_after_code_updated_exit()
+                if view is not None:
+                    self._log_signal(
+                        symbol,
+                        "OPTION_BLOCKED",
+                        None,
+                        bar["close"],
+                        "CODE_UPDATED_WHILE_IN_TRADE: new entry blocked until resume/respawn",
+                    )
+                return
+            if view is not None and self._is_entry_bar_stale(bar.get("ts")):
+                self._log_signal(
+                    symbol,
+                    "OPTION_BLOCKED",
+                    None,
+                    bar["close"],
+                    "ENTRY_STALE_BAR_SKIPPED: bar closed before armed_at_utc",
+                )
+                return
         if (
             view is not None
             and self.options_bridge.mark_stale
@@ -3334,6 +3535,7 @@ class StrategyRunner:
             return
         if result.get("exited"):
             self._log_option_exit(symbol, result, bar["close"])
+            self._maybe_pause_after_code_updated_exit()
             return
         if result.get("rejected"):
             # BUG-15: a same-code repeat on the same contract is throttled by
@@ -3383,6 +3585,11 @@ class StrategyRunner:
             return None
         try:
             if self.options_bridge._has_open_structure():
+                return None
+            if self.code_updated_while_in_trade:
+                self._maybe_pause_after_code_updated_exit()
+                return None
+            if self._is_entry_tick_stale(ts):
                 return None
             if self.options_bridge.mark_stale or self._entries_paused_by_strategy():
                 return None
@@ -3496,6 +3703,7 @@ class StrategyRunner:
             self._log_signal(
                 symbol, "OPTION_MTM", None, price, f"option MTM {float(pnl):+,.0f}"
             )
+        self._maybe_pause_after_code_updated_exit()
 
     def _tick_option_book(
         self, symbol: str, price: Optional[float], ts: Optional[str]
@@ -3521,6 +3729,8 @@ class StrategyRunner:
                 break
             exited = True
             self._log_option_exit(symbol, event, spot_for_log)
+        if exited:
+            self._maybe_pause_after_code_updated_exit()
         return exited
 
     def _record_watch_point(self, ts: Optional[str], spot: float, option_pnl: float) -> None:
@@ -3722,6 +3932,25 @@ class StrategyRunner:
         if signal == 1 and not held:
             if self.status != STATUS_RUNNING:
                 self._log_signal(symbol, "BLOCKED", 1, price, f"entry blocked while {self.status}")
+                return
+            if self.code_updated_while_in_trade:
+                self._maybe_pause_after_code_updated_exit()
+                self._log_signal(
+                    symbol,
+                    "BLOCKED",
+                    1,
+                    price,
+                    "CODE_UPDATED_WHILE_IN_TRADE: new entry blocked until resume/respawn",
+                )
+                return
+            if self._is_entry_bar_stale(ts):
+                self._log_signal(
+                    symbol,
+                    "BLOCKED",
+                    1,
+                    price,
+                    "ENTRY_STALE_BAR_SKIPPED: bar closed before armed_at_utc",
+                )
                 return
             if self._entries_paused_by_strategy():
                 # Portfolio Intelligence: the *strategy* chose to pause entries
@@ -4081,6 +4310,7 @@ class StrategyRunner:
         self._log_signal(
             symbol, "EXIT", 0, fill.price, f"{reason} → SELL {pos['qty']:g} @ {fill.price:.2f}"
         )
+        self._maybe_pause_after_code_updated_exit()
         # A level belongs to the position it was set on: once the book is flat
         # there is nothing left to protect, and carrying the level into the
         # NEXT trade would arm a stop nobody asked for.
@@ -4703,6 +4933,16 @@ class StrategyRunner:
                 "strategy_code_changed": bool(
                     getattr(self, "strategy_code_changed", False)
                 ),
+                "code_updated_while_in_trade": bool(
+                    getattr(self, "code_updated_while_in_trade", False)
+                ),
+                "has_open_exposure": self.has_open_exposure(),
+                "armed_at_utc": (
+                    iso_utc(self.armed_at_utc)
+                    if self.armed_at_utc is not None
+                    else None
+                ),
+                "pause_reason": self.pause_reason,
                 "config_drift": drift["config_drift"],
                 "config_drift_reasons": drift["config_drift_reasons"],
                 "can_respawn": open_total == 0,

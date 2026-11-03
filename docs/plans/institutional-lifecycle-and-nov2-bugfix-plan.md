@@ -14,7 +14,7 @@
 | **A1** — `WAITING_FOR_FEED` + frozen-mark stub | `Sprint A-1` | ✅ **LIVE (`89962d1`)** | `cb91d41` / `b2b76a4` — Verified on-wire `2026-11-03 09:17 IST`: `restored 16 of 16 runner(s) (0 parked)`. |
 | **A2** — `on_broker_authenticated` auto-wake | `Sprint A-1` | ✅ **LIVE (`89962d1`)** | `9e5b000` / `b2b76a4` — Verified live with remembered mStock session (`depth=True` streaming). |
 | **A4** — market-hours paging + login banner | `Sprint A-1` | ✅ **LIVE (`89962d1`)** | `74cb76b` / `b2b76a4` |
-| **A3** — open-trade continuity + `armed_at_utc` | `Sprint A-2` | ⏳ **LIVE BURN-IN IN PROGRESS** | `Sprint A-1 + B + C` live session underway (`2026-11-03 09:17–15:30 IST`). Unblocks after today's `15:30 IST` close completes clean (§3 sequencing rule; ships standalone for 1-commit rollback). |
+| **A3** — open-trade continuity + `armed_at_utc` | `Sprint A-2` | ✅ **DONE** | Standalone 1-commit `Sprint A-2` — `has_open_exposure() -> RUNNING`, `RESTART_FLAT_SAFETY`, `CODE_UPDATED_WHILE_IN_TRADE`, `< 1s` post-wake protective SL/TP/Expiry sweep, paused option bar-entry guard, and `bar_close_utc >= armed_at_utc` stale-signal gate. |
 | **B1** — restart-proof risk state | `Sprint B` | ✅ **LIVE (`89962d1`)** | `0eb8f1f` — Verified on-wire `09:17 IST`: undated prior peak rolled clean for `2026-11-03`; full-roster anchor `₹98,16,152.17`; dated intraday restart memory now armed. |
 | **C1** — two-layer clock law in `OrderLedger` | `Sprint C` | ✅ **LIVE (`89962d1`)** | `fdaab48` — Canonical `+00:00` UTC across all `OrderLedger` writers & legacy snapshot hydration (`#23`). |
 | **C2** — mStock Layer-0 auth gate + `401/403` kill-latch | `Sprint C` | ✅ **LIVE (`89962d1`)** | `c009da0` — `0` HTTP packets / `0` `.mstock_session_token` leaks when logged out; instant `401/403` `STATUS_EXPIRED` kill-latch + Ticket A4 alert; Upstox untouched. |
@@ -217,13 +217,15 @@ Implement in strict sprint order (**one small, reviewable PR per sprint**).
      - Outside `09:00–15:30 IST`, weekends, and NSE holidays: suppress all auto-popups and red `"Broker login needed"` banners (manual click on `Brokers` still works anytime).
 
 #### Ticket A3 (`Sprint A-2` — Isolated Sub-PR After `A-1` Live Session Bake) — Open-Trade Continuity Rule & No-Stale-Signal Entry Guard
-> ⏸ **BLOCKED — not started, by design.** §3's sequencing rule holds this until `A-1`
-> has completed one clean live session, so it stays a 1-commit rollback. What `A-1`
-> already built for it: `feed_state` on the runner, `_maybe_upgrade_to_live_chain()` as
-> the hot-swap seam, and `on_broker_authenticated()` as the wake entry point — so A3's
-> remaining scope is the `state_store.restore_runner` blanket `RUNNING → PAUSED` rule,
-> `has_open_exposure()`, and the `armed_at_utc` stale-signal guard. Do not fold it into
-> PR #52.
+> ✅ **IMPLEMENTED (2026-11-03, standalone 1-commit `Sprint A-2` unit).**
+> `StrategyRunner.has_open_exposure()` (equity positions + open option structures + working
+> `OrderLedger` / `LiveGateway` orders), `restore_runner()` open-exposure continuity
+> (`STATUS_RUNNING` when carrying risk vs `STATUS_PAUSED` `RESTART_FLAT_SAFETY` when flat;
+> `CODE_UPDATED_WHILE_IN_TRADE` protecting open positions and auto-pausing upon exit),
+> `_apply_state_payload()` risk-halt override + automatic shared feed startup, immediate
+> `< 1s` `evaluate_open_exposure_protection()` sweep on `on_broker_authenticated()`, paused
+> option bar-entry gate in `_process_option_bar()`, and `bar_close_utc >= armed_at_utc`
+> stale-signal gating are all live and verified in `tests/forward/test_open_trade_continuity.py`.
 - **Files**: `src/backtest/forward/state_store.py`, `src/backtest/forward/paper_runner.py`
 - **Design**:
   1. Helper `runner.has_open_exposure() -> bool`: returns `True` when `len(runner.portfolio.positions) > 0` or `runner.options_bridge.has_open_structure()` (or working live venue orders exist).

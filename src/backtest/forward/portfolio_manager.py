@@ -1590,12 +1590,17 @@ class PortfolioManager:
                 with self._lock:
                     self._parked_snapshots[park_key] = snap
                 continue
+            if self._is_runner_risk_halted(runner) and runner.status == STATUS_RUNNING:
+                runner.status = STATUS_PAUSED
+                runner.pause_reason = "BLOCKED_BY_RISK"
+                runner._sync_bridge_runner_state()
             with self._lock:
                 self._parked_snapshots.pop(park_key, None)
             out["unparked"].append(config.instance_id)
             if getattr(runner, "feed_state", None) == FEED_STATE_LIVE:
                 woke.append(runner)
 
+        protective_exits = 0
         for runner in woke:
             try:
                 self._repair_runner_marks_internal(runner, force=True)
@@ -1604,8 +1609,30 @@ class PortfolioManager:
                 logger.exception(
                     "[login-wake] mark refresh failed for %s", runner.config.name
                 )
+                continue
+            try:
+                runner.arm_entries()
+                if runner.status == STATUS_RUNNING and runner.has_open_exposure():
+                    closed_now = runner.evaluate_open_exposure_protection()
+                    if closed_now > 0:
+                        protective_exits += closed_now
+                        if self._trade_persister is not None and not self._restoring:
+                            self._trade_persister.flush_runner(runner)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[login-wake] post-wake protective exit check failed for %s",
+                    runner.config.name,
+                )
+
+        if protective_exits > 0:
+            out["protective_exits"] = protective_exits
 
         if out["woken"] or out["unparked"]:
+            if self._auto_start_feed:
+                try:
+                    self._sync_mstock_thread()
+                except Exception:  # noqa: BLE001
+                    logger.debug("[login-wake] feed thread sync failed", exc_info=True)
             try:
                 self._evaluate_risk()
                 out["risk_evaluated"] = True
@@ -3523,10 +3550,19 @@ class PortfolioManager:
                 for runner in self._runners.values()
                 if getattr(runner, "feed_state", None) == FEED_STATE_WAITING
             )
+            running_restored = sum(
+                1
+                for runner in self._runners.values()
+                if runner.status == STATUS_RUNNING
+            )
+            paused_restored = sum(
+                1
+                for runner in self._runners.values()
+                if runner.status == STATUS_PAUSED
+            )
             logger.warning(
                 "[state] restored %d of %d runner(s) (%d parked, still saved)%s "
-                "from %s (%s) — restored runners are PAUSED; "
-                "resume explicitly",
+                "from %s (%s) — %d in-trade RUNNING, %d PAUSED",
                 restored,
                 len(payload.get("runners", [])),
                 len(self._parked_snapshots),
@@ -3538,6 +3574,8 @@ class PortfolioManager:
                 source_label,
                 self._last_restore_risk_note
                 or "session risk state initialized",
+                running_restored,
+                paused_restored,
             )
         except Exception:  # noqa: BLE001 — a bad restore must not block boot
             logger.exception(
@@ -3801,7 +3839,49 @@ class PortfolioManager:
                 self._last_restore_risk_note,
             )
 
+        # Sprint A-2 / Ticket A3:
+        # 1. Enforce hydrated manager/bucket/segment risk halts on restored
+        #    open-exposure runners (never run inside a tripped circuit breaker).
+        # 2. If auto_start_feed is active and any restored book is RUNNING,
+        #    start its feed / live poll thread immediately at boot.
+        any_running_restored = False
+        for runner in list(self._runners.values()):
+            if runner.status == STATUS_RUNNING and self._is_runner_risk_halted(runner):
+                runner.status = STATUS_PAUSED
+                runner.pause_reason = "BLOCKED_BY_RISK"
+                runner._sync_bridge_runner_state()
+            if runner.status == STATUS_RUNNING:
+                any_running_restored = True
+                if self._auto_start_feed:
+                    try:
+                        r_feed = self._feed_for(runner.config.source)
+                        if str(runner.config.source or "").lower() not in (
+                            "mstock",
+                            "dhan",
+                            "upstox",
+                        ):
+                            r_feed.start(warmup=True)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("restore feed start skipped", exc_info=True)
+        if any_running_restored and self._auto_start_feed:
+            try:
+                self._sync_mstock_thread()
+            except Exception:  # noqa: BLE001
+                logger.debug("restore mstock thread sync skipped", exc_info=True)
+
         return restored
+
+    def _is_runner_risk_halted(self, runner: "StrategyRunner") -> bool:
+        """True when global, bucket, or segment risk circuit breakers block ``runner``."""
+        if self.halted:
+            return True
+        bucket = self._runner_bucket(runner)
+        if self._bucket_halted.get(bucket, False):
+            return True
+        seg = getattr(runner.config, "segment", None)
+        if seg and self._bucket_halted.get(f"segment:{seg}", False):
+            return True
+        return False
 
     def _on_bar(self, symbol: str, bar: Dict[str, Any]) -> None:
         """Fan one closed candle out to every runner trading that symbol."""
