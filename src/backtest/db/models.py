@@ -2599,7 +2599,7 @@ class RiskSessionStateRecord(Base):
         Money, nullable=False, server_default=text("0")
     )
     halted: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("0")
+        Boolean, nullable=False, server_default=text("false")
     )
     halt_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
