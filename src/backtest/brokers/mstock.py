@@ -188,6 +188,13 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
     broker_name = "mstock"
     broker_display_name = "mStock"
 
+    #: How long a price ladder may be served as *depth* after it last printed.
+    #: Deliberately much longer than the LTP age window: a deep-OTM strike can
+    #: go minutes without a frame while its book is still the real book. The
+    #: 2026-11-03 fabricated straddle needed the opposite half of this — a row
+    #: whose ladder had to be kept or refused, not silently re-quoted forever.
+    WS_LADDER_TTL_SECONDS = 120.0
+
     def __init__(
         self,
         session_ttl_minutes: float | None = None,
@@ -943,6 +950,18 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             for tok in removable:
                 self._ws_subscribed_tokens.discard(tok)
                 self._ws_token_modes.pop(tok, None)
+            # Cold start for anything re-subscribed later: a token evicted from
+            # the registry must not re-serve the row it cached while it was
+            # subscribed, or a resubscribe-after-re-login (cause 7, 2026-10-26)
+            # hands the seam a book from a socket generation that no longer
+            # exists. Purge the trace, don't outlive it.
+            forget = getattr(self._ws_feed, "forget_token", None)
+            if callable(forget):
+                for tok in allowed:
+                    try:
+                        forget(str(tok))
+                    except Exception:  # noqa: BLE001 — a fake feed may not have it
+                        logger.debug("WS feed forgot_token failed for %d", tok)
             logger.info("Unsubscribed %d WS token(s): %s", len(removable), removable[:10])
             return removable
 
@@ -1042,21 +1061,35 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         max_age_seconds: float = 10.0,
         *,
         socket_liveness_seconds: float | None = None,
+        ladder_ttl_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Get latest validated quote from WebSocket cache.
 
-        Distinguishes two regimes using ``recv_mono`` + ``last_any_tick_mono()``:
+        Two independent clocks, because a packet proves two different things.
+
+        **Price freshness** (``max_age_seconds``, per token, with a socket-wide
+        fallback): distinguishes two regimes using ``ltp_mono``/``recv_mono`` +
+        ``last_any_tick_mono()``:
+
         1. **Live socket + quiet OTM strike**: ``is_connected()`` is True and
            the socket received any index/option frame within
-           ``socket_liveness_seconds`` (defaults to ``max_age_seconds``) — a
-           subscribed OTM leg whose book has not printed in >10s stays valid
-           (preserving live 2-sided Bid/Ask instead of falsely degrading to
-           one-sided HTTP LTP).
+           ``socket_liveness_seconds`` (defaults to ``max_age_seconds``) *and*
+           this token is in the subscription registry — a subscribed OTM leg
+           whose book has not printed in >10s stays valid (preserving live
+           2-sided Bid/Ask instead of falsely degrading to one-sided HTTP LTP).
         2. **Disconnected/zombie socket or post-15:30 market close**: socket is
            closed OR neither the token nor the socket has received frames within
            their freshness window, OR the cached row carries neither
            ``recv_mono`` nor a valid ``timestamp`` — rejected immediately
            (``return {}``), eliminating Finding F5 post-close frozen marks.
+
+        **Ladder trust** (``ladder_ttl_seconds``): an old price is still a price;
+        an old *book* is not depth. A row whose ladder stopped printing past its
+        TTL — including one the wrapper retained through blank frames, which
+        carries a ``kept:`` label and its original stamp — is served with
+        ``bid``/``ask`` zeroed and ``ladder_status=expired:*``. Callers keep the
+        LTP for marking and lose the ability to claim a cross-the-spread fill.
+        Rows that predate ladder labelling (legacy/test dicts) are untouched.
         """
         if not self._ws_feed:
             return {}
@@ -1074,9 +1107,12 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             if not quote:
                 return {}
 
+            now_mono = time.monotonic()
+
             if max_age_seconds is not None and max_age_seconds > 0:
-                now_mono = time.monotonic()
-                recv_mono = quote.get("recv_mono")
+                recv_mono = quote.get("ltp_mono")
+                if recv_mono is None:
+                    recv_mono = quote.get("recv_mono")
                 if recv_mono is not None:
                     quote_age = max(0.0, now_mono - float(recv_mono))
                     if quote_age > max_age_seconds:
@@ -1094,16 +1130,15 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                         )
                         tok_int = int(instrument_token)
                         with self._ws_lock:
-                            token_subscribed = (
-                                not self._ws_subscribed_tokens
-                                or tok_int in self._ws_subscribed_tokens
-                            )
+                            token_subscribed = tok_int in self._ws_subscribed_tokens
                         if not (socket_alive and token_subscribed):
                             logger.debug(
-                                "Stale WS tick token=%d age=%.1fs alive=%s; rejecting",
+                                "Stale WS tick token=%d age=%.1fs "
+                                "alive=%s subscribed=%s; rejecting",
                                 instrument_token,
                                 quote_age,
                                 socket_alive,
+                                token_subscribed,
                             )
                             return {}
                 else:
@@ -1127,6 +1162,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
 
             out = dict(quote)
             out.setdefault("source", "ws")
+            self._expire_ladder(out, instrument_token, now_mono, ladder_ttl_seconds)
             return out
 
         except Exception as exc:  # noqa: BLE001
@@ -1136,6 +1172,48 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                 exc,
             )
             return {}
+
+    def _expire_ladder(
+        self,
+        row: dict[str, Any],
+        instrument_token: int,
+        now_mono: float,
+        ladder_ttl_seconds: float | None,
+    ) -> None:
+        """Downgrade an untrustworthy ladder in place; keep the price.
+
+        Never raises — the price side of the row is still usable for marks.
+        """
+        status = row.get("ladder_status")
+        if status is None:
+            return
+        text = str(status)
+        if not row.get("bid") and not row.get("ask"):
+            # Nothing to expire: no side of this row claims to be depth.
+            return
+        ttl = (
+            float(self.WS_LADDER_TTL_SECONDS)
+            if ladder_ttl_seconds is None
+            else float(ladder_ttl_seconds)
+        )
+        stamp = row.get("ladder_mono")
+        age = None if stamp is None else max(0.0, now_mono - float(stamp))
+        if age is not None and age <= ttl:
+            return
+        logger.warning(
+            "ladder_expired token=%s status=%s age=%s ttl=%.0fs bid=%s ask=%s; "
+            "serving price without depth",
+            instrument_token,
+            text,
+            "unstamped" if age is None else f"{age:.1f}s",
+            ttl,
+            row.get("bid"),
+            row.get("ask"),
+        )
+        row["bid"] = 0.0
+        row["ask"] = 0.0
+        row["depth"] = {}
+        row["ladder_status"] = f"expired:{text}"
 
     def get_session_token(self) -> str | None:
         """Raw session token — backend use only.

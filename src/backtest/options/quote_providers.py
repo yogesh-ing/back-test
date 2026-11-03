@@ -714,6 +714,34 @@ class NoExecutableQuoteError(ValueError):
         super().__init__(f"{self.reason}: {detail}")
 
 
+class UntrustedOptionQuoteError(NoExecutableQuoteError):
+    """A nonzero side price that no counterparty could have quoted.
+
+    The 2026-11-03 fabricated straddle needed exactly this class: legs priced at
+    ₹0.05 and ₹4 on contracts worth ~₹340 passed ``price <= 0`` and were booked
+    as +₹71,639 of profit. Same refusal shape as its parent, different reason
+    code so the two failure modes stay countable apart.
+    """
+
+    reason = "UNTRUSTED_QUOTE"
+
+
+#: ``off`` restores the pre-incident seam, ``shadow`` logs without refusing,
+#: ``enforce`` refuses. Default is enforce — the gate exists because the number
+#: that reached the ledger was neither zero nor missing, merely impossible.
+QUOTE_SANITY_ENV = "OPTION_QUOTE_SANITY"
+QUOTE_SANITY_MODES = ("off", "shadow", "enforce")
+#: NSE index-option tick grid; a contract that says otherwise wins.
+NSE_OPTION_TICK_SIZE = 0.05
+#: How far a top-of-book may sit from the last traded price in the *same packet*.
+#: Multiplicative and deliberately generous: an illiquid strike routinely prints
+#: a book several times away from a stale LTP, and refusing that would turn a
+#: calibration question into a mass exit refusal. What it cannot tolerate is an
+#: order-of-magnitude disagreement — the ₹0.05 ask against a ₹340 LTP that the
+#: 2026-11-03 straddle booked as profit.
+LTP_DISTANCE_MAX_RATIO = 5.0
+
+
 class BidAskQuoteProvider:
     """Execution realism wrapper: market orders cross the spread (PRD §4.1).
 
@@ -736,6 +764,15 @@ class BidAskQuoteProvider:
     remove. A structure that cannot be priced stays unopened; a held structure
     keeps its last honest mark and the staleness halt deals with it.
 
+    Zero is not the only impossible number. On 2026-11-03 the seam took a ₹0.05
+    ask on a leg worth ~₹340 because ``price <= 0`` was the whole test, so the
+    same fail-closed rule now runs two more gates before a side price is
+    believed — see :meth:`_sanity_problem`: the price must sit near the LTP that
+    arrived in the same packet, and it must not be under the contract's own
+    intrinsic value. Mode is ``$OPTION_QUOTE_SANITY`` (``off`` / ``shadow`` /
+    ``enforce``, default ``enforce``); refusals count into
+    :attr:`sanity_stats` and log as ``quote_sanity``.
+
     Note ``OptionPaperBroker.slippage_pct`` still applies ON TOP: the
     spread is where the market stands, slippage models your own impact.
     Construct the broker with ``slippage_pct=0`` for pure-spread fills.
@@ -743,6 +780,149 @@ class BidAskQuoteProvider:
 
     def __init__(self, inner: Any) -> None:
         self.inner = inner
+        #: Refusals by reason code, so a soak can count the classes apart from
+        #: ``NO_EXECUTION_QUOTE``. Read by the runner's diagnostics, never by a
+        #: pricing path.
+        self.sanity_stats: dict[str, int] = {}
+
+    # -- quote sanity (root-cause doc §8b/§8d) ------------------------------
+
+    @staticmethod
+    def _sanity_mode() -> str:
+        mode = str(os.getenv(QUOTE_SANITY_ENV, "enforce")).strip().lower()
+        return mode if mode in QUOTE_SANITY_MODES else "enforce"
+
+    def _contract_for(self, instrument_token: str) -> Any:
+        """The contract behind a token, if the wrapped provider knows it.
+
+        Same lookup order the paper broker uses for tick size: an explicit
+        finder, then the private registry. ``None`` means "no opinion", and the
+        intrinsic gate abstains rather than guessing a strike.
+        """
+        for name in ("get_contract", "contract_for", "find_contract"):
+            finder = getattr(self.inner, name, None)
+            if callable(finder):
+                try:
+                    found = finder(instrument_token)
+                except Exception:  # noqa: BLE001 — a lookup must never price a leg
+                    found = None
+                if found is not None:
+                    return found
+        registry = getattr(self.inner, "_contracts", None)
+        if isinstance(registry, dict):
+            return registry.get(str(instrument_token))
+        return None
+
+    def _spot_for(self, contract: Any) -> float:
+        """The underlying's live spot, or 0.0 when the provider cannot say.
+
+        Deliberate deviation from fail-closed: an unusable spot disables only
+        the intrinsic gate, it does not refuse the price. Refusing on a missing
+        spot would turn a spot-cache hiccup into a mass exit refusal across
+        every held book — a different outage than the one being fixed.
+        """
+        getter = getattr(self.inner, "get_spot", None)
+        if not callable(getter):
+            return 0.0
+        underlying = str(getattr(contract, "underlying", "") or "")
+        if not underlying:
+            return 0.0
+        try:
+            return max(0.0, float(getter(underlying)))
+        except Exception:  # noqa: BLE001 — abstain, never invent a spot
+            return 0.0
+
+    def _sanity_problem(
+        self, quote: dict[str, Any], key: str, price: float, instrument_token: str
+    ) -> tuple[str, str] | None:
+        """``(reason, detail)`` when this side price cannot be a real book.
+
+        Two independent impossibility proofs, both read from data already in
+        hand, checked most-precise first so the log names the strongest reason:
+
+        * ``intrinsic_floor`` — an ITM option is worth at least its intrinsic
+          (minus one tick for grid rounding). ₹0.05 on a ₹340-strike leg is not
+          a cheap quote, it is not a quote. Model-free, so it needs no opinion
+          about volatility or time value. It fires only when the row's own LTP
+          corroborates the intrinsic: when the LTP is itself under intrinsic the
+          whole row is merely lagging a moved spot, which is a staleness problem
+          the age gates own — refusing it would lock an exit rather than a fake.
+        * ``ltp_distance`` — the same packet carried an LTP for this very
+          instrument; a book a multiple away from it is a decoding artefact or a
+          row whose price moved on.
+        """
+        try:
+            ltp = float(quote.get("ltp") or 0.0)
+        except (TypeError, ValueError):
+            ltp = 0.0
+
+        contract = self._contract_for(instrument_token)
+
+        if contract is not None:
+            tick = NSE_OPTION_TICK_SIZE
+            try:
+                raw_tick = float(getattr(contract, "tick_size", 0) or 0)
+                if raw_tick > 0:
+                    tick = raw_tick
+            except (TypeError, ValueError):
+                pass
+            try:
+                strike = float(getattr(contract, "strike", 0) or 0)
+            except (TypeError, ValueError):
+                strike = 0.0
+            option_type = getattr(contract, "option_type", "")
+            option_type = str(getattr(option_type, "value", option_type)).upper()
+            spot = self._spot_for(contract)
+            if strike > 0 and spot > 0 and option_type in ("CE", "PE"):
+                intrinsic = (
+                    max(0.0, spot - strike)
+                    if option_type == "CE"
+                    else max(0.0, strike - spot)
+                )
+                corroborated = ltp <= 0 or ltp >= intrinsic - tick
+                if intrinsic > 0 and corroborated and price < intrinsic - tick:
+                    return (
+                        "intrinsic_floor",
+                        f"{key}={price:.2f} < intrinsic={intrinsic:.2f} "
+                        f"({option_type} strike={strike:.0f} spot={spot:.2f})",
+                    )
+
+        if ltp > 0 and price > 0:
+            if price * LTP_DISTANCE_MAX_RATIO < ltp or price > ltp * LTP_DISTANCE_MAX_RATIO:
+                return (
+                    "ltp_distance",
+                    f"{key}={price:.2f} vs ltp={ltp:.2f} "
+                    f"(outside x{LTP_DISTANCE_MAX_RATIO} of its own last trade)",
+                )
+        return None
+
+    def _check_sanity(
+        self, quote: dict[str, Any], key: str, price: float, instrument_token: str
+    ) -> str | None:
+        """Run the gates; return the reason when the price must be refused.
+
+        ``shadow`` records and logs but lets the trade through — that is the
+        mode to run while the calibration of the two bounds is being watched.
+        """
+        mode = self._sanity_mode()
+        if mode == "off":
+            return None
+        problem = self._sanity_problem(quote, key, price, instrument_token)
+        if problem is None:
+            return None
+        reason, detail = problem
+        self.sanity_stats[reason] = self.sanity_stats.get(reason, 0) + 1
+        logger.warning(
+            "quote_sanity mode=%s reason=%s token=%s side=%s detail=%s",
+            mode,
+            reason,
+            instrument_token,
+            key,
+            detail,
+        )
+        if mode == "enforce":
+            return f"{reason} ({detail})"
+        return None
 
     # -- QuoteProvider protocol (unchanged passthrough) -------------------
 
@@ -778,12 +958,14 @@ class BidAskQuoteProvider:
         key = "bid" if held == "BUY" else "ask"
         price = float(quote.get(key) or 0.0)
         if price <= 0 or bool(quote.get("error")):
+            reason = f"no {key} quote to mark {instrument_token} (held {held})"
+        else:
+            reason = self._check_sanity(quote, key, price, instrument_token)
+        if reason is not None:
             # Do NOT invent a mark: label the row failed so the broker's
             # fail-closed MTM keeps the last known price and counts the
             # failure (the same path a dead broker session takes).
-            quote["error"] = quote.get("error") or (
-                f"no {key} quote to mark {instrument_token} (held {held})"
-            )
+            quote["error"] = quote.get("error") or reason
             return quote
         quote["ltp"] = price
         quote["mark_basis"] = key
@@ -798,6 +980,9 @@ class BidAskQuoteProvider:
                 f"{instrument_token}: no {key} to {side} against "
                 f"(quote={quote.get('error') or 'one-sided or zero ' + key})"
             )
+        reason = self._check_sanity(quote, key, price, instrument_token)
+        if reason is not None:
+            raise UntrustedOptionQuoteError(f"{instrument_token}: {reason}")
         quote["ltp"] = price
         quote["execution_side"] = side
         return quote
