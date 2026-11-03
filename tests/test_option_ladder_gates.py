@@ -1,0 +1,457 @@
+"""Ladder perimeter + quote-sanity gates (docs/OPTION-DEPTH-GARBAGE-ROOT-CAUSE-2026-11-03.md).
+
+The 2026-11-03 short straddle "earned" +₹71,639 by buying legs at ₹0.05 and ₹4 on
+contracts worth ~₹340. Three independent holes let that through, and this suite
+holds each one shut:
+
+1. ``MStockWebSocketWrapper`` — level hygiene and last-valid-write-wins, so a
+   packet with a correct header and a blank ladder can neither publish a book nor
+   destroy the last real one.
+2. ``MStockBroker.get_ws_quote`` — the ladder has its own clock and its own TTL,
+   a token must actually be subscribed for the socket-liveness bypass to apply,
+   and unsubscribe/reconnect purges the cached row (cold start).
+3. ``BidAskQuoteProvider`` — ``price <= 0`` was the whole test; now a side price
+   must also sit near its own LTP and above the contract's intrinsic value.
+"""
+
+from __future__ import annotations
+
+import time
+from datetime import date, timedelta
+from decimal import Decimal
+from typing import Any
+
+import pytest
+
+from backtest.brokers.mstock import MStockBroker
+from backtest.data.mstock_ws_wrapper import MStockWebSocketWrapper
+from backtest.instruments.base import OptionType
+from backtest.instruments.option import OptionContract
+from backtest.options.quote_providers import (
+    BidAskQuoteProvider,
+    NoExecutableQuoteError,
+    UntrustedOptionQuoteError,
+)
+
+
+class _FakeMTicker:
+    MODE_LTP = "ltp"
+    MODE_QUOTE = "quote"
+    MODE_FULL = "full"
+
+    def __init__(self) -> None:
+        self.on_ticks: Any = None
+        self.on_connect: Any = None
+        self.on_close: Any = None
+        self.closed = False
+
+    def subscribe(self, tokens: list[int]) -> bool:
+        return True
+
+    def unsubscribe(self, tokens: list[int]) -> bool:
+        return True
+
+    def set_mode(self, mode: str, tokens: list[int]) -> bool:
+        return True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _level(price: float, qty: int = 75) -> dict[str, Any]:
+    return {"price": price, "quantity": qty, "orders": 1}
+
+
+def _tick(
+    token: int,
+    ltp: float,
+    bids: list[dict[str, Any]],
+    asks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "instrument_token": token,
+        "last_price": ltp,
+        "volume_traded": 1000,
+        "open_interest": 45000,
+        "ohlc": {},
+        "depth": {"bid": bids, "ask": asks},
+        "exchange_timestamp": "12:00:00",
+        "mode": "full",
+    }
+
+
+def _broker_with_ws() -> tuple[MStockBroker, _FakeMTicker, MStockWebSocketWrapper]:
+    broker = MStockBroker()
+    ticker = _FakeMTicker()
+    wrapper = MStockWebSocketWrapper(ticker, coalesce_ms=0)
+    ticker.on_connect(ticker, {})
+    broker._ws_feed = wrapper
+    broker._subscribe_default_indices()
+    return broker, ticker, wrapper
+
+
+# ---------------------------------------------------------------------------
+# 1. Wrapper: level hygiene (§8a) and last-valid-write-wins (§5.1)
+# ---------------------------------------------------------------------------
+
+
+class TestLadderSanitizing:
+    def test_placeholder_zero_quantity_level_is_not_depth(self) -> None:
+        """The ₹0.05 leg: a level with a price nobody published is not a quote."""
+        depth, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(
+            {"bid": [_level(0.05, qty=0)], "ask": [_level(0.10, qty=0)]}
+        )
+        assert status == "blank"
+        assert bid == 0.0 and ask == 0.0
+        assert depth["bid"] == [] and depth["ask"] == []
+
+    def test_empty_ladder_is_blank_not_ok(self) -> None:
+        depth, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(
+            {"bid": [], "ask": []}
+        )
+        assert (status, bid, ask) == ("blank", 0.0, 0.0)
+        assert depth == {"bid": [], "ask": []}
+
+    def test_missing_depth_is_none_status(self) -> None:
+        _d, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(None)
+        assert (status, bid, ask) == ("none", 0.0, 0.0)
+
+    def test_one_sided_book_keeps_the_side_that_exists(self) -> None:
+        """"no ask to BUY" is a real venue state — keep the bid, label the row."""
+        _d, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(
+            {"bid": [_level(180.0)], "ask": []}
+        )
+        assert status == "one_sided"
+        assert bid == 180.0 and ask == 0.0
+
+    def test_crossed_ladder_quotes_neither_side(self) -> None:
+        _d, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(
+            {"bid": [_level(190.0)], "ask": [_level(189.0)]}
+        )
+        assert status == "crossed"
+        assert bid == 0.0 and ask == 0.0
+
+    def test_first_surviving_level_prices_the_side_never_a_better_one(self) -> None:
+        """Skip dead levels, but do not invent the venue's best price for it."""
+        _d, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(
+            {
+                "bid": [_level(180.0), _level(185.0)],
+                "ask": [_level(190.0), _level(188.0)],
+            }
+        )
+        assert status == "ok"
+        assert (bid, ask) == (180.0, 190.0)
+
+    def test_zero_price_level_is_skipped_and_the_next_real_level_wins(self) -> None:
+        _d, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(
+            {"bid": [_level(0.0), _level(181.0)], "ask": [_level(0.0), _level(183.0)]}
+        )
+        assert status == "ok"
+        assert (bid, ask) == (181.0, 183.0)
+
+    def test_honest_two_sided_book_is_ok_and_stamped(self) -> None:
+        row = MStockWebSocketWrapper._normalize_tick(
+            _tick(7777, 182.0, [_level(181.0)], [_level(183.0)])
+        )
+        assert row["ladder_status"] == "ok"
+        assert row["ladder_mono"] == pytest.approx(row["recv_mono"])
+        assert row["ltp_mono"] == pytest.approx(row["recv_mono"])
+        assert (row["bid"], row["ask"]) == (181.0, 183.0)
+
+    def test_blank_ladder_row_carries_no_side_price(self) -> None:
+        row = MStockWebSocketWrapper._normalize_tick(
+            _tick(7777, 182.0, [], [])
+        )
+        assert row["ladder_status"] == "blank"
+        assert "ladder_mono" not in row
+        assert row["bid"] == 0.0 and row["ask"] == 0.0
+
+
+class TestLastValidWriteWins:
+    def test_blank_frame_retains_the_last_honest_ladder(self) -> None:
+        broker, ticker, wrapper = _broker_with_ws()
+        try:
+            ticker.on_ticks(
+                ticker,
+                [_tick(63000, 340.0, [_level(339.5)], [_level(341.0)])],
+            )
+            honest = wrapper.get_quote("63000")
+            assert honest["ladder_status"] == "ok"
+
+            # Same header, correct LTP, no book at all — what mStock sent on 03-Nov.
+            time.sleep(0.01)
+            ticker.on_ticks(ticker, [_tick(63000, 352.0, [], [])])
+
+            merged = wrapper.get_quote("63000")
+            assert merged["ltp"] == 352.0, "the frame's own price still updates"
+            assert (merged["bid"], merged["ask"]) == (339.5, 341.0)
+            assert merged["ladder_status"] == "kept:blank"
+            assert merged["ladder_mono"] == pytest.approx(honest["ladder_mono"])
+            assert wrapper.blank_ladder_count("63000") == 1
+        finally:
+            wrapper.close()
+
+    def test_nothing_is_invented_when_the_first_frame_is_blank(self) -> None:
+        broker, ticker, wrapper = _broker_with_ws()
+        try:
+            ticker.on_ticks(ticker, [_tick(63001, 340.0, [], [])])
+            row = wrapper.get_quote("63001")
+            assert row["ladder_status"] == "blank"
+            assert row["bid"] == 0.0 and row["ask"] == 0.0
+        finally:
+            wrapper.close()
+
+    def test_reconnect_starts_a_new_cache_generation(self) -> None:
+        """A row cached on the dead socket must not become servable on the new one."""
+        broker, ticker, wrapper = _broker_with_ws()
+        try:
+            ticker.on_ticks(ticker, [_tick(63002, 340.0, [_level(339.5)], [_level(341.0)])])
+            assert wrapper.get_quote("63002") is not None
+            ticker.on_close(ticker, 1006, "network drop")
+            ticker.on_connect(ticker, {})
+            assert wrapper.get_quote("63002") is None
+            assert wrapper.last_any_tick_mono() == 0.0
+        finally:
+            wrapper.close()
+
+
+# ---------------------------------------------------------------------------
+# 2. Serve gate: two clocks, subscription truth, cold start
+# ---------------------------------------------------------------------------
+
+
+class TestServeGate:
+    def _inject(self, wrapper, token: str, age_s: float, ladder_age_s: float | None = None):
+        now = time.monotonic()
+        row = MStockWebSocketWrapper._normalize_tick(
+            _tick(int(token), 340.0, [_level(339.5)], [_level(341.0)]),
+            recv_mono=now - age_s,
+        )
+        row["ltp_mono"] = now - age_s
+        if ladder_age_s is not None:
+            row["ladder_mono"] = now - ladder_age_s
+        with wrapper._lock:
+            wrapper._quotes[token] = row
+            wrapper._last_any_tick_mono = now - 0.2
+        return row
+
+    def test_quiet_leg_on_a_live_subscribed_socket_still_serves_depth(self) -> None:
+        broker, _t, wrapper = _broker_with_ws()
+        try:
+            broker.subscribe_tokens_ws([63010], mode="full")
+            self._inject(wrapper, "63010", age_s=40.0)
+            q = broker.get_ws_quote(63010, max_age_seconds=10.0)
+            assert (q.get("bid"), q.get("ask")) == (339.5, 341.0)
+        finally:
+            wrapper.close()
+
+    def test_ladder_past_its_ttl_serves_price_without_depth(self) -> None:
+        broker, _t, wrapper = _broker_with_ws()
+        try:
+            broker.subscribe_tokens_ws([63011], mode="full")
+            self._inject(wrapper, "63011", age_s=1.0, ladder_age_s=400.0)
+            q = broker.get_ws_quote(63011, max_age_seconds=10.0)
+            assert q["ltp"] == 340.0
+            assert q["bid"] == 0.0 and q["ask"] == 0.0
+            assert q["ladder_status"].startswith("expired:")
+            assert q["depth"] == {}
+        finally:
+            wrapper.close()
+
+    def test_unsubscribed_token_cannot_use_the_socket_liveness_bypass(self) -> None:
+        """§5.2: a token outside the registry is not "fresh because the socket is"."""
+        broker, _t, wrapper = _broker_with_ws()
+        try:
+            self._inject(wrapper, "63012", age_s=40.0)
+            assert broker.get_ws_quote(63012, max_age_seconds=10.0) == {}
+        finally:
+            wrapper.close()
+
+    def test_unsubscribe_purges_the_cached_row(self) -> None:
+        broker, ticker, wrapper = _broker_with_ws()
+        try:
+            broker.subscribe_tokens_ws([63013], mode="full")
+            ticker.on_ticks(
+                ticker, [_tick(63013, 340.0, [_level(339.5)], [_level(341.0)])]
+            )
+            assert wrapper.get_quote("63013") is not None
+            broker.unsubscribe_tokens_ws([63013])
+            assert wrapper.get_quote("63013") is None
+            broker.subscribe_tokens_ws([63013], mode="full")
+            assert broker.get_ws_quote(63013, max_age_seconds=10.0) == {}
+        finally:
+            wrapper.close()
+
+
+# ---------------------------------------------------------------------------
+# 3. Execution/mark seam: intrinsic floor + LTP distance (§8b, §8d)
+# ---------------------------------------------------------------------------
+
+
+def _contract(token: str, strike: float, option_type: OptionType) -> OptionContract:
+    return OptionContract(
+        instrument_token=token,
+        trading_symbol=f"NIFTY{token}",
+        underlying="NIFTY",
+        expiry=date.today() + timedelta(days=7),
+        strike=Decimal(str(strike)),
+        option_type=option_type,
+        lot_size=75,
+        tick_size=Decimal("0.05"),
+    )
+
+
+class _ScriptedProvider:
+    """A broker-shaped inner: fixed rows, a real contract registry, a live spot."""
+
+    source_name = "scripted"
+
+    def __init__(self, spot: float = 24340.0) -> None:
+        self.rows: dict[str, dict[str, Any]] = {}
+        self._contracts: dict[str, Any] = {}
+        self._spot = spot
+
+    def add(self, token: str, contract: OptionContract, **row: Any) -> None:
+        self._contracts[token] = contract
+        self.rows[token] = row
+
+    def get_quote(self, instrument_token: str) -> dict[str, Any]:
+        return dict(self.rows.get(str(instrument_token), {}))
+
+    def get_spot(self, underlying: str) -> float:
+        return self._spot
+
+
+class TestQuoteSanityGates:
+    def _provider(self) -> tuple[BidAskQuoteProvider, _ScriptedProvider]:
+        inner = _ScriptedProvider(spot=24340.0)
+        provider = BidAskQuoteProvider(inner)
+        return provider, inner
+
+    def test_fabricated_cheap_ask_is_refused(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        provider, inner = self._provider()
+        # Near-ATM 24350 CE at spot 24340: intrinsic ~0, so only the packet's own
+        # LTP can prove ₹0.05 is not an ask. mStock's blank ladder printed exactly
+        # this shape on 2026-11-03.
+        inner.add("9001", _contract("9001", 24350.0, OptionType.CE),
+                  ltp=340.0, bid=0.04, ask=0.05, source="ws")
+        with pytest.raises(UntrustedOptionQuoteError) as exc:
+            provider.execution_quote("9001", "BUY")
+        assert "ltp_distance" in str(exc.value)
+        assert provider.sanity_stats  # counted, for the soak to read
+
+    def test_itm_ask_below_intrinsic_is_refused(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        provider, inner = self._provider()
+        # 24000 CE at spot 24340 is 340 ITM — a ₹0.05 offer is a free gift nobody
+        # gives, which is what the intrinsic floor is for.
+        inner.add("9012", _contract("9012", 24000.0, OptionType.CE),
+                  ltp=340.0, bid=0.04, ask=0.05, source="ws")
+        with pytest.raises(UntrustedOptionQuoteError) as exc:
+            provider.execution_quote("9012", "BUY")
+        assert "intrinsic_floor" in str(exc.value)
+
+    def test_honest_itm_ask_is_accepted(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        provider, inner = self._provider()
+        inner.add("9002", _contract("9002", 24350.0, OptionType.CE),
+                  ltp=340.0, bid=339.5, ask=341.0, source="ws")
+        quote = provider.execution_quote("9002", "BUY")
+        assert quote["ltp"] == 341.0
+        assert quote["execution_side"] == "BUY"
+        assert provider.sanity_stats == {}
+
+    def test_far_from_its_own_ltp_is_refused_even_above_intrinsic(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        provider, inner = self._provider()
+        # OTM strike (intrinsic 0) so only the LTP-distance gate can see it.
+        inner.add("9003", _contract("9003", 25500.0, OptionType.CE),
+                  ltp=48.0, bid=47.5, ask=4.0, source="ws")
+        with pytest.raises(UntrustedOptionQuoteError) as exc:
+            provider.execution_quote("9003", "BUY")
+        assert "ltp_distance" in str(exc.value)
+
+    def test_wide_but_real_deep_otm_spread_survives(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        provider, inner = self._provider()
+        inner.add("9004", _contract("9004", 26000.0, OptionType.CE),
+                  ltp=1.2, bid=0.45, ask=2.9, source="ws")
+        quote = provider.execution_quote("9004", "BUY")
+        assert quote["ltp"] == 2.9
+
+    def test_mark_of_an_impossible_bid_keeps_the_last_mark(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        provider, inner = self._provider()
+        inner.add("9005", _contract("9005", 24000.0, OptionType.PE),
+                  ltp=360.0, bid=5.0, ask=372.0, source="ws")
+        marked = provider.mark_quote("9005", "BUY")
+        assert marked.get("error"), "a long leg is never marked off a fake bid"
+
+    def test_shadow_mode_logs_and_allows(self, monkeypatch) -> None:
+        monkeypatch.setenv("OPTION_QUOTE_SANITY", "shadow")
+        provider, inner = self._provider()
+        inner.add("9006", _contract("9006", 24000.0, OptionType.CE),
+                  ltp=340.0, bid=0.04, ask=0.05, source="ws")
+        quote = provider.execution_quote("9006", "BUY")
+        assert quote["ltp"] == 0.05
+        assert provider.sanity_stats.get("intrinsic_floor") == 1
+
+    def test_off_mode_restores_the_old_seam(self, monkeypatch) -> None:
+        monkeypatch.setenv("OPTION_QUOTE_SANITY", "off")
+        provider, inner = self._provider()
+        inner.add("9007", _contract("9007", 24000.0, OptionType.CE),
+                  ltp=340.0, bid=0.04, ask=0.05, source="ws")
+        assert provider.execution_quote("9007", "BUY")["ltp"] == 0.05
+        assert provider.sanity_stats == {}
+
+    def test_intrinsic_gate_abstains_when_the_spot_is_unusable(self, monkeypatch) -> None:
+        """A spot hiccup must not become a mass exit refusal across every book."""
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        inner = _ScriptedProvider()
+        inner.get_spot = lambda _u: (_ for _ in ()).throw(ValueError("no live spot yet"))
+        provider = BidAskQuoteProvider(inner)
+        inner.add("9008", _contract("9008", 24350.0, OptionType.CE),
+                  ltp=340.0, bid=339.5, ask=341.0, source="ws")
+        assert provider.execution_quote("9008", "BUY")["ltp"] == 341.0
+
+    def test_unknown_contract_still_gets_the_ltp_gate(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        provider, inner = self._provider()
+        inner.rows["9009"] = {"ltp": 340.0, "bid": 0.04, "ask": 0.05, "source": "ws"}
+        with pytest.raises(UntrustedOptionQuoteError):
+            provider.execution_quote("9009", "BUY")
+
+    def test_stale_but_consistent_row_is_not_refused_as_fabricated(self, monkeypatch) -> None:
+        """Spot moved, the whole leg lagged: that is staleness, not a fake price.
+
+        Refusing here would lock the exit of a held ITM leg during a fast
+        market, which is a worse outage than the one being fixed. The age gates
+        own lag; this gate owns contradiction.
+        """
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        provider, inner = self._provider()
+        inner.add("9013", _contract("9013", 24000.0, OptionType.CE),
+                  ltp=45.15, bid=45.0, ask=45.15, source="ws")
+        inner._spot = 24500.0  # intrinsic 500 — the LTP itself is far below it
+        assert provider.execution_quote("9013", "BUY")["ltp"] == 45.15
+        assert provider.sanity_stats == {}
+
+    def test_zero_side_still_raises_the_original_reason(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        provider, inner = self._provider()
+        inner.add("9010", _contract("9010", 24350.0, OptionType.CE),
+                  ltp=340.0, bid=339.5, ask=0.0, source="ws")
+        with pytest.raises(NoExecutableQuoteError) as exc:
+            provider.execution_quote("9010", "BUY")
+        assert "NO_EXECUTION_QUOTE" in str(exc.value)
+
+    def test_put_intrinsic_floor_uses_the_put_formula(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        provider, inner = self._provider()
+        # 24400 PE at spot 24340 is 60 ITM; ₹4 is not a price for it.
+        inner.add("9011", _contract("9011", 24400.0, OptionType.PE),
+                  ltp=70.0, bid=4.0, ask=72.0, source="ws")
+        with pytest.raises(UntrustedOptionQuoteError) as exc:
+            provider.execution_quote("9011", "SELL")
+        assert "intrinsic_floor" in str(exc.value)

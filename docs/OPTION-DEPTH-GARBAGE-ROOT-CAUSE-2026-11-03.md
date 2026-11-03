@@ -220,6 +220,59 @@ persists per-strike `ce_bid/ce_ask/ce_ident`, `pe_bid/pe_ask/pe_ident`, `spot`, 
 7. Restate/void the four fabricated trades: writer fix plus a one-off at-rest repair with `bak_`
    snapshots — no read-time compensation.
 
+### 10.1 What landed on 2026-11-04 (`fix/ladder-perimeter-gates`)
+
+Implemented, with tests in `tests/test_option_ladder_gates.py`:
+
+- **§10.1 (§5.1, §8a)** `mstock_ws_wrapper.py` — `_sanitize_depth` drops levels
+  without a positive price *or* positive quantity, prices each side from the
+  first surviving level, and labels the row `ok | one_sided | crossed | blank |
+  none`. `_retain_ladder` makes it last-valid-write-wins: a frame with no usable
+  ladder keeps the previous book and its `ladder_mono`, takes only the fields it
+  genuinely carries (under `ltp_mono`), and is stamped `kept:<reason>`. The
+  `tick profile` line now logs `ladder=<status>` instead of `depth=bool(dict)`.
+- **§10.4 (§5.1–5.2)** `mstock.py` — `get_ws_quote` runs two clocks: LTP age with
+  the socket-liveness bypass (now also requiring the token to be *in* the
+  registry — the `not self._ws_subscribed_tokens` fail-open is gone), and a
+  separate `WS_LADDER_TTL_SECONDS = 120` ladder trust window past which the row
+  is served with `bid`/`ask` zeroed and `ladder_status=expired:*`.
+  `unsubscribe_tokens_ws` calls `forget_token`, and the wrapper's `on_connect`
+  starts a new cache generation (`_purge_all`), so no row outlives the socket
+  that wrote it.
+- **§10.1-verification (§8b, §8d)** `quote_providers.py` —
+  `BidAskQuoteProvider` gained `_sanity_problem` on both seams
+  (`execution_quote` → `UntrustedOptionQuoteError`, `mark_quote` → `error` row):
+  an `intrinsic_floor` and an `ltp_distance` check, mode `$OPTION_QUOTE_SANITY`
+  = `off|shadow|enforce` (default `enforce`), counted in `sanity_stats`.
+
+Three deliberate deviations from §8, each because the gate would otherwise cause
+a different outage than the one being fixed:
+
+1. **Intrinsic fires only when the row's own LTP corroborates it.** A held ITM
+   leg whose whole row lags a fast spot (LTP 45 vs intrinsic 500) is stale, not
+   fabricated; refusing it locks the *exit* of real risk. Age gates own lag, this
+   gate owns contradiction.
+2. **The intrinsic gate abstains when the spot is unusable — it never refuses on
+   a missing spot.** Failing closed there would turn one spot-cache hiccup into a
+   mass exit refusal across every book at once.
+3. **Ladder ordering is not a refusal.** §8a asks for "bids descending / asks
+   ascending", but no captured real frame proves mStock's array convention — and
+   `tests/test_mticker_ws_fixes.py` builds its packet with the same layout it
+   asserts (§11), so it cannot settle it. Best-first is assumed for pricing (the
+   first surviving level), which is the conservative reading either way.
+
+**Not implemented:** §10.2 / §8c (CE-PE parity band). It is computable from the
+book's own legs only for a same-strike straddle; a strangle's `fixed_distance`
+wings are different strikes, so the pair the gate needs is not in the trade
+record. It also cannot be back-verified here — no ladder has ever been persisted
+on this system (§6), so there is no tape to calibrate a band against. The
+intrinsic floor and the LTP-distance check both fire on all four fabricated legs
+without it.
+
+§10.3 is covered by the `ladder_status` label. §10.5–§10.7 (`take_profit_points`
+units, the `carry_policy` re-spawn, the at-rest restatement of the four trades)
+are separate work and still open.
+
 ## 11. Guardrails for whoever edits the feed
 
 Before touching `src/backtest/data/mticker.py`: read
