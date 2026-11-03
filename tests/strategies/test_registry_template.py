@@ -93,8 +93,14 @@ KNOWN_FAILS: dict[str, dict[str, str]] = {
 #: it speaks a NEUTRAL view and enters via an explicit named intent
 #: (``build_opening_intent``), never via NEUTRAL-as-entry. The old
 #: NEUTRAL-abuse instant entries (``atm_instant_buy``, ``immediate_entry``)
-#: were abolished by the CE/PE split.
-DELIBERATE_NEUTRAL = {"immediate_strangle"}
+#: were abolished by the CE/PE split. ``strangle_wing_points`` and
+#: ``straddle_short_atm`` (2026-11-02) are the same shape: a NEUTRAL view
+#: plus a named ``build_opening_intent``.
+DELIBERATE_NEUTRAL = {
+    "immediate_strangle",
+    "strangle_wing_points",
+    "straddle_short_atm",
+}
 
 #: Strategies whose docstrings declare a constant/holding contract — the
 #: template's ``EXPECTS_DECISION_CHANGES`` is set False for them via a
@@ -110,6 +116,8 @@ CONSTANT_DECISION = {
     "CE_instant_buy",
     "PE_instant_buy",
     "immediate_strangle",
+    "strangle_wing_points",
+    "straddle_short_atm",
 }
 
 _TEMPLATE_PATH = PROJECT_ROOT / "templates" / "strategy_test_template.py"

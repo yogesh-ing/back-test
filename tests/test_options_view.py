@@ -273,7 +273,7 @@ def test_option_view_component_behaviour():
     assert result.returncode == 0, (
         f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-    assert "24 tests passed" in result.stdout
+    assert "33 tests passed" in result.stdout
 
 
 # ---------------------------------------------------------------------------

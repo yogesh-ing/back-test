@@ -77,9 +77,11 @@ from backtest.simulator.position_sizing import all_in_size
 from backtest.strategy.base import Strategy
 from backtest.strategy.registry import get_strategy
 from backtest.timekeeping import (
+    current_session_date,
     entry_window_refusal,
     from_market_clock,
     from_stored_utc,
+    iso_utc,
     now_utc,
 )
 
@@ -455,6 +457,50 @@ def _infer_wing_distance_pct(strategy: Any) -> Optional[float]:
     return None
 
 
+def _ledger_iso_utc(ts: Any = None) -> str:
+    """Normalize any OrderLedger timestamp to canonical aware-UTC ISO-8601 (Ticket C1).
+
+    Institutional Two-Layer Clock Law:
+      * Engine, in-memory OrderLedger, and SQL storage use canonical UTC
+        (``YYYY-MM-DDTHH:MM:SS...+00:00``) so lexicographical sorting, hold
+        duration, and latency math across equity (wall-clock) and option-leg
+        (bar-clock) fills never drift by 5h 30m.
+      * Naive strings/datetimes arriving from market feeds or option bridges
+        represent exchange time (IST ``+05:30``) and enter through
+        :func:`from_market_clock`; aware strings/datetimes convert preserving
+        the exact instant; missing/unparseable values fall back fail-soft to
+        :func:`now_utc` so a malformed vendor string never drops a fill.
+    """
+    if ts is None or (isinstance(ts, str) and not ts.strip()):
+        return iso_utc(now_utc()) or ""
+    try:
+        parsed = from_market_clock(ts)
+        if parsed is not None:
+            return iso_utc(parsed) or ""
+    except (TypeError, ValueError):
+        logger.warning(
+            "[ledger] unparseable timestamp %r handed to OrderLedger; falling back to now_utc()",
+            ts,
+        )
+    return iso_utc(now_utc()) or ""
+
+
+def _ledger_stored_iso_utc(ts: Any = None) -> str:
+    """Normalize a previously persisted ledger timestamp (`reattach_order`) to aware UTC."""
+    if ts is None or (isinstance(ts, str) and not ts.strip()):
+        return _ledger_iso_utc()
+    try:
+        parsed = from_stored_utc(ts)
+        if parsed is not None:
+            return iso_utc(parsed) or ""
+    except (TypeError, ValueError):
+        logger.warning(
+            "[ledger] unparseable stored timestamp %r in reattach_order; falling back to now_utc()",
+            ts,
+        )
+    return _ledger_iso_utc()
+
+
 class OrderLedger:
     """Thread-safe order tagging & fill-routing ledger.
 
@@ -475,6 +521,10 @@ class OrderLedger:
         self._runners: Dict[str, Any] = {}  # instance_id -> StrategyRunner
         self._pending_fills: Dict[str, Deque[FillEvent]] = defaultdict(deque)
         self._fill_count = 0
+        #: B3: mirrors terminal orders into the durable ``orders`` table.
+        self._persistence_sink: Optional[
+            Callable[["Order", Optional[FillEvent]], None]
+        ] = None
 
     # -- registration ------------------------------------------------------
 
@@ -496,6 +546,39 @@ class OrderLedger:
         with self._lock:
             return self._runners.get(instance_id)
 
+    # -- durable mirror (B3) ------------------------------------------------
+
+    def set_persistence_sink(
+        self, sink: Optional[Callable[["Order", Optional[FillEvent]], None]]
+    ) -> None:
+        """Register the writer that mirrors terminal orders into the database.
+
+        Only the transitions the ledger itself owns are mirrored — refusals,
+        cancels and the synchronous option-leg rows written by
+        :meth:`record_filled`. An equity order that *executed* is in the
+        runner's :class:`~backtest.simulator.portfolio.Portfolio` under the
+        same client order id, and that book is the writer for it; mirroring
+        both would fight over ``uq_orders_client_order_id``.
+
+        The sink runs outside the ledger lock and its exceptions are swallowed:
+        the durable table is a record of what happened, never a participant in
+        it, so a database outage must not cost a fill.
+        """
+        self._persistence_sink = sink
+
+    def _notify_persistence(
+        self, order: "Order", fill: Optional[FillEvent] = None
+    ) -> None:
+        sink = self._persistence_sink
+        if sink is None:
+            return
+        try:
+            sink(order, fill)
+        except Exception:  # noqa: BLE001 — the mirror must never break trading
+            logger.exception(
+                "[ledger] durable mirror failed for %s", order.client_order_id
+            )
+
     # -- orders -------------------------------------------------------------
 
     def submit(self, instance_id: str, request: OrderRequest) -> Order:
@@ -515,7 +598,7 @@ class OrderLedger:
             order_type=request.order_type,
             limit_price=request.limit_price,
             status=ORDER_PENDING,
-            created_ts=datetime.now(timezone.utc).isoformat(),
+            created_ts=_ledger_iso_utc(),
             tag=dict(request.tag),
         )
         with self._lock:
@@ -531,8 +614,9 @@ class OrderLedger:
             if order is None or order.status != ORDER_PENDING:
                 return False
             order.status = ORDER_CANCELLED
-            order.updated_ts = datetime.now(timezone.utc).isoformat()
-            return True
+            order.updated_ts = _ledger_iso_utc()
+        self._notify_persistence(order)
+        return True
 
     def reject(self, client_order_id: str, reason: str) -> bool:
         """Mark a pending order rejected with the broker's reason.
@@ -547,8 +631,9 @@ class OrderLedger:
                 return False
             order.status = ORDER_REJECTED
             order.reject_reason = str(reason or "rejected")
-            order.updated_ts = datetime.now(timezone.utc).isoformat()
-            return True
+            order.updated_ts = _ledger_iso_utc()
+        self._notify_persistence(order)
+        return True
 
     def amend(
         self,
@@ -595,7 +680,7 @@ class OrderLedger:
                 order.limit_price = new_price
                 order.amended_limit_price = new_price
             order.amend_count += 1
-            order.amended_ts = datetime.now(timezone.utc).isoformat()
+            order.amended_ts = _ledger_iso_utc()
             order.updated_ts = order.amended_ts
             return order
 
@@ -617,6 +702,7 @@ class OrderLedger:
         Raises ``KeyError`` if the client order id is unknown — an unknown
         order id must never silently fill.
         """
+        fill_ts = _ledger_iso_utc(ts)
         with self._lock:
             instance_id = self._routing.get(client_order_id)
             if instance_id is None:
@@ -631,7 +717,7 @@ class OrderLedger:
                 side=order.side,
                 quantity=qty,
                 price=float(price),
-                ts=ts or datetime.now(timezone.utc).isoformat(),
+                ts=fill_ts,
                 tag=dict(order.tag or {}),
                 commission=float(commission or 0.0),
                 statutory_fees=float(statutory_fees or 0.0),
@@ -688,6 +774,8 @@ class OrderLedger:
         broker_order_id: Optional[str] = None,
         order_type: str = "MARKET",
         limit_price: Optional[float] = None,
+        commission: Optional[float] = None,
+        statutory_fees: Optional[float] = None,
     ) -> Order:
         """Write a **terminal FILLED row** for a fill that never was a routed order.
 
@@ -696,6 +784,10 @@ class OrderLedger:
         PENDING order to advance — yet the execution still belongs in the
         ledger, because the Orders tab is the audit of "did it fill, and at
         what price?".
+
+        ``commission`` / ``statutory_fees`` are the option book's own fee split
+        for this leg (same BUG-26 contract as :meth:`apply_fill`); the leg
+        record knows what it charged, so the mirrored fill must not report zero.
 
         Deliberately **not** :meth:`apply_fill`: that routes a FillEvent to the
         owning runner's equity handler, which would open a share-simulation
@@ -707,7 +799,7 @@ class OrderLedger:
         if side not in (SIDE_BUY, SIDE_SELL):
             raise ValueError(f"order side must be BUY or SELL, got {side!r}")
 
-        stamp = ts or datetime.now(timezone.utc).isoformat()
+        stamp = _ledger_iso_utc(ts)
         coid = self._make_client_order_id(instance_id)
         norm_type = str(order_type or "MARKET").strip().upper() or "MARKET"
         order = Order(
@@ -731,12 +823,28 @@ class OrderLedger:
         order.slippage, order.slippage_pct = self._slippage(
             side, float(price), order.requested_price
         )
+        leg_fill = FillEvent(
+            client_order_id=coid,
+            instance_id=instance_id,
+            symbol=order.symbol,
+            side=side,
+            quantity=float(quantity),
+            price=float(price),
+            ts=stamp,
+            tag=dict(tag or {}),
+            commission=float(commission or 0.0),
+            statutory_fees=float(statutory_fees or 0.0),
+        )
         with self._lock:
             self._routing[coid] = instance_id
             self._orders[coid] = order
             self._order_history.append(coid)
             self._fill_count += 1
             self._trim_locked()
+        # Mirror outside the lock, and only to the durable table — this fill is
+        # never queued in _pending_fills or routed to a handler, because the
+        # option book already owns the accounting for it.
+        self._notify_persistence(order, leg_fill)
         return order
 
     def drain_pending_fills(self, instance_id: str) -> List[FillEvent]:
@@ -781,7 +889,7 @@ class OrderLedger:
             order_type="MARKET",
             limit_price=None,
             status=ORDER_PENDING,
-            created_ts=str(spec.get("created_ts") or datetime.now(timezone.utc).isoformat()),
+            created_ts=_ledger_stored_iso_utc(spec.get("created_ts")),
             tag=dict(spec.get("tag") or {}),
             broker_order_id=broker_order_id,
         )
@@ -936,12 +1044,12 @@ class OrderLedger:
         if not created_ts:
             return 0.0
         try:
-            created = datetime.fromisoformat(str(created_ts).replace("Z", "+00:00"))
+            created = from_stored_utc(str(created_ts))
         except ValueError:
             return 0.0
-        if created.tzinfo is None:
-            created = created.replace(tzinfo=timezone.utc)
-        return max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
+        if created is None:
+            return 0.0
+        return max(0.0, (now_utc() - created).total_seconds())
 
     @property
     def fill_count(self) -> int:
@@ -971,11 +1079,12 @@ class OrderLedger:
 class PaperBroker:
     """Simulated execution gateway for command-center buckets.
 
-    Market orders fill immediately at the supplied price, routed through
-    the owning runner's :class:`~backtest.simulator.execution.OrderExecutor`
-    (zero-cost profile — see :func:`free_executor`). Every order is tagged
-    by the ledger and every fill is dispatched back through it, exactly as
-    a live gateway would.
+    Market orders fill immediately at the supplied price, routed through the
+    owning runner's :class:`~backtest.simulator.execution.OrderExecutor` —
+    which is the **costed** engine the runner binds with
+    :meth:`StrategyRunner.bind_executor`, so a paper fill carries the venue's
+    real fee stack (BUG-26). Every order is tagged by the ledger and every fill
+    is dispatched back through it, exactly as a live gateway would.
     """
 
     def __init__(self, ledger: OrderLedger, slippage_pct: float = 0.0) -> None:
@@ -1081,6 +1190,16 @@ STATUS_RUNNING = "RUNNING"
 STATUS_PAUSED = "PAUSED"
 STATUS_STOPPED = "STOPPED"
 STATUS_ERROR = "ERROR"
+
+#: Feed readiness (Sprint A1) — orthogonal to ``status``. ``status`` says
+#: whether the operator wants this book trading; ``feed_state`` says whether
+#: the market pipe behind it is actually connected. A runner can be RUNNING
+#: and still blind, which is exactly the combination that used to be
+#: invisible: an unauthenticated broker made option runners fail construction
+#: and vanish into ``_parked_snapshots`` rather than show up waiting.
+FEED_STATE_LIVE = "LIVE"
+FEED_STATE_WAITING = "WAITING_FOR_FEED"
+FEED_STATE_SYNTHETIC = "SYNTHETIC"
 
 MAX_BARS_PER_SYMBOL = 600  # Sized for EMA(200) 3x IIR convergence + 2yr 1day VCP/RS
 MAX_SIGNAL_LOG = 200
@@ -1347,11 +1466,7 @@ class StrategyRunner:
             # runner bars from — normalised above, so it is never empty.
             source=str(config.source),
         )
-        self.executor = equity_costed_executor(self.portfolio, config)
-        # What the cost engine actually charged, so a closed trade can name its
-        # own segment and profile instead of being re-derived later.
-        self.fee_segment = str(self.executor.config.segment)
-        self.fee_profile = str(getattr(self.executor.fees.broker, "name", "") or "")
+        self.executor = self.bind_executor(self.portfolio)
         self.closed_trades_cache: List[Dict[str, Any]] = []
 
         # -- options bridge (Gap G3.2) --------------------------------------
@@ -1367,6 +1482,16 @@ class StrategyRunner:
         # overwrites this with the store the acquire actually landed in; the
         # starting value is the runner's own (already policy-resolved) source.
         self._chain_source = str(config.source)
+        #: Sprint A1 — is the market pipe behind this book connected? Starts
+        #: honest for an equity runner (its bar feed is the manager's shared
+        #: broker poll thread) and is re-decided below for an option book,
+        #: whose chain/quote feed is the part that needs an authenticated
+        #: broker session.
+        self.feed_state = (
+            FEED_STATE_SYNTHETIC
+            if policy_key(str(config.source)) == "synthetic"
+            else FEED_STATE_LIVE
+        )
         if str(config.instrument.get("type", "equity")) == "option":
             from backtest.forward.feed_registry import option_quote_provider_for
 
@@ -1376,10 +1501,16 @@ class StrategyRunner:
             # API budget per underlying); anything else → the synthetic pair.
             # The fallback is deliberate and labelled ("synthetic:bs") so a
             # synthetic-priced runner can never pass as live.
+            # Sprint A1: ``allow_disconnected`` — with no session and synthetic
+            # off this hands back the frozen-mark stub instead of raising, so
+            # the book is BUILT (visible, unpriceable, refusing entries) rather
+            # than parked out of sight. Constructing it is not the same as
+            # trading it: nothing here can fabricate a mark.
             provider, quote_label = option_quote_provider_for(
                 config.source,
                 self._chain_underlying,
                 wing_distance_pct=_infer_wing_distance_pct(self.strategy),
+                allow_disconnected=True,
             )
             # The bus STORE the acquire landed in (synthetic|mstock|dhan|upstox) —
             # derived from the resolved provider, not from config.source: a
@@ -1387,10 +1518,20 @@ class StrategyRunner:
             # release the synthetic entry, or stop() leaks the refcount.
             # Live labels are ``live:<source>`` (+ ``+bidask`` when the bus
             # handed out the spread-crossing wrapper).
-            self._chain_source = (
-                str(config.source).lower() if quote_label.startswith("live:") else "synthetic"
-            )
-            self._chain_released = False  # one release per acquire (stop is idempotent)
+            if quote_label.startswith("live:"):
+                self._chain_source = str(config.source).lower()
+                self._chain_released = False  # one release per acquire
+                self.feed_state = FEED_STATE_LIVE
+            elif quote_label.startswith("disconnected"):
+                # The stub took NO ChainBus entry — it is per-runner and owns
+                # no subscription — so stop() must not release anything.
+                self._chain_source = "disconnected"
+                self._chain_released = True
+                self.feed_state = FEED_STATE_WAITING
+            else:
+                self._chain_source = "synthetic"
+                self._chain_released = False
+                self.feed_state = FEED_STATE_SYNTHETIC
             try:
                 resolved_opt_broker = option_broker
                 fee_calc = CommissionCalculator.for_broker("zerodha")
@@ -1407,11 +1548,18 @@ class StrategyRunner:
                                 "LiveOptionBrokerAdapter when mode='live'"
                             )
                     else:
-                        if self._chain_source == "synthetic":
+                        if self._chain_source in ("synthetic", "disconnected"):
+                            # A live book may not be priced by anything but the
+                            # venue it trades on. The frozen-mark stub keeps a
+                            # *paper* book visible while logged out; building a
+                            # live one on it would mean a live gateway executing
+                            # against legs nobody priced.
                             raise ValueError(
                                 f"live option runner {config.name!r} refused: live option "
-                                f"chain for {config.source!r} is unavailable (refusing "
-                                "synthetic chain fallback in mode='live')"
+                                f"chain for {config.source!r} is unavailable (resolved to "
+                                f"{quote_label!r}) — refusing synthetic chain fallback in "
+                                "mode='live', and refusing to arm a live gateway against an "
+                                "unpriced WAITING_FOR_FEED chain"
                             )
                         raw_live_broker = getattr(self.broker, "broker", None)
                         if raw_live_broker is None:
@@ -1455,12 +1603,13 @@ class StrategyRunner:
                 self.options_bridge.entry_bucket_timeframe = config.timeframe
             except Exception:
                 try:
-                    from backtest.forward.feed_registry import get_chain_bus
+                    if not self._chain_released:
+                        from backtest.forward.feed_registry import get_chain_bus
 
-                    get_chain_bus().release(
-                        self._chain_underlying, source=self._chain_source
-                    )
-                    self._chain_released = True
+                        get_chain_bus().release(
+                            self._chain_underlying, source=self._chain_source
+                        )
+                        self._chain_released = True
                 except Exception:  # noqa: BLE001
                     pass
                 raise
@@ -1493,7 +1642,7 @@ class StrategyRunner:
         #: Most recent option-book MTM (0.0 for equity runners) — task A1.
         self.last_option_pnl: float = 0.0
         self.signal_log: Deque[Dict[str, Any]] = deque(maxlen=MAX_SIGNAL_LOG)
-        
+
         # Audit list of closed round trips — _record_closed_trade stamps
         # exit_time / session_date / net_pnl at closure; daily_pnl() reads
         # the book (portfolio.closed_positions), not this list.
@@ -1505,7 +1654,18 @@ class StrategyRunner:
         if self.options_bridge is not None:
             book = self.options_bridge.option_broker
             self._option_session_start_realized = float(book.total_realized_pnl)
-        
+
+        # -- BUG-04 session anchors ------------------------------------------
+        # The NET contract's day boundary: the last (realized, open) pair
+        # captured inside the previous session. ``daily_pnl`` is the move of
+        # their SUM since that capture, so a mark booked yesterday can never
+        # be re-booked today.
+        self._pnl_session: Optional[str] = None
+        self._last_session_realized: float = 0.0
+        self._last_session_open: float = 0.0
+        self._prev_close_realized_net: float = 0.0
+        self._prev_close_open_pnl: float = 0.0
+
         #: PnL-vs-spot watch series (2026-09-24): one row per closed bar while
         #: an option structure is open — feeds the end-of-day chart export
         #: (watch_export.py). Live (mstock) runners only; synthetic books are
@@ -1553,9 +1713,46 @@ class StrategyRunner:
         self.retries_recovered: int = 0
         self.retries_exhausted: int = 0
 
+        # -- Sprint A-2 / Ticket A3: Open-Trade Continuity & Entry Arming ----
+        #: Aware UTC horizon stamped on start/resume/live-feed attach for live
+        #: broker sources; bars/ticks closing strictly before ``armed_at_utc``
+        #: update lookback indicators and MTM only (never trigger new entries).
+        self.armed_at_utc: Optional[datetime] = None
+        self._armed_explicit: bool = False
+        #: Machine-readable reason when ``status == STATUS_PAUSED`` (e.g.
+        #: ``RESTART_FLAT_SAFETY``, ``OPERATOR_PAUSED``, ``BLOCKED_BY_RISK``,
+        #: ``CODE_UPDATED_WHILE_IN_TRADE``).
+        self.pause_reason: Optional[str] = None
+        #: True when strategy bundle code changed on disk while this runner
+        #: held open exposure across a restart: open risk stays protected in
+        #: ``STATUS_RUNNING`` and new entries are blocked once flat.
+        self.code_updated_while_in_trade: bool = False
+
         self._lock = threading.RLock()
         self.ledger.register_handler(self.instance_id, self.on_fill)
         self.ledger.register_runner(self.instance_id, self)
+
+    # -- fill engine --------------------------------------------------------
+
+    def bind_executor(self, portfolio: Portfolio) -> OrderExecutor:
+        """Attach this book's costed fill engine, and publish what it charges.
+
+        Two sites need it: the constructor, and the snapshot restore — which
+        replaces the whole :class:`Portfolio`, so the executor that was built
+        against the old one must be rebuilt against the new. Before BUG-26 was
+        landed the restore rebound to :func:`free_executor`, which quietly
+        un-deployed the cost fix for **every runner that survived a restart** —
+        the normal production case, so a paper book kept booking zero-cost
+        round trips on a build that could price them.
+
+        ``fee_segment`` / ``fee_profile`` are set here rather than read back
+        later, so a closed trade can name the cost model that actually charged
+        it and the two can never drift apart.
+        """
+        self.executor = equity_costed_executor(portfolio, self.config)
+        self.fee_segment = str(self.executor.config.segment)
+        self.fee_profile = str(getattr(self.executor.fees.broker, "name", "") or "")
+        return self.executor
 
     # -- accounting views (over the simulator portfolio) --------------------
 
@@ -1564,8 +1761,50 @@ class StrategyRunner:
         return float(self.portfolio.current_cash)
 
     @property
-    def realized_pnl(self) -> float:
+    def gross_realized_pnl(self) -> float:
+        """Lifetime realized P&L **before** any cost — both books (BUG-04)."""
         return float(self.portfolio.realized_pnl) + self._option_realized_pnl()
+
+    @property
+    def total_fees_paid(self) -> float:
+        """Lifetime brokerage + statutory charges, equity book and option book.
+
+        The cash truth: each book's own accumulator, not a sum over positions,
+        so a fee charged outside a position object cannot hide in this column.
+        """
+        fees = float(self.portfolio.total_commission)
+        bridge = self.options_bridge
+        if bridge is not None:
+            broker = bridge.option_broker
+            fees += float(broker.total_costs_paid)
+        return fees
+
+    def _open_fees(self) -> float:
+        """The part of :attr:`total_fees_paid` sitting on books still open.
+
+        Those charges have not cost a *closed* trade anything yet — they are
+        the price of the position that is still on the book — so they are
+        attributed to :meth:`open_pnl`, which keeps :attr:`realized_pnl` at
+        zero for a runner that has opened but not yet closed anything.
+        """
+        fees = sum(float(p.commission_total) for p in self.portfolio.positions.values())
+        bridge = self.options_bridge
+        if bridge is not None:
+            for structure in bridge.option_broker.get_open_structures():
+                fees += float(structure.total_commission)
+                fees += float(structure.statutory_fees or 0)
+        return fees
+
+    @property
+    def realized_pnl(self) -> float:
+        """Lifetime realized P&L, **net** of the costs it belongs to (BUG-04).
+
+        ``gross_realized_pnl − (total_fees_paid − fees on open books)``. The
+        split is chosen so :meth:`open_pnl` and this property add up to exactly
+        ``equity() − allocated_capital`` — the invariant every card, row and
+        snapshot on the portfolio is bound to.
+        """
+        return self.gross_realized_pnl - (self.total_fees_paid - self._open_fees())
 
     @property
     def positions(self) -> Dict[str, Dict[str, Any]]:
@@ -1734,6 +1973,10 @@ class StrategyRunner:
                     "exit_reason": pos.exit_reason,
                     "coid": None,
                     "exit_coid": None,
+                    # The round trip's own identity in the durable ledger, so a
+                    # stored trade can be joined back to the position and the
+                    # fills that made it (B3).
+                    "position_id": pos.position_id,
                 }
             )
         trades.extend(self.closed_option_trades)
@@ -1781,6 +2024,10 @@ class StrategyRunner:
             broker_order_id=str(broker_order_id) if broker_order_id else None,
             order_type=order_type,
             limit_price=float(limit_price) if limit_price is not None else None,
+            # The leg record carries the brokerage the option book charged; the
+            # statutory stack is booked per structure, not per leg, so it is
+            # deliberately absent here rather than guessed at.
+            commission=float(record.get("commission") or 0.0),
         )
 
     def _on_option_execution_halt(self, reason: str) -> None:
@@ -1808,7 +2055,7 @@ class StrategyRunner:
     # ------------------------------------------------------------------ #
 
     def _maybe_upgrade_to_live_chain(self) -> None:
-        """Upgrade a synthetic-priced option runner to its live chain (bug #2).
+        """Upgrade an unpriced option runner to its live chain (bug #2 + A1).
 
         A restored mstock/dhan option runner resolves its quote provider ONCE,
         in ``__init__``. If the broker session was not yet authenticated at
@@ -1819,23 +2066,35 @@ class StrategyRunner:
         bars in, MOCK-token prices out. This is the "random expiry / random
         tick / random PnL" the owner reported.
 
-        Called from :meth:`resume` (restored runners come back PAUSED) and from
-        :meth:`start`. It is a no-op unless every guard passes:
+        With synthetic disabled the same moment now yields the frozen-mark stub
+        instead (Sprint A1), which is honest but blind — so this is also the
+        seam that turns a ``WAITING_FOR_FEED`` book into a priced one.
 
-        * it is an option runner currently on a SYNTHETIC chain whose
-          ``config.source`` is a live broker (mstock/dhan);
+        Called from :meth:`resume` (restored runners come back PAUSED), from
+        :meth:`start`, and from the manager's ``on_broker_authenticated`` hook
+        (Sprint A2 — a login must wake the book without a server restart). It
+        is a no-op unless every guard passes:
+
+        * it is an option runner currently NOT on its live chain — either the
+          labelled synthetic one, or the Sprint A1 frozen-mark stub — whose
+          ``config.source`` is a live broker (mstock/dhan/upstox);
         * that broker is authenticated RIGHT NOW (pre-checked via
           ``_default_quote_broker`` so a still-missing session never triggers a
           second synthetic acquire inside ``option_quote_provider_for``);
-        * the bridge has NO open structure — a live swap would orphan the
-          MOCK-token legs (they don't resolve on the real chain), so we refuse
-          and log, advising flatten-then-resume.
+        * coming off SYNTHETIC, the bridge has NO open structure — a live swap
+          would orphan the MOCK-token legs (they don't resolve on the real
+          chain), so we refuse and log, advising flatten-then-resume. Coming
+          off the DISCONNECTED stub the opposite is true: the open legs carry
+          the venue's own tokens (they were opened on the live chain before the
+          session dropped), so swapping is not just safe, it is the whole point
+          — "never go blind on an open position".
 
-        On success: release the synthetic ChainBus entry, acquire the live one
-        (``option_quote_provider_for`` does the acquire), swap the bridge's
-        quote provider, and re-point ``_chain_source`` so ``stop()`` releases
-        the entry we now hold. State is only mutated after the live acquire
-        succeeds, so a failure leaves the runner exactly as it was.
+        On success: release any synthetic ChainBus entry (the stub holds none),
+        acquire the live one (``option_quote_provider_for`` does the acquire),
+        swap the bridge's quote provider, and re-point ``_chain_source`` /
+        ``feed_state`` so ``stop()`` releases the entry we now hold. State is
+        only mutated after the live acquire succeeds, so a failure leaves the
+        runner exactly as it was.
         """
         bridge = self.options_bridge
         if bridge is None:
@@ -1843,8 +2102,10 @@ class StrategyRunner:
         src = str(self.config.source or "").lower()
         if src not in ("mstock", "dhan", "upstox"):
             return
-        if self._chain_source != "synthetic":
+        if self._chain_source not in ("synthetic", "disconnected"):
             return  # already live (or never fell back) — nothing to upgrade
+        # The stub is not a bus entry: nothing was acquired, nothing to release.
+        was_disconnected = self._chain_source == "disconnected"
 
         try:
             from backtest.forward.feed_registry import (
@@ -1861,17 +2122,21 @@ class StrategyRunner:
         if _default_quote_broker(src) is None:
             logger.info(
                 "Runner %s (%s) still has no authenticated %s session — "
-                "keeping synthetic chain",
+                "keeping %s chain",
                 self.instance_id[:8],
                 self.config.name,
                 src,
+                "the frozen-mark" if was_disconnected else "synthetic",
             )
             return
 
         # Never swap the pricing source under an open structure: its legs carry
-        # MOCK tokens that don't exist on the live chain.
+        # MOCK tokens that don't exist on the live chain. A book that came off
+        # the disconnected stub is the opposite case — its legs were opened on
+        # the live chain and hold the venue's own tokens, so the swap is what
+        # puts them back under a real mark.
         try:
-            if bridge._has_open_structure():
+            if not was_disconnected and bridge._has_open_structure():
                 logger.warning(
                     "Runner %s (%s) has an OPEN structure — refusing synthetic→"
                     "live chain upgrade (MOCK-token legs won't price on the "
@@ -1887,35 +2152,40 @@ class StrategyRunner:
 
         try:
             provider, label = option_quote_provider_for(src, self._chain_underlying)
-        except Exception:  # noqa: BLE001 — a failed upgrade keeps the runner synthetic
+        except Exception:  # noqa: BLE001 — a failed upgrade keeps the runner as it was
             logger.exception(
-                "live chain acquire failed for %s — staying synthetic",
+                "live chain acquire failed for %s — staying %s",
                 self.instance_id[:8],
+                "disconnected" if was_disconnected else "synthetic",
             )
             return
 
         if not label.startswith("live:"):
             # Session vanished between the pre-check and the acquire; the helper
             # already re-acquired synthetic, so release that extra ref and bail.
-            try:
-                get_chain_bus().release(self._chain_underlying, source="synthetic")
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    "synthetic re-release failed for %s", self.instance_id[:8], exc_info=True
-                )
+            if not was_disconnected:
+                try:
+                    get_chain_bus().release(self._chain_underlying, source="synthetic")
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "synthetic re-release failed for %s", self.instance_id[:8], exc_info=True
+                    )
             logger.info(
-                "Runner %s (%s) live chain not available (%s) — staying synthetic",
+                "Runner %s (%s) live chain not available (%s) — staying %s",
                 self.instance_id[:8],
                 self.config.name,
                 label,
+                "disconnected" if was_disconnected else "synthetic",
             )
             return
 
         # Live acquire succeeded — now drop the synthetic entry we were holding.
-        try:
-            get_chain_bus().release(self._chain_underlying, source="synthetic")
-        except Exception:  # noqa: BLE001 — release must never block the upgrade
-            logger.exception("synthetic chain release failed for %s", self.instance_id[:8])
+        # The disconnected stub never took one.
+        if not was_disconnected:
+            try:
+                get_chain_bus().release(self._chain_underlying, source="synthetic")
+            except Exception:  # noqa: BLE001 — release must never block the upgrade
+                logger.exception("synthetic chain release failed for %s", self.instance_id[:8])
 
         bridge.quote_provider = provider
         trader_obj = getattr(bridge.option_broker, "trader", None)
@@ -1923,13 +2193,156 @@ class StrategyRunner:
             trader_obj.quote_provider = provider
         self._chain_source = src
         self._chain_released = False  # we now hold the live entry; stop() releases it
+        self.feed_state = FEED_STATE_LIVE
+        self.arm_entries()
         logger.info(
-            "Runner %s (%s) upgraded synthetic→live chain (%s) on %s",
+            "Runner %s (%s) upgraded %s→live chain (%s) on %s",
             self.instance_id[:8],
             self.config.name,
+            "disconnected" if was_disconnected else "synthetic",
             label,
             self._chain_underlying,
         )
+
+    def has_open_exposure(self) -> bool:
+        """True when this runner holds open equity/option risk or working orders (Ticket A3)."""
+        if len(self.positions) > 0:
+            return True
+        if self.options_bridge is not None:
+            try:
+                if len(self.options_bridge.option_broker.get_open_structures()) > 0:
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+        if self.ledger is not None:
+            try:
+                orders_map = getattr(self.ledger, "_orders", None) or {}
+                for order in list(orders_map.values()):
+                    if (
+                        getattr(order, "instance_id", None) == self.instance_id
+                        and getattr(order, "status", None) == ORDER_PENDING
+                    ):
+                        return True
+            except Exception:  # noqa: BLE001
+                pass
+        snap_gw = getattr(self.broker, "snapshot_state", None)
+        if callable(snap_gw):
+            try:
+                gw_state = snap_gw() or {}
+                for item in gw_state.get("working") or []:
+                    if item.get("instance_id") == self.instance_id:
+                        return True
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+    def arm_entries(self, at_utc: Optional[datetime] = None) -> Optional[datetime]:
+        """Stamp ``armed_at_utc`` so pre-arm catch-up bars cannot trigger stale entries (Ticket A3).
+
+        When ``at_utc`` is passed explicitly (tests / deterministic clocks), it is
+        always applied across all dates. When omitted, auto-stamps ``now_utc()``
+        for live broker feeds (``mstock`` / ``dhan`` / ``upstox``) once live,
+        gating earlier bars/ticks from the same IST trading session.
+        """
+        if at_utc is not None:
+            self.armed_at_utc = from_stored_utc(at_utc)
+            self._armed_explicit = True
+            return self.armed_at_utc
+        src = str(self.config.source or "").strip().lower()
+        if src in ("mstock", "dhan", "upstox"):
+            if self.options_bridge is None or self.feed_state == FEED_STATE_LIVE:
+                self.armed_at_utc = now_utc()
+                self._armed_explicit = False
+        return self.armed_at_utc
+
+    def _within_armed_scope(self, event_utc: datetime) -> bool:
+        """True when ``armed_at_utc`` applies to ``event_utc``."""
+        if self.armed_at_utc is None:
+            return False
+        if self._armed_explicit:
+            return True
+        from backtest.timekeeping import to_exchange
+
+        return to_exchange(event_utc).date() == to_exchange(self.armed_at_utc).date()
+
+    def _is_entry_bar_stale(self, bar_ts: Any) -> bool:
+        """True when a bar closed strictly before ``self.armed_at_utc`` (Ticket A3)."""
+        if self.armed_at_utc is None or not bar_ts:
+            return False
+        try:
+            bar_open_utc = from_market_clock(bar_ts)
+            mins = float(TIMEFRAME_MINUTES.get(self.config.timeframe, 1) or 1)
+            bar_close_utc = bar_open_utc + timedelta(seconds=60.0 * mins)
+            if not self._within_armed_scope(bar_close_utc):
+                return False
+            return bar_close_utc < self.armed_at_utc
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _is_entry_tick_stale(self, tick_ts: Any) -> bool:
+        """True when a tick timestamp precedes ``self.armed_at_utc`` (Ticket A3)."""
+        if self.armed_at_utc is None or not tick_ts:
+            return False
+        try:
+            tick_utc = from_market_clock(tick_ts)
+            if not self._within_armed_scope(tick_utc):
+                return False
+            return tick_utc < self.armed_at_utc
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _maybe_pause_after_code_updated_exit(self) -> None:
+        """Once an open trade held across a code update exits, pause before new entries."""
+        if self.code_updated_while_in_trade and not self.has_open_exposure():
+            self.status = STATUS_PAUSED
+            self.pause_reason = "CODE_UPDATED_WHILE_IN_TRADE"
+            self._sync_bridge_runner_state()
+            logger.info(
+                "Runner %s (%s) closed open exposure under CODE_UPDATED_WHILE_IN_TRADE "
+                "— paused for conscious resume/respawn",
+                self.instance_id[:8],
+                self.config.name,
+            )
+
+    def evaluate_open_exposure_protection(
+        self, now_ts: Optional[str] = None
+    ) -> int:
+        """Immediately check SL / Target / Expiry / Squareoff on open exposure after wake."""
+        exits = 0
+        with self._lock:
+            if self.status != STATUS_RUNNING or not self.has_open_exposure():
+                return 0
+            self._sync_bridge_runner_state()
+            bridge = self.options_bridge
+            if bridge is not None and bridge._has_open_structure():
+                sym = self.config.symbols[0] if self.config.symbols else bridge.underlying
+                evt = bridge.evaluate_post_wake_exits(
+                    strategy_name=self.config.strategy_name,
+                    ts=now_ts,
+                )
+                if evt is not None:
+                    self.last_option_pnl = float(bridge.unrealized_pnl)
+                    spot = float(
+                        self.last_price.get(sym) or bridge.last_spot or 0.0
+                    )
+                    while True:
+                        popped = bridge.pop_exit_event()
+                        if popped is None:
+                            break
+                        exits += 1
+                        self._log_option_exit(sym, popped, spot)
+            for sym in list(self.positions.keys()):
+                px = self.last_price.get(sym)
+                if px is not None and px > 0:
+                    before = sym in self.positions
+                    self._check_position_rules(sym, float(px))
+                    if before and sym not in self.positions:
+                        exits += 1
+            if exits > 0:
+                self._mark_to_market(record=True)
+            self._check_instance_risk()
+            self._maybe_pause_after_code_updated_exit()
+        return exits
 
     def _sync_bridge_runner_state(self) -> None:
         bridge = self.options_bridge
@@ -1947,11 +2360,16 @@ class StrategyRunner:
                 logger.warning("Runner %s already stopped; start() ignored", self.instance_id)
                 return
             self.status = STATUS_RUNNING
+            self.pause_reason = None
             self.error = None
             self._sync_bridge_runner_state()
             # U6.2: re-acquire the chain subscription if this runner was
             # previously stopped (stop released it); start is idempotent.
-            if self.options_bridge is not None and self._chain_released:
+            if (
+                self.options_bridge is not None
+                and self._chain_released
+                and self._chain_source != "disconnected"
+            ):
                 try:
                     from backtest.forward.feed_registry import get_chain_bus
                     get_chain_bus().acquire(
@@ -1963,6 +2381,7 @@ class StrategyRunner:
             # Bug #2: a runner built while the broker was logged out is stuck on
             # the synthetic chain — try to upgrade it now that we're (re)starting.
             self._maybe_upgrade_to_live_chain()
+            self.arm_entries()
             logger.info(
                 "Runner %s (%s) started: %s on %s",
                 self.instance_id[:8],
@@ -1971,16 +2390,19 @@ class StrategyRunner:
                 self.target_label,
             )
 
-    def pause(self) -> None:
+    def pause(self, reason: str = "OPERATOR_PAUSED") -> None:
         with self._lock:
             if self.status == STATUS_RUNNING:
                 self.status = STATUS_PAUSED
+                self.pause_reason = reason
                 self._sync_bridge_runner_state()
-                logger.info("Runner %s paused", self.instance_id[:8])
+                logger.info("Runner %s paused (%s)", self.instance_id[:8], reason)
 
     def resume(self) -> None:
         with self._lock:
-            if getattr(self, "strategy_code_changed", False):
+            if getattr(self, "strategy_code_changed", False) or getattr(
+                self, "code_updated_while_in_trade", False
+            ):
                 # Plan §8: resuming after STRATEGY_CODE_CHANGED is the
                 # operator's explicit migration to the new code — restamp
                 # the bundle so the snapshot tells the truth from here.
@@ -2001,13 +2423,18 @@ class StrategyRunner:
                 except Exception:  # noqa: BLE001 — never block a resume on stamping
                     pass
                 self.strategy_code_changed = False
+                self.code_updated_while_in_trade = False
+                if self.error and "CODE_UPDATED_WHILE_IN_TRADE" in str(self.error):
+                    self.error = None
             if self.status == STATUS_PAUSED:
                 # Bug #2: restored runners come back PAUSED on whatever chain
                 # they resolved at construction. If the broker is authenticated
                 # now, upgrade synthetic→live before we start pricing again.
                 self._maybe_upgrade_to_live_chain()
                 self.status = STATUS_RUNNING
+                self.pause_reason = None
                 self.error = None
+                self.arm_entries()
                 self._sync_bridge_runner_state()
                 logger.info("Runner %s resumed", self.instance_id[:8])
 
@@ -3000,6 +3427,37 @@ class StrategyRunner:
                 symbol, "ERROR", None, self.last_price.get(symbol), f"view error: {exc}"
             )
             return
+        if not self.options_bridge._has_open_structure():
+            if self.status != STATUS_RUNNING:
+                if view is not None:
+                    self._log_signal(
+                        symbol,
+                        "OPTION_BLOCKED",
+                        None,
+                        bar["close"],
+                        f"entry blocked while {self.status}",
+                    )
+                return
+            if self.code_updated_while_in_trade:
+                self._maybe_pause_after_code_updated_exit()
+                if view is not None:
+                    self._log_signal(
+                        symbol,
+                        "OPTION_BLOCKED",
+                        None,
+                        bar["close"],
+                        "CODE_UPDATED_WHILE_IN_TRADE: new entry blocked until resume/respawn",
+                    )
+                return
+            if view is not None and self._is_entry_bar_stale(bar.get("ts")):
+                self._log_signal(
+                    symbol,
+                    "OPTION_BLOCKED",
+                    None,
+                    bar["close"],
+                    "ENTRY_STALE_BAR_SKIPPED: bar closed before armed_at_utc",
+                )
+                return
         if (
             view is not None
             and self.options_bridge.mark_stale
@@ -3077,6 +3535,7 @@ class StrategyRunner:
             return
         if result.get("exited"):
             self._log_option_exit(symbol, result, bar["close"])
+            self._maybe_pause_after_code_updated_exit()
             return
         if result.get("rejected"):
             # BUG-15: a same-code repeat on the same contract is throttled by
@@ -3126,6 +3585,11 @@ class StrategyRunner:
             return None
         try:
             if self.options_bridge._has_open_structure():
+                return None
+            if self.code_updated_while_in_trade:
+                self._maybe_pause_after_code_updated_exit()
+                return None
+            if self._is_entry_tick_stale(ts):
                 return None
             if self.options_bridge.mark_stale or self._entries_paused_by_strategy():
                 return None
@@ -3239,6 +3703,7 @@ class StrategyRunner:
             self._log_signal(
                 symbol, "OPTION_MTM", None, price, f"option MTM {float(pnl):+,.0f}"
             )
+        self._maybe_pause_after_code_updated_exit()
 
     def _tick_option_book(
         self, symbol: str, price: Optional[float], ts: Optional[str]
@@ -3264,6 +3729,8 @@ class StrategyRunner:
                 break
             exited = True
             self._log_option_exit(symbol, event, spot_for_log)
+        if exited:
+            self._maybe_pause_after_code_updated_exit()
         return exited
 
     def _record_watch_point(self, ts: Optional[str], spot: float, option_pnl: float) -> None:
@@ -3465,6 +3932,25 @@ class StrategyRunner:
         if signal == 1 and not held:
             if self.status != STATUS_RUNNING:
                 self._log_signal(symbol, "BLOCKED", 1, price, f"entry blocked while {self.status}")
+                return
+            if self.code_updated_while_in_trade:
+                self._maybe_pause_after_code_updated_exit()
+                self._log_signal(
+                    symbol,
+                    "BLOCKED",
+                    1,
+                    price,
+                    "CODE_UPDATED_WHILE_IN_TRADE: new entry blocked until resume/respawn",
+                )
+                return
+            if self._is_entry_bar_stale(ts):
+                self._log_signal(
+                    symbol,
+                    "BLOCKED",
+                    1,
+                    price,
+                    "ENTRY_STALE_BAR_SKIPPED: bar closed before armed_at_utc",
+                )
                 return
             if self._entries_paused_by_strategy():
                 # Portfolio Intelligence: the *strategy* chose to pause entries
@@ -3824,6 +4310,7 @@ class StrategyRunner:
         self._log_signal(
             symbol, "EXIT", 0, fill.price, f"{reason} → SELL {pos['qty']:g} @ {fill.price:.2f}"
         )
+        self._maybe_pause_after_code_updated_exit()
         # A level belongs to the position it was set on: once the book is flat
         # there is nothing left to protect, and carrying the level into the
         # NEXT trade would arm a stop nobody asked for.
@@ -3838,7 +4325,7 @@ class StrategyRunner:
 
     def on_fill(self, fill: FillEvent) -> None:
         """Track fills and persist closed trades to database.
-        
+
         FIX 2026-10-13: Previously this was a no-op stub. Now it:
         1. Tracks trade closures for daily PnL calculation
         2. Persists trades to database immediately
@@ -3850,7 +4337,7 @@ class StrategyRunner:
                 "Fill routed to wrong runner: %s != %s", fill.instance_id, self.instance_id
             )
             return
-        
+
         # Validate quantity (FIX for qty=0 bug)
         if not fill.quantity or fill.quantity <= 0:
             logger.error(
@@ -3858,7 +4345,7 @@ class StrategyRunner:
                 f"This indicates broken position tracking!"
             )
             return
-        
+
         logger.debug(
             "fill routed to runner %s: %s %s %g @ %s | Fees: Rs%.2f",
             self.instance_id[:8],
@@ -3868,7 +4355,7 @@ class StrategyRunner:
             fill.price,
             float(fill.total_fees) if hasattr(fill, 'total_fees') else 0.0,
         )
-        
+
         # Track trade closure for daily PnL calculation
         # A close happens when a fill reduces/closes an existing position
         try:
@@ -3878,7 +4365,7 @@ class StrategyRunner:
                 self._record_closed_trade(fill)
         except Exception as e:
             logger.warning(f"Error tracking trade closure: {e}")
-    
+
     def _record_closed_trade(self, closing_fill: FillEvent) -> None:
         """Record a closed round trip for the audit trail and daily PnL.
 
@@ -3961,10 +4448,11 @@ class StrategyRunner:
     def _option_realized_pnl(self) -> float:
         """Booked option P&L from closed/expired legs (gross of costs).
 
-        Matches the options dashboard's convention: ``realized_pnl`` is what
-        the legs booked, while the commission + statutory fee stack lives in
-        :meth:`option_pnl` / :meth:`equity` — netting fees here would make a
-        runner show a *negative* realized P&L the instant it opened anything.
+        Feeds :attr:`gross_realized_pnl` only — the GROSS half of the contract.
+        The option book keeps its fee stack in
+        :meth:`backtest.forward.options_bridge.OptionsBridge.summary` /
+        :meth:`option_pnl`, so this stays the legs' price P&L and the netting
+        happens once, in :attr:`realized_pnl`.
         """
         bridge = self.options_bridge
         if bridge is None:
@@ -3984,10 +4472,20 @@ class StrategyRunner:
         return float(bridge.net_pnl)
 
     def unrealized_pnl(self) -> float:
+        """Open legs' raw mark-to-market, before any cost (both books)."""
         unrealized = float(self.portfolio.unrealized_pnl)
         if self.options_bridge is not None:
             unrealized += float(self.options_bridge.unrealized_pnl)
         return unrealized
+
+    def open_pnl(self) -> float:
+        """Current NET open P&L (BUG-04).
+
+        ``unrealized_pnl() − the charges the still-open books have already
+        paid``: what would be banked if everything marked out at today's price.
+        Pairs with :attr:`realized_pnl` to close the equity identity exactly.
+        """
+        return self.unrealized_pnl() - self._open_fees()
 
     def equity(self) -> float:
         """Equity portfolio + this runner's option book (task A2).
@@ -4005,71 +4503,161 @@ class StrategyRunner:
             deployed += float(self.options_bridge.premium_at_risk)
         return deployed
 
-    def daily_pnl(self) -> float:
-        """Daily PnL: round trips whose IST session date is today + open MTM.
+    def _pnl_session_now(self) -> str:
+        """The session this book is attributed to: newest bar, else wall clock.
 
-        Day rolls at 00:00 IST — the 2026-10-22 anchor check found nothing
-        that rolls at 09:15 (``reset_daily_anchors()`` fires only from
-        ``stress_test``), and calendar dates were the chosen semantics.
-        Realized comes from ``portfolio.closed_positions``, not the
-        ``_closed_trades`` audit list: the book round-trips across restarts
-        and the list does not, so a runner restarted mid-day would otherwise
-        lose the day's realized losses from the fuse (guard: the 00:00–05:30
-        IST UTC/IST seam is resolved once, via ``_as_ist_date``).
-        ``Position.net_pnl`` is net of every commission on the round trip.
-
-        Both closed and open option structures stamp IST ``session_date`` and
-        net out brokerage + statutory fees so ``daily_pnl()`` reconciles with
-        ``equity() - _day_start_equity`` and rolls cleanly at 00:00 IST.
+        The bar clock, not the wall clock, because a replay reaches a session
+        the machine is not standing in — the option book already rolls its
+        BUG-18 anchor on the bar clock, and the two must roll together.
         """
-        today = datetime.now(_IST).date().isoformat()
-        realized_today = sum(
-            (
-                p.net_pnl
-                for p in self.portfolio.closed_positions
-                if p.closed_at is not None and _as_ist_date(p.closed_at) == today
-            ),
-            Decimal("0"),
-        )
+        newest = max(self._last_bar_ts.values(), default="") or ""
+        return _ist_date_of(newest) or current_session_date().isoformat()
 
-        total = float(realized_today) + float(self.portfolio.unrealized_pnl)
+    def daily_realized_breakdown(self, target_date: Optional[str] = None) -> Dict[str, Any]:
+        """Today's IST-scoped realized P&L triad: gross, single commission, net (E1/E2).
 
-        # Option book contribution (OPT-6: closes stamp IST session_date, so
-        # options roll at 00:00 IST and survive a mid-day restart exactly like
-        # equities, net of brokerage + statutory fees).
-        #
-        # BUG-18: a structure that carried in from an earlier session books only
-        # TODAY'S move here. Yesterday's mark was already that session's daily
-        # number, so re-booking the overnight gap today would double-count it,
-        # while booking the whole trip today would hide where it actually
-        # happened. Lifetime ``realized_pnl``/``equity()`` still carry the full
-        # trade; only this daily slice is attributed.
+        Closed positions/structures from prior IST sessions remain in the
+        restored cache for lifetime equity, but are excluded here so every
+        daily commission and realized-today subtitle reflects ONLY ``target_date``.
+        """
+        today = target_date or self._pnl_session_now()
+        gross = Decimal("0")
+        commission = Decimal("0")
+        net = Decimal("0")
+        count = 0
+
+        for p in self.portfolio.closed_positions:
+            if p.closed_at is None or _as_ist_date(p.closed_at) != today:
+                continue
+            gross += p.realized_pnl
+            commission += getattr(p, "commission_total", Decimal("0"))
+            net += p.net_pnl
+            count += 1
+
         if self.options_bridge is not None:
             book = self.options_bridge.option_broker
-            option_today = Decimal("0")
             for structure in book.get_closed_structures():
                 s_date = getattr(structure, "effective_session_date", None)
                 if not s_date and getattr(structure, "closed_at", None) is not None:
                     s_date = _as_ist_date(structure.closed_at)
                 if s_date != today:
                     continue
-                lifetime = getattr(
+                prior_net = getattr(structure, "prior_close_net_pnl", Decimal("0"))
+                struct_comm = structure.total_commission + getattr(
+                    structure, "statutory_fees", Decimal("0")
+                )
+                lifetime_net = getattr(
                     structure,
                     "net_pnl",
-                    structure.total_realized_pnl - structure.total_commission,
+                    structure.total_realized_pnl - struct_comm,
                 )
-                option_today += lifetime - getattr(structure, "prior_close_net_pnl", Decimal("0"))
-            for structure in book.get_open_structures():
-                today_slice = getattr(structure, "net_open_pnl_today", None)
-                if today_slice is None:
-                    costs = getattr(structure, "total_commission", Decimal("0")) + getattr(
-                        structure, "statutory_fees", Decimal("0")
-                    )
-                    today_slice = structure.total_unrealized_pnl - costs
-                option_today += today_slice
-            total += float(option_today)
+                today_net = lifetime_net - prior_net
+                gross += today_net + struct_comm if prior_net else structure.total_realized_pnl
+                commission += struct_comm
+                net += today_net
+                count += 1
 
-        return total
+        return {
+            "session_date": today,
+            "gross_pnl": float(gross),
+            "commission_total": float(commission),
+            "net_pnl": float(net),
+            "trade_count": count,
+        }
+
+    def daily_realized_net_pnl(self) -> float:
+        return self.daily_realized_breakdown()["net_pnl"]
+
+    def daily_gross_pnl(self) -> float:
+        return self.daily_realized_breakdown()["gross_pnl"]
+
+    def daily_commission(self) -> float:
+        return self.daily_realized_breakdown()["commission_total"]
+
+    def _capture_pnl_session(self) -> None:
+        """Roll the BUG-04 day anchors: store the current (realized, open) pair.
+
+        Called on every mark and before every read of the daily fields. The
+        promotion into ``_prev_close_*`` fires only when the session date
+        advances, and takes the pair captured at the END of the previous
+        session — so the stored anchor is never today's number. Because
+        ``realized_pnl + open_pnl == equity − allocated`` holds at every
+        instant, the difference of those two sums is exactly today's move:
+        yesterday's mark cannot be re-booked today (BUG-18 parity for the
+        equity book, which had no per-position anchor) and a partial scale-out
+        is counted the day it books, not the day the ticket finally closes
+        (BUG-04 defect #2).
+        """
+        today = self._pnl_session_now()
+        realized = self.realized_pnl
+        open_pnl = self.open_pnl()
+        if self._pnl_session is None:
+            self._pnl_session = today
+            self._last_session_realized = realized
+            self._last_session_open = open_pnl
+            return
+        if today > self._pnl_session:
+            self._prev_close_realized_net = self._last_session_realized
+            self._prev_close_open_pnl = self._last_session_open
+        if today >= self._pnl_session:
+            self._pnl_session = today
+            self._last_session_realized = realized
+            self._last_session_open = open_pnl
+
+    @property
+    def prev_close_open_pnl(self) -> float:
+        """NET open P&L as of the previous session's last capture (BUG-04)."""
+        self._capture_pnl_session()
+        return self._prev_close_open_pnl
+
+    def baseline_pnl_anchors(self) -> None:
+        """Start the BUG-04 day anchors for a book that has no anchor history.
+
+        A state file written before the NET contract carries no session, so the
+        restored lifetime numbers cannot be dated. A runner created inside the
+        current session has no past to hide — its lifetime IS today, so the
+        anchors stay at zero and a mid-day restart cannot lose the day's losses.
+        An older book is baselined at the restore, which makes ``daily_pnl()``
+        measure the new session instead of re-claiming the lifetime.
+        """
+        created_session = _ist_date_of(self.created_ts)
+        current_session = self._pnl_session_now()
+        if created_session is not None and created_session >= current_session:
+            return
+        # Stamping the session keeps the first read out of the
+        # ``_pnl_session is None`` branch, which returns without promoting
+        # ``prev`` — that left the anchors at 0 across the boot window.
+        self._pnl_session = current_session
+        self._prev_close_realized_net = self.realized_pnl
+        self._prev_close_open_pnl = self.open_pnl()
+        self._last_session_realized = self.realized_pnl
+        self._last_session_open = self.open_pnl()
+
+    @property
+    def realized_pnl_today(self) -> float:
+        """NET realized P&L booked inside the current session (BUG-04)."""
+        self._capture_pnl_session()
+        return self.realized_pnl - self._prev_close_realized_net
+
+    def daily_pnl(self) -> float:
+        """Today's move: NET realized booked today plus the move in open P&L.
+
+        ``realized_pnl_today + (open_pnl − prev_close_open_pnl)`` — the single
+        contract (BUG-04), and by construction equal to
+        ``equity() − <equity at the previous session's close>``.
+
+        Day rolls at 00:00 IST, matching the option book's BUG-18 attribution.
+        The old version filtered ``portfolio.closed_positions`` on
+        ``closed_at`` and added the whole open MTM, which (a) dropped a partial
+        scale-out's realized half until the ticket finally closed — possibly on
+        a later session — and (b) re-booked yesterday's open mark inside
+        today's number.
+        """
+        self._capture_pnl_session()
+        return (
+            self.realized_pnl - self._prev_close_realized_net
+            + self.open_pnl() - self._prev_close_open_pnl
+        )
 
     def win_rate(self) -> float:
         total = self.wins + self.losses
@@ -4077,6 +4665,7 @@ class StrategyRunner:
 
     def _mark_to_market(self, record: bool = False) -> None:
         equity = self.equity()
+        self._capture_pnl_session()
         is_stale = bool(self.options_bridge is not None and self.options_bridge.mark_stale)
         # §8 Q4: freeze peak_equity / max_drawdown_pct updates while option
         # marks are stale so a frozen mark cannot corrupt drawdown breakers.
@@ -4111,24 +4700,35 @@ class StrategyRunner:
         self.equity_curve.append(point)
 
     def _roll_trading_day(self, ts: str) -> None:
-        # Daily PnL is session-anchored: the baseline is fixed at the first
-        # bar the runner sees (warmup and replay do not roll days). Call
-        # :meth:`reset_daily_anchor` to re-baseline at the real session start.
+        # Takes the stored session baseline once, at the first bar this runner
+        # sees. It is the equity the snapshot/state reports as the day's start —
+        # NOT the daily fuse, which reads :meth:`daily_pnl` and rolls on the
+        # BUG-04 session anchors. Call :meth:`reset_daily_anchor` to re-baseline.
         day = ts[:10] if ts else datetime.now(timezone.utc).date().isoformat()
         if self._current_day is None:
             self._current_day = day
             self._day_start_equity = self.equity()
 
     def reset_daily_anchor(self) -> None:
-        """Re-baseline daily PnL at current equity (session open / tests)."""
+        """Re-baseline the day at current equity (session open / manual reset).
+
+        The daily fuse reads :meth:`daily_pnl`, so clearing the day means
+        promoting the BUG-04 session anchors too — otherwise this call would
+        move a number nothing consults and the book would stay tripped on the
+        loss it was just forgiven.
+        """
         with self._lock:
             self._day_start_equity = self.equity()
             self._current_day = datetime.now(timezone.utc).date().isoformat()
+            self._capture_pnl_session()
+            self._prev_close_realized_net = self.realized_pnl
+            self._prev_close_open_pnl = self.open_pnl()
+            self._last_session_realized = self.realized_pnl
+            self._last_session_open = self.open_pnl()
 
     # -- instance-level circuit breakers ----------------------------------
 
     def _check_instance_risk(self) -> None:
-        equity = self.equity()
         alloc = self.config.allocated_capital
         breach = None
         # 0 disables a breaker (2026-09-24, mirrors the global daily-loss
@@ -4143,15 +4743,18 @@ class StrategyRunner:
                 f"instance max drawdown {self.max_drawdown_pct:.1%} >= "
                 f"{self.config.max_drawdown_pct:.1%}"
             )
-        elif (
-            self.config.daily_loss_limit_pct > 0
-            and (alloc - equity) >= alloc * self.config.daily_loss_limit_pct
-            and self.daily_pnl() < 0
-        ):
-            loss_pct = (self._day_start_equity - equity) / alloc
-            if loss_pct >= self.config.daily_loss_limit_pct:
+        elif self.config.daily_loss_limit_pct > 0 and alloc > 0:
+            # The day, not the life: ``daily_pnl()`` is the BUG-04 session move.
+            # This branch used ``_day_start_equity`` — the equity at the first
+            # bar the runner ever saw, baselined once and never rolled — so it
+            # counted yesterday's loss against today's limit, and (worse) a
+            # profitable session lifted equity above the anchor so the next
+            # day's crash reached nothing. The cumulative direction already
+            # belongs to the drawdown fuse above, whose baseline is peak_equity.
+            day_move = self.daily_pnl()
+            if day_move <= -alloc * self.config.daily_loss_limit_pct:
                 breach = (
-                    f"instance daily loss {loss_pct:.1%} >= "
+                    f"instance daily loss {-day_move / alloc:.1%} >= "
                     f"{self.config.daily_loss_limit_pct:.1%}"
                 )
         if breach:
@@ -4194,6 +4797,49 @@ class StrategyRunner:
             return f"{label} [{len(self.config.symbols)} symbols]"
         return self.config.symbols[0]
 
+    def config_drift_info(self) -> Dict[str, Any]:
+        """Detect frozen-spawn config/template drift without mutating live rules (Ticket D3)."""
+        reasons: List[str] = []
+        if bool(getattr(self, "strategy_code_changed", False)):
+            reasons.append("strategy code changed since spawn")
+        if self.options_bridge is not None:
+            try:
+                from backtest.strategy.registry import get_strategy
+
+                strat_cls = get_strategy(self.config.strategy_name)
+                spec_fn = getattr(strat_cls, "execution_spec", None)
+                spec = spec_fn() if callable(spec_fn) else None
+                if spec is not None:
+                    tpl_expr = spec.to_expression()
+                    tpl_carry = str(tpl_expr.get("carry_policy") or "").strip().lower()
+                    if tpl_carry in ("intraday", "positional") and (
+                        self.options_bridge.carry_policy != tpl_carry
+                    ):
+                        reasons.append(
+                            f"carry_policy drifted (frozen={self.options_bridge.carry_policy}, "
+                            f"template={tpl_carry})"
+                        )
+                    inst = self.config.instrument or {}
+                    prov = inst.get("expression_provenance")
+                    frozen_expr = inst.get("expression")
+                    if isinstance(frozen_expr, dict):
+                        has_custom = isinstance(prov, dict) and any(
+                            v in ("user", "playbook") for v in prov.values()
+                        )
+                        if not has_custom:
+                            from backtest.strategy.execution import config_sha256
+
+                            if config_sha256(frozen_expr) != config_sha256(tpl_expr):
+                                msg = "option expression defaults drifted from strategy template"
+                                if msg not in reasons:
+                                    reasons.append(msg)
+            except Exception:  # noqa: BLE001 — never fail get_state() on drift check
+                pass
+        return {
+            "config_drift": bool(reasons),
+            "config_drift_reasons": reasons,
+        }
+
     def get_state(self) -> Dict[str, Any]:
         """Compact row for the portfolio matrix table.
 
@@ -4213,6 +4859,9 @@ class StrategyRunner:
                 self.options_bridge.summary() if self.options_bridge is not None else None
             )
             open_structures = int((options_summary or {}).get("open_structures") or 0)
+            open_total = len(self.positions) + open_structures
+            drift = self.config_drift_info()
+            daily_breakdown = self.daily_realized_breakdown()
             return {
                 "instance_id": self.instance_id,
                 "name": self.config.name,
@@ -4225,14 +4874,32 @@ class StrategyRunner:
                 "allocated_capital": round(self.config.allocated_capital, 2),
                 "equity": round(equity, 2),
                 "deployed_capital": round(self.deployed_capital(), 2),
-                "open_pnl": round(self.unrealized_pnl(), 2),
+                # BUG-04 — one NET contract, same keys on every row and card:
+                # gross realized and the lifetime fee stack are shown next to
+                # the net numbers so a reader can check the netting, and
+                # ``equity == allocated_capital + realized_pnl + open_pnl``.
+                "gross_realized_pnl": round(self.gross_realized_pnl, 2),
+                "total_fees_paid": round(self.total_fees_paid, 2),
+                "open_pnl": round(self.open_pnl(), 2),
+                "realized_pnl_today": round(self.realized_pnl_today, 2),
+                "prev_close_open_pnl": round(self.prev_close_open_pnl, 2),
                 "daily_pnl": round(self.daily_pnl(), 2),
+                "daily_realized_net_pnl": round(daily_breakdown["net_pnl"], 2),
+                "daily_gross_pnl": round(daily_breakdown["gross_pnl"], 2),
+                "daily_commission": round(daily_breakdown["commission_total"], 2),
+                "daily_trade_count": int(daily_breakdown["trade_count"]),
                 "realized_pnl": round(self.realized_pnl, 2),
                 "win_rate": round(self.win_rate(), 4),
                 "max_drawdown_pct": round(self.max_drawdown_pct, 4),
                 "open_positions": len(self.positions) + open_structures,
                 "equity_positions": len(self.positions),
                 "status": self.status,
+                # Sprint A1 — feed readiness, orthogonal to ``status``. An
+                # operator needs two answers: "do I want this book trading?"
+                # (status) and "can it see the market?" (feed_state). RUNNING
+                # and blind used to be invisible — the book was parked out of
+                # the runner list entirely.
+                "feed_state": self.feed_state,
                 "mode": self.config.mode,
                 "source": self.config.source,
                 # Multi-broker PRD Phase B: which capital segment this runner
@@ -4266,11 +4933,29 @@ class StrategyRunner:
                 "strategy_code_changed": bool(
                     getattr(self, "strategy_code_changed", False)
                 ),
+                "code_updated_while_in_trade": bool(
+                    getattr(self, "code_updated_while_in_trade", False)
+                ),
+                "has_open_exposure": self.has_open_exposure(),
+                "armed_at_utc": (
+                    iso_utc(self.armed_at_utc)
+                    if self.armed_at_utc is not None
+                    else None
+                ),
+                "pause_reason": self.pause_reason,
+                "config_drift": drift["config_drift"],
+                "config_drift_reasons": drift["config_drift_reasons"],
+                "can_respawn": open_total == 0,
+                "carry_policy": (options_summary or {}).get("carry_policy"),
                 "options": options_summary,
                 # R1: runner-level mark freshness fields (mirrored from options_summary)
                 "mark_ts": (options_summary or {}).get("mark_ts"),
                 "mark_stale": bool((options_summary or {}).get("mark_stale")),
                 "quote_error": (options_summary or {}).get("quote_error"),
+                "feed_disconnected": bool(
+                    (options_summary or {}).get("feed_disconnected")
+                ),
+                "feed_refusal": (options_summary or {}).get("feed_refusal"),
                 "stale_positions": int((options_summary or {}).get("stale_positions") or 0),
                 # BUG-15: same-contract, same-code refusals are a stuck runner,
                 # not a trading one. Mirror the bridge's health so a UI/list row
@@ -4821,7 +5506,7 @@ class PaperRunner:
         # a paper run; the bars' origin comes from the source class.
         self.portfolio.mode = "paper"
         self.portfolio.source = self.source_tag
-        
+
         # Closed-trade audit list: this class has no _record_closed_trade
         # producer (fills are applied inside run_engine_loop), so daily_pnl()
         # reads portfolio.closed_positions directly.
@@ -4860,33 +5545,57 @@ class PaperRunner:
             coid_prefix="paper",
             log_label="paper run",
         )
-    
+
     # ------------------------------------------------------------------ #
     # Accounting / metrics (FIX 2026-10-13)
     # ------------------------------------------------------------------ #
-    
+
     def equity(self) -> float:
         """Current equity = cash + position value."""
         return float(self.portfolio.calculate_total_equity())
-    
-    def daily_pnl(self) -> float:
-        """Daily PnL: round trips closed today (00:00 IST roll) + open MTM.
 
-        Mirrors :meth:`StrategyRunner.daily_pnl`. The old version filtered
-        ``_closed_trades`` — which this class never populates — on a
-        ``net_pnl`` key nobody wrote, so realized was structurally 0 while
-        the entire lifetime's commission was subtracted every call.
+    @property
+    def gross_realized_pnl(self) -> float:
+        """Lifetime realized P&L before any cost (BUG-04 contract)."""
+        return float(self.portfolio.realized_pnl)
+
+    @property
+    def total_fees_paid(self) -> float:
+        """Lifetime brokerage + statutory charges on this run's book."""
+        return float(self.portfolio.total_commission)
+
+    def _open_fees(self) -> float:
+        """Charges sitting on positions that are still open."""
+        return sum(float(p.commission_total) for p in self.portfolio.positions.values())
+
+    @property
+    def realized_pnl(self) -> float:
+        """Lifetime realized P&L, net of the costs of the closed round trips."""
+        return self.gross_realized_pnl - (self.total_fees_paid - self._open_fees())
+
+    def open_pnl(self) -> float:
+        """NET open P&L: mark-to-market less the open book's own charges."""
+        return float(self.portfolio.unrealized_pnl) - self._open_fees()
+
+    @property
+    def realized_pnl_today(self) -> float:
+        """One run is one session: today's NET realized is the lifetime number."""
+        return self.realized_pnl
+
+    @property
+    def prev_close_open_pnl(self) -> float:
+        """``0.0`` — a run starts flat, so nothing carried in from before."""
+        return 0.0
+
+    def daily_pnl(self) -> float:
+        """This run's P&L: realized (net) + open (net) == equity − initial.
+
+        Mirrors :meth:`StrategyRunner.daily_pnl`, single session. The old
+        version filtered ``_closed_trades`` — which this class never populates
+        — on a ``net_pnl`` key nobody wrote, so realized was structurally 0
+        while the entire lifetime's commission was subtracted every call.
         """
-        today = datetime.now(_IST).date().isoformat()
-        realized_today = sum(
-            (
-                p.net_pnl
-                for p in self.portfolio.closed_positions
-                if p.closed_at is not None and _as_ist_date(p.closed_at) == today
-            ),
-            Decimal("0"),
-        )
-        return float(realized_today) + float(self.portfolio.unrealized_pnl)
+        return self.realized_pnl + self.open_pnl()
 
     @property
     def wins(self) -> int:

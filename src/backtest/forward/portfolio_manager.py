@@ -30,6 +30,8 @@ from typing import Any, Deque, Dict, List, Optional
 from backtest.data.sources_policy import policy_key, synthetic_enabled
 from backtest.timekeeping import (
     EXCHANGE_TZ,
+    current_session_date,
+    format_session_scope,
     in_eod_squareoff_window,
     now_utc,
 )
@@ -44,10 +46,15 @@ from backtest.forward.warmup import (
 )
 from backtest.forward.state_store import (
     PortfolioStateStore,
+    PostgresStateStore,
     capture_runner,
+    resolve_state_store_primary,
     restore_runner,
+    verify_state_parity,
 )
 from backtest.forward.paper_runner import (
+    FEED_STATE_LIVE,
+    FEED_STATE_WAITING,
     ORDER_AGING_ALERT_S,
     ORDER_AGING_WARN_S,
     ORDER_CANCELLED,
@@ -94,6 +101,9 @@ class PortfolioManager:
         enable_broker_warmup: Optional[bool] = None,
         async_warmup: Optional[bool] = None,
         reject_duplicate_runners: bool = False,
+        persist_trades: bool = True,
+        db_manager: Optional[Any] = None,
+        allow_synthetic_db_state: bool = False,
     ) -> None:
         self.ledger = OrderLedger()
         self.broker = PaperBroker(self.ledger)
@@ -121,6 +131,9 @@ class PortfolioManager:
         # Aggregate anchors (manager-level — used for combined views)
         self.total_capital: float = 0.0
         self.peak_equity: float = 0.0
+        self._session_peak_daily_pnl: float = 0.0
+        self._risk_session_date_ist: str = current_session_date().isoformat()
+        self._last_restore_risk_note: str = ""
         self._day_start_equity: float = 0.0
         self._current_day: Optional[str] = None
 
@@ -139,6 +152,7 @@ class PortfolioManager:
         # that cannot be derived.)
         # ----------------------------------------------------------------
         self._bucket_peak: Dict[str, float] = {"paper": 0.0, "live": 0.0}
+        self._bucket_session_peak_pnl: Dict[str, float] = {"paper": 0.0, "live": 0.0}
         self._bucket_halted: Dict[str, bool] = {"paper": False, "live": False}
         self._bucket_halt_reason: Dict[str, Optional[str]] = {"paper": None, "live": None}
         self._bucket_halt_mode: Dict[str, Optional[str]] = {"paper": None, "live": None}
@@ -269,17 +283,48 @@ class PortfolioManager:
         #: each working order is reported once per band instead of every tick.
         self._aging_alerted: Dict[str, set] = {}
         self._state_store = PortfolioStateStore(state_path) if state_path else None
-        # GAP-4 (2026-09-21): permanent trade history in PostgreSQL. Fail-soft:
-        # a missing/unreachable DB degrades to the JSON snapshot only.
+        # GAP-4 (2026-09-21) & Sprint D / Ticket D1: permanent trade history +
+        # PostgreSQL Single-Source-of-Truth via the shared DatabaseManager pool
+        # (POOL-3: zero ad-hoc create_engine calls).
         self._trade_persister: Optional[Any] = None
-        try:
-            from backtest.forward.trade_persistence import LiveTradePersister
+        self._pg_state_store: Optional[PostgresStateStore] = None
+        self.last_parity_report: Optional[Dict[str, Any]] = None
+        self._eod_settled_session: Optional[str] = None
+        self._last_risk_milestone_mono: float = 0.0
+        self._last_flushed_peaks: Dict[str, float] = {}
+        self._explicit_db_manager: bool = db_manager is not None
+        shared_db = db_manager
+        if persist_trades and shared_db is None:
+            try:
+                from backtest.db import DatabaseManager
 
-            from backtest.db import DatabaseManager
+                shared_db = DatabaseManager.from_env()
+            except Exception:  # noqa: BLE001 — persistence is best-effort
+                logger.info("trade persistence disabled (no reachable database)", exc_info=True)
+                shared_db = None
+        if shared_db is not None:
+            try:
+                from backtest.forward.trade_persistence import LiveTradePersister
 
-            self._trade_persister = LiveTradePersister(DatabaseManager.from_env())
-        except Exception:  # noqa: BLE001 — persistence is best-effort
-            logger.info("trade persistence disabled (no reachable database)", exc_info=True)
+                self._trade_persister = LiveTradePersister(shared_db)
+                self._trade_persister.attach_order_ledger(self.ledger)
+            except Exception:  # noqa: BLE001 — persistence is best-effort
+                logger.info("trade persistence disabled (init failed)", exc_info=True)
+            enable_pg_store = (
+                "PYTEST_CURRENT_TEST" not in os.environ
+                or self._explicit_db_manager
+                or self._state_store is not None
+                or os.environ.get("STATE_STORE_PRIMARY", "").strip().lower()
+                in ("postgres", "pg", "postgresql", "db")
+            )
+            if enable_pg_store:
+                try:
+                    self._pg_state_store = PostgresStateStore(
+                        shared_db,
+                        allow_synthetic=bool(allow_synthetic_db_state),
+                    )
+                except Exception:  # noqa: BLE001 — fail-soft dual-write
+                    logger.info("postgres state store disabled (init failed)", exc_info=True)
         self._restoring = False  # suppress saves while rehydrating
         # Portfolio Intelligence (2026-09-26): read-only aggregate analytics +
         # alert rules. Built before the restore so restored runners register
@@ -293,6 +338,15 @@ class PortfolioManager:
             logger.exception("portfolio intelligence disabled (init failed)")
         self._restore_state()
 
+        # BUG-37 (ticket 2.4 item 3): the ledger keeps 'active' rows for books
+        # nobody runs — deleted runners, re-spawns under a new instance id, test
+        # fixtures — and ``sum(initial_capital) WHERE status='active'`` is what
+        # capital is read from. Fail-soft like every other boot side effect.
+        try:
+            self._reap_orphan_portfolio_rows()
+        except Exception:  # noqa: BLE001 — a reap must never block a start
+            logger.exception("[ledger] orphan portfolio-row reap skipped")
+
         # MTM Staleness Watchdog (R6): periodic 60s mark-repair timer + manual
         # operator trigger (~10s cooldown per runner).
         self._refresh_marks_cooldown_s: float = 10.0
@@ -301,6 +355,9 @@ class PortfolioManager:
         #: BUG-39: the session clock is read once a second so the EOD
         #: square-off cannot depend on a tick arriving at 15:10.
         self.eod_sweep_interval_s: float = 1.0
+        #: Edge trigger for the "paused book carries overnight" warning, so a
+        #: 1 s sweep says it once per session rather than 1,200 times.
+        self._paused_carry_warned: bool = False
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None
         if auto_start_feed and "PYTEST_CURRENT_TEST" not in os.environ:
@@ -324,16 +381,132 @@ class PortfolioManager:
         return sum(r.equity() for r in self._bucket_runners(mode))
 
     def _bucket_capital(self, mode: str) -> float:
-        """Derive total allocated capital for a bucket."""
+        """Derive total allocated capital for a bucket from its runners."""
         return sum(r.config.allocated_capital for r in self._bucket_runners(mode))
+
+    def _sync_total_capital(self) -> None:
+        """Re-derive ``total_capital`` from the runners that actually exist.
+
+        BUG-03: it was an accumulator, added to on spawn and subtracted from on
+        delete. A refused restore, a re-spawn, or any path that removed a
+        runner without paying the subtraction left it drifting away from the
+        money on the books — and the state file then faithfully re-saved the
+        drift. Callers must run this *after* mutating ``_runners``.
+        """
+        self.total_capital = round(
+            sum(r.config.allocated_capital for r in self._runners.values()), 2
+        )
+
+    def _anchor_keys(self, runner: StrategyRunner, bucket: str) -> List[str]:
+        """Every bucket key this runner's money sits inside."""
+        keys = [bucket]
+        segment = getattr(runner.config, "segment", None)
+        if bucket == "live" and segment:
+            keys.append(self._segment_key(str(segment).strip().lower()))
+        return keys
+
+    def _record_capital_flow(self, runner: StrategyRunner, delta: float) -> None:
+        """Move the day/peak anchors with money entering or leaving a book.
+
+        BUG-33: ``daily_pnl = equity - day_start`` only measures trading while
+        the anchor and the book see the same money. A runner spawned mid-session
+        put its allocated capital into equity without touching the anchor, so
+        the fuse saw a large phantom *gain* — which is worse than a phantom
+        loss, because the bucket's daily-loss limit is then spent masking real
+        losses instead of tripping on them. Deleting a book subtracted its
+        equity and read as a loss against a peak it had just inflated.
+
+        So every anchor and high-water mark the runner belongs to (the manager
+        baseline, its bucket, its live segment) shifts by the same flow: money
+        in at ``allocated_capital``, money out at the book's ``equity()``, which
+        leaves the surviving books' measured P&L exactly where it was.
+
+        An anchor of 0 means the session baseline has not been taken yet — the
+        first bar takes it from current equity, which already contains the flow,
+        so those keys are skipped. That is also what keeps a boot-time restore
+        (which zeroes every anchor) from double-counting its own runners.
+
+        Callers hold ``self._lock``.
+        """
+        if not delta:
+            return
+        removed_pos_pnl = (
+            max(0.0, self._safe_runner_daily_pnl(runner)) if delta < 0 else 0.0
+        )
+        for key in self._anchor_keys(runner, self._runner_bucket(runner)):
+            anchor = self._bucket_day_start.get(key, 0.0)
+            if anchor > 0:
+                self._bucket_day_start[key] = round(anchor + delta, 2)
+            peak = self._bucket_peak.get(key, 0.0)
+            if peak > 0:
+                self._bucket_peak[key] = round(max(peak + delta, 0.0), 2)
+            if removed_pos_pnl > 0:
+                self._bucket_session_peak_pnl[key] = round(
+                    max(0.0, self._bucket_session_peak_pnl.get(key, 0.0) - removed_pos_pnl),
+                    2,
+                )
+        if self._day_start_equity > 0:
+            self._day_start_equity = round(self._day_start_equity + delta, 2)
+        if self.peak_equity > 0:
+            self.peak_equity = round(max(self.peak_equity + delta, 0.0), 2)
+        if removed_pos_pnl > 0:
+            self._session_peak_daily_pnl = round(
+                max(0.0, self._session_peak_daily_pnl - removed_pos_pnl), 2
+            )
+        logger.info(
+            "[ledger] capital flow %+.2f applied to anchors (runner=%s bucket=%s)",
+            delta,
+            runner.config.name,
+            self._runner_bucket(runner),
+        )
 
     def _bucket_daily_pnl(self, mode: str) -> float:
         """Derive daily P&L for a bucket from its runners."""
         return sum(r.daily_pnl() for r in self._bucket_runners(mode))
 
     def _bucket_realized_pnl(self, mode: str) -> float:
-        """Derive realized P&L for a bucket from its runners."""
+        """Derive NET realized P&L for a bucket from its runners (BUG-04).
+
+        ``runner.realized_pnl`` is the net half of the contract — lifetime
+        realized less the costs that belong to closed round trips.
+        """
         return sum(r.realized_pnl for r in self._bucket_runners(mode))
+
+    def _bucket_sum(self, mode: str, attr: str, call: bool = False) -> float:
+        """Sum one BUG-04 contract field across a bucket's runners."""
+        total = 0.0
+        for r in self._bucket_runners(mode):
+            value = getattr(r, attr, 0.0)
+            total += float(value() if call else value)
+        return total
+
+    def _bucket_gross_realized(self, mode: str) -> float:
+        """Lifetime realized before any cost — see BUG-04 contract."""
+        return self._bucket_sum(mode, "gross_realized_pnl")
+
+    def _bucket_fees(self, mode: str) -> float:
+        """Lifetime brokerage + statutory charges paid by this bucket."""
+        return self._bucket_sum(mode, "total_fees_paid")
+
+    def _bucket_realized_today(self, mode: str) -> float:
+        """NET realized booked in the current session, all runners."""
+        return self._bucket_sum(mode, "realized_pnl_today")
+
+    def _bucket_daily_realized_net_pnl(self, mode: str) -> float:
+        """Today's IST-scoped net realized P&L across a bucket's runners (E1)."""
+        return self._bucket_sum(mode, "daily_realized_net_pnl", call=True)
+
+    def _bucket_daily_gross_pnl(self, mode: str) -> float:
+        """Today's IST-scoped gross realized P&L across a bucket's runners (E1)."""
+        return self._bucket_sum(mode, "daily_gross_pnl", call=True)
+
+    def _bucket_daily_commission(self, mode: str) -> float:
+        """Today's single combined commission sum across a bucket's runners (E2)."""
+        return self._bucket_sum(mode, "daily_commission", call=True)
+
+    def _bucket_open_pnl(self, mode: str) -> float:
+        """NET mark-to-market on books still open."""
+        return self._bucket_sum(mode, "open_pnl", call=True)
 
     def _bucket_deployed(self, mode: str) -> float:
         """Derive deployed capital for a bucket from its runners."""
@@ -437,7 +610,6 @@ class PortfolioManager:
                 runners = self._segment_runners(name)
                 key = self._segment_key(name)
                 equity = sum(r.equity() for r in runners)
-                day_start = self._bucket_day_start.get(key, 0.0)
                 peak = self._bucket_peak.get(key, 0.0)
                 out[name] = {
                     "display_name": seg.display_name,
@@ -447,7 +619,9 @@ class PortfolioManager:
                     "risk": dict(seg.risk),
                     "runner_count": len(runners),
                     "equity": equity,
-                    "daily_pnl": (equity - day_start) if day_start > 0 else 0.0,
+                    # Today's move, same as the bucket card and the segment
+                    # fuse: ``equity - day_start`` was the life of the segment.
+                    "daily_pnl": sum(r.daily_pnl() for r in runners),
                     "deployed": sum(r.deployed_capital() for r in runners),
                     "drawdown_pct": ((peak - equity) / peak) if peak > 0 else 0.0,
                     "halted": self._bucket_halted.get(key, False),
@@ -460,12 +634,141 @@ class PortfolioManager:
         """Initialize per-bucket state if not yet present (idempotent)."""
         if mode not in self._bucket_peak:
             self._bucket_peak[mode] = 0.0
+            self._bucket_session_peak_pnl[mode] = 0.0
             self._bucket_halted[mode] = False
             self._bucket_halt_reason[mode] = None
             self._bucket_halt_mode[mode] = None
             self._bucket_halted_ts[mode] = None
             self._bucket_day_start[mode] = 0.0
             self._bucket_day[mode] = None
+        elif mode not in self._bucket_session_peak_pnl:
+            self._bucket_session_peak_pnl[mode] = 0.0
+
+    def _slice_runners_for_key(self, key: str) -> List[StrategyRunner]:
+        """Resolve runners belonging to a bucket ('paper'|'live') or 'segment:<name>'."""
+        if key in ("paper", "live"):
+            return self._bucket_runners(key)
+        if key.startswith("segment:"):
+            return self._segment_runners(key.split(":", 1)[1])
+        return []
+
+    @staticmethod
+    def _safe_runner_daily_pnl(runner: StrategyRunner) -> float:
+        """Read a runner's session P&L without prematurely stamping ``_pnl_session``.
+
+        Calling ``runner.daily_pnl()`` on a freshly spawned runner before its
+        first bar stamps ``_pnl_session = current_session_date()`` (wall clock),
+        preventing ``_capture_pnl_session()`` from rolling on earlier-dated
+        replay bars. Before any bar or restored session anchor exists, session
+        P&L is simply ``equity() - allocated_capital``.
+        """
+        if (
+            getattr(runner, "_pnl_session", None) is not None
+            or getattr(runner, "_last_bar_ts", None)
+        ):
+            return float(runner.daily_pnl())
+        alloc = float(
+            getattr(getattr(runner, "config", None), "allocated_capital", 0.0) or 0.0
+        )
+        return (float(runner.equity()) - alloc) if alloc > 0 else 0.0
+
+    def _maybe_roll_risk_session_ist(self) -> bool:
+        """Roll session high-water marks & auto-halt latches cleanly at 00:00 IST."""
+        today_ist = current_session_date().isoformat()
+        prev_session = self._risk_session_date_ist
+        bar_sessions = [
+            str(getattr(r, "_pnl_session", "") or "")
+            for r in self._runners.values()
+            if getattr(r, "_pnl_session", None)
+        ]
+        cur_bar_session = max(bar_sessions) if bar_sessions else None
+        prev_bar_session = getattr(self, "_bar_risk_session", None)
+        if cur_bar_session:
+            self._bar_risk_session = cur_bar_session
+        if (
+            prev_bar_session
+            and cur_bar_session
+            and cur_bar_session > prev_bar_session
+        ):
+            # Bar-clock session advanced (replay / synthetic multi-day run):
+            # zero intraday peak P&L so yesterday's gain is not added on top of
+            # today's new open baseline.
+            self._session_peak_daily_pnl = 0.0
+            for key in list(self._bucket_session_peak_pnl.keys()):
+                self._bucket_session_peak_pnl[key] = 0.0
+        if prev_session and prev_session != today_ist:
+            self._risk_session_date_ist = today_ist
+            self._session_peak_daily_pnl = 0.0
+            agg_eq = self._aggregate_equity()
+            self.peak_equity = agg_eq if self._runners else 0.0
+            self._day_start_equity = agg_eq if self._runners else 0.0
+            cleared_subjects: List[str] = []
+            if self.halted:
+                cleared_subjects.append("portfolio")
+            self.halted = False
+            self.halt_reason = None
+            self.halt_mode = None
+            self.halted_ts = None
+            for key in list(self._bucket_peak.keys()):
+                self._bucket_session_peak_pnl[key] = 0.0
+                s_runners = self._slice_runners_for_key(key)
+                s_eq = sum(float(r.equity()) for r in s_runners)
+                self._bucket_peak[key] = s_eq if s_runners else 0.0
+                self._bucket_day_start[key] = s_eq if s_runners else 0.0
+                if self._bucket_halted.get(key):
+                    cleared_subjects.append(f"bucket:{key}")
+                self._bucket_halted[key] = False
+                self._bucket_halt_reason[key] = None
+                self._bucket_halt_mode[key] = None
+                self._bucket_halted_ts[key] = None
+            logger.info(
+                "[risk] rolled session risk peak & breaker latches from %s to new IST session %s",
+                prev_session,
+                today_ist,
+            )
+            if cleared_subjects:
+                self._resolve_breaker_alerts(cleared_subjects)
+            return True
+        self._risk_session_date_ist = today_ist
+        return False
+
+    def _sync_slice_session_peak(
+        self, key: Optional[str], runners: List[StrategyRunner]
+    ) -> float:
+        """Update cash-flow-neutral session peak P&L and effective peak equity.
+
+        ``open_baseline = equity - daily_pnl`` is invariant to trading gains/losses
+        within the IST session and shifts strictly by capital added/removed, so
+        ``open_baseline + session_peak_daily_pnl`` preserves intraday drawdown %
+        even across mid-day restarts or offline runner additions/removals.
+        """
+        if key is None:
+            if not runners:
+                self._session_peak_daily_pnl = 0.0
+                self.peak_equity = 0.0
+                return 0.0
+            equity = sum(float(r.equity()) for r in runners)
+            daily_pnl = sum(self._safe_runner_daily_pnl(r) for r in runners)
+            open_baseline = max(0.0, equity - daily_pnl)
+            if daily_pnl > self._session_peak_daily_pnl:
+                self._session_peak_daily_pnl = daily_pnl
+            cf_peak = open_baseline + self._session_peak_daily_pnl
+            self.peak_equity = max(self.peak_equity, equity, cf_peak)
+            return self.peak_equity
+
+        self._ensure_bucket_state(key)
+        if not runners:
+            self._bucket_session_peak_pnl[key] = 0.0
+            self._bucket_peak[key] = 0.0
+            return 0.0
+        equity = sum(float(r.equity()) for r in runners)
+        daily_pnl = sum(self._safe_runner_daily_pnl(r) for r in runners)
+        open_baseline = max(0.0, equity - daily_pnl)
+        if daily_pnl > self._bucket_session_peak_pnl.get(key, 0.0):
+            self._bucket_session_peak_pnl[key] = daily_pnl
+        cf_peak = open_baseline + self._bucket_session_peak_pnl[key]
+        self._bucket_peak[key] = max(self._bucket_peak.get(key, 0.0), equity, cf_peak)
+        return self._bucket_peak[key]
 
     def get_bucket_aggregates(self) -> Dict[str, Dict[str, Any]]:
         """Per-bucket aggregate snapshot — the C4 embedded bucket data.
@@ -476,14 +779,22 @@ class PortfolioManager:
         and SSE stream consume this directly.
         """
         buckets: Dict[str, Dict[str, Any]] = {}
+        today_ist = current_session_date()
+        scope_label = format_session_scope(today_ist)
         for mode in ("paper", "live"):
             equity = self._bucket_equity(mode)
             capital = self._bucket_capital(mode)
             peak = self._bucket_peak.get(mode, 0.0)
             day_start = self._bucket_day_start.get(mode, 0.0)
             daily = self._bucket_daily_pnl(mode)
+            daily_realized_net = self._bucket_daily_realized_net_pnl(mode)
+            daily_gross = self._bucket_daily_gross_pnl(mode)
+            daily_comm = self._bucket_daily_commission(mode)
             counts = self._bucket_runner_counts(mode)
             limit = abs(self.supervisor.config.daily_loss_limit)
+            # BUG-33: the percentage is quoted against the money in the bucket,
+            # never against a smaller stale anchor.
+            pct_denominator = max(day_start, capital, 1.0)
 
             buckets[mode] = {
                 "equity": round(equity, 2),
@@ -491,8 +802,20 @@ class PortfolioManager:
                 "peak_equity": round(peak, 2),
                 "drawdown_pct": round(self._bucket_drawdown(mode), 4),
                 "daily_pnl": round(daily, 2),
-                "daily_pnl_pct": (round(daily / day_start, 6) if day_start else 0.0),
+                "daily_pnl_pct": round(daily / pct_denominator, 6),
+                "daily_realized_net_pnl": round(daily_realized_net, 2),
+                "daily_gross_pnl": round(daily_gross, 2),
+                "daily_commission": round(daily_comm, 2),
+                "session_date_ist": today_ist.isoformat(),
+                "session_scope_label": scope_label,
                 "realized_pnl": round(self._bucket_realized_pnl(mode), 2),
+                # BUG-04: the full NET contract, per bucket. Rows and cards
+                # must be able to reconcile gross − fees = net without opening
+                # a runner detail.
+                "gross_realized_pnl": round(self._bucket_gross_realized(mode), 2),
+                "total_fees_paid": round(self._bucket_fees(mode), 2),
+                "realized_pnl_today": round(self._bucket_realized_today(mode), 2),
+                "open_pnl": round(self._bucket_open_pnl(mode), 2),
                 "deployed_capital": round(self._bucket_deployed(mode), 2),
                 "open_positions": self._bucket_open_positions(mode),
                 "halted": self._bucket_halted.get(mode, False),
@@ -601,7 +924,10 @@ class PortfolioManager:
                 "open_positions": 0,
                 "open_structures": 0,
                 "equity": 0.0,
+                "gross_realized_pnl": 0.0,
+                "total_fees_paid": 0.0,
                 "realized_pnl": 0.0,
+                "open_pnl": 0.0,
                 "unrealized_pnl": 0.0,
                 "capital": 0.0,
                 "positions": [],
@@ -621,12 +947,28 @@ class PortfolioManager:
             open_positions = broker.get_open_positions()
             open_structures = broker.get_open_structures()
 
+            # BUG-04: this row is runner-shaped, so it owes the same contract.
+            # ``total_realized_pnl`` is gross and ``total_costs_paid`` is the
+            # lifetime stack; the part still sitting on open books belongs to
+            # the mark, the rest to realized — the same attribution the runners
+            # use, so gross − fees = net here and there alike.
+            gross_realized = float(broker.total_realized_pnl)
+            fees_paid = float(broker.total_costs_paid)
+            open_fees = sum(
+                float(s.total_commission) + float(s.statutory_fees or 0)
+                for s in open_structures
+            )
+            net_open = float(broker.total_unrealized_pnl) - open_fees
+
             return {
                 "exists": True,
                 "open_positions": len(open_positions),
                 "open_structures": len(open_structures),
                 "equity": float(broker.total_equity),
-                "realized_pnl": float(broker.total_realized_pnl),
+                "gross_realized_pnl": gross_realized,
+                "total_fees_paid": fees_paid,
+                "realized_pnl": gross_realized - (fees_paid - open_fees),
+                "open_pnl": net_open,
                 "unrealized_pnl": float(broker.total_unrealized_pnl),
                 "capital": float(broker.capital),
                 "available_cash": float(broker.available_cash),
@@ -1027,11 +1369,13 @@ class PortfolioManager:
                     config.mode,
                 )
             self._runners[runner.instance_id] = runner
-            self.total_capital += config.allocated_capital
+            self._sync_total_capital()
 
             # Per-bucket state initialization (idempotent)
             bucket = self._runner_bucket(runner)
             self._ensure_bucket_state(bucket)
+            # BUG-33: the money this book brings in is not trading profit.
+            self._record_capital_flow(runner, float(config.allocated_capital))
 
             # Feed + anchors — subscriptions accounted in the shared bus
             # (U6.2). Bar-feed subscriptions are taken here; the chain-bus
@@ -1101,6 +1445,341 @@ class PortfolioManager:
             self.warmup_runner(rid, background=self._async_warmup)
         return rid
 
+    # ------------------------------------------------------------------
+    # Sprint A2: broker login wakes the books that were waiting on it
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _waits_on_broker(config: Any, broker_key: str) -> bool:
+        """True when a runner config trades on ``broker_key``.
+
+        Accepts a :class:`RunnerConfig` or its serialized dict form — the
+        parked-snapshot path only ever has the dict. Both the quote source and
+        the execution venue count: a book priced off mStock but routed through
+        Dhan is waiting on either one.
+        """
+        values = (
+            (config.get("source"), config.get("execution_broker"))
+            if isinstance(config, dict)
+            else (getattr(config, "source", None), getattr(config, "execution_broker", None))
+        )
+        return any(str(v or "").strip().lower() == broker_key for v in values)
+
+    def count_runners_waiting_on(self, broker_name: Optional[str]) -> int:
+        """How many live books are stuck on a frozen mark for want of ``broker_name``.
+
+        Sprint A4 — the topbar banner and the auto-open login popup are gated on
+        "a runner actually needs this broker", so the status poll has to carry
+        the number. Only runners that *built* on the frozen stub count: a parked
+        snapshot is a restore refusal with a dozen possible causes, and claiming
+        all of them need a login would put a red banner up for a book that a
+        re-login cannot fix.
+
+        Cheap by construction — two dict scans, no I/O and no chain acquire —
+        because ``/api/broker/status`` is polled by every open tab.
+        """
+        key = str(broker_name or "").strip().lower()
+        if not key:
+            return 0
+        with self._lock:
+            return sum(
+                1
+                for runner in self._runners.values()
+                if getattr(runner, "feed_state", None) == FEED_STATE_WAITING
+                and self._waits_on_broker(runner.config, key)
+            )
+
+    def on_broker_authenticated(self, broker_name: Optional[str]) -> Dict[str, Any]:
+        """Wake every book that was waiting on ``broker_name``.
+
+        Fires the moment a session becomes valid: ``verify_totp`` success, the
+        monitor loop's unauthenticated→authenticated edge, or a remembered
+        session restored at boot. Three jobs, in order:
+
+        1. Hot-swap the frozen-mark stub for the live chain on runners that are
+           already constructed, so a book that booted ``WAITING_FOR_FEED``
+           prices again immediately rather than at its next resume.
+        2. Re-construct runners *parked* at restore because construction
+           refused without a session. They come back PAUSED — waking the feed
+           is not the operator's intent to trade.
+        3. Re-mark the books that woke, then re-run the risk pass. Frozen marks
+           make the fuses stale in both directions: a halt that fired on a
+           frozen number may no longer hold, and a fresh number may fire one
+           that should.
+
+        Never raises — a login must not fail because waking a book did.
+        """
+        key = str(broker_name or "").strip().lower()
+        out: Dict[str, Any] = {
+            "broker": key,
+            "woken": [],
+            "unparked": [],
+            "still_waiting": [],
+            "marked": 0,
+            "risk_evaluated": False,
+        }
+        if not key:
+            return out
+
+        # Snapshot the work under the lock, then release it. The chain acquire
+        # below is a network call; holding ``_lock`` across it would stall
+        # every SSE poll and control action for a broker round-trip.
+        with self._lock:
+            candidates = [
+                (rid, runner)
+                for rid, runner in self._runners.items()
+                if getattr(runner, "feed_state", None) == FEED_STATE_WAITING
+                and self._waits_on_broker(runner.config, key)
+            ]
+            parked = [
+                (park_key, snap)
+                for park_key, snap in self._parked_snapshots.items()
+                if self._waits_on_broker(snap.get("config") or {}, key)
+            ]
+        # Event 2 (Sprint D / Ticket D1): reconcile mode="live" positions
+        # against broker.get_positions() on every authentication edge when live
+        # books are routed to this broker.
+        rec = self._reconcile_live_broker_positions(key)
+        if rec.get("checked"):
+            out["reconciliation"] = rec
+        if not candidates and not parked:
+            return out
+
+        woke: List[StrategyRunner] = []
+        for rid, runner in candidates:
+            try:
+                runner._maybe_upgrade_to_live_chain()
+            except Exception:  # noqa: BLE001 — one stuck book cannot stop the rest
+                logger.exception("[login-wake] chain hot-swap failed for %s", rid[:8])
+                out["still_waiting"].append(rid)
+                continue
+            if getattr(runner, "feed_state", None) == FEED_STATE_LIVE:
+                out["woken"].append(rid)
+                woke.append(runner)
+            else:
+                out["still_waiting"].append(rid)
+
+        for park_key, snap in parked:
+            name = str((snap.get("config") or {}).get("name", "?"))
+            try:
+                from backtest.forward.state_store import _config_from_dict
+
+                config = _config_from_dict(snap["config"])
+                self.add_runner(config, start=False)
+            except (ValueError, KeyError, RuntimeError) as exc:
+                logger.warning(
+                    "[login-wake] parked runner %s still refused after %s login: %s",
+                    name, key, exc,
+                )
+                continue
+            runner = self._runners.get(config.instance_id)
+            if runner is None:
+                continue
+            try:
+                restore_runner(runner, snap)
+            except Exception:  # noqa: BLE001 — a corrupt snapshot must not fail a login
+                logger.exception(
+                    "[login-wake] parked runner %s re-created but could not be "
+                    "rehydrated — leaving it parked", name,
+                )
+                # ``remove_runner`` also drops the parked entry, which would
+                # destroy the only record of this book's positions and the
+                # operator's manual SL/TP levels. Take the half-built runner off
+                # screen, then put the snapshot back so the next boot retries.
+                self.remove_runner(config.instance_id)
+                with self._lock:
+                    self._parked_snapshots[park_key] = snap
+                continue
+            if self._is_runner_risk_halted(runner) and runner.status == STATUS_RUNNING:
+                runner.status = STATUS_PAUSED
+                runner.pause_reason = "BLOCKED_BY_RISK"
+                runner._sync_bridge_runner_state()
+            with self._lock:
+                self._parked_snapshots.pop(park_key, None)
+            out["unparked"].append(config.instance_id)
+            if getattr(runner, "feed_state", None) == FEED_STATE_LIVE:
+                woke.append(runner)
+
+        protective_exits = 0
+        for runner in woke:
+            try:
+                self._repair_runner_marks_internal(runner, force=True)
+                out["marked"] += 1
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[login-wake] mark refresh failed for %s", runner.config.name
+                )
+                continue
+            try:
+                runner.arm_entries()
+                if runner.status == STATUS_RUNNING and runner.has_open_exposure():
+                    closed_now = runner.evaluate_open_exposure_protection()
+                    if closed_now > 0:
+                        protective_exits += closed_now
+                        if self._trade_persister is not None and not self._restoring:
+                            self._trade_persister.flush_runner(runner)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[login-wake] post-wake protective exit check failed for %s",
+                    runner.config.name,
+                )
+
+        if protective_exits > 0:
+            out["protective_exits"] = protective_exits
+
+        if out["woken"] or out["unparked"]:
+            if self._auto_start_feed:
+                try:
+                    self._sync_mstock_thread()
+                except Exception:  # noqa: BLE001
+                    logger.debug("[login-wake] feed thread sync failed", exc_info=True)
+            try:
+                self._evaluate_risk()
+                out["risk_evaluated"] = True
+            except Exception:  # noqa: BLE001
+                logger.exception("[login-wake] risk re-evaluation failed")
+            self._audit_log(
+                f"BROKER_LOGIN_WAKE {key}",
+                scope="dashboard",
+                detail=(
+                    f"woken={len(out['woken'])} unparked={len(out['unparked'])} "
+                    f"still_waiting={len(out['still_waiting'])} marked={out['marked']}"
+                ),
+            )
+            self._persist_state()
+        logger.info(
+            "[login-wake] %s authenticated: %d book(s) pricing again, %d parked "
+            "snapshot(s) re-created, %d still waiting",
+            key, len(out["woken"]), len(out["unparked"]), len(out["still_waiting"]),
+        )
+        return out
+
+    def _reconcile_live_broker_positions(self, broker_key: str) -> Dict[str, Any]:
+        """Event 2 (Sprint D / Ticket D1): reconcile live positions on broker login.
+
+        Compares open ``mode="live"`` symbols across runners routed to
+        ``broker_key`` against ``broker.get_positions()``. Never silently mutates
+        books; logs and raises an operator alert if external/phone-app trades
+        caused a mismatch.
+        """
+        with self._lock:
+            live_runners = [
+                r
+                for r in self._runners.values()
+                if self._runner_bucket(r) == "live"
+                and str(
+                    r.config.execution_broker or r.config.source or ""
+                ).strip().lower()
+                == broker_key
+            ]
+        if not live_runners:
+            return {"checked": False, "reason": "no_live_runners", "mismatches": []}
+        try:
+            from backtest.brokers.session_manager import get_session_manager
+
+            broker = get_session_manager().get_authenticated_broker(broker_key)
+        except Exception:  # noqa: BLE001
+            return {"checked": False, "reason": "broker_unavailable", "mismatches": []}
+        get_pos = getattr(broker, "get_positions", None)
+        if not callable(get_pos):
+            return {"checked": False, "reason": "unsupported_by_broker", "mismatches": []}
+        try:
+            venue_raw = get_pos() or []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[reconcile] %s get_positions() failed: %s", broker_key, exc)
+            return {"checked": False, "reason": "fetch_failed", "mismatches": []}
+
+        # Build net signed qty per trading_symbol on our live books:
+        local_net: Dict[str, int] = {}
+        for r in live_runners:
+            for sym, pos in (getattr(r.portfolio, "positions", {}) or {}).items():
+                q = int(round(float(getattr(pos, "quantity", 0) or 0)))
+                if q != 0:
+                    local_net[str(sym).upper()] = local_net.get(str(sym).upper(), 0) + q
+            bridge = getattr(r, "options_bridge", None)
+            if bridge is not None:
+                for s in bridge.option_broker.get_open_structures():
+                    for leg in s.legs:
+                        tsym = str(leg.trading_symbol or "").upper()
+                        if not tsym:
+                            continue
+                        signed_units = int(leg.total_quantity) * (
+                            1 if leg.is_long else -1
+                        )
+                        local_net[tsym] = local_net.get(tsym, 0) + signed_units
+
+        venue_net: Dict[str, int] = {}
+        rows_iter = (
+            venue_raw.get("net", [])
+            if isinstance(venue_raw, dict)
+            else (venue_raw if isinstance(venue_raw, list) else [])
+        )
+        for item in rows_iter:
+            if not isinstance(item, dict):
+                continue
+            tsym = str(
+                item.get("tradingsymbol")
+                or item.get("trading_symbol")
+                or item.get("symbol")
+                or ""
+            ).upper()
+            if not tsym:
+                continue
+            qty = int(
+                round(
+                    float(
+                        item.get("quantity")
+                        or item.get("netqty")
+                        or item.get("net_qty")
+                        or 0
+                    )
+                )
+            )
+            if qty != 0:
+                venue_net[tsym] = venue_net.get(tsym, 0) + qty
+
+        mismatches: List[str] = []
+        for sym in sorted(set(local_net) | set(venue_net)):
+            lq = local_net.get(sym, 0)
+            vq = venue_net.get(sym, 0)
+            if lq != vq:
+                mismatches.append(f"{sym}: local={lq} venue={vq}")
+
+        if mismatches:
+            detail = "; ".join(mismatches)
+            logger.error(
+                "[reconcile] LIVE_POSITION_MISMATCH on %s: %s", broker_key, detail
+            )
+            self._audit_log(
+                f"LIVE_POSITION_MISMATCH {broker_key}",
+                scope="live",
+                detail=detail,
+            )
+            try:
+                from backtest.alerts.broker import get_alert_broker
+
+                get_alert_broker().raise_alert(
+                    key=f"live_position_mismatch:{broker_key}",
+                    alert_type="risk_breach",
+                    severity="warning",
+                    title=f"Live position mismatch on {broker_key}",
+                    message=f"Local vs venue open qty diverged: {detail}",
+                    metadata={"broker": broker_key, "mismatches": mismatches},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            logger.info(
+                "[reconcile] LIVE_POSITION_OK on %s (%d symbol(s))",
+                broker_key,
+                len(local_net),
+            )
+        return {
+            "checked": True,
+            "ok": len(mismatches) == 0,
+            "mismatches": mismatches,
+        }
+
     def remove_runner(self, instance_id: str) -> bool:
         with self._lock:
             runner = self._runners.pop(instance_id, None)
@@ -1115,6 +1794,10 @@ class PortfolioManager:
                     return True
                 return False
             bucket = self._runner_bucket(runner)
+            # BUG-33: the money leaving is this book's equity, measured while
+            # the book is still intact — taken before stop() and the anchor
+            # shift so the surviving books' day P&L does not jump.
+            self._record_capital_flow(runner, -float(runner.equity()))
             if self.intelligence is not None:
                 try:
                     self.intelligence.unregister_runner(instance_id, runner)
@@ -1136,17 +1819,21 @@ class PortfolioManager:
                 feed = self.mstock_feed
             feed.remove_symbols(runner.config.symbols)
             self._sync_mstock_thread()
-            self.total_capital -= runner.config.allocated_capital
+            self._sync_total_capital()
             self._refresh_anchors()
             # If this was the last runner in the bucket, reset bucket state
             if not self._bucket_runners(bucket):
                 self._bucket_peak[bucket] = 0.0
+                self._bucket_session_peak_pnl[bucket] = 0.0
                 self._bucket_halted[bucket] = False
                 self._bucket_halt_reason[bucket] = None
                 self._bucket_halt_mode[bucket] = None
                 self._bucket_halted_ts[bucket] = None
                 self._bucket_day_start[bucket] = 0.0
                 self._bucket_day[bucket] = None
+            if not self._runners:
+                self._session_peak_daily_pnl = 0.0
+                self.peak_equity = 0.0
             logger.info("Runner removed: %s (bucket=%s)", runner.config.name, bucket)
             self._persist_state()
             try:
@@ -1218,6 +1905,130 @@ class PortfolioManager:
                         state = r.get_state()
         return state
 
+    def respawn_runner(
+        self,
+        instance_id: str,
+        *,
+        auto_start: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Retire a flat runner and spawn a replacement from latest template rules (Ticket D3).
+
+        Strictly gated on ``open_positions == 0`` (equity + option structures):
+        never mutates or closes an open position mid-trade.
+        """
+        with self._lock:
+            runner = self._runners.get(instance_id)
+            if runner is None:
+                raise KeyError(f"unknown runner: {instance_id}")
+            eq_open = len(getattr(runner, "positions", {}) or {})
+            opt_open = (
+                len(runner.options_bridge.option_broker.get_open_structures())
+                if runner.options_bridge is not None
+                else 0
+            )
+            if (eq_open + opt_open) > 0:
+                raise ValueError(
+                    f"cannot respawn runner {runner.config.name!r} while "
+                    f"{eq_open + opt_open} position(s) are open — "
+                    "flatten or wait until flat"
+                )
+            old_cfg = runner.config
+            old_status = runner.status
+            bucket = self._runner_bucket(runner)
+
+        # Resolve latest strategy bundle & execution spec outside the lock:
+        from backtest.strategy.bundle import engine_git_sha, strategy_bundle as _bundle
+        from backtest.strategy.registry import get_strategy
+
+        strat_cls = get_strategy(old_cfg.strategy_name)
+        new_instrument: Dict[str, Any] = dict(old_cfg.instrument or {"type": "equity"})
+        if str(new_instrument.get("type", "equity")).lower() == "option":
+            spec_fn = getattr(strat_cls, "execution_spec", None)
+            spec = spec_fn() if callable(spec_fn) else None
+            if spec is not None:
+                from backtest.options.execution_gate import PreTradeRiskGate
+                from backtest.strategy.execution import (
+                    resolve_expression,
+                    validate_expression,
+                )
+
+                gate = PreTradeRiskGate(mode=old_cfg.mode or "paper")
+                old_expr = new_instrument.get("expression") or {}
+                qty_sel: Optional[Dict[str, Any]] = None
+                if isinstance(old_expr, dict) and old_expr.get("quantity") is not None:
+                    qty_sel = {"quantity": old_expr["quantity"]}
+                try:
+                    resolved, provenance = resolve_expression(
+                        spec=spec, user_selections=qty_sel
+                    )
+                except Exception:  # noqa: BLE001 — fall back to pure template defaults
+                    resolved, provenance = resolve_expression(spec=spec)
+                errs = validate_expression(
+                    resolved, permitted_structures=gate.permitted_structures()
+                )
+                if errs:
+                    raise ValueError("; ".join(errs))
+                new_instrument = {
+                    "type": "option",
+                    "expression": resolved,
+                    "expression_provenance": provenance,
+                }
+
+        new_bundle: Optional[Dict[str, Any]] = None
+        try:
+            from backtest.risk_limits import load_risk_limits
+            from backtest.strategy.execution import config_sha256
+
+            new_bundle = _bundle(strat_cls).to_dict()
+            new_bundle["engine_git_sha"] = engine_git_sha()
+            new_bundle["risk_limits_sha256"] = load_risk_limits().sha256
+            new_bundle["config_sha256"] = config_sha256(
+                new_instrument.get("expression") or {}
+            )
+        except Exception:  # noqa: BLE001
+            new_bundle = old_cfg.strategy_bundle
+
+        new_cfg = RunnerConfig(
+            name=old_cfg.name,
+            strategy_name=old_cfg.strategy_name,
+            allocated_capital=old_cfg.allocated_capital,
+            target_type=old_cfg.target_type,
+            symbols=list(old_cfg.symbols) if old_cfg.symbols else None,
+            universe_id=old_cfg.universe_id,
+            timeframe=old_cfg.timeframe,
+            strategy_params=dict(old_cfg.strategy_params or {}),
+            max_pool_positions=old_cfg.max_pool_positions,
+            position_pct=old_cfg.position_pct,
+            max_drawdown_pct=old_cfg.max_drawdown_pct,
+            daily_loss_limit_pct=old_cfg.daily_loss_limit_pct,
+            allow_short=old_cfg.allow_short,
+            mode=old_cfg.mode,
+            source=old_cfg.source,
+            instrument=new_instrument,
+            retry_policy=old_cfg.retry_policy,
+            segment=old_cfg.segment,
+            execution_broker=old_cfg.execution_broker,
+            strategy_bundle=new_bundle,
+        )
+        should_start = (
+            (old_status == STATUS_RUNNING) if auto_start is None else bool(auto_start)
+        )
+        self.remove_runner(instance_id)
+        new_id = self.add_runner(new_cfg, start=should_start)
+        new_runner = self.get_runner(new_id)
+        self._audit_log(
+            f"RESPAWN {old_cfg.name}",
+            scope=bucket,
+            instance_id=new_id,
+            detail=f"retired={instance_id[:8]} new={new_id[:8]}",
+        )
+        self._persist_state()
+        return {
+            "retired_instance_id": instance_id,
+            "instance_id": new_id,
+            "runner": new_runner.get_state() if new_runner is not None else None,
+        }
+
     # ------------------------------------------------------------------ #
     # Live Order Management (2026-09-23)
     # ------------------------------------------------------------------ #
@@ -1263,6 +2074,10 @@ class PortfolioManager:
                 "segment": runner.config.segment,
                 "status": runner.status,
                 "stale": runner.status != STATUS_RUNNING,
+                # Sprint A1: a row on a book whose broker is logged out is a
+                # frozen last mark, not a paused-but-priced one. Same table,
+                # different fix (log in), so the row says which.
+                "feed_state": runner.feed_state,
                 "target_label": runner.target_label,
             }
             try:
@@ -1292,9 +2107,19 @@ class PortfolioManager:
                         "units": row.get("units"),
                         "entry_price": row.get("entry_price"),
                         "current_price": row.get("current_price"),
+                        "prev_close_mark": row.get("prev_close_mark"),
                         "unrealized_pnl": row.get("unrealized_pnl"),
+                        "net_open_pnl": row.get("net_open_pnl"),
+                        "prior_close_net_pnl": row.get("prior_close_net_pnl"),
+                        "today_pnl": row.get("today_pnl"),
                         "pnl_pct": row.get("open_pnl_pct"),
                         "entry_ts": row.get("entry_ts"),
+                        "carry_policy": row.get("carry_policy"),
+                        "intraday_squareoff_minutes_before": row.get(
+                            "intraday_squareoff_minutes_before"
+                        ),
+                        "entry_session_date": row.get("entry_session_date"),
+                        "carried_overnight": bool(row.get("carried_overnight", False)),
                         # R1: mark freshness contract on position rows
                         "mark_ts": row.get("mark_ts"),
                         "mark_stale": bool(row.get("mark_stale")),
@@ -1371,6 +2196,10 @@ class PortfolioManager:
                 self.run_eod_squareoff_sweep()
             except Exception:  # noqa: BLE001 — watchdog must never crash
                 logger.exception("[session-clock] EOD square-off sweep failed")
+            try:
+                self.run_eod_mark_settlement()
+            except Exception:  # noqa: BLE001 — watchdog must never crash
+                logger.exception("[session-clock] EOD mark settlement failed")
             if now_mono < next_mtm_pass:
                 continue
             next_mtm_pass = now_mono + interval
@@ -1392,19 +2221,36 @@ class PortfolioManager:
 
         A positional carry is never touched: holding past the close has to be a
         declared ``carry_policy``, not an accident of a quiet quote feed.
+
+        A book outside ``RUNNING`` is skipped and reported in ``held_paused``:
+        PAUSE is the operator's opt-out from this obligation (B4), so the sweep
+        never overrides it — it says so, once per session, and they own the
+        carry.
         """
         reference = now or now_utc()
         if not self._is_eod_sweep_enabled():
             return {"skipped": True, "reason": "sweep_disabled", "squared_off": []}
         if not in_eod_squareoff_window(reference):
+            self._paused_carry_warned = False
             return {"skipped": True, "reason": "outside_squareoff_window", "squared_off": []}
         with self._lock:
-            runners = [
+            intraday_books = [
                 r
                 for r in self._runners.values()
-                if r.status == STATUS_RUNNING
-                and r.options_bridge is not None
-                and r.options_bridge.carries_intraday
+                if r.options_bridge is not None and r.options_bridge.carries_intraday
+            ]
+            runners = [r for r in intraday_books if r.status == STATUS_RUNNING]
+            # B4: pause is an opt-out from the obligation, not a request to
+            # override it — but an unforced overnight carry must not be silent.
+            held = [
+                {
+                    "instance_id": r.instance_id,
+                    "name": r.config.name,
+                    "status": r.status,
+                    "scope": self._runner_bucket(r),
+                }
+                for r in intraday_books
+                if r.status != STATUS_RUNNING
             ]
         squared: List[Dict[str, Any]] = []
         for runner in runners:
@@ -1438,7 +2284,28 @@ class PortfolioManager:
             )
         if squared:
             self._persist_state()
-        return {"skipped": False, "squared_off": squared}
+        if held and not self._paused_carry_warned:
+            # Once per session (the sweep runs every second): the log is one
+            # surface, the in-app audit trail another — an operator who paused
+            # a book through the UI sees the consequence where they acted.
+            self._paused_carry_warned = True
+            logger.warning(
+                "[session-clock] square-off obligation NOT enforced on %d "
+                "intraday book(s) outside RUNNING — operator owns the carry",
+                len(held),
+            )
+            for book in held:
+                self._audit_log(
+                    "EOD_CARRY_HELD",
+                    scope=book["scope"],
+                    instance_id=book["instance_id"],
+                    detail=(
+                        f"{book['name']} is {book['status']} at "
+                        f"{reference.astimezone(EXCHANGE_TZ):%H:%M:%S} IST — intraday "
+                        "book carried overnight, square-off skipped by design"
+                    ),
+                )
+        return {"skipped": False, "squared_off": squared, "held_paused": held}
 
     def _repair_runner_marks_internal(
         self,
@@ -1524,12 +2391,95 @@ class PortfolioManager:
                 runner_results.append(
                     {"instance_id": runner.instance_id, "name": runner.config.name, **res}
                 )
+        # Event 6 (Sprint D / Ticket D1): 60s market-hours batch crash checkpoint
+        # (1 batch transaction/min; zero per-tick DB chatter).
+        checkpointed = 0
+        if self._pg_state_store is not None:
+            try:
+                with self._lock:
+                    all_runners = list(self._runners.values())
+                checkpointed = self._pg_state_store.flush_mark_checkpoint(
+                    all_runners, settle_prev_close=False
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("[mtm-watchdog] 60s mark checkpoint failed")
         return {
             "skipped": False,
             "checked": checked_total,
             "repaired": repaired_total,
             "still_failing": failing_total,
+            "checkpointed": checkpointed,
             "runners": runner_results,
+        }
+
+    def run_eod_mark_settlement(
+        self, now: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """Event 6 (Sprint D / Ticket D1): official 15:30 IST EOD settlement.
+
+        Once per IST trading day at/after 15:30:00 IST, stamps ``prev_close_mark``
+        and ``prior_close_net_pnl`` on all carried open option legs/structures,
+        dual-writes state, and runs the Phase D1-a/b parity check.
+
+        A holiday would otherwise stamp the previous session's last marks as
+        today's ``prev_close_mark`` anchor, so the day-state check is the same
+        server truth the square-off sweep uses.
+        """
+        reference = now or now_utc()
+        now_ist = reference.astimezone(EXCHANGE_TZ)
+        try:
+            from backtest.live.market_status import get_market_day_state
+
+            day_state = str(get_market_day_state(now_ist).get("day_state") or "")
+        except Exception:  # noqa: BLE001 — fall back to the weekday-only gate
+            day_state = "WEEKEND" if now_ist.weekday() >= 5 else "TRADING_DAY"
+        if day_state == "WEEKEND":
+            return {"settled": False, "reason": "weekend"}
+        if day_state == "HOLIDAY":
+            return {"settled": False, "reason": "holiday"}
+        if (now_ist.hour, now_ist.minute) < (15, 30):
+            return {"settled": False, "reason": "before_close"}
+        sess_iso = now_ist.date().isoformat()
+        if self._eod_settled_session == sess_iso:
+            return {"settled": False, "reason": "already_settled", "session": sess_iso}
+        self._eod_settled_session = sess_iso
+
+        settled_legs = 0
+        with self._lock:
+            all_runners = list(self._runners.values())
+        for r in all_runners:
+            bridge = getattr(r, "options_bridge", None)
+            if bridge is None:
+                continue
+            for s in bridge.option_broker.get_open_structures():
+                if s.last_mark_net_pnl is not None:
+                    s.prior_close_net_pnl = s.last_mark_net_pnl
+                for leg in s.legs:
+                    if leg.current_price is not None and leg.current_price > 0:
+                        leg.prev_close_mark = leg.current_price
+                        settled_legs += 1
+        if self._pg_state_store is not None:
+            try:
+                self._pg_state_store.flush_mark_checkpoint(
+                    all_runners, settle_prev_close=True
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("[session-clock] EOD postgres settlement failed")
+        self._persist_state()
+        if self._state_store is not None and self._pg_state_store is not None:
+            try:
+                self.last_parity_report = verify_state_parity(
+                    self._state_store.load(),
+                    self._pg_state_store.load(),
+                    allow_synthetic=self._pg_state_store.allow_synthetic,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("[session-clock] EOD parity check failed")
+        return {
+            "settled": True,
+            "session": sess_iso,
+            "settled_legs": settled_legs,
+            "parity": self.last_parity_report,
         }
 
     def refresh_runner_marks(
@@ -2102,11 +3052,22 @@ class PortfolioManager:
         with self._lock:
             for runner in self._runners.values():
                 runner.reset_daily_anchor()
+            self._risk_session_date_ist = current_session_date().isoformat()
             self._day_start_equity = self._aggregate_equity()
-            # Per-bucket day anchors
-            for mode in ("paper", "live"):
-                self._bucket_day_start[mode] = self._bucket_equity(mode)
-                self._bucket_day[mode] = datetime.now(timezone.utc).date().isoformat()
+            self._session_peak_daily_pnl = 0.0
+            self.peak_equity = self._day_start_equity
+            # Per-bucket + per-segment day anchors
+            for key in list(
+                {"paper", "live"}
+                | {k for k in self._bucket_peak.keys() if k.startswith("segment:")}
+            ):
+                s_runners = self._slice_runners_for_key(key)
+                s_eq = sum(float(r.equity()) for r in s_runners)
+                self._bucket_day_start[key] = s_eq
+                self._bucket_session_peak_pnl[key] = 0.0
+                self._bucket_peak[key] = s_eq
+                if key in ("paper", "live"):
+                    self._bucket_day[key] = datetime.now(timezone.utc).date().isoformat()
             logger.info("Daily PnL anchors reset (baseline=%.2f)", self._day_start_equity)
             self._persist_state()
 
@@ -2293,7 +3254,7 @@ class PortfolioManager:
 
         tick_tokens = set(str(k) for k in quotes_by_token.keys())
         exited_runners: List[StrategyRunner] = []
-        entered_any = False
+        entered_runners: List[StrategyRunner] = []
 
         for runner in running_mstock:
             matched_spot = False
@@ -2308,7 +3269,7 @@ class PortfolioManager:
                     if res.get("exited"):
                         exited_runners.append(runner)
                     elif res.get("structure_id"):
-                        entered_any = True
+                        entered_runners.append(runner)
 
             if not matched_spot and runner.options_bridge is not None and runner.config.symbols:
                 held_hits = runner.open_option_tokens().intersection(tick_tokens)
@@ -2326,13 +3287,17 @@ class PortfolioManager:
                     if isinstance(res, dict) and res.get("exited"):
                         exited_runners.append(runner)
 
-        if exited_runners or entered_any:
+        if exited_runners or entered_runners:
             with self._lock:
                 if exited_runners:
                     self._evaluate_risk()
                 self._persist_state()
             if self._trade_persister is not None and not self._restoring:
-                for runner in exited_runners:
+                seen_ids: set = set()
+                for runner in entered_runners + exited_runners:
+                    if runner.instance_id in seen_ids:
+                        continue
+                    seen_ids.add(runner.instance_id)
                     try:
                         self._trade_persister.flush_runner(runner)
                     except Exception:  # noqa: BLE001
@@ -2361,8 +3326,63 @@ class PortfolioManager:
         for key, snapshot in self._parked_snapshots.items():
             if key not in live_ids:
                 runners.append(snapshot)
+        session_date_ist = self._risk_session_date_ist or current_session_date().isoformat()
+        agg_eq = sum(float(r.equity()) for r in live)
+        agg_daily = sum(self._safe_runner_daily_pnl(r) for r in live)
+        agg_base = max(0.0, agg_eq - agg_daily)
+        implied_mgr_peak_pnl = (
+            (self.peak_equity - agg_base) if (live and self.peak_equity > 0) else 0.0
+        )
+        mgr_peak_pnl = (
+            round(max(0.0, self._session_peak_daily_pnl, agg_daily, implied_mgr_peak_pnl), 2)
+            if live
+            else 0.0
+        )
+
+        bucket_keys = ["paper", "live"] + sorted(
+            k
+            for k in (set(self._bucket_peak.keys()) | set(self._bucket_halted.keys()))
+            if k.startswith("segment:")
+        )
+        buckets_payload: Dict[str, Dict[str, Any]] = {}
+        for mode in bucket_keys:
+            s_runners = self._slice_runners_for_key(mode)
+            s_eq = sum(float(r.equity()) for r in s_runners)
+            s_daily = sum(self._safe_runner_daily_pnl(r) for r in s_runners)
+            s_base = max(0.0, s_eq - s_daily)
+            b_peak = self._bucket_peak.get(mode, 0.0)
+            implied_b_peak_pnl = (
+                (b_peak - s_base) if (s_runners and b_peak > 0) else 0.0
+            )
+            b_peak_pnl = (
+                round(
+                    max(
+                        0.0,
+                        self._bucket_session_peak_pnl.get(mode, 0.0),
+                        s_daily,
+                        implied_b_peak_pnl,
+                    ),
+                    2,
+                )
+                if s_runners
+                else 0.0
+            )
+            buckets_payload[mode] = {
+                "session_date_ist": session_date_ist,
+                "session_peak_daily_pnl": b_peak_pnl,
+                "peak": b_peak,
+                "halted": self._bucket_halted.get(mode, False),
+                "halt_reason": self._bucket_halt_reason.get(mode),
+                "halt_mode": self._bucket_halt_mode.get(mode),
+                "halted_ts": self._bucket_halted_ts.get(mode),
+                "day_start": self._bucket_day_start.get(mode, 0.0),
+                "day": self._bucket_day.get(mode),
+            }
+
         return {
             "manager": {
+                "session_date_ist": session_date_ist,
+                "session_peak_daily_pnl": mgr_peak_pnl,
                 "total_capital": self.total_capital,
                 "peak_equity": self.peak_equity,
                 "day_start_equity": self._day_start_equity,
@@ -2374,31 +3394,47 @@ class PortfolioManager:
                 "tick_count": self.tick_count,
                 "tick_index": self.tick_index,
             },
-            "buckets": {
-                mode: {
-                    "peak": self._bucket_peak.get(mode, 0.0),
-                    "halted": self._bucket_halted.get(mode, False),
-                    "halt_reason": self._bucket_halt_reason.get(mode),
-                    "halt_mode": self._bucket_halt_mode.get(mode),
-                    "halted_ts": self._bucket_halted_ts.get(mode),
-                    "day_start": self._bucket_day_start.get(mode, 0.0),
-                    "day": self._bucket_day.get(mode),
-                }
-                for mode in ("paper", "live")
-            },
+            "buckets": buckets_payload,
             "runners": runners,
         }
 
-    def save_state(self) -> bool:
-        """Persist now (public — also usable from ops/API). Returns success."""
-        if self._state_store is None:
+    def save_state(self, *, include_db: bool = True) -> bool:
+        """Event 4 (Sprint D / Ticket D1): dual-write JSON + PostgreSQL SSoT."""
+        db_store = self._pg_state_store if include_db else None
+        if self._state_store is None and db_store is None:
             return False
-        try:
-            self._state_store.save(self._snapshot_payload())
-            return True
-        except Exception:  # noqa: BLE001 — persistence must never break trading
-            logger.exception("portfolio state save failed (%s)", self._state_store.path)
-            return False
+        payload = self._snapshot_payload()
+        json_ok = False
+        pg_ok = False
+        if self._state_store is not None:
+            try:
+                self._state_store.save(payload)
+                json_ok = True
+            except Exception:  # noqa: BLE001 — persistence must never break trading
+                logger.exception(
+                    "portfolio JSON state save failed (%s)", self._state_store.path
+                )
+        if db_store is not None:
+            try:
+                db_store.save(payload)
+                pg_ok = True
+                self._last_flushed_peaks["global"] = float(
+                    (payload.get("manager") or {}).get("session_peak_daily_pnl")
+                    or 0.0
+                )
+                for sk, b_snap in (payload.get("buckets") or {}).items():
+                    if isinstance(b_snap, dict):
+                        self._last_flushed_peaks[sk] = float(
+                            b_snap.get("session_peak_daily_pnl") or 0.0
+                        )
+            except Exception:  # noqa: BLE001 — fail-soft dual-write
+                logger.exception("portfolio PostgreSQL state save failed")
+        primary = resolve_state_store_primary()
+        if primary == "postgres" and db_store is not None:
+            return pg_ok
+        if self._state_store is not None:
+            return json_ok
+        return pg_ok
 
     def persist_risk_config(self) -> None:
         """Best-effort snapshot save after a live risk-config change.
@@ -2446,43 +3482,150 @@ class PortfolioManager:
             }
         return result
 
-    def _persist_state(self) -> None:
+    def _persist_state(self, *, include_db: bool = True) -> None:
         if self._restoring:
             return  # never re-write the file we are reading from
-        self.save_state()
+        self.save_state(include_db=include_db)
 
     def _restore_state(self) -> None:
-        """Rehydrate configs, books and breaker latches from the state file.
+        """Event 1 (Sprint D / Ticket D1): rehydrate state from SSoT on boot.
 
-        Runners saved as RUNNING come back PAUSED (fail-closed). Any failure
-        logs loudly and boots clean — persistence must never prevent a start.
+        Honours ``STATE_STORE_PRIMARY=json|postgres`` (default ``json`` during
+        Phase D1-a shadow dual-write; ``postgres`` in Phase D1-b/c) and runs
+        the parity verifier when both stores have payloads.
         """
-        if self._state_store is None:
+        primary = resolve_state_store_primary()
+        allow_pg_boot = (
+            self._pg_state_store is not None
+            and (
+                "PYTEST_CURRENT_TEST" not in os.environ
+                or self._explicit_db_manager
+                or self._state_store is not None
+                or os.environ.get("STATE_STORE_PRIMARY", "").strip().lower()
+                == "postgres"
+            )
+        )
+        if self._state_store is None and not allow_pg_boot:
             return
-        payload = self._state_store.load()
+
+        json_payload = self._state_store.load() if self._state_store is not None else None
+        pg_payload: Optional[Dict[str, Any]] = None
+        if allow_pg_boot and self._pg_state_store is not None:
+            try:
+                pg_payload = self._pg_state_store.load()
+            except Exception:  # noqa: BLE001 — fail-soft DB boot
+                logger.exception("[state] PostgreSQL load failed — falling back to JSON")
+                pg_payload = None
+
+        if json_payload is not None and pg_payload is not None:
+            try:
+                self.last_parity_report = verify_state_parity(
+                    json_payload,
+                    pg_payload,
+                    allow_synthetic=(
+                        self._pg_state_store.allow_synthetic
+                        if self._pg_state_store is not None
+                        else False
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("[state] boot parity check failed")
+
+        if primary == "postgres":
+            payload = pg_payload if pg_payload is not None else json_payload
+            source_label = (
+                "PostgreSQL SSoT"
+                if pg_payload is not None
+                else str(getattr(self._state_store, "path", "json"))
+            )
+        else:
+            payload = json_payload if json_payload is not None else pg_payload
+            source_label = (
+                str(self._state_store.path)
+                if (json_payload is not None and self._state_store is not None)
+                else "PostgreSQL SSoT"
+            )
+
         if not payload:
             return
-        # Freeze what the file held before this process can rewrite it — the
-        # safety net under "a save rebuilds the runner list from memory".
-        self._state_store.boot_backup()
+        if self._state_store is not None and json_payload is not None:
+            # Freeze what the file held before this process can rewrite it.
+            self._state_store.boot_backup()
         try:
             self._restoring = True
             try:
                 restored = self._apply_state_payload(payload)
             finally:
                 self._restoring = False
+            waiting = sum(
+                1
+                for runner in self._runners.values()
+                if getattr(runner, "feed_state", None) == FEED_STATE_WAITING
+            )
+            running_restored = sum(
+                1
+                for runner in self._runners.values()
+                if runner.status == STATUS_RUNNING
+            )
+            paused_restored = sum(
+                1
+                for runner in self._runners.values()
+                if runner.status == STATUS_PAUSED
+            )
             logger.warning(
-                "[state] restored %d of %d runner(s) (%d parked, still saved) "
-                "+ breaker latches from %s — restored runners are PAUSED; "
-                "resume explicitly",
+                "[state] restored %d of %d runner(s) (%d parked, still saved)%s "
+                "from %s (%s) — %d in-trade RUNNING, %d PAUSED",
                 restored,
                 len(payload.get("runners", [])),
                 len(self._parked_snapshots),
-                self._state_store.path,
+                (
+                    f", {waiting} built on a frozen mark awaiting broker login"
+                    if waiting
+                    else ""
+                ),
+                source_label,
+                self._last_restore_risk_note
+                or "session risk state initialized",
+                running_restored,
+                paused_restored,
             )
         except Exception:  # noqa: BLE001 — a bad restore must not block boot
             logger.exception(
-                "[state] restore from %s failed — starting clean", self._state_store.path
+                "[state] restore from %s failed — starting clean", source_label
+            )
+
+    def _reap_orphan_portfolio_rows(self) -> None:
+        """Retire ledger rows this process has no runner for (BUG-37).
+
+        Claim keys come from the runners that actually booted, so a restore
+        that brought back nothing cannot reap anything: on 2026-10-27 a refused
+        restore emptied the runner list, and an unconditional reap would have
+        retired the whole ledger on the next boot.
+        """
+        db = getattr(self._trade_persister, "db", None)
+        if db is None or not self._runners:
+            return
+
+        from backtest.forward.portfolio_reaper import (
+            reap_orphan_portfolio_rows,
+            runner_claim_keys,
+        )
+
+        claims = runner_claim_keys(self._runners.values())
+        with db.session() as session:
+            report = reap_orphan_portfolio_rows(session, claims)
+        if report.changed:
+            logger.warning(
+                "[ledger] retired %d portfolio row(s) no runner owns (Rs %s of capital was "
+                "booked against them; %d still show open positions; %d row(s) claimed kept)",
+                report.changed,
+                report.reaped_capital,
+                report.reaped_open_exposure_rows,
+                len(report.kept),
+            )
+        else:
+            logger.info(
+                "[ledger] portfolio rows clean: %d active row(s), all claimed", report.scanned
             )
 
     def _apply_state_payload(self, payload: Dict[str, Any]) -> int:
@@ -2502,17 +3645,20 @@ class PortfolioManager:
             )
 
             # Per-runner isolation: a runner that cannot be re-created —
-            # a 'live' runner with no armed broker session (ValueError), or
-            # a strategy retired/renamed since the state was written, whose
-            # lookup raises KeyError from the registry — is skipped and
-            # logged. It must never abort the loop: before this catch was
-            # widened, one retired name (e.g. a pre-Phase-2 strategy)
-            # silently dropped every later runner plus the manager scalars
-            # below, all reported as "starting clean".
+            # a 'live' runner with no armed broker session
+            # (BrokerSessionExpired, a RuntimeError), or a strategy
+            # retired/renamed since the state was written, whose lookup raises
+            # KeyError from the registry — is skipped and logged. It must never
+            # abort the loop: before this catch was widened, one retired name
+            # (e.g. a pre-Phase-2 strategy) silently dropped every later runner
+            # plus the manager scalars below, all reported as "starting clean".
+            # The same widening applies to the session error — a live runner
+            # whose broker logged out used to escape the (ValueError, KeyError)
+            # tuple, blow through the loop, and take every paper runner with it.
             try:
                 config = _config_from_dict(runner_snap["config"])
                 self.add_runner(config, start=False)
-            except (ValueError, KeyError) as exc:
+            except (ValueError, KeyError, RuntimeError) as exc:
                 logger.warning(
                     "[state] runner (%s) refused on restore: %s — parked, "
                     "kept in the state file for the next boot",
@@ -2534,70 +3680,220 @@ class PortfolioManager:
             self._parked_snapshots.pop(park_key, None)
             restored += 1
 
-        manager = payload.get("manager", {})
-        self.total_capital = float(manager.get("total_capital", 0.0))
-        self.peak_equity = float(manager.get("peak_equity", 0.0))
-        # CRITICAL FIX 2026-10-15: Do NOT restore day_start_equity from state —
-        # it's a GHOST from a previous session and causes false daily-loss breaches.
-        # Will be initialized from current equity below (after runners restored).
-        # self._day_start_equity = float(manager.get("day_start_equity", 0.0))
-        self._current_day = manager.get("current_day")
-        self.halted = False
-        self.halt_reason = None
-        self.halt_mode = None
-        self.halted_ts = None
+        manager = payload.get("manager", {}) or {}
+        # BUG-03: never re-adopt the saved scalar — it is whatever the
+        # accumulator had drifted to when the file was written. The runners
+        # restored above are the capital.
+        self._sync_total_capital()
         self.tick_count = int(manager.get("tick_count", 0))
         self.tick_index = int(manager.get("tick_index", 0))
-        # 2026-09-23: halt latches are deliberately NOT restored. Yesterday's
-        # emergency-stop latched the breaker into the state file and it
-        # re-armed on every boot — the dashboard showed "🔴 HALTED: Emergency
-        # flatten (user requested full stop)" forever despite fresh trading.
-        # A halt is a session-scoped circuit state: it guards THIS session's
-        # P&L, so it starts clean each boot (fail-safe for trading, unlike
-        # fail-closed for the boot — owner hit this mid-testing).
-        # Same rule for the DAY ANCHOR + PEAK: a saved day_start from a
-        # previous session is a GHOST — the book may have been rebuilt since
-        # (the ₹1.73 Cr anchor vs a ₹20 L book computed daily PnL of
-        # -₹1.53 Cr and tripped the global breaker instantly). The anchor is
-        # re-baselined to the restored book on the first bar (see _on_bar).
-        # CRITICAL FIX 2026-10-15: Do NOT leave anchors at 0.0 — if no bars
-        # arrive before the first risk check (e.g., market closed, all runners
-        # paused), the daily PnL calc becomes garbage (equity - 0 = massive
-        # fake gain/loss). Initialize from current aggregate so risk checks
-        # are sane even before the first bar.
-        self._day_start_equity = 0.0  # Will be set below after runners restored
-        self.peak_equity = 0.0
         self._current_day = None
         self._bucket_day_start = {"paper": 0.0, "live": 0.0}
         self._bucket_day = {"paper": None, "live": None}
 
-        for mode, bucket in payload.get("buckets", {}).items():
-            self._bucket_peak[mode] = 0.0  # session-scoped like the day anchor
-            self._bucket_halted[mode] = False
-            self._bucket_halt_reason[mode] = None
-            self._bucket_halt_mode[mode] = None
-            self._bucket_halted_ts[mode] = None
-            # day_start / day stay session-scoped (re-baselined on first bar)
+        today_ist = current_session_date().isoformat()
+        saved_session_date_ist = (
+            str(manager.get("session_date_ist") or "").strip() or None
+        )
+        same_ist_session = saved_session_date_ist == today_ist
+        self._risk_session_date_ist = today_ist
 
-        # CRITICAL FIX 2026-10-15: Initialize daily loss anchors from CURRENT
-        # equity after all runners are restored. This prevents false breaker
-        # trips when the state file has old day_start values from a previous
-        # session and no bars arrive before the first risk check.
-        current_equity = self._aggregate_equity()
-        if current_equity > 0:
-            self._day_start_equity = current_equity
-            for mode in ("paper", "live"):
-                if self._bucket_runners(mode):
-                    self._bucket_day_start[mode] = self._bucket_equity(mode)
+        all_runners = list(self._runners.values())
+        agg_equity = self._aggregate_equity()
+        agg_daily_pnl = sum(self._safe_runner_daily_pnl(r) for r in all_runners)
+        agg_open_baseline = max(0.0, agg_equity - agg_daily_pnl) if all_runners else 0.0
+        self._day_start_equity = (
+            round(agg_open_baseline if agg_open_baseline > 0 else max(0.0, agg_equity), 2)
+            if all_runners
+            else 0.0
+        )
+
+        saved_buckets = payload.get("buckets", {}) or {}
+        all_slice_keys = sorted(
+            {"paper", "live"}
+            | set(saved_buckets.keys())
+            | {k for k in self._bucket_peak.keys() if k.startswith("segment:")}
+        )
+
+        if same_ist_session:
+            # Institutional RMS Same-Day Restart (Sprint B / Ticket B1):
+            # Reconstruct cash-flow-neutral peak equity from the surviving
+            # runners' session-open baseline + persisted session_peak_daily_pnl,
+            # and keep active halt latches locked for the rest of today_ist.
+            saved_mgr_peak_pnl = max(
+                0.0, float(manager.get("session_peak_daily_pnl", 0.0) or 0.0)
+            )
+            self._session_peak_daily_pnl = (
+                round(max(0.0, saved_mgr_peak_pnl, agg_daily_pnl), 2)
+                if all_runners
+                else 0.0
+            )
+            self.peak_equity = (
+                round(
+                    max(
+                        0.0,
+                        agg_equity,
+                        agg_open_baseline + self._session_peak_daily_pnl,
+                    ),
+                    2,
+                )
+                if all_runners
+                else 0.0
+            )
+            self.halted = bool(manager.get("halted", False))
+            self.halt_reason = manager.get("halt_reason") if self.halted else None
+            self.halt_mode = manager.get("halt_mode") if self.halted else None
+            self.halted_ts = manager.get("halted_ts") if self.halted else None
+
+            for key in all_slice_keys:
+                self._ensure_bucket_state(key)
+                b_snap = saved_buckets.get(key) or {}
+                b_session = (
+                    str(b_snap.get("session_date_ist") or saved_session_date_ist or "").strip()
+                    or None
+                )
+                s_runners = self._slice_runners_for_key(key)
+                s_eq = sum(float(r.equity()) for r in s_runners)
+                s_daily = sum(self._safe_runner_daily_pnl(r) for r in s_runners)
+                s_base = max(0.0, s_eq - s_daily) if s_runners else 0.0
+                self._bucket_day_start[key] = (
+                    round(s_base if s_base > 0 else max(0.0, s_eq), 2)
+                    if s_runners
+                    else 0.0
+                )
+                self._bucket_day[key] = None
+                if b_session == today_ist:
+                    saved_b_peak_pnl = max(
+                        0.0, float(b_snap.get("session_peak_daily_pnl", 0.0) or 0.0)
+                    )
+                    self._bucket_session_peak_pnl[key] = (
+                        round(max(0.0, saved_b_peak_pnl, s_daily), 2)
+                        if s_runners
+                        else 0.0
+                    )
+                    self._bucket_peak[key] = (
+                        round(
+                            max(
+                                0.0,
+                                s_eq,
+                                s_base + self._bucket_session_peak_pnl[key],
+                            ),
+                            2,
+                        )
+                        if s_runners
+                        else 0.0
+                    )
+                    b_halted = bool(b_snap.get("halted", False))
+                    self._bucket_halted[key] = b_halted
+                    self._bucket_halt_reason[key] = (
+                        b_snap.get("halt_reason") if b_halted else None
+                    )
+                    self._bucket_halt_mode[key] = (
+                        b_snap.get("halt_mode") if b_halted else None
+                    )
+                    self._bucket_halted_ts[key] = (
+                        b_snap.get("halted_ts") if b_halted else None
+                    )
+                else:
+                    self._bucket_session_peak_pnl[key] = 0.0
+                    self._bucket_peak[key] = 0.0
+                    self._bucket_halted[key] = False
+                    self._bucket_halt_reason[key] = None
+                    self._bucket_halt_mode[key] = None
+                    self._bucket_halted_ts[key] = None
+
+            self._last_restore_risk_note = (
+                f"same-day session risk peak & breaker latches restored (session={today_ist})"
+            )
+        else:
+            # New IST Trading Day (or undated legacy state file):
+            # Roll session peak P&L and halt latches clean so prior-day ghosts
+            # never carry into a fresh morning session.
+            self._session_peak_daily_pnl = 0.0
+            self.peak_equity = 0.0
+            self.halted = False
+            self.halt_reason = None
+            self.halt_mode = None
+            self.halted_ts = None
+
+            for key in all_slice_keys:
+                self._ensure_bucket_state(key)
+                s_runners = self._slice_runners_for_key(key)
+                s_eq = sum(float(r.equity()) for r in s_runners)
+                s_daily = sum(self._safe_runner_daily_pnl(r) for r in s_runners)
+                s_base = max(0.0, s_eq - s_daily) if s_runners else 0.0
+                self._bucket_session_peak_pnl[key] = 0.0
+                self._bucket_peak[key] = 0.0
+                self._bucket_halted[key] = False
+                self._bucket_halt_reason[key] = None
+                self._bucket_halt_mode[key] = None
+                self._bucket_halted_ts[key] = None
+                self._bucket_day_start[key] = (
+                    round(s_base if s_base > 0 else max(0.0, s_eq), 2)
+                    if s_runners
+                    else 0.0
+                )
+                self._bucket_day[key] = None
+
+            prior_label = saved_session_date_ist or "undated"
+            self._last_restore_risk_note = (
+                f"prior-session ({prior_label}) risk peak & breaker latches "
+                f"rolled clean for new IST session ({today_ist})"
+            )
+
+        if self._day_start_equity > 0:
             logger.info(
-                "[state] daily loss anchors initialized from current equity: "
-                "manager=%.2f, paper=%.2f, live=%.2f",
+                "[state] daily loss anchors initialized: "
+                "manager=%.2f, paper=%.2f, live=%.2f (%s)",
                 self._day_start_equity,
                 self._bucket_day_start.get("paper", 0.0),
                 self._bucket_day_start.get("live", 0.0),
+                self._last_restore_risk_note,
             )
 
+        # Sprint A-2 / Ticket A3:
+        # 1. Enforce hydrated manager/bucket/segment risk halts on restored
+        #    open-exposure runners (never run inside a tripped circuit breaker).
+        # 2. If auto_start_feed is active and any restored book is RUNNING,
+        #    start its feed / live poll thread immediately at boot.
+        any_running_restored = False
+        for runner in list(self._runners.values()):
+            if runner.status == STATUS_RUNNING and self._is_runner_risk_halted(runner):
+                runner.status = STATUS_PAUSED
+                runner.pause_reason = "BLOCKED_BY_RISK"
+                runner._sync_bridge_runner_state()
+            if runner.status == STATUS_RUNNING:
+                any_running_restored = True
+                if self._auto_start_feed:
+                    try:
+                        r_feed = self._feed_for(runner.config.source)
+                        if str(runner.config.source or "").lower() not in (
+                            "mstock",
+                            "dhan",
+                            "upstox",
+                        ):
+                            r_feed.start(warmup=True)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("restore feed start skipped", exc_info=True)
+        if any_running_restored and self._auto_start_feed:
+            try:
+                self._sync_mstock_thread()
+            except Exception:  # noqa: BLE001
+                logger.debug("restore mstock thread sync skipped", exc_info=True)
+
         return restored
+
+    def _is_runner_risk_halted(self, runner: "StrategyRunner") -> bool:
+        """True when global, bucket, or segment risk circuit breakers block ``runner``."""
+        if self.halted:
+            return True
+        bucket = self._runner_bucket(runner)
+        if self._bucket_halted.get(bucket, False):
+            return True
+        seg = getattr(runner.config, "segment", None)
+        if seg and self._bucket_halted.get(f"segment:{seg}", False):
+            return True
+        return False
 
     def _on_bar(self, symbol: str, bar: Dict[str, Any]) -> None:
         """Fan one closed candle out to every runner trading that symbol."""
@@ -2715,9 +4011,11 @@ class PortfolioManager:
             # V2: bounded save rate. The %60 was tuned for 1s synthetic ticks
             # (one save/min); the live mStock feed ticks once per SWEEP (60s),
             # so %60 meant one save per HOUR (live-session finding 2026-09-21).
-            # Every 5 sweeps ≈ 5 min on live, 5s on synthetic — bounded either way.
+            # Every 5 sweeps ≈ 5 min on live, 5s on synthetic — JSON hot-standby
+            # only; SQL mark checkpoints run on Event 6 (60s market-hours batch)
+            # so non-trading 1-minute bar sweeps execute 0 SQL queries.
             if self._state_store is not None and self.tick_index % 5 == 0:
-                self._persist_state()
+                self._persist_state(include_db=False)
             # GAP-4: flush newly closed trades to Postgres on the same cadence
             # — idempotent (dedupe in the persister), fail-soft.
             if self._trade_persister is not None and self.tick_index % 5 == 0:
@@ -2753,10 +4051,12 @@ class PortfolioManager:
         NOT halt 'live' — the breakers are independent (C1/C5). The manager
         also tracks a global halt for the master-kill path.
         """
+        self._maybe_roll_risk_session_ist()
         now_ts = datetime.now(timezone.utc).isoformat()
         # Buckets that tripped *in this pass* — the master alert is suppressed
         # when one of them already raised its own (no double notification).
         fresh_buckets = []
+        any_fresh_halt = False
 
         # --- Per-bucket risk evaluation (independent breakers) ---
         for mode in ("paper", "live"):
@@ -2765,10 +4065,14 @@ class PortfolioManager:
                 continue
 
             equity = self._bucket_equity(mode)
-            if equity > self._bucket_peak.get(mode, 0.0):
-                self._bucket_peak[mode] = equity
+            self._sync_slice_session_peak(mode, bucket_runners)
 
-            daily_pnl = equity - self._bucket_day_start.get(mode, 0.0)
+            # The day, not the life. ``equity - day_start`` was the anchor taken
+            # at the bucket's first bar and never rolled, so it fed the breaker
+            # every loss the book has ever had while the card next to it showed
+            # ``daily_pnl`` — today's move. A halt on day 3 of a slow drift, or
+            # none at all after a profitable session, both came from that.
+            daily_pnl = self._bucket_daily_pnl(mode)
             already_halted = self._bucket_halted.get(mode, False)
 
             report = self.supervisor.evaluate(
@@ -2785,6 +4089,7 @@ class PortfolioManager:
                 self._bucket_halt_mode[mode] = report.halt_mode
                 self._bucket_halted_ts[mode] = now_ts
                 fresh_buckets.append(mode)
+                any_fresh_halt = True
                 logger.critical(
                     "BUCKET HALT [%s]: %s (mode=%s)",
                     mode.upper(),
@@ -2827,12 +4132,11 @@ class PortfolioManager:
             self._ensure_bucket_state(key)
 
             seg_equity = sum(r.equity() for r in seg_runners)
-            if seg_equity > self._bucket_peak.get(key, 0.0):
-                self._bucket_peak[key] = seg_equity
+            self._sync_slice_session_peak(key, seg_runners)
             if self._bucket_day_start.get(key, 0.0) <= 0:
                 self._bucket_day_start[key] = seg_equity
 
-            seg_daily_pnl = seg_equity - self._bucket_day_start.get(key, 0.0)
+            seg_daily_pnl = sum(r.daily_pnl() for r in seg_runners)
             seg_halted = self._bucket_halted.get(key, False)
             report = self._segment_risk_supervisor(seg_name, seg_def.risk).evaluate(
                 runners=seg_runners,
@@ -2846,6 +4150,7 @@ class PortfolioManager:
                 self._bucket_halt_reason[key] = report.halt_reason
                 self._bucket_halt_mode[key] = report.halt_mode
                 self._bucket_halted_ts[key] = now_ts
+                any_fresh_halt = True
                 logger.critical(
                     "SEGMENT HALT [%s → %s]: %s (mode=%s)",
                     seg_name,
@@ -2867,14 +4172,15 @@ class PortfolioManager:
         # when each individual segment is inside its own limits.
         all_runners = list(self._runners.values())
         equity = self._aggregate_equity()
-        if equity > self.peak_equity:
-            self.peak_equity = equity
+        self._sync_slice_session_peak(None, all_runners)
 
         report = self.supervisor.evaluate(
             runners=all_runners,
             total_equity=equity,
             peak_equity=self.peak_equity,
-            daily_pnl=equity - self._day_start_equity,
+            # Same basis as the bucket and segment fuses above, and the same
+            # number the portfolio card shows: the session move, not the life.
+            daily_pnl=self._aggregate_daily_pnl(),
             already_halted=self.halted,
         )
         self.last_report = report.to_dict()
@@ -2884,6 +4190,7 @@ class PortfolioManager:
             self.halt_reason = report.halt_reason
             self.halt_mode = report.halt_mode
             self.halted_ts = now_ts
+            any_fresh_halt = True
             logger.critical("PORTFOLIO HALT: %s (mode=%s)", self.halt_reason, self.halt_mode)
             if not fresh_buckets:
                 # Combined-book breach with no single bucket tripping: this is
@@ -2908,6 +4215,70 @@ class PortfolioManager:
         elif self.halted and not report.halted:
             # Supervisor says clear but latch stays until explicit reset.
             pass
+
+        if any_fresh_halt:
+            # Event 5 (Sprint D / Ticket D1): immediate flush on halted = True.
+            self._persist_state()
+        else:
+            self._maybe_flush_risk_milestone()
+
+    def _maybe_flush_risk_milestone(
+        self,
+        *,
+        min_step_inr: float = 500.0,
+        min_interval_s: float = 30.0,
+    ) -> bool:
+        """Event 5 (Sprint D / Ticket D1): throttled session_peak_daily_pnl write.
+
+        Writes to ``risk_session_state`` ONLY when a slice's peak advances by at
+        least ``min_step_inr`` and ``min_interval_s`` has elapsed since the last
+        milestone write — zero DB queries on ordinary ticks.
+        """
+        if self._restoring or self._pg_state_store is None:
+            return False
+        now_mono = time.monotonic()
+        if (
+            self._last_risk_milestone_mono > 0
+            and (now_mono - self._last_risk_milestone_mono) < min_interval_s
+        ):
+            return False
+        candidates: Dict[str, float] = {"global": float(self._session_peak_daily_pnl)}
+        for mode in ("paper", "live"):
+            candidates[mode] = float(self._bucket_session_peak_pnl.get(mode, 0.0))
+        advanced = any(
+            (val - self._last_flushed_peaks.get(k, 0.0)) >= min_step_inr
+            for k, val in candidates.items()
+        )
+        if not advanced:
+            return False
+
+        slices: Dict[str, Dict[str, Any]] = {
+            "global": {
+                "peak_daily_pnl": self._session_peak_daily_pnl,
+                "current_daily_pnl": self._aggregate_daily_pnl(),
+                "deployed_capital": self.total_capital,
+                "halted": self.halted,
+                "halt_reason": self.halt_reason,
+            }
+        }
+        for mode in ("paper", "live"):
+            slices[mode] = {
+                "peak_daily_pnl": self._bucket_session_peak_pnl.get(mode, 0.0),
+                "current_daily_pnl": self._bucket_daily_pnl(mode),
+                "deployed_capital": self._bucket_capital(mode),
+                "halted": self._bucket_halted.get(mode, False),
+                "halt_reason": self._bucket_halt_reason.get(mode),
+            }
+        try:
+            self._pg_state_store.save_risk_milestone(
+                current_session_date().isoformat(), slices
+            )
+            self._last_risk_milestone_mono = now_mono
+            self._last_flushed_peaks.update(candidates)
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception("[risk] milestone flush failed")
+            return False
 
     def _raise_breaker_alert(
         self,
@@ -2986,19 +4357,20 @@ class PortfolioManager:
 
     def _refresh_anchors(self) -> None:
         """Refresh manager-level + per-bucket peak/day-start anchors."""
+        self._maybe_roll_risk_session_ist()
+        all_runners = list(self._runners.values())
         equity = self._aggregate_equity()
-        if equity > self.peak_equity:
-            self.peak_equity = equity
+        self._sync_slice_session_peak(None, all_runners)
         # Session baseline: fixed at the first runner's first bar (or reset).
         if self._day_start_equity <= 0:
             self._day_start_equity = equity
 
         # Per-bucket anchors
         for mode in ("paper", "live"):
+            b_runners = self._bucket_runners(mode)
             b_equity = self._bucket_equity(mode)
-            if b_equity > self._bucket_peak.get(mode, 0.0):
-                self._bucket_peak[mode] = b_equity
-            if self._bucket_day_start.get(mode, 0.0) <= 0 and self._bucket_runners(mode):
+            self._sync_slice_session_peak(mode, b_runners)
+            if self._bucket_day_start.get(mode, 0.0) <= 0 and b_runners:
                 self._bucket_day_start[mode] = b_equity
 
         # Per-segment anchors (Phase D) — same rule, one slice per live
@@ -3012,9 +4384,9 @@ class PortfolioManager:
         for seg_name in seg_names:
             key = self._segment_key(seg_name)
             self._ensure_bucket_state(key)
-            s_equity = sum(r.equity() for r in self._segment_runners(seg_name))
-            if s_equity > self._bucket_peak.get(key, 0.0):
-                self._bucket_peak[key] = s_equity
+            s_runners = self._segment_runners(seg_name)
+            s_equity = sum(r.equity() for r in s_runners)
+            self._sync_slice_session_peak(key, s_runners)
             if self._bucket_day_start.get(key, 0.0) <= 0:
                 self._bucket_day_start[key] = s_equity
 
@@ -3057,11 +4429,26 @@ class PortfolioManager:
             deployed = sum(s["deployed_capital"] for s in states)
             daily = sum(s["daily_pnl"] for s in states)
             realized = sum(s["realized_pnl"] for s in states)
+            # BUG-04: the NET contract rows travel with every runner state, so
+            # the aggregate views can publish gross, fees and the day's slice
+            # without re-deriving them.
+            gross_realized = sum(s.get("gross_realized_pnl") or 0.0 for s in states)
+            fees = sum(s.get("total_fees_paid") or 0.0 for s in states)
+            realized_today = sum(s.get("realized_pnl_today") or 0.0 for s in states)
+            daily_realized_net = sum(
+                float(s.get("daily_realized_net_pnl") or 0.0) for s in states
+            )
+            daily_gross = sum(float(s.get("daily_gross_pnl") or 0.0) for s in states)
+            daily_comm = sum(float(s.get("daily_commission") or 0.0) for s in states)
+            open_pnl = sum(s.get("open_pnl") or 0.0 for s in states)
             open_positions = sum(s["open_positions"] for s in states)
             running = sum(1 for s in states if s["status"] == STATUS_RUNNING)
             paused = sum(1 for s in states if s["status"] == STATUS_PAUSED)
             stopped = sum(1 for s in states if s["status"] == STATUS_STOPPED)
             errors = sum(1 for s in states if s["status"] == "ERROR")
+
+            # C4: embed per-bucket aggregates in the single stream
+            buckets = self.get_bucket_aggregates()
 
             # C2: Use per-bucket peak when scoped; manager-level when combined
             if mode is not None:
@@ -3073,7 +4460,9 @@ class PortfolioManager:
                 bucket_halt_mode = self._bucket_halt_mode.get(mode)
                 bucket_halted_ts = self._bucket_halted_ts.get(mode)
             else:
-                total_capital = self.total_capital
+                # BUG-03: the unscoped ledger is the buckets summed, not the
+                # manager scalar — so capital cannot drift from the books.
+                total_capital = round(sum(b["capital"] for b in buckets.values()), 2)
                 peak_equity = self.peak_equity
                 day_start = self._day_start_equity
                 bucket_halted = self.halted
@@ -3082,11 +4471,12 @@ class PortfolioManager:
                 bucket_halted_ts = self.halted_ts
             drawdown = ((peak_equity - equity) / peak_equity) if peak_equity > 0 else 0.0
             limit = abs(self.supervisor.config.daily_loss_limit)
+            # BUG-33: quote the percentage against the larger of the
+            # flow-adjusted anchor and the capital in scope, so a stale or
+            # tiny anchor cannot inflate a return.
+            pct_denominator = max(day_start, total_capital, 1.0)
 
             warnings = self.last_report.get("warnings", []) if self.last_report else []
-
-            # C4: embed per-bucket aggregates in the single stream
-            buckets = self.get_bucket_aggregates()
 
             # C6: capability flag — drives the REAL MONEY / Simulated fills banner.
             # broker_connected is a process-level property (is the broker session active?).
@@ -3119,7 +4509,9 @@ class PortfolioManager:
                 dashboard_book.get("equity", 0.0) if dashboard_book.get("exists") else 0.0
             )
             dashboard_daily = (
-                dashboard_book.get("unrealized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
+                # BUG-04: fold the NET mark, not gross MTM — the gross half
+                # would overstate today by every rupee of fee this book paid.
+                dashboard_book.get("open_pnl", 0.0) if dashboard_book.get("exists") else 0.0
             )
             dashboard_realized = (
                 dashboard_book.get("realized_pnl", 0.0) if dashboard_book.get("exists") else 0.0
@@ -3128,24 +4520,65 @@ class PortfolioManager:
                 dashboard_book.get("open_positions", 0) if dashboard_book.get("exists") else 0
             )
 
-            # Combined totals include dashboard book so flatten/emergency is honest
-            combined_equity = equity + dashboard_equity
-            combined_daily = daily + dashboard_daily
-            combined_realized = realized + dashboard_realized
-            combined_positions = open_positions + dashboard_positions
+            # Include the dashboard book in the combined totals — but only
+            # where it belongs. Its ``equity`` is capital + P&L, so folding it
+            # in unconditionally booked ₹10,00,000 of capital the ledger never
+            # carried (BUG-03), and did so on scoped paper/live calls too, where
+            # the singleton belongs to neither bucket. On an unscoped read of a
+            # book that actually holds money, its capital and margin join the
+            # totals as well, so total_equity - total_capital stays exactly P&L.
+            dashboard_in_use = dashboard_book.get("exists") and (
+                dashboard_positions > 0 or abs(dashboard_realized) >= 0.005
+            )
+            fold_dashboard = mode is None and bool(dashboard_in_use)
+            if fold_dashboard:
+                total_capital = round(
+                    total_capital + float(dashboard_book.get("capital") or 0.0), 2
+                )
+                deployed = deployed + float(dashboard_book.get("margin_used") or 0.0)
+
+            combined_equity = equity + (dashboard_equity if fold_dashboard else 0.0)
+            combined_daily = daily + (dashboard_daily if fold_dashboard else 0.0)
+            combined_realized = realized + (dashboard_realized if fold_dashboard else 0.0)
+            combined_positions = open_positions + (dashboard_positions if fold_dashboard else 0)
+            # BUG-04: the rest of the NET contract on the combined/scoped view.
+            # Each is the same sum the runners made, plus the dashboard book
+            # when its money genuinely belongs in this scope.
+            combined_gross = gross_realized + (
+                float(dashboard_book.get("gross_realized_pnl") or 0.0)
+                if fold_dashboard
+                else 0.0
+            )
+            combined_fees = fees + (
+                float(dashboard_book.get("total_fees_paid") or 0.0)
+                if fold_dashboard
+                else 0.0
+            )
+            combined_open = open_pnl + (
+                float(dashboard_book.get("open_pnl") or 0.0) if fold_dashboard else 0.0
+            )
             stale_marks_count = sum(int(s.get("stale_positions") or 0) for s in states)
+            today_ist = current_session_date()
+            scope_label = format_session_scope(today_ist)
 
             return {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "session_date_ist": today_ist.isoformat(),
+                "session_scope_label": scope_label,
                 "total_capital": round(total_capital, 2),
                 "total_equity": round(combined_equity, 2),
                 "deployed_capital": round(deployed, 2),
-                "deployed_pct": (
-                    round(deployed / self.total_capital, 4) if self.total_capital > 0 else 0.0
-                ),
+                "deployed_pct": (round(deployed / total_capital, 4) if total_capital > 0 else 0.0),
                 "daily_pnl": round(combined_daily, 2),
-                "daily_pnl_pct": (round(combined_daily / day_start, 6) if day_start else 0.0),
+                "daily_pnl_pct": round(combined_daily / pct_denominator, 6),
+                "daily_realized_net_pnl": round(daily_realized_net, 2),
+                "daily_gross_pnl": round(daily_gross, 2),
+                "daily_commission": round(daily_comm, 2),
                 "realized_pnl": round(combined_realized, 2),
+                "gross_realized_pnl": round(combined_gross, 2),
+                "total_fees_paid": round(combined_fees, 2),
+                "realized_pnl_today": round(realized_today, 2),
+                "open_pnl": round(combined_open, 2),
                 "open_positions": combined_positions,
                 "stale_marks_count": stale_marks_count,
                 "runner_count": len(states),
@@ -3261,6 +4694,11 @@ class PortfolioManager:
                     "mode": state["mode"],
                     "equity": state["equity"],
                     "realized_pnl": state["realized_pnl"],
+                    # BUG-04: the row that quotes a NET realized must also show
+                    # the gross it came from and the fees taken off it.
+                    "gross_realized_pnl": state.get("gross_realized_pnl", 0.0),
+                    "total_fees_paid": state.get("total_fees_paid", 0.0),
+                    "realized_pnl_today": state.get("realized_pnl_today", 0.0),
                     "daily_pnl": state["daily_pnl"],
                     "open_pnl": state["open_pnl"],
                     "win_rate": state["win_rate"],
@@ -3429,6 +4867,19 @@ def get_portfolio_manager() -> PortfolioManager:
     with _MANAGER_LOCK:
         if _MANAGER is None:
             _MANAGER = PortfolioManager()
+        return _MANAGER
+
+
+def peek_portfolio_manager() -> Optional[PortfolioManager]:
+    """Return the live singleton **without constructing one**.
+
+    A broker login calls this to wake the books waiting on it. Going through
+    :func:`get_portfolio_manager` instead would mean a TOTP check on a process
+    that never opened the portfolio page building feeds, restoring state and
+    booking capital as a side effect of authenticating — so the honest answer
+    when nothing has been built yet is ``None``.
+    """
+    with _MANAGER_LOCK:
         return _MANAGER
 
 

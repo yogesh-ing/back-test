@@ -27,6 +27,7 @@ from backtest.api import (
     backtest_bp,
     broker_auth_bp,
     data_bp,
+    diary_bp,
     forward_bp,
     intelligence_bp,
     portfolio_bp,
@@ -521,6 +522,7 @@ def create_app(
     app.register_blueprint(segments_bp)
     app.register_blueprint(settings_bp)
     app.register_blueprint(reporting_bp)
+    app.register_blueprint(diary_bp)
 
     # SSE broadcast cadence for the portfolio command center.
     app.config.setdefault("PORTFOLIO_SSE_INTERVAL", 1.0)
@@ -660,6 +662,18 @@ def create_app(
         """Consolidated P&L / tax report (PRD-002)."""
         return render_template("reporting.html", active="reporting")
 
+    @app.get("/diary")
+    def diary_page() -> Any:
+        """IST-scoped PnL Diary & Institutional Edge Suite (Paper | Live segregated)."""
+        raw_mode = (request.args.get("mode") or "paper").strip().lower()
+        initial_mode = raw_mode if raw_mode in ("paper", "live") else "paper"
+        return render_template(
+            "diary.html",
+            active="diary",
+            mode=initial_mode,
+            initial_mode=initial_mode,
+        )
+
     # Options trading dashboard (Phase 7) — page + JSON API
     from backtest.web.options_api import register_options_routes
     register_options_routes(app)
@@ -788,7 +802,27 @@ def run_app(
     app.run(host=host, port=port, debug=debug, use_reloader=False)
 
 
+def _unbuffer_console(streams: tuple | None = None) -> None:
+    """Put every line on the wire the moment it is written (B8).
+
+    A redirected stream is block-buffered (8 KiB on Windows), so a server started
+    without ``python -u`` parks its stdout half in the buffer while it trades: on
+    30-Oct the running server's log had not moved since 08:15:38 even though every
+    request was served, and the gate that says "grep the session-clock sweep line"
+    became unusable. Line buffering belongs here rather than in a launch flag
+    nobody remembers — the log file is the only witness an operator has off-hours.
+    """
+    for stream in (streams if streams is not None else (sys.stdout, sys.stderr)):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError, OSError):  # noqa: BLE001
+            # A replaced stream (pytest capture, an embedded runner) that cannot
+            # be reconfigured is not a reason to refuse to serve.
+            pass
+
+
 def main() -> None:
+    _unbuffer_console()
     import argparse
 
     parser = argparse.ArgumentParser(description="Unified Trading Bot Platform")

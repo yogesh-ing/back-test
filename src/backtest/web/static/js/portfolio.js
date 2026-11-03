@@ -51,6 +51,12 @@
       deployed_pct: b.capital > 0 ? b.deployed_capital / b.capital : 0,
       daily_pnl: b.daily_pnl,
       daily_pnl_pct: b.daily_pnl_pct,
+      realized_pnl_today: b.realized_pnl_today,
+      daily_realized_net_pnl: b.daily_realized_net_pnl,
+      daily_gross_pnl: b.daily_gross_pnl,
+      daily_commission: b.daily_commission,
+      session_date_ist: b.session_date_ist || p.session_date_ist,
+      session_scope_label: b.session_scope_label || p.session_scope_label,
       realized_pnl: b.realized_pnl,
       open_positions: b.open_positions,
       runner_count: b.count,
@@ -154,15 +160,25 @@
       " (" + pct(p.deployed_pct) + ")";
     $("m-deployed-bar").style.width = Math.min(100, (p.deployed_pct || 0) * 100) + "%";
 
+    const scopeLabel = p.session_scope_label || "Today · IST";
     const daily = $("m-daily-pnl");
     daily.textContent = fmtSigned(p.daily_pnl);
     daily.className = "metric-value " + pnlClass(p.daily_pnl);
-    $("m-daily-pnl-pct").textContent = (p.daily_pnl >= 0 ? "+" : "") +
+    const pctStr = (p.daily_pnl >= 0 ? "+" : "") +
       ((p.daily_pnl_pct || 0) * 100).toFixed(2) + "%";
+    $("m-daily-pnl-pct").textContent = scopeLabel + " · " + pctStr;
 
+    const realizedToday = p.realized_pnl_today != null
+      ? p.realized_pnl_today
+      : (p.daily_realized_net_pnl != null ? p.daily_realized_net_pnl : p.realized_pnl);
     const real = $("m-realized-pnl");
-    real.textContent = fmtSigned(p.realized_pnl);
-    real.className = "metric-value " + pnlClass(p.realized_pnl);
+    real.textContent = fmtSigned(realizedToday);
+    real.className = "metric-value " + pnlClass(realizedToday);
+    const realSub = $("m-realized-sub");
+    if (realSub) {
+      const commToday = p.daily_commission != null ? p.daily_commission : 0;
+      realSub.textContent = scopeLabel + " · Comm " + fmtMoney(commToday);
+    }
 
     const staleMarksCount = typeof p.stale_marks_count === "number"
       ? p.stale_marks_count
@@ -239,6 +255,15 @@
     } else if (r.status === "PAUSED") {
       html += '<button class="row-btn" data-act="resume" data-id="' + r.instance_id + '" title="Resume">▶</button>';
     }
+    if (OptionView.hasConfigDrift(r)) {
+      const flat = Number(r.open_positions || 0) === 0;
+      html += '<button class="row-btn row-btn-respawn" data-act="respawn" data-id="' +
+        r.instance_id + '"' + (flat ? "" : " disabled") +
+        ' title="' + (flat
+          ? "Respawn with latest rules (retires this flat runner and spawns from latest template)"
+          : "Respawn disabled while open_positions > 0 — wait until flat") + '">' +
+        "↻ Respawn with latest rules</button>";
+    }
     html += '<button class="row-btn row-btn-stop" data-act="stop" data-id="' + r.instance_id + '" title="Stop">⏹</button>';
     html += '<button class="row-btn" data-act="deep_dive" data-id="' + r.instance_id + '" title="Deep dive">🔍</button>';
     html += '<button class="row-btn row-btn-danger" data-act="remove" data-id="' + r.instance_id + '" title="Remove instance (flattens its book, deletes the row)">🗑</button>';
@@ -308,7 +333,8 @@
       // rows are untouched (every helper returns "" / null for them).
       const option = OptionView.isOption(r);
       const instrument = option
-        ? '<span class="badge badge-option">' + OptionView.instrumentLabel(r) + '</span>'
+        ? '<span class="badge badge-option">' + OptionView.instrumentLabel(r) + '</span>' +
+          OptionView.carryPolicyBadgeHtml(r, { compact: true })
         : typeBadge;
       const posCell = OptionView.positionsCell(r);
       const notes = OptionView.matrixNotes(r);
@@ -341,6 +367,8 @@
           (posCell.sub ? '<div class="cell-sub">' + posCell.sub + '</div>' : "") + '</td>' +
         '<td><span class="status-cell">' + (STATUS_DOT[r.status] || "⚪") + " " + r.status + "</span>" +
           warmupSubHtml(r) +
+          OptionView.feedStateBadgeHtml(r) +
+          OptionView.configDriftBadgeHtml(r) +
           (r.duplicate_of
             ? '<div class="cell-sub cell-error" title="Duplicates active runner ' +
               String(r.duplicate_of).slice(0, 8) + '">⚠ duplicate</div>'
@@ -383,6 +411,9 @@
       out = out.filter((r) => r.stop_loss !== null && r.stop_loss !== undefined ||
         (r.target !== null && r.target !== undefined));
     }
+    if (state.posCarryFilter) {
+      out = out.filter((r) => OptionView.carryPolicyOf(r) === state.posCarryFilter);
+    }
     return out;
   }
 
@@ -411,10 +442,14 @@
         theta.toLocaleString("en-IN", { maximumFractionDigits: 1 }) + "</span>") + "</td>";
   }
 
-  // Execution times arrive as UTC ISO strings (datetime.now(timezone.utc) on
-  // the backend). The broker terminal speaks IST, so render browser-local
-  // time — a bare "06:57" next to a broker's "12:27" is the same instant.
-  // Some books persist naive UTC (no +00:00 suffix); assume UTC when absent.
+  // Execution times arrive as aware-UTC ISO strings (datetime.now(timezone.utc)
+  // on the backend) and some books still persist them naive. IST is this app's
+  // presentation zone (the 2026-10-27 clock policy), so the label is rendered in
+  // Asia/Kolkata regardless of where the browser sits — a bare "06:57" next to a
+  // broker terminal's "12:27" is the same instant. B6: the Orders tab used to
+  // print the UTC hour while this table printed IST; both now share one clock.
+  const IST_ZONE = "Asia/Kolkata";
+
   function parseExecDate(iso) {
     let s = String(iso || "");
     if (s && !/([zZ]|[+-]\d{2}:?\d{2})$/.test(s)) s += "Z";
@@ -424,10 +459,19 @@
     if (!iso) return "";
     const d = parseExecDate(iso);
     if (isNaN(d.getTime())) return "";
-    const t = d.toLocaleTimeString("en-IN", { hour12: false });
-    if (d.toDateString() === new Date().toDateString()) return t;
-    return String(d.getDate()).padStart(2, "0") + "-" +
-      String(d.getMonth() + 1).padStart(2, "0") + " " + t;
+    const istParts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: IST_ZONE, hour12: false,
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      day: "2-digit", month: "2-digit",
+      year: "numeric",
+    }).formatToParts(d).reduce((acc, p) => (acc[p.type] = p.value, acc), {});
+    const t = `${istParts.hour}:${istParts.minute}:${istParts.second}`;
+    const today = new Intl.DateTimeFormat("en-GB", {
+      timeZone: IST_ZONE, day: "2-digit", month: "2-digit", year: "numeric",
+    }).format(new Date());
+    if (`${istParts.day}-${istParts.month}-${istParts.year}` ===
+        today.replace(/\//g, "-")) return t;
+    return istParts.day + "-" + istParts.month + " " + t;
   }
 
   function positionRowHtml(row) {
@@ -436,15 +480,21 @@
       ? '<span class="muted" title="Runner is not running — this mark is frozen, actions still work">⏸</span> '
       : "";
     const label = row.kind === "option"
-      ? '<span class="badge badge-option">OPTION</span> ' + (row.label || row.symbol) + " <span class=\"muted\">(net)</span>"
+      ? '<span class="badge badge-option">OPTION</span>' +
+        OptionView.carryPolicyBadgeHtml(row) + " " +
+        (row.label || row.symbol) + ' <span class="muted">(net)</span>'
       : row.label || row.symbol;
     const entered = row.entry_ts
       ? '<span class="muted" title="Entry executed ' + String(row.entry_ts).replace(/[<>&"]/g, "") + ' (server UTC)"> · in ' + execTimeLabel(row.entry_ts) + "</span>"
       : "";
+    const prevCloseNote = (row.kind === "option" && row.prev_close_mark !== null && row.prev_close_mark !== undefined)
+      ? " · prev close ₹" + Number(row.prev_close_mark).toFixed(2)
+      : "";
     const sub = row.kind === "option"
       ? '<div class="cell-sub">' + (row.structure_type || "").replace(/_/g, " ") +
         (row.expiry ? " · exp " + expiryLabelOf(row.expiry) : "") +
-        (row.bars_held ? " · " + row.bars_held + " bars" : "") + entered + "</div>"
+        (row.bars_held ? " · " + row.bars_held + " bars" : "") +
+        prevCloseNote + entered + "</div>"
       : '<div class="cell-sub">' + (row.strategy_name || "") + entered + "</div>";
     return (
       '<tr class="pos-row' + (row.stale ? " pos-row-stale" : "") +
@@ -457,13 +507,13 @@
         (row.broker ? " · <span class=\"pos-broker\" title=\"Execution broker\">" +
           row.broker + "</span>" : "") +
         (row.segment ? " · " + row.segment : "") +
-        "</div></td>" +
+        "</div>" + OptionView.feedStateBadgeHtml(row) + "</td>" +
       '<td class="cell-name">' + label + sub + "</td>" +
       "<td>" + (row.side || "") + "</td>" +
       '<td class="num">' + Number(row.qty || 0).toLocaleString("en-IN") + "</td>" +
       '<td class="num">' + legPriceOf(row.entry_price) + "</td>" +
       '<td class="num">' + legPriceOf(row.current_price) + OptionView.staleBadgeHtml(row) + "</td>" +
-      '<td class="num ' + pnlClass(pnl) + '">' + fmtSigned(pnl) + "</td>" +
+      '<td class="num ' + pnlClass(pnl) + '">' + fmtSigned(pnl) + OptionView.carryPnlSubHtml(row) + "</td>" +
       posLevelCell(row.target, "target") +
       posLevelCell(row.stop_loss, "stop") +
       greeksCell(row) +
@@ -1645,6 +1695,17 @@
         window.DeepDive.open(id, state.portfolio);
       } else if (act === "refresh_marks") {
         refreshRunnerMarks(id);
+      } else if (act === "respawn") {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        try {
+          const data = await api("/api/portfolio/runners/" + id + "/respawn", "POST", {});
+          toast("Respawned with latest rules (" + String(data.instance_id || "").slice(0, 8) + ")", "success");
+          fetchBackendAudit();
+        } catch (err) {
+          btn.disabled = false;
+          toast("Respawn refused: " + err.message, "error");
+        }
       } else if (act === "remove") {
         // Destructive: confirm first — removal flattens the book and
         // deletes the instance; there is no undo.
@@ -1777,6 +1838,11 @@
       state.posRulesOnly = e.target.checked;
       renderPositionRows(POSITION_ROWS);
     });
+    const posCarryFilter = $("pos-carry-filter");
+    if (posCarryFilter) posCarryFilter.addEventListener("change", (e) => {
+      state.posCarryFilter = e.target.value || "";
+      renderPositionRows(POSITION_ROWS);
+    });
     const posRefresh = $("pos-refresh");
     if (posRefresh) posRefresh.addEventListener("click", () => {
       if (state.portfolio) renderAggregatePositions(state.portfolio);
@@ -1818,15 +1884,13 @@
 
   // ---------------------------------------------------------------- boot
   document.addEventListener("DOMContentLoaded", () => {
-    // CRITICAL: Check if broker is authenticated when market is open
-    // If not, show login modal immediately before allowing any trading
-    checkBrokerAuthOnStartup().then(() => {
-      bindEvents();
-      connectStream();
-      // Initial snapshot (SSE will take over)
-      const summaryUrl = "/api/portfolio/summary" + (PAGE_MODE ? "?mode=" + PAGE_MODE : "");
-      api(summaryUrl).then((d) => render(d.portfolio)).catch(() => {});
-    });
+    bindEvents();
+    connectStream();
+    // Initial snapshot (SSE will take over)
+    const summaryUrl = "/api/portfolio/summary" + (PAGE_MODE ? "?mode=" + PAGE_MODE : "");
+    api(summaryUrl).then((d) => render(d.portfolio)).catch(() => {});
+    // Check if broker is authenticated when market is open
+    checkBrokerAuthOnStartup();
   });
   
   async function checkBrokerAuthOnStartup() {

@@ -84,6 +84,23 @@ from backtest.strategy.base import Strategy
 logger = logging.getLogger("backtest.forward.strategy_adapter")
 
 # ---------------------------------------------------------------------------
+# Placeholder portfolios (ticket 2.4 item 2)
+# ---------------------------------------------------------------------------
+
+#: ``strategy_signals.portfolio_id`` is NOT NULL, so a signal needs an FK target
+#: even when the runner's portfolio was never registered. The placeholder books
+#: the smallest capital the ``initial_capital > 0`` check allows — BUG-37 was
+#: this site inventing a ₹1,00,000 ``status='active'`` book per test fixture,
+#: which is what made ``sum(initial_capital)`` drift.
+SHADOW_FK_CAPITAL = Decimal("0.01")
+
+#: ``ck_portfolios_status`` only admits active/paused/stopped, so a placeholder
+#: is parked in ``stopped`` — the one the capital math already ignores — and
+#: identified by name prefix instead. The boot reaper claims rows by prefix.
+SHADOW_FK_STATUS = "stopped"
+SHADOW_FK_PREFIX = "shadow-fk-"
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -1317,6 +1334,42 @@ class StrategyAdapter:
 
     # -- DB persistence ----------------------------------------------------
 
+    def _ensure_portfolio_row(self, session: Any, portfolio_id: Optional[str]) -> Optional[str]:
+        """Return an FK target for ``portfolio_id``, creating a placeholder if needed.
+
+        Returns ``None`` when no signal can be logged at all — the caller drops
+        the signal instead of raising into the trading path.
+        """
+        from backtest.db.models import Portfolio as PortfolioRow
+
+        if not portfolio_id:
+            logger.warning("signal has no portfolio_id; not logged to DB")
+            return None
+        if session.get(PortfolioRow, portfolio_id) is not None:
+            return portfolio_id
+
+        try:
+            session.add(
+                PortfolioRow(
+                    portfolio_id=portfolio_id,
+                    name=f"{SHADOW_FK_PREFIX}{portfolio_id}",
+                    initial_capital=SHADOW_FK_CAPITAL,
+                    current_cash=SHADOW_FK_CAPITAL,
+                    status=SHADOW_FK_STATUS,
+                )
+            )
+            session.flush()
+        except Exception as exc:
+            # Rollback keeps this session usable; otherwise the failed flush
+            # poisons it and every later write in the same session raises.
+            session.rollback()
+            logger.warning(
+                "placeholder portfolio %s unavailable (%s); signal not logged", portfolio_id, exc
+            )
+            return None
+        logger.debug("created placeholder portfolio row %s for signal logging", portfolio_id)
+        return portfolio_id
+
     def _save_signal_to_db(
         self,
         signal: Signal,
@@ -1326,18 +1379,18 @@ class StrategyAdapter:
     ) -> str:
         """Persist signal to ``strategy_signals`` table.
 
-        Returns signal_id (or empty string if no DB).
+        Returns signal_id (or empty string if the signal could not be logged).
 
-        Handles FK dependencies gracefully: if the portfolio row does not
-        yet exist in the DB, a minimal row is created. If an order_id is
-        supplied but the order row does not exist, the signal is saved
-        without the FK (order_id cleared) so logging never blocks trading.
+        A portfolio with no row yet gets a capital-free placeholder (see
+        ``SHADOW_FK_CAPITAL``) because the FK is NOT NULL; if even that is
+        impossible the signal is dropped with a warning rather than raising.
+        An order_id whose row does not exist is cleared, so logging never
+        blocks trading.
         """
         if self.db_manager is None:
             return ""
 
         from backtest.db.models import Order as OrderRow
-        from backtest.db.models import Portfolio as PortfolioRow
         from backtest.db.models import StrategySignal as StrategySignalRow
 
         # map signal_type and direction to DB enums (lowercase)
@@ -1349,46 +1402,9 @@ class StrategyAdapter:
         portfolio_id = getattr(self.portfolio, "portfolio_id", None)
 
         with self.db_manager.session() as session:
-            # Ensure portfolio row exists for FK
-            if portfolio_id:
-                existing = session.get(PortfolioRow, portfolio_id)
-                if existing is None:
-                    # create minimal portfolio row so signals can be logged
-                    try:
-                        # initial_capital and current_cash required
-                        init_cap = getattr(self.portfolio, "initial_capital", Decimal("100000"))
-                        curr_cash = getattr(self.portfolio, "current_cash", init_cap)
-                        name = getattr(self.portfolio, "name", f"portfolio-{portfolio_id[:8]}")
-                        # avoid name collision
-                        row = PortfolioRow(
-                            portfolio_id=portfolio_id,
-                            name=name,
-                            initial_capital=init_cap,
-                            current_cash=curr_cash,
-                            status="active",
-                        )
-                        session.add(row)
-                        session.flush()
-                        logger.debug(
-                            "auto-created portfolio row %s for signal logging", portfolio_id
-                        )
-                    except Exception as exc:
-                        # if creation fails (e.g. name collision), try to fetch
-                        # by name or clear portfolio_id
-                        logger.debug("auto-create portfolio failed: %s, will try without FK", exc)
-                        # try to find existing by name
-                        try:
-                            from sqlalchemy import select
-
-                            existing_by_name = session.scalars(
-                                select(PortfolioRow).where(PortfolioRow.name == name)
-                            ).first()
-                            if existing_by_name is not None:
-                                portfolio_id = existing_by_name.portfolio_id
-                            else:
-                                portfolio_id = None
-                        except Exception:
-                            portfolio_id = None
+            portfolio_id = self._ensure_portfolio_row(session, portfolio_id)
+            if portfolio_id is None:
+                return ""
 
             # Check order_id FK - if order row does not exist, drop the FK to avoid failure
             effective_order_id = order_id

@@ -338,6 +338,9 @@ $('dm-fetchBtn').addEventListener('click', async () => {
         showToast('Fetch started', 'success');
         applyJobState({ status: 'running' });
         startPolling();
+        if (typeof globalThis !== 'undefined' && globalThis.PollCadence) {
+            globalThis.PollCadence.notifyDataJobStarted();
+        }
     } catch (err) {
         showToast(err.message, 'error');
     }

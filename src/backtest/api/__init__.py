@@ -21,6 +21,7 @@ from backtest.api.analytics import analytics_bp
 from backtest.api.backtest import backtest_bp
 from backtest.api.broker_auth import broker_auth_bp
 from backtest.api.data_manager import data_bp
+from backtest.api.diary import diary_bp
 from backtest.api.forward import forward_bp
 from backtest.api.intelligence import intelligence_bp
 from backtest.api.playbooks import playbooks_bp
@@ -32,6 +33,7 @@ from backtest.api.symbols import symbols_bp
 
 __all__ = [
     "analytics_bp",
+    "diary_bp",
     "strategies_bp",
     "symbols_bp",
     "backtest_bp",

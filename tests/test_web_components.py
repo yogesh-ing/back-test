@@ -52,8 +52,9 @@ def test_forward_live_widgets_render():
     "harness,expected",
     [
         ("test_position_actions.mjs", 12),
-        # Phase 3 (amend / aging / retry lineage) added nine more.
-        ("test_orders_tab.mjs", 21),
+        # Phase 3 (amend / aging / retry lineage) added nine more; B6's
+        # same-clock Orders stamp fix (a80e689) added two on top of those.
+        ("test_orders_tab.mjs", 23),
         # Portfolio Intelligence: alert widget + Risk Board intelligence sections.
         ("test_alert_widget.mjs", 11),
     ],

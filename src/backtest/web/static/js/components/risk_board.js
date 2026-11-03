@@ -4,7 +4,24 @@
 (function () {
   "use strict";
   const $ = (id) => document.getElementById(id);
+  const pageMode = () => ($("portfolio-page") && $("portfolio-page").dataset.mode) || "";
   const state = { risk: null, mode: "", loading: false };
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+  const fmtMoney2dp = (n) => {
+    const v = Number(n || 0);
+    const c = (document.body && document.body.dataset.currencySymbol) || "₹";
+    const sign = v < 0 ? "-" : "";
+    return sign + c + Math.abs(v).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+  const fmtSigned2dp = (n) => {
+    const v = Number(n || 0);
+    const c = (document.body && document.body.dataset.currencySymbol) || "₹";
+    return (v >= 0 ? "+" : "-") + c + Math.abs(v).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
 
   const fmtMoney = (n) => {
     if (typeof Money !== "undefined" && Money.format) return Money.format(n);
@@ -228,29 +245,58 @@
 
   async function refreshAggregatedTrades() {
     try {
-      const mode = state.mode || ($("risk-mode") ? $("risk-mode").value : "");
+      const mode = pageMode() || state.mode || ($("risk-mode") ? $("risk-mode").value : "");
+      const scope = $("agg-trade-scope") ? $("agg-trade-scope").value : "today";
       const kind = $("agg-trade-kind") ? $("agg-trade-kind").value : "all";
       const limit = $("agg-trade-limit") ? $("agg-trade-limit").value : "100";
-      const url = `/api/portfolio/trades/aggregated?mode=${mode}&kind=${kind}&limit=${limit}`;
+      const params = new URLSearchParams({ kind, limit, scope });
+      if (mode) params.set("mode", mode);
+      const url = `/api/portfolio/trades/aggregated?${params.toString()}`;
       const data = await api(url);
       const tbody = $("agg-trades-body");
       const summaryEl = $("agg-trades-summary");
-      if (summaryEl) summaryEl.textContent = `${data.summary.total} total · ${data.summary.returned} shown · PnL ${fmtSigned(data.summary.total_pnl)} · Win rate ${pct(data.summary.win_rate)}`;
+      const s = data.summary || {};
+      if (summaryEl) {
+        const scopeLbl = s.session_scope_label || (scope === "today" ? "Today · IST" : "All sessions");
+        const grossSum = s.total_gross_pnl != null ? s.total_gross_pnl : (s.total_pnl || 0);
+        const commSum = s.total_commission != null ? s.total_commission : 0;
+        const netSum = s.total_net_pnl != null ? s.total_net_pnl : (s.total_pnl || 0);
+        let msg = `${scopeLbl} · ${s.total || 0} trades (${s.returned || 0} shown) · Gross ${fmtSigned2dp(grossSum)} · Commission ${fmtMoney2dp(commSum)} · Net ${fmtSigned2dp(netSum)} · Net Win ${pct(s.win_rate)}`;
+        if (s.duplicates_collapsed) msg += ` · ${s.duplicates_collapsed} dupes collapsed`;
+        if (s.mismatch_count) msg += ` · ⚠ ${s.mismatch_count} ledger mismatch`;
+        summaryEl.textContent = msg;
+      }
       if (tbody) {
-        if (!data.trades.length) tbody.innerHTML = `<tr><td colspan="9" class="muted">No closed trades yet.</td></tr>`;
+        if (!data.trades.length) tbody.innerHTML = `<tr><td colspan="11" class="muted">No closed trades in selected scope.</td></tr>`;
         else tbody.innerHTML = data.trades.map(t => {
-          // Option structures (2026-09-22 polish): the label already carries
-          // underlying · structure · strikes · type — show it, plus lots×units
-          // and expiry so a spread row reads like the deep-dive does.
           const isOpt = (t.kind || "") === "option";
           const symCell = isOpt
-            ? `<span class="badge badge-option">🎯</span> ${t.label || t.symbol || ""}` +
-              (t.expiry ? ` <span class="muted">exp ${t.expiry.slice(0, 10)}</span>` : "")
-            : (t.symbol || "");
+            ? `<span class="badge badge-option">🎯</span> ${esc(t.label || t.symbol || "")}` +
+              (t.expiry ? ` <span class="muted">exp ${esc(String(t.expiry).slice(0, 10))}</span>` : "")
+            : esc(t.symbol || "");
           const qtyCell = isOpt
-            ? `${t.qty ?? ""} lot${t.qty === 1 ? "" : "s"} <span class="muted">(${t.units ?? ""} u)</span>`
-            : (t.qty ?? "");
-          return `<tr class="${isOpt ? "matrix-row-option" : ""}"><td>${symCell}</td><td>${t.runner_name || ""}</td><td>${t.strategy || ""}</td><td>${t.kind || "equity"}</td><td>${t.side || ""}</td><td class="num">${qtyCell}</td><td class="num">${t.entry_price ?? ""} → ${t.exit_price ?? ""}</td><td class="num ${pnlClass(t.pnl)}">${fmtSigned(t.pnl || 0)}</td><td>${t.exit_reason || ""} <span class="muted">${(t.exit_ts || "").slice(0,16)}</span></td></tr>`;
+            ? `${esc(t.qty ?? "")} lot${t.qty === 1 ? "" : "s"}${t.units ? ` <span class="muted">(${esc(t.units)} u)</span>` : ""}`
+            : esc(t.qty ?? "");
+          const gross = Number(t.gross_pnl != null ? t.gross_pnl : (t.pnl || 0));
+          const comm = Number(t.commission_total != null ? t.commission_total : (Number(t.commission || 0) + Number(t.statutory_fees || 0)));
+          const net = Number(t.net_pnl != null ? t.net_pnl : (gross - comm));
+          const mismatch = t.reconcile_ok === false
+            ? ` <span class="badge badge-warn" title="Gross − Commission ≠ Net (diff ${fmtSigned2dp(t.reconcile_diff || 0)})">⚠ Mismatch</span>`
+            : "";
+          const timeLbl = esc(t.exit_ist_label || (t.exit_ts || "").slice(0, 16));
+          return `<tr class="${isOpt ? "matrix-row-option" : ""}" style="font-variant-numeric:tabular-nums;">` +
+            `<td>${symCell}</td>` +
+            `<td>${esc(t.runner_name || "")}</td>` +
+            `<td>${esc(t.strategy || "")}</td>` +
+            `<td>${esc(t.kind || "equity")}</td>` +
+            `<td>${esc(t.side || "")}</td>` +
+            `<td class="num">${qtyCell}</td>` +
+            `<td class="num">${Number(t.entry_price || 0).toFixed(2)} → ${Number(t.exit_price || 0).toFixed(2)}</td>` +
+            `<td class="num ${pnlClass(gross)}">${fmtSigned2dp(gross)}</td>` +
+            `<td class="num muted">${fmtMoney2dp(comm)}</td>` +
+            `<td class="num ${pnlClass(net)}">${fmtSigned2dp(net)}${mismatch}</td>` +
+            `<td>${esc(t.exit_reason || "—")} <span class="muted">${timeLbl}</span></td>` +
+            `</tr>`;
         }).join("");
       }
     } catch (e) {
@@ -262,9 +308,18 @@
     const refreshBtn = $("btn-risk-refresh");
     if (refreshBtn) refreshBtn.addEventListener("click", refresh);
     const modeSel = $("risk-mode");
-    if (modeSel) modeSel.addEventListener("change", (e) => { state.mode = e.target.value; refresh(); refreshAggregatedTrades(); });
+    if (modeSel) {
+      const locked = pageMode();
+      if (locked) {
+        modeSel.value = locked;
+        state.mode = locked;
+      }
+      modeSel.addEventListener("change", (e) => { state.mode = e.target.value; refresh(); refreshAggregatedTrades(); });
+    }
     const aggRefreshBtn = $("btn-agg-trades-refresh");
     if (aggRefreshBtn) aggRefreshBtn.addEventListener("click", refreshAggregatedTrades);
+    const scopeSel = $("agg-trade-scope");
+    if (scopeSel) scopeSel.addEventListener("change", refreshAggregatedTrades);
     const kindSel = $("agg-trade-kind");
     if (kindSel) kindSel.addEventListener("change", refreshAggregatedTrades);
     const limitSel = $("agg-trade-limit");

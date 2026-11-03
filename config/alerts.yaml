@@ -85,7 +85,13 @@ default:
     position_closed: [telegram, log]
     daily_summary: [telegram, email, log]
     broker_session_expiring: [telegram, log]
-    broker_session_expired: [telegram, log]
+    # Sprint A4: the T−10m action gate and the expiry itself decide whether the
+    # feed survives the session, so both fan out to every channel configured.
+    # They are raised CRITICAL, which the notifier already treats as exempt from
+    # quiet hours and from the hourly rate limit — throttling away the one
+    # message the operator can still act on would defeat the point.
+    broker_session_expiring_urgent: [telegram, email, slack, discord, sms, desktop, log]
+    broker_session_expired: [telegram, email, slack, discord, sms, desktop, log]
 
   # Quiet hours – suppress non-critical alerts during night (IST)
   quiet_hours_enabled: false
@@ -114,6 +120,7 @@ default:
     position_closed: "📉 Position closed: {symbol} {side} {quantity} @ {price} | PnL: {pnl}"
     daily_summary: "📊 Daily Summary: Equity {equity} | P&L {pnl} | Trades {trades} | Win Rate {win_rate}%"
     broker_session_expiring: "🟡 {broker_display_name} login expires {expires_at} — Re-login (password + TOTP) in the web UI to keep feeds running."
+    broker_session_expiring_urgent: "🟠 {broker_display_name} login expires in {minutes_remaining} min — Re-login (password + TOTP) NOW or live feeds, entries and marks stop."
     broker_session_expired: "🔴 {broker_display_name} session EXPIRED — live feeds and runner entries PAUSED. Re-login (password + TOTP) now."
 
   keep_history: true
@@ -168,6 +175,7 @@ profiles:
       system_error: [telegram, log]
       daily_summary: [telegram, log]
       broker_session_expiring: [telegram, log]
+      broker_session_expiring_urgent: [telegram, log]
       broker_session_expired: [telegram, log]
 
   # All channels – for testing all integrations
@@ -189,3 +197,5 @@ profiles:
       error: [telegram, slack, discord, log]
       warning: [telegram, log]
       info: [telegram, log]
+      broker_session_expiring_urgent: [telegram, slack, discord, email, log]
+      broker_session_expired: [telegram, slack, discord, email, log]

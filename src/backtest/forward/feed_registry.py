@@ -64,6 +64,7 @@ from backtest.data.sources_policy import (
 from backtest.forward.feed_quality import get_quality_monitor
 from backtest.options.quote_providers import (
     BidAskQuoteProvider,
+    DisconnectedQuoteProvider,
     SyntheticChainGenerator,
     SyntheticQuoteProvider,
 )
@@ -373,6 +374,7 @@ def option_quote_provider_for(
     quote_broker: Any | None = None,
     *,
     wing_distance_pct: Optional[float] = None,
+    allow_disconnected: bool = False,
 ) -> tuple[Any, str]:
     """``(quote_provider, label)`` for an option runner's bridge — P1.1.
 
@@ -384,6 +386,16 @@ def option_quote_provider_for(
       held legs mark off the far side (PRD §4.1/§4.2).
     * otherwise → the synthetic pair (``"synthetic:bs"``), **but only if the
       data-source policy allows synthetic at all**.
+    * ``allow_disconnected=True`` + no session + synthetic off → the
+      :class:`DisconnectedQuoteProvider` frozen-mark stub
+      (``"disconnected:<broker>"``), which is what lets a runner be *built*
+      while its broker is logged out (Sprint A1). The caller — the forward
+      runner — is the only one that passes it: a book restored before the
+      operator logs in stays on screen with its strikes, lots and levels
+      instead of vanishing into ``_parked_snapshots``, and it can neither
+      price a fake mark nor open anything. **No ChainBus entry is taken**, so
+      there is nothing to release; the stub is per-runner and upgrades to the
+      live chain the moment the broker authenticates.
 
     The bus wraps broker feeds once, at entry creation, rather than leaving it
     to each call site, because "paper filled at LTP" is not evidence of
@@ -420,6 +432,20 @@ def option_quote_provider_for(
             )
             return provider, provider.source_name
         if not synthetic_enabled():
+            if allow_disconnected:
+                stub = DisconnectedQuoteProvider(source_key, underlying)
+                logger.warning(
+                    "option runner on %s requested source=%s with no authenticated "
+                    "%s session — building it on the frozen-mark stub (%s): the book "
+                    "stays visible and unpriceable, and refuses every new entry, "
+                    "until %s logs in",
+                    underlying,
+                    source_key,
+                    source_key,
+                    stub.source_name,
+                    source_key,
+                )
+                return stub, stub.source_name
             raise SourceDisabledError(
                 f"option runner on {underlying} asked for source={source_key} but there is "
                 f"no authenticated {source_key} session, and synthetic chains are disabled "
@@ -678,10 +704,16 @@ class _BrokerBarFeedBase:
             elapsed = time.monotonic() - started
             self._stop.wait(max(0.0, self.poll_interval_s - elapsed))
 
+    def _has_live_auth(self) -> bool:
+        """Layer-0 authentication gate before touching any symbol or HTTP socket."""
+        return True
+
     def _poll_once(self) -> int:
         with self._lock:
             symbols = list(self._symbols)
         if not symbols:
+            return 0
+        if not self._has_live_auth():
             return 0
 
         market_open = self._market_open()
@@ -700,7 +732,7 @@ class _BrokerBarFeedBase:
 
         delivered = 0
         for symbol in symbols:
-            if self._stop.is_set():
+            if self._stop.is_set() or not self._has_live_auth():
                 break
             if not market_open and symbol in self._last_ts:
                 continue
@@ -881,6 +913,17 @@ class MStockBarFeed(_BrokerBarFeedBase):
 
             feed_client = MStockLiveFeed(poll_interval_s=poll_interval_s)
         super().__init__(feed_client=feed_client, poll_interval_s=poll_interval_s)
+
+    def _has_live_auth(self) -> bool:
+        """Layer-0 mStock auth gate: 0 HTTP packets when logged out or expired (Ticket C2)."""
+        from backtest.data.mstock_live_feed import MStockLiveFeed, has_mstock_live_auth
+
+        if (
+            isinstance(self._client, MStockLiveFeed)
+            and getattr(self._client, "client", None) is None
+        ):
+            return has_mstock_live_auth()
+        return True
 
 
 class DhanBarFeed(_BrokerBarFeedBase):

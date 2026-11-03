@@ -6,6 +6,14 @@ hand-written migration files are executed **verbatim** with
 ``executescript()`` — the sequence a developer applies locally:
 ``001`` → ``002`` → ``008`` → ``016`` → ``020``.
 
+Naming note (2026-10-30, BUG-38): the *Alembic* revision for this unlock was
+renumbered ``020`` → ``021``, because two files declared ``revision = "020"``
+on the same parent and the chain had two heads. The hand-written SQL keeps its
+``020`` key — it records into a different ledger (``schema_migrations``), whose
+rows already exist in deployed databases, so renaming it would be a data
+migration for nothing. Everything below that says ``020`` means the SQL file;
+the two Alembic checks at the end name ``021``.
+
 The intermediate ``016`` step matters for the same reason 008 did in that
 test: the 020 rebuild carries every column and constraint accumulated so far
 (``mode``/``source`` from 002, ``segment``/``execution_broker`` from 008,
@@ -22,6 +30,10 @@ Covered:
 * the rebuilt schema still matches the ORM models column-for-column;
 * the ``schema_migrations`` ledger records ``020``;
 * the Alembic revision mirrors the SQL (textual, per ``test_migrations_002``);
+* the Alembic chain has ONE head and no revision id is declared twice
+  (``test_alembic_has_single_linear_head`` — the BUG-38 guardrail);
+* running revision ``020`` on a hand-applied ledger is a no-op, which is the
+  shape live ``forward_test`` is in (stamped ``019``, table already present);
 * the PG file follows the conventions 016's file follows.
 
 PostgreSQL-specific behaviour (``DROP CONSTRAINT``, table-level CHECKs,
@@ -31,6 +43,8 @@ matching the repo convention in ``tests/test_db_schema.py``.
 
 from __future__ import annotations
 
+import importlib.util
+import re
 import sqlite3
 from pathlib import Path
 
@@ -49,8 +63,8 @@ SQL_008 = MIGRATIONS / "008_multi_broker_segments.sqlite.sql"
 SQL_016 = MIGRATIONS / "016_add_dhan_source.sqlite.sql"
 SQL_020 = MIGRATIONS / "020_add_upstox_source.sqlite.sql"
 PG_020 = MIGRATIONS / "020_add_upstox_source.sql"
-ALEMBIC_020 = (
-    ALEMBIC_VERSIONS / "20261013_1200_020_add_upstox_source_to_portfolios.py"
+ALEMBIC_021 = (
+    ALEMBIC_VERSIONS / "20261013_1200_021_add_upstox_source_to_portfolios.py"
 )
 
 POPULATED_ID = "11111111-1111-1111-1111-111111111111"
@@ -301,13 +315,144 @@ def test_pg_020_file_matches_conventions():
     assert "VALUES ('020'" in sql
 
 
-def test_alembic_020_mirrors_the_sql():
+def test_alembic_021_mirrors_the_sql():
     """The Alembic revision widens exactly the same constraint."""
-    assert ALEMBIC_020.exists(), f"missing {ALEMBIC_020}"
-    src = ALEMBIC_020.read_text()
-    assert 'revision: str = "020"' in src
-    assert 'down_revision: Union[str, None] = "019"' in src
+    assert ALEMBIC_021.exists(), f"missing {ALEMBIC_021}"
+    src = ALEMBIC_021.read_text(encoding="utf-8")
+    assert 'revision: str = "021"' in src
+    assert 'down_revision: Union[str, None] = "020"' in src
     assert "'synthetic','replay','mstock','dhan','upstox'" in src  # widened
     assert 'def downgrade()' in src
     # Downgrade restores the 016-era CHECK (drops upstox only).
     assert "'synthetic','replay','mstock','dhan')" in src
+
+
+def test_alembic_has_single_linear_head():
+    """CI guardrail (BUG-38): exactly one head, and no revision id declared twice.
+
+    Two files declared ``revision = "020"`` on the same parent for three weeks.
+    ``alembic upgrade`` could not resolve the chain, ``current`` sat at ``019``,
+    and every later schema fix had nowhere to chain — while every test of the
+    hand-written SQL files stayed green, because the fork existed only in the
+    Alembic namespace. This is the check that makes two branches landing the same
+    revision number fail loudly instead of silently.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
+    # Not pinned to an id on purpose: the head moves with every revision, and a
+    # guard that has to be edited to stay green is the one that gets edited
+    # wrongly. ``test_alembic_chain_009_to_022`` owns the pinned head.
+    assert len(script.get_heads()) == 1, (
+        f"the alembic chain must have exactly one head, got {script.get_heads()}"
+    )
+
+    declared: dict[str, str] = {}
+    for path in sorted(ALEMBIC_VERSIONS.glob("*.py")):
+        # 001 quotes with '', the rest with "" — both spellings are the same id.
+        match = re.search(
+            r"""^revision: str = ['"]([^'"]+)['"]""",
+            path.read_text(encoding="utf-8"),
+            re.M,
+        )
+        assert match, f"{path.name} declares no revision id"
+        assert match.group(1) not in declared, (
+            f"{path.name} and {declared[match.group(1)]} both declare "
+            f'revision "{match.group(1)}"'
+        )
+        declared[match.group(1)] = path.name
+
+
+# ---------------------------------------------------------------------------
+# Upgrading a hand-applied ledger (the live `forward_test` shape)
+# ---------------------------------------------------------------------------
+
+JOURNAL_REVISION = "20261008_1200_020_option_intent_journal.py"
+
+
+def _load_revision(filename: str):
+    """Import one Alembic file as a module so its ``upgrade()`` can be driven."""
+    path = ALEMBIC_VERSIONS / filename
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _RecordingOp:
+    """Stands in for ``alembic.op``: records the DDL the revision would emit."""
+
+    def __init__(self, bind) -> None:
+        self._bind = bind
+        self.calls: list[str] = []
+
+    def get_bind(self):
+        return self._bind
+
+    def create_table(self, name, *a, **k):
+        self.calls.append(f"create_table:{name}")
+
+    def create_index(self, name, *a, **k):
+        self.calls.append(f"create_index:{name}")
+
+    def drop_index(self, name, *a, **k):
+        self.calls.append(f"drop_index:{name}")
+
+    def drop_table(self, name, *a, **k):
+        self.calls.append(f"drop_table:{name}")
+
+    def execute(self, statement, *a, **k):
+        self.calls.append(f"execute:{str(statement)[:40]}")
+
+
+def _bind_with_journal(present: bool):
+    """A scratch SQLite bind with or without ``option_intent_events``."""
+    engine = create_engine("sqlite://")
+    with engine.begin() as conn:
+        if present:
+            conn.execute(text("CREATE TABLE option_intent_events (event_id INTEGER)"))
+    return engine
+
+
+def test_journal_revision_skips_a_hand_applied_ledger():
+    """``alembic upgrade 019:021`` must be safe on live, which already has the table.
+
+    ``forward_test`` is stamped ``019`` yet physically carries
+    ``option_intent_events`` and its three indexes — the SQL-file path applied
+    them (probed 2026-10-30). Without the skip, ``upgrade`` would die on
+    ``CREATE TABLE`` and the widening this chain exists to deliver would never
+    run. So this revision must be a no-op when the objects are already there,
+    and must still create them when they are not.
+    """
+    module = _load_revision(JOURNAL_REVISION)
+
+    stub = _RecordingOp(_bind_with_journal(present=True))
+    module.op = stub
+    module.upgrade()
+    assert stub.calls == [], f"would abort a hand-applied upgrade: {stub.calls}"
+
+    stub = _RecordingOp(_bind_with_journal(present=False))
+    module.op = stub
+    module.upgrade()
+    assert stub.calls == [
+        "create_table:option_intent_events",
+        "create_index:ix_opt_intent_events_dedupe",
+        "create_index:ix_opt_intent_events_intent",
+        "create_index:ix_opt_intent_events_recorded",
+    ]
+
+    # The mirror case: a downgrade from an absent table must not raise either.
+    stub.calls.clear()
+    module.downgrade()
+    assert stub.calls == []
+
+    stub = _RecordingOp(_bind_with_journal(present=True))
+    module.op = stub
+    module.downgrade()
+    assert stub.calls == [
+        "drop_index:ix_opt_intent_events_recorded",
+        "drop_index:ix_opt_intent_events_intent",
+        "drop_index:ix_opt_intent_events_dedupe",
+        "drop_table:option_intent_events",
+    ]

@@ -179,6 +179,154 @@ const OptionView = (function () {
     return openStructures(row).filter((s) => !!(s && s.mark_stale)).length;
   }
 
+  /**
+   * Sprint A1 — can this book see the market at all?
+   *
+   * `feed_state` is orthogonal to `status`: `status` is the operator's intent
+   * (do I want this trading), `feed_state` is the pipe (can it see the market).
+   * A book restored before its broker logged in is WAITING_FOR_FEED — on
+   * screen, holding its last honest mark, refusing every new entry. Before A1
+   * it was not on screen at all: construction failed and the manager filed it
+   * under `_parked_snapshots`, so ten live paper books vanished from boot until
+   * the next restart *after* a login.
+   *
+   * Distinct from a stale mark (the feed died mid-session) and from PAUSED (the
+   * operator's choice) — and it has a different fix: log the broker in.
+   */
+  function isFeedWaiting(row) {
+    if (!row) return false;
+    if (row.feed_disconnected) return true;
+    return String(row.feed_state || "").toUpperCase() === "WAITING_FOR_FEED";
+  }
+
+  const BROKER_LABELS = { mstock: "mStock", dhan: "Dhan", upstox: "Upstox" };
+
+  /** "Waiting for mStock login" — names the broker the operator must log into. */
+  function feedWaitLabel(row) {
+    const source = String((row && row.source) || "").toLowerCase();
+    return "Waiting for " + (BROKER_LABELS[source] || source || "broker") + " login";
+  }
+
+  /** Status-cell sub-line for a blind book; "" for a connected one. */
+  function feedStateBadgeHtml(row) {
+    if (!isFeedWaiting(row)) return "";
+    const detail = (row && row.feed_refusal) || "";
+    const title = "Marks are frozen at their last honest value and new entries are refused." +
+      (detail ? " " + detail : "");
+    return '<div class="cell-sub badge-waiting-feed" title="' + escAttr(title) + '">' +
+      "🔌 " + escAttr(feedWaitLabel(row)) + " · frozen mark</div>";
+  }
+
+  /**
+   * Sprint D / Ticket D2: compute IST auto-squareoff clock ("15:10") from
+   * `intraday_squareoff_minutes_before` against NSE 15:30 IST close.
+   */
+  function squareoffTimeLabel(minutesBefore) {
+    const mins = Number.isFinite(Number(minutesBefore)) && Number(minutesBefore) > 0
+      ? Math.round(Number(minutesBefore))
+      : 20;
+    const total = Math.max(9 * 60 + 15, 15 * 60 + 30 - mins);
+    const hh = String(Math.floor(total / 60)).padStart(2, "0");
+    const mm = String(total % 60).padStart(2, "0");
+    return hh + ":" + mm;
+  }
+
+  /** Resolve canonical carry_policy ("intraday" | "positional" | "") for a position or runner row. */
+  function carryPolicyOf(item) {
+    if (!item) return "";
+    const direct = String(item.carry_policy || "").trim().toLowerCase();
+    if (direct === "intraday" || direct === "positional") return direct;
+    const b = book(item);
+    const fromBook = b && String(b.carry_policy || "").trim().toLowerCase();
+    if (fromBook === "intraday" || fromBook === "positional") return fromBook;
+    if (isOption(item)) {
+      const expr = (item.instrument && item.instrument.expression) || {};
+      const fromExpr = String(expr.carry_policy || "").trim().toLowerCase();
+      if (fromExpr === "intraday" || fromExpr === "positional") return fromExpr;
+    }
+    return "";
+  }
+
+  /**
+   * Sprint D / Ticket D2 & D3: Carry-horizon badge HTML.
+   * - `carry_policy="intraday"`   -> `⏱ INTRADAY 15:10`
+   * - `carry_policy="positional"` -> `📅 POSITIONAL (HOLD TO EXPIRY)` (or `📅 POSITIONAL` when `opts.compact`)
+   */
+  function carryPolicyBadgeHtml(item, opts) {
+    const policy = carryPolicyOf(item);
+    if (!policy) return "";
+    const compact = !!(opts && opts.compact);
+    const b = book(item);
+    const minsBefore = item.intraday_squareoff_minutes_before != null
+      ? item.intraday_squareoff_minutes_before
+      : (b && b.intraday_squareoff_minutes_before);
+    if (policy === "positional") {
+      const text = compact ? "📅 POSITIONAL" : "📅 POSITIONAL (HOLD TO EXPIRY)";
+      const title = "Positional carry contract (carry_policy=positional) — held across sessions until exit rule or expiry settlement";
+      return ' <span class="badge badge-carry-positional" title="' + escAttr(title) + '">' + text + "</span>";
+    }
+    const sqTime = squareoffTimeLabel(minsBefore);
+    const title = "Intraday carry contract (carry_policy=intraday) — auto square-off at " + sqTime + " IST while runner is RUNNING";
+    return ' <span class="badge badge-carry-intraday" title="' + escAttr(title) + '">⏱ INTRADAY ' + sqTime + "</span>";
+  }
+
+  function fmtSignedInr(v) {
+    const n = num(v);
+    const abs = Math.abs(n).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return (n > 0 ? "+₹" : (n < 0 ? "−₹" : "₹")) + abs;
+  }
+
+  /**
+   * Sprint D / Ticket D2: Today vs. Total Trade P&L + 15:30 prev_close_mark
+   * sub-line for open option structure rows on the Positions blotter.
+   */
+  function carryPnlSubHtml(row) {
+    if (!row || row.kind !== "option") return "";
+    const hasToday = row.today_pnl !== null && row.today_pnl !== undefined;
+    const hasNet = row.net_open_pnl !== null && row.net_open_pnl !== undefined;
+    const hasPrev = row.prev_close_mark !== null && row.prev_close_mark !== undefined;
+    if (!hasToday && !hasNet && !hasPrev) return "";
+    if (row.carried_overnight || hasPrev) {
+      const parts = [];
+      if (hasToday) parts.push("Today " + fmtSignedInr(row.today_pnl));
+      if (hasNet) parts.push("Total " + fmtSignedInr(row.net_open_pnl));
+      const titleParts = ["Carried overnight" + (row.entry_session_date ? " from " + row.entry_session_date : "")];
+      if (hasPrev) titleParts.push("15:30 prev close mark ₹" + num(row.prev_close_mark).toFixed(2));
+      return '<div class="cell-sub pos-pnl-split" title="' + escAttr(titleParts.join(" · ")) + '">' +
+        escAttr(parts.join(" · ")) +
+        (hasPrev ? ' <span class="muted">(prev ' + escAttr(signText(row.prev_close_mark)) + ")</span>" : "") +
+        "</div>";
+    }
+    if (hasNet) {
+      return '<div class="cell-sub pos-pnl-split" title="Opened today — Today P&L equals Total Net Open P&L after entry commission">' +
+        "Net " + escAttr(fmtSignedInr(row.net_open_pnl)) + "</div>";
+    }
+    return "";
+  }
+
+  /** True when a runner's frozen spawn config/template has drifted from disk (Ticket D3). */
+  function hasConfigDrift(row) {
+    if (!row) return false;
+    return !!(row.config_drift || row.strategy_code_changed);
+  }
+
+  /**
+   * Sprint D / Ticket D3: Amber config-drift pill for FROZEN_AT_SPAWN runners
+   * whose strategy code or template expression/carry_policy defaults changed.
+   */
+  function configDriftBadgeHtml(row) {
+    if (!hasConfigDrift(row)) return "";
+    const reasons = Array.isArray(row.config_drift_reasons) && row.config_drift_reasons.length
+      ? row.config_drift_reasons.join("; ")
+      : "Strategy template on disk changed since this runner was spawned";
+    const openPos = num(row.open_positions);
+    const gateNote = openPos > 0
+      ? " Close or wait for " + openPos + " open position(s) to exit before respawning."
+      : " Runner is flat — click Respawn to rollover onto the latest rules.";
+    return '<div class="cell-sub badge-config-drift" title="' + escAttr(reasons + "." + gateNote) + '">' +
+      "⚠️ Outdated config — respawn when flat</div>";
+  }
+
   /** Flat rows for the deep-dive open-position table. */
   function structureRows(row) {
     return openStructures(row).map((s) => ({
@@ -259,7 +407,7 @@ const OptionView = (function () {
       {
         key: "book_realized",
         label: "Book P&L (Closed)",
-        value: num(b.total_pnl),
+        value: num(b.net_realized_pnl),
         money: true,
         pnl: true,
         sub: closed ? Math.round(num(b.win_rate) * 100) + "% won · settled " + num(b.settled_count) : "",
@@ -340,6 +488,15 @@ const OptionView = (function () {
     staleBadgeHtml,
     isMarkStale,
     staleCount,
+    isFeedWaiting,
+    feedWaitLabel,
+    feedStateBadgeHtml,
+    squareoffTimeLabel,
+    carryPolicyOf,
+    carryPolicyBadgeHtml,
+    carryPnlSubHtml,
+    hasConfigDrift,
+    configDriftBadgeHtml,
   };
 })();
 

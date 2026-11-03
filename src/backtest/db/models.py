@@ -639,6 +639,11 @@ class Trade(Base):
     holding_period_minutes: Mapped[Optional[int]] = mapped_column(Integer)
     return_percentage: Mapped[Optional[Decimal]] = mapped_column(Ratio)
     exit_reason: Mapped[Optional[str]] = mapped_column(String(32))
+    #: SHA-256 of the identity columns (see
+    #: :func:`backtest.forward.trade_persistence.trade_dedupe_key`). Nullable
+    #: because rows written before B1 carry no key; the unique index ignores
+    #: NULLs on both PostgreSQL and SQLite.
+    dedupe_key: Mapped[Optional[str]] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -659,6 +664,7 @@ class Trade(Base):
         Index("ix_trades_symbol", "symbol"),
         Index("ix_trades_strategy", "strategy_name"),
         Index("ix_trades_net_pnl", "portfolio_id", "net_pnl"),
+        Index("uq_trades_dedupe_key", "dedupe_key", unique=True),
     )
 
     @property
@@ -2316,3 +2322,305 @@ BACKTEST_LEDGER_TABLES = (
     BacktestRun.__table__,
     BacktestRunSeries.__table__,
 )
+
+
+# ---------------------------------------------------------------------------
+# PnL Diary & Institutional Edge Suite — Operator Journal (Slice 5 / Mig 023)
+# ---------------------------------------------------------------------------
+
+
+class DiaryNote(Base):
+    """Book-segregated IST session & spawned-instance operator journal entry.
+
+    Paper and Live books are strictly isolated via ``mode IN ('paper','live')``.
+    ``portfolio_id`` / ``instance_label`` are optional so a note can attach to
+    an entire IST session day, a strategy on that day, or a specific spawned
+    runner instance (without a rigid FK that would block notes on compacted or
+    in-memory runs).
+    """
+
+    __tablename__ = "diary_notes"
+
+    note_id: Mapped[str] = mapped_column(
+        UUIDStr, primary_key=True, default=_uuid4_str
+    )
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    strategy_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    portfolio_id: Mapped[Optional[str]] = mapped_column(UUIDStr, nullable=True)
+    instance_label: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    regime_tags: Mapped[Any] = mapped_column(
+        JSONVariant, nullable=False, server_default=text("'[]'")
+    )
+    note_text: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("''")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("mode IN ('paper','live')", name="ck_diary_notes_mode"),
+        Index("ix_diary_notes_mode_session", "mode", "session_date"),
+        Index("ix_diary_notes_strategy", "mode", "strategy_name"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"<DiaryNote {self.note_id[:8]} {self.mode} "
+            f"{self.session_date.isoformat()}>"
+        )
+
+
+#: Tables owned by the PnL Diary journal (scoped ``create_all`` helper).
+DIARY_TABLES = (DiaryNote.__table__,)
+
+
+# ---------------------------------------------------------------------------
+# Institutional PostgreSQL Single-Source-of-Truth (Sprint D / Mig 024)
+# ---------------------------------------------------------------------------
+
+
+class RunnerInstanceRecord(Base):
+    """Durable runner instance registry replacing flat JSON dependency (Ticket D1)."""
+
+    __tablename__ = "runner_instances"
+
+    instance_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    portfolio_id: Mapped[Optional[str]] = mapped_column(
+        UUIDStr,
+        ForeignKey(
+            "portfolios.portfolio_id",
+            ondelete="SET NULL",
+            name="fk_runner_instances_portfolio",
+        ),
+        nullable=True,
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    segment: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    execution_broker: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(24), nullable=False, server_default=text("'PAUSED'")
+    )
+    allocated_capital: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    carry_policy: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    config_json: Mapped[Any] = mapped_column(
+        JSONVariant, nullable=False, server_default=text("'{}'")
+    )
+    runtime_state_json: Mapped[Any] = mapped_column(
+        JSONVariant, nullable=False, server_default=text("'{}'")
+    )
+    prev_close_mark: Mapped[Optional[Decimal]] = mapped_column(Price, nullable=True)
+    last_mark_price: Mapped[Optional[Decimal]] = mapped_column(Price, nullable=True)
+    last_mark_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("mode IN ('paper','live')", name="ck_runner_instances_mode"),
+        CheckConstraint(
+            "status IN ('RUNNING','PAUSED','STOPPED','RETIRED')",
+            name="ck_runner_instances_status",
+        ),
+        CheckConstraint(
+            "carry_policy IS NULL OR carry_policy IN ('intraday','positional')",
+            name="ck_runner_instances_carry",
+        ),
+        Index("ix_runner_instances_mode_status", "mode", "status"),
+    )
+
+
+class OptionOpenStructureRecord(Base):
+    """First-class relational row for open/carried Option structures (Ticket D1)."""
+
+    __tablename__ = "option_open_structures"
+
+    structure_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    instance_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    portfolio_id: Mapped[Optional[str]] = mapped_column(
+        UUIDStr,
+        ForeignKey(
+            "portfolios.portfolio_id",
+            ondelete="SET NULL",
+            name="fk_opt_open_struct_portfolio",
+        ),
+        nullable=True,
+    )
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    strategy_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    structure_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    underlying: Mapped[str] = mapped_column(String(32), nullable=False)
+    expiry: Mapped[date] = mapped_column(Date, nullable=False)
+    carry_policy: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'intraday'")
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'open'")
+    )
+    entry_session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    session_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    entry_net_cost: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    commission_total: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    statutory_fees: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    last_mark_net_pnl: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    prior_close_net_pnl: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    prev_close_mark: Mapped[Optional[Decimal]] = mapped_column(Price, nullable=True)
+    stop_loss: Mapped[Optional[Decimal]] = mapped_column(Price, nullable=True)
+    target: Mapped[Optional[Decimal]] = mapped_column(Price, nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_mark_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    exit_reason: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    legs: Mapped[list["OptionOpenLegRecord"]] = relationship(
+        back_populates="structure", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        CheckConstraint("mode IN ('paper','live')", name="ck_opt_open_struct_mode"),
+        CheckConstraint(
+            "carry_policy IN ('intraday','positional')", name="ck_opt_open_struct_carry"
+        ),
+        CheckConstraint(
+            "status IN ('open','closed')", name="ck_opt_open_struct_status"
+        ),
+        Index("ix_opt_open_struct_instance_status", "instance_id", "status"),
+        Index("ix_opt_open_struct_mode_status", "mode", "status"),
+    )
+
+
+class OptionOpenLegRecord(Base):
+    """First-class relational Option leg row with entry_price & prev_close_mark."""
+
+    __tablename__ = "option_open_legs"
+
+    position_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    structure_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey(
+            "option_open_structures.structure_id",
+            ondelete="CASCADE",
+            name="fk_opt_open_legs_structure",
+        ),
+        nullable=False,
+    )
+    instance_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    instrument_type: Mapped[str] = mapped_column(
+        String(8), nullable=False, server_default=text("'OPT'")
+    )
+    instrument_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    trading_symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    underlying: Mapped[str] = mapped_column(String(32), nullable=False)
+    option_type: Mapped[str] = mapped_column(String(4), nullable=False)
+    strike: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    expiry: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    lot_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    entry_price: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    last_mark_price: Mapped[Optional[Decimal]] = mapped_column(Price, nullable=True)
+    prev_close_mark: Mapped[Optional[Decimal]] = mapped_column(Price, nullable=True)
+    unrealized_pnl: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    realized_pnl: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    commission: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'open'")
+    )
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_updated: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    structure: Mapped["OptionOpenStructureRecord"] = relationship(
+        back_populates="legs"
+    )
+
+    __table_args__ = (
+        CheckConstraint("instrument_type = 'OPT'", name="ck_opt_open_legs_inst_type"),
+        CheckConstraint("option_type IN ('CE','PE')", name="ck_opt_open_legs_opt_type"),
+        CheckConstraint("side IN ('BUY','SELL')", name="ck_opt_open_legs_side"),
+        CheckConstraint("status IN ('open','closed')", name="ck_opt_open_legs_status"),
+        Index("ix_opt_open_legs_structure", "structure_id"),
+        Index("ix_opt_open_legs_instance_status", "instance_id", "status"),
+    )
+
+
+class RiskSessionStateRecord(Base):
+    """Durable cash-flow-neutral session high-water mark & halt latch (Ticket D1)."""
+
+    __tablename__ = "risk_session_state"
+
+    session_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    slice_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    peak_daily_pnl: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    current_daily_pnl: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    deployed_capital: Mapped[Decimal] = mapped_column(
+        Money, nullable=False, server_default=text("0")
+    )
+    halted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("0")
+    )
+    halt_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_risk_session_state_date", "session_date"),)
+
+
+#: Tables owned by the Sprint D PostgreSQL Single-Source-of-Truth store.
+FORWARD_SSOT_TABLES = (
+    RunnerInstanceRecord.__table__,
+    OptionOpenStructureRecord.__table__,
+    OptionOpenLegRecord.__table__,
+    RiskSessionStateRecord.__table__,
+)
+
+
+def ensure_forward_ssot_schema(manager: Any) -> None:
+    """Idempotently ensure Sprint D tables exist using the shared engine pool."""
+    engine = manager.engine if hasattr(manager, "engine") else manager
+    Base.metadata.create_all(
+        engine, tables=[Portfolio.__table__, *FORWARD_SSOT_TABLES]
+    )

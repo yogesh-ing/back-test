@@ -2,6 +2,7 @@
 {% set navigation = [
     ('Workspace', [
         ('portfolio', '/portfolio', 'Portfolio', 'portfolio'),
+        ('diary', '/diary', 'PnL diary', 'calendar'),
         ('analytics', '/analytics', 'Analytics', 'chart'),
         ('risk', '/risk', 'Risk management', 'shield'),
         ('reporting', '/reporting', 'P&L reports', 'report')
@@ -18,7 +19,7 @@
         ('settings', '/settings', 'Settings', 'settings')
     ])
 ] %}
-{% set page_labels = {'portfolio': 'Portfolio', 'analytics': 'Analytics', 'risk': 'Risk management', 'reporting': 'P&L reports', 'backtest': 'Backtest', 'compare': 'Compare strategies', 'optimize': 'Optimization', 'strategy_builder': 'Strategy builder', 'forward': 'Engine playground', 'data': 'Market data', 'settings': 'Settings'} %}
+{% set page_labels = {'portfolio': 'Portfolio', 'diary': 'PnL diary', 'analytics': 'Analytics', 'risk': 'Risk management', 'reporting': 'P&L reports', 'backtest': 'Backtest', 'compare': 'Compare strategies', 'optimize': 'Optimization', 'strategy_builder': 'Strategy builder', 'forward': 'Engine playground', 'data': 'Market data', 'settings': 'Settings'} %}
 {% set source_name = {'synthetic': 'Synthetic data', 'csv': 'CSV data', 'db': 'Historical data', 'mstock': 'mStock data', 'dhan': 'Dhan data', 'upstox': 'Upstox data'}.get(config.get('BACKTEST_SOURCE'), 'Data source') %}
 <!DOCTYPE html>
 <html lang="en" data-theme="dark">
@@ -123,6 +124,8 @@
                 <button id="halt-pill" class="halt-pill halt-pill-unknown" type="button" title="Checking portfolio risk — click to view Risk Board">
                     <span id="halt-pill-dot" aria-hidden="true">⚪</span><span id="halt-pill-text">Checking</span>
                 </button>
+                <button id="broker-login-banner" class="broker-login-banner" type="button" hidden
+                        aria-label="A broker session is not valid — click to re-authenticate"></button>
                 <button id="broker-status" class="broker-status" type="button" title="Broker connections" aria-label="Broker connections">
                     <span id="broker-strip" class="broker-strip"></span>
                     <span id="broker-status-dot" class="broker-dot" data-state="unknown" aria-hidden="true">⚪</span>
@@ -190,6 +193,7 @@
             <a href="/backtest"><span class="step-number">01</span><div><strong>Build evidence</strong><p>Backtest, compare and optimize. Check data provenance and out-of-sample performance.</p></div>{{ icon('arrow-up-right') }}</a>
             <a href="/portfolio/paper"><span class="step-number">02</span><div><strong>Practice without exposure</strong><p>Deploy into the paper bucket. Inspect signals, positions, costs and risk limits.</p></div>{{ icon('arrow-up-right') }}</a>
             <a href="/settings"><span class="step-number">03</span><div><strong>Prepare for live trading</strong><p>Verify broker connections, cost models and segment limits. Live trading requires explicit arming.</p></div>{{ icon('arrow-up-right') }}</a>
+            <a href="/diary?playbook=1"><span class="step-number">04</span><div><strong>Diagnose &amp; graduate edge</strong><p>Use Strategy Analytics and the PnL Diary Edge Playbook to tune regimes, cut fee drag and pass all 6 graduation gates.</p></div>{{ icon('arrow-up-right') }}</a>
         </div>
         <div class="guide-note">{{ icon('shield', 17) }}Historical results do not guarantee future returns. Navigation and theme changes never place an order.</div>
     </dialog>
@@ -212,6 +216,7 @@
     <script src="{{ url_for('static', filename='js/components/currency.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/chart_theme.js') }}"></script>
     <script src="{{ url_for('static', filename='js/workspace.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/poll_cadence.js') }}"></script>
     <script src="{{ url_for('static', filename='js/data_fetch_indicator.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/option_config.js') }}"></script>
     <script src="{{ url_for('static', filename='js/components/option_view.js') }}"></script>

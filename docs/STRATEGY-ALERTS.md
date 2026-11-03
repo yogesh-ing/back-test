@@ -47,9 +47,10 @@ Alert types: `portfolio_gamma_critical`, `portfolio_delta_warning`,
 `concentration_high`, `strike_clustering`, `vix_regime_change`,
 `oi_anomaly`, `correlation_spike`, `liquidity_dry_up`, `data_feed_stale`,
 plus the platform/state alerts `risk_limit_breach`,
-`broker_session_expiring` and `broker_session_expired` — the last three are
-trader-audience types (breaker trips, broker login expiry) but any strategy
-may subscribe to them like any other type.
+`broker_session_expiring`, `broker_session_expiring_urgent` and
+`broker_session_expired` — the last four are trader-audience types (breaker
+trips, broker login expiry) but any strategy may subscribe to them like any
+other type.
 
 ## 2. Handle
 

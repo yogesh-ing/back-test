@@ -17,7 +17,6 @@ Run:
 from __future__ import annotations
 
 import io
-import os
 import sys
 from datetime import date, datetime, timedelta
 
@@ -26,16 +25,17 @@ import requests
 from sqlalchemy import create_engine, text
 
 from backtest.data.base import bar_timestamp
+from backtest.db.config import get_db_url
 from backtest.live.auth import get_auth_code, login, verify_totp
 from backtest.live.mstock import MStockClient, _candles_to_frame
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-DB_URL = os.getenv(
-    "FORWARD_TEST_DB_URL",
-    "postgresql+psycopg2://postgres:postgres@localhost:5432/forward_test",
-)
+# Resolved through the single DB-URL authority, never a hard-coded fallback: the
+# address lives in the environment and the pytest firewall can only protect the
+# live ledger if it sees the URL.
+DB_URL = get_db_url()
 SYMBOL = "NIFTY"
 EXCHANGE = "NSE"
 TIMEFRAME = "day"

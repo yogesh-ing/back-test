@@ -189,7 +189,12 @@ class TestIncidentRegressions:
 
 
 def _capture_inserted_trade(trade: dict):
-    """Run LiveTradePersister._insert_trade against a recording fake DB."""
+    """Run the trade writer's build-and-insert seam against a recording fake DB.
+
+    ``_trade_values`` is the step that decides the clock: whatever instant it
+    hands over is what lands in the ``TIMESTAMPTZ`` columns — B1 split it out of
+    ``_insert_trade`` so the identity columns can be hashed before the insert.
+    """
     from backtest.forward.trade_persistence import LiveTradePersister
 
     captured: list = []
@@ -215,7 +220,8 @@ def _capture_inserted_trade(trade: dict):
         instance_id = "inst"
         config = _Cfg()
 
-    LiveTradePersister(_Db())._insert_trade("portfolio-id", _Runner(), trade)
+    persister = LiveTradePersister(_Db())
+    persister._insert_trade(persister._trade_values("portfolio-id", _Runner(), trade))
     assert len(captured) == 1
     return captured[0]
 

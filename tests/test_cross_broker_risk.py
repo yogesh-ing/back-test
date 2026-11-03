@@ -195,3 +195,72 @@ class TestGlobalSumBreaker:
             assert "loss" in (mgr.halt_reason or "").lower()
         finally:
             mgr.shutdown()
+
+
+class TestSegmentFuseReadsTheSession:
+    """The per-segment fuse had the same stale anchor as the bucket's.
+
+    ``seg_daily_pnl`` was ``seg_equity − segment:<name>'s day_start``, taken at
+    the segment's first bar and only ever moved by a capital flow (BUG-33), so
+    it accumulated the segment's whole life while the risk page's card printed
+    the session move. The latch is keyed ``segment:<name>``, so a slow drift
+    across three days halted one broker's book and a crash the day after a
+    good one halted nothing — the two directions tests/forward and
+    tests/test_breaker_independence.py pin at bucket level.
+    """
+
+    def test_two_clean_days_do_not_halt_the_segment(self):
+        mgr = _manager()
+        try:
+            aid = mgr.add_runner(_segment_config("A1", "seg_a", "AAA"), start=True)
+            mgr._on_bar("AAA", _bar("2026-09-02 10:00:00"))
+            _lose(mgr, aid, "AAA", qty=1000, entry=100.0, exit_=94.0)  # ~−6k of 200k
+            mgr._evaluate_risk()
+            assert mgr._bucket_halted.get("segment:seg_a", False) is False
+
+            mgr._on_bar("AAA", _bar("2026-09-03 10:00:00"))
+            _lose(mgr, aid, "AAA", qty=1000, entry=90.0, exit_=84.0)  # another ~−6k
+
+            today = mgr.get_segment_aggregates()["seg_a"]["daily_pnl"]
+            seg_equity = sum(r.equity() for r in mgr._segment_runners("seg_a"))
+            life = seg_equity - mgr._bucket_day_start["segment:seg_a"]
+            assert today > -10_000, f"today should stand alone, got {today:,.2f}"
+            assert life < -10_000, (
+                "fixture lost its edge: the old basis (two clean days summed) "
+                f"said {life:,.2f}, which is under seg_a's own 10k limit"
+            )
+
+            mgr._evaluate_risk()
+            assert mgr._bucket_halted.get("segment:seg_a", False) is False, (
+                f"seg_a halted on a {today:,.2f} day against its own ₹10,000 "
+                f"limit while still owing {life:,.2f} from a closed session"
+            )
+        finally:
+            mgr.shutdown()
+
+    def test_crash_day_halts_after_a_profitable_one(self):
+        mgr = _manager()
+        try:
+            aid = mgr.add_runner(_segment_config("A1", "seg_a", "AAA"), start=True)
+            mgr._on_bar("AAA", _bar("2026-09-02 10:00:00"))
+            _lose(mgr, aid, "AAA", qty=1000, entry=100.0, exit_=130.0)  # +30k
+            mgr._evaluate_risk()
+            assert mgr._bucket_halted.get("segment:seg_a", False) is False
+
+            mgr._on_bar("AAA", _bar("2026-09-03 10:00:00"))
+            _lose(mgr, aid, "AAA", qty=1000, entry=100.0, exit_=85.0)  # −15k today
+
+            agg = mgr.get_segment_aggregates()["seg_a"]
+            assert agg["daily_pnl"] < -10_000
+            assert agg["equity"] > mgr._bucket_day_start["segment:seg_a"], (
+                "the segment must still be above its spawn anchor — that is "
+                "exactly the position the old subtraction read as a profit"
+            )
+
+            mgr._evaluate_risk()
+            assert mgr._bucket_halted["segment:seg_a"] is True, (
+                "seg_a traded through a −₹15,000 day because yesterday's +₹30,000 "
+                "sat in the number the breaker was fed"
+            )
+        finally:
+            mgr.shutdown()

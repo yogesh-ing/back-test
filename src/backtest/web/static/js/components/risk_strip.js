@@ -99,6 +99,9 @@
     }
 
     strip.hidden = false;
+    if (window.PollCadence) {
+      window.PollCadence.noteRiskSnapshot(p);
+    }
 
     const state = getState(p);
     strip.className = "risk-strip risk-strip-" + state;
@@ -433,12 +436,22 @@
   let riskPollTimer = null;
 
   function scheduleRiskPoll() {
-    if (riskPollTimer) clearTimeout(riskPollTimer);
-    const isResearchPage = /backtest|compare|optimize|strategy-builder|data|settings/i.test(window.location.pathname);
-    const baseInterval = sseActive
-      ? 15000
-      : (isResearchPage ? 15000 : 5000);
-    const delay = document.hidden ? 30000 : baseInterval;
+    if (riskPollTimer) {
+      clearTimeout(riskPollTimer);
+      riskPollTimer = null;
+    }
+    const pathname = (window.location && window.location.pathname) || "/";
+    let delay;
+    if (window.PollCadence) {
+      delay = window.PollCadence.riskStripDelay({ sseActive, pathname });
+    } else {
+      const isResearchPage = /backtest|compare|optimize|strategy-builder|data|settings|diary|analytics|screener/i.test(pathname);
+      const baseInterval = sseActive
+        ? 15000
+        : (isResearchPage ? 15000 : 5000);
+      delay = document.hidden ? 30000 : baseInterval;
+    }
+    if (delay === null) return;
     riskPollTimer = setTimeout(async () => {
       if (!sseActive || (Date.now() - lastSseTs > 12000)) {
         await fetchRisk();
@@ -453,6 +466,31 @@
     fetchRisk();
     scheduleRiskPoll();
 
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        if (!sseActive || (Date.now() - lastSseTs > 12000)) {
+          fetchRisk().then(scheduleRiskPoll);
+        } else {
+          scheduleRiskPoll();
+        }
+      } else {
+        scheduleRiskPoll();
+      }
+    });
+
+    document.addEventListener("market:state", (ev) => {
+      const detail = ev && ev.detail;
+      if (detail && (detail.session_state === "OPEN" || detail.session_state === "PRE_OPEN") && !document.hidden) {
+        if (!sseActive || (Date.now() - lastSseTs > 12000)) {
+          fetchRisk().then(scheduleRiskPoll);
+        } else {
+          scheduleRiskPoll();
+        }
+      } else {
+        scheduleRiskPoll();
+      }
+    });
+
     // Listen to portfolio events if EventSource is used
     const originalAddEventListener = EventSource.prototype.addEventListener;
     EventSource.prototype.addEventListener = function (type, handler) {
@@ -463,6 +501,9 @@
             sseActive = true;
             lastSseTs = Date.now();
             lastPortfolio = p;
+            if (window.PollCadence) {
+              window.PollCadence.noteSseFrame(p, lastSseTs);
+            }
             updateStrip(p);
             updateHaltPill(p);
           } catch(_) {}

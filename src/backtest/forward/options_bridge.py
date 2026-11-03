@@ -185,6 +185,13 @@ _DETERMINISTIC_ENTRY_REJECTIONS = frozenset(
 _BLOCKED_BY_RISK_THRESHOLD = 3
 _REJECTION_LOG_THROTTLE_SECONDS = 900.0
 
+#: Sprint A1 — what a book with no authenticated broker session answers every
+#: new entry with. Deliberately NOT in ``_DETERMINISTIC_ENTRY_REJECTIONS``:
+#: that set promotes a runner to ``BLOCKED_BY_RISK`` after three repeats, and a
+#: book waiting for a login is not stuck on risk, it is blind. Different badge
+#: (``feed_state=WAITING_FOR_FEED``), different fix (log the broker in).
+WAITING_FOR_FEED = "WAITING_FOR_FEED"
+
 
 def _market_is_open(now_utc: Optional[datetime] = None) -> bool:
     """Whether the NSE session is trading right now (marks are only expected then).
@@ -378,6 +385,12 @@ class OptionsBridge:
                     "test profile)."
                 )
             self.quote_provider = SyntheticQuoteProvider(generated)
+        elif getattr(self.quote_provider, "disconnected", False):
+            # Sprint A1: the frozen-mark stub is never fitted with a generated
+            # chain surface. Fitting one would put synthetic strikes and
+            # premiums behind a book whose entire point is that it cannot
+            # price — the operator would read a made-up mark as a market.
+            pass
         elif getattr(self.quote_provider, "generator", None) is None:
             generated = synthetic_chain_generator("options bridge chain surface")
             if generated is not None:
@@ -599,6 +612,15 @@ class OptionsBridge:
             return None if from_tick else self.on_market_view(None, strategy_name)
         if self._has_open_structure():
             return None if from_tick else self.on_market_view(view, strategy_name)
+        # Sprint A1 — a blind book opens nothing. This sits AFTER the
+        # open-structure branch on purpose: exits are never blocked by an entry
+        # rule, so a held structure keeps being managed off its last honest
+        # mark (stops, targets, expiry) while the broker is logged out. Only
+        # opening is refused — there is no chain to select a strike from and no
+        # side to cross, so a fill here could only be fabricated.
+        feed_refusal = self._disconnected_entry_refusal()
+        if feed_refusal is not None:
+            return feed_refusal
         tick_entry_dt: Optional[datetime] = None
         entry_bucket: Optional[str] = None
         # The market instant this entry is being judged on. Every entry gate
@@ -990,6 +1012,11 @@ class OptionsBridge:
             "stale_episode_id": self._stale_episode_id if self.mark_stale else 0,
             "last_refresh": self.last_refresh_result,
             "quote_source": str(getattr(self.quote_provider, "source_name", "unknown")),
+            # Sprint A1: a book priced off the frozen-mark stub. The UI reads
+            # this to say "waiting for <broker> login" instead of showing a
+            # mark that has not moved and letting the operator guess why.
+            "feed_disconnected": self.feed_disconnected,
+            "feed_refusal": self.feed_refusal,
             "last_exit": dict(self.last_exit) if self.last_exit else None,
             "settled_count": self._settlement_count,
             # -- BUG-02 day-count budget + BUG-15 health --------------------
@@ -1111,6 +1138,32 @@ class OptionsBridge:
         return None
 
     @property
+    def feed_disconnected(self) -> bool:
+        """Whether this book is priced off the frozen-mark stub (Sprint A1).
+
+        True means the broker this runner trades on has no authenticated
+        session right now: held legs keep their last honest mark, and every
+        new entry is refused with :data:`WAITING_FOR_FEED`. It is a *feed*
+        state, not a risk state — nothing here is wrong with the book, and the
+        bridge starts pricing the instant the broker logs in (the runner
+        hot-swaps the stub for the live chain).
+        """
+        if bool(getattr(self.quote_provider, "disconnected", False)):
+            return True
+        inner = getattr(self.quote_provider, "inner", None)
+        return bool(getattr(inner, "disconnected", False))
+
+    @property
+    def feed_refusal(self) -> Optional[str]:
+        """The operator-facing reason this book cannot price, or ``None``."""
+        if not self.feed_disconnected:
+            return None
+        provider = self.quote_provider
+        if not bool(getattr(provider, "disconnected", False)):
+            provider = getattr(provider, "inner", None)
+        return str(getattr(provider, "detail", "") or WAITING_FOR_FEED)
+
+    @property
     def net_pnl(self) -> Decimal:
         """Book P&L since inception: realized + unrealized − all costs.
 
@@ -1204,6 +1257,11 @@ class OptionsBridge:
                         "qty": leg.total_quantity,
                         "entry_price": float(leg.entry_price),
                         "current_price": float(leg.current_price),
+                        "prev_close_mark": (
+                            round(float(leg.prev_close_mark), 2)
+                            if getattr(leg, "prev_close_mark", None) is not None
+                            else None
+                        ),
                         "pnl": float(leg.unrealized_pnl),
                         # R1: per-leg mark freshness contract
                         "mark_ts": leg.mark_ts,
@@ -1222,7 +1280,36 @@ class OptionsBridge:
                 )
             entry = _net_premium("entry_price")
             current = _net_premium("current_price")
+            has_all_prev_close = bool(legs) and all(
+                getattr(lg, "prev_close_mark", None) is not None for lg in legs
+            )
+            prev_close_net = (
+                round(_net_premium("prev_close_mark"), 2)
+                if has_all_prev_close
+                else None
+            )
             unrealized = float(structure.total_unrealized_pnl)
+            net_open_dec = (
+                structure.total_unrealized_pnl
+                - structure.total_commission
+                - getattr(structure, "statutory_fees", Decimal("0"))
+            )
+            net_open_pnl = round(float(net_open_dec), 2)
+            carried = bool(getattr(structure, "carried_overnight", False))
+            raw_prior_net = getattr(structure, "prior_close_net_pnl", None)
+            prior_close_net_pnl = (
+                round(float(raw_prior_net), 2) if raw_prior_net is not None else None
+            )
+            if carried and raw_prior_net is not None:
+                today_pnl: Optional[float] = round(
+                    float(net_open_dec - raw_prior_net), 2
+                )
+            elif carried and prev_close_net is not None and units > 0:
+                today_pnl = round((current - prev_close_net) * units, 2)
+            elif not carried:
+                today_pnl = net_open_pnl
+            else:
+                today_pnl = None
             structure_stale = bool(
                 self.runner_running and structure.is_mark_stale(self.stale_after_seconds)
             )
@@ -1238,16 +1325,21 @@ class OptionsBridge:
                     "lot_size": legs[0].lot_size if legs else 0,
                     "entry_price": round(entry, 2),
                     "current_price": round(current, 2),
+                    "prev_close_mark": prev_close_net,
                     "unrealized_pnl": round(unrealized, 2),
+                    "net_open_pnl": net_open_pnl,
+                    "prior_close_net_pnl": prior_close_net_pnl,
+                    "today_pnl": today_pnl,
                     "entry_cost": round(entry * units, 2),
                     "open_pnl_pct": (
                         round(unrealized / (entry * units), 4) if entry * units else 0.0
                     ),
                     "entry_ts": structure.opened_at.isoformat() if structure.opened_at else None,
-                    # BUG-18: say which session this risk was taken in, and stop
-                    # the reader guessing whether it has been sleeping in it.
+                    # BUG-18 & Sprint D / Ticket D2: carry horizon + session slice clarity
+                    "carry_policy": self.carry_policy,
+                    "intraday_squareoff_minutes_before": self.intraday_squareoff_minutes_before,
                     "entry_session_date": getattr(structure, "entry_session_date", None),
-                    "carried_overnight": bool(getattr(structure, "carried_overnight", False)),
+                    "carried_overnight": carried,
                     # R1: per-structure mark freshness contract
                     "mark_ts": structure.mark_ts,
                     "mark_stale": structure_stale,
@@ -1273,7 +1365,9 @@ class OptionsBridge:
                     # on this row: a structure id is unique for the life of
                     # the structure, unlike a symbol label.
                     "position_key": structure.structure_id,
-                    "stop_loss": self._operator_level_for(structure.structure_id, self.manual_stop_loss),
+                    "stop_loss": self._operator_level_for(
+                        structure.structure_id, self.manual_stop_loss
+                    ),
                     "target": self._operator_level_for(structure.structure_id, self.manual_target),
                     # Net Greeks for the whole structure (units-scaled), or
                     # None when they cannot be computed honestly.
@@ -1595,6 +1689,32 @@ class OptionsBridge:
         close_ts = ts_override if ts_override is not None else self._bar_ts(self._bar_dt)
         return self._exit_structure(decision, close_ts, strategy_name="", queue=True)
 
+    def evaluate_post_wake_exits(
+        self,
+        *,
+        strategy_name: str = "",
+        ts: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Sprint A-2 / Ticket A3: evaluate SL / Target / Expiry / Squareoff immediately after wake.
+
+        Called right after ``repair_marks(force=True)`` refreshes live leg quotes
+        on broker authentication so a morning gap past SL/Target/Expiry exits
+        within < 1s of login without waiting up to 60s for the next bar close.
+        """
+        if not self._has_open_structure() or not self.runner_running:
+            return None
+        close_ts = ts or now_utc().isoformat()
+        self._touch_market_clock(close_ts)
+        manual_evt = self._maybe_manual_exit(ts_override=close_ts)
+        if manual_evt is not None:
+            return manual_evt
+        decision = self._evaluate_exit(view=None)
+        if decision is not None and decision.reason in RISK_REASONS:
+            return self._exit_structure(
+                decision, close_ts, strategy_name=strategy_name, queue=True
+            )
+        return self._maybe_intraday_squareoff(close_ts, ts_override=close_ts)
+
     @property
     def carries_intraday(self) -> bool:
         """True when this book must be flat before the close (BUG-39)."""
@@ -1625,9 +1745,21 @@ class OptionsBridge:
         *,
         ts_override: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        """Square off intraday option structures >= 20 min before 15:30 IST close (OPT-5)."""
+        """Square off intraday option structures >= 20 min before 15:30 IST close (OPT-5).
+
+        The status read below is what makes PAUSE a reliable opt-out. This is the
+        single choke point every square-off route passes — bar, tick and the
+        session-clock sweep — and until now it read only the clock, so a tick
+        landing inside the window flattened a deliberately PAUSED book (B4,
+        gate of 2026-10-30: book ``2201907e`` at 15:10:00 IST) while the sweep
+        next door required ``RUNNING``. An operator who paused owns the overnight
+        carry; the manager's session-clock sweep reports it instead of overriding
+        the pause.
+        """
         mins_before = self.intraday_squareoff_minutes_before
         if mins_before is None or mins_before <= 0 or not self._has_open_structure():
+            return None
+        if not self.runner_running:
             return None
         ist_dt = self._ist_clock_from_ts(ts)
         if ist_dt is None:
@@ -2386,6 +2518,19 @@ class OptionsBridge:
         logger.warning("[options-bridge] OPTION_BLOCKED %s: %s", code, reason)
         return True
 
+    def _disconnected_entry_refusal(self) -> Optional[dict[str, Any]]:
+        """Refuse a new entry while this book has no broker session (Sprint A1).
+
+        Edge-triggered through :meth:`_journal_halt_once`, so a blind book
+        seeing a bar every minute writes one journal row, not 375. The state
+        itself is the runner's ``feed_state=WAITING_FOR_FEED``.
+        """
+        if not self.feed_disconnected:
+            return None
+        reason = self.feed_refusal or WAITING_FOR_FEED
+        self._journal_halt_once(WAITING_FOR_FEED, reason)
+        return {"rejected": True, "reason": reason, "code": WAITING_FOR_FEED}
+
     # ------------------------------------------------------------------ #
     # Position analytics (Greeks) — Live Order Management
     # ------------------------------------------------------------------ #
@@ -2496,6 +2641,20 @@ class OptionsBridge:
         generator = getattr(self.quote_provider, "generator", None) or getattr(
             getattr(self.quote_provider, "inner", None), "generator", None
         )
+        if generator is None and getattr(self.quote_provider, "disconnected", False):
+            # Sprint A1 — the second of the two doors that could fit a generated
+            # chain onto the frozen-mark stub (the constructor is the first).
+            # Refusing here rather than gating on the policy is the point: this
+            # bridge has no broker session, so the only chain a policy could
+            # offer is a synthetic one, and a synthetic strike behind a book
+            # labelled ``WAITING_FOR_FEED`` is a fabricated market.
+            raise SourceDisabledError(
+                f"no option chain feed for {self.underlying}: the quote provider "
+                f"({type(self.quote_provider).__name__}) is disconnected "
+                f"({getattr(self.quote_provider, 'source_name', '')}) and cannot "
+                f"select a strike until its broker authenticates. Refusing to "
+                f"price or open on a generated chain."
+            )
         if generator is None:
             generator = synthetic_chain_generator(f"options bridge ({self.underlying})")
             if generator is None:

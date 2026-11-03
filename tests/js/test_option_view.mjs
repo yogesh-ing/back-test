@@ -89,7 +89,7 @@ function optionRunner(overrides = {}) {
             closed_count: 0,
             closed_structures: 0,
             wins: 0, losses: 0, win_rate: 0,
-            total_pnl: 0, costs_paid: 80,
+            total_pnl: 0, net_realized_pnl: 0, costs_paid: 80,
             settled_count: 0,
             unrealized_pnl: 7578.0,
             open_structures_detail: [STRUCTURE],
@@ -284,11 +284,14 @@ test("closed-book stats summarise wins and settlements", () => {
     const traded = optionRunner({
         options: Object.assign({}, optionRunner().options, {
             closed_structures: 4, wins: 1, losses: 3, win_rate: 0.25,
-            total_pnl: -8051.25, settled_count: 1,
+            total_pnl: -8051.25, net_realized_pnl: -8231.6, settled_count: 1,
         }),
     });
     const closed = OptionView.bookStats(traded).find((s) => s.key === "book_realized");
-    assert.equal(closed.value, -8051.25);
+    // B9: the card binds the NET half. `total_pnl` is the gross the bridge
+    // still reports for its own history, and the number the portfolio rows
+    // stopped publishing — reading it here made one runner cost two P&Ls.
+    assert.equal(closed.value, -8231.6);
     assert.match(closed.sub, /25% won/);
     assert.match(closed.sub, /settled 1/);
 });
@@ -328,6 +331,138 @@ test("a closed option trade is labelled by structure and reason", () => {
 
 test("equity trades keep their plain symbol", () => {
     assert.equal(OptionView.tradeLine({ kind: "equity", symbol: "RELIANCE" }), "RELIANCE");
+});
+
+// --- Sprint A1: feed readiness is its own axis, not a flavour of `status` ---
+
+test("a connected book gets no feed pill", () => {
+    assert.equal(OptionView.isFeedWaiting({ feed_state: "LIVE", source: "mstock" }), false);
+    assert.equal(OptionView.feedStateBadgeHtml({ feed_state: "LIVE", source: "mstock" }), "");
+    // An equity runner has no option payload at all and still reads connected.
+    assert.equal(OptionView.feedStateBadgeHtml({ status: "RUNNING" }), "");
+    assert.equal(OptionView.feedStateBadgeHtml(null), "");
+});
+
+test("WAITING_FOR_FEED is recognised from either field the API sends", () => {
+    // get_state() mirrors the bridge's flag; list_positions() carries the enum.
+    assert.equal(OptionView.isFeedWaiting({ feed_state: "WAITING_FOR_FEED" }), true);
+    assert.equal(OptionView.isFeedWaiting({ feed_disconnected: true }), true);
+    assert.equal(OptionView.isFeedWaiting({ feed_state: "SYNTHETIC" }), false);
+});
+
+test("the pill names the broker to log into and says the mark is frozen", () => {
+    const html = OptionView.feedStateBadgeHtml({
+        feed_state: "WAITING_FOR_FEED",
+        source: "mstock",
+        feed_refusal: "WAITING_FOR_FEED: no authenticated mstock session on NIFTY",
+    });
+    assert.match(html, /badge-waiting-feed/);
+    assert.match(html, /Waiting for mStock login/);
+    assert.match(html, /frozen mark/);
+    assert.match(html, /title="[^"]*no authenticated mstock session/);
+});
+
+test("an unknown or missing source still produces a usable pill", () => {
+    assert.match(OptionView.feedWaitLabel({ source: "dhan" }), /Dhan/);
+    assert.match(OptionView.feedWaitLabel({ source: "upstox" }), /Upstox/);
+    assert.equal(OptionView.feedWaitLabel({}), "Waiting for broker login");
+});
+
+test("a refusal string cannot break out of the title attribute", () => {
+    const html = OptionView.feedStateBadgeHtml({
+        feed_disconnected: true,
+        source: 'mstock" onload="alert(1)',
+        feed_refusal: '"><script>alert(1)</script>',
+    });
+    assert.equal(html.includes("<script>"), false);
+    assert.equal(html.includes('" onload="'), false);
+    assert.match(html, /&quot;/);
+});
+
+// --- Sprint D / Ticket D2: carry-horizon badges & Today vs Total P&L clarity ---
+
+test("carryPolicyBadgeHtml renders exact intraday 15:10 vs positional badges", () => {
+    const intra = OptionView.carryPolicyBadgeHtml({
+        kind: "option",
+        carry_policy: "intraday",
+        intraday_squareoff_minutes_before: 20,
+    });
+    assert.match(intra, /badge-carry-intraday/);
+    assert.match(intra, /⏱ INTRADAY 15:10/);
+
+    const custom = OptionView.carryPolicyBadgeHtml({
+        kind: "option",
+        carry_policy: "intraday",
+        intraday_squareoff_minutes_before: 25,
+    });
+    assert.match(custom, /⏱ INTRADAY 15:05/);
+
+    const posFull = OptionView.carryPolicyBadgeHtml({
+        kind: "option",
+        carry_policy: "positional",
+    });
+    assert.match(posFull, /badge-carry-positional/);
+    assert.match(posFull, /📅 POSITIONAL \(HOLD TO EXPIRY\)/);
+
+    const posCompact = OptionView.carryPolicyBadgeHtml(
+        { instrument: { type: "option" }, options: { carry_policy: "positional" } },
+        { compact: true },
+    );
+    assert.match(posCompact, /📅 POSITIONAL</);
+
+    assert.equal(OptionView.carryPolicyBadgeHtml({ kind: "equity" }), "");
+});
+
+test("carryPnlSubHtml distinguishes carried Today vs Total P&L and prev_close_mark", () => {
+    const carriedHtml = OptionView.carryPnlSubHtml({
+        kind: "option",
+        carried_overnight: true,
+        entry_session_date: "2026-11-02",
+        prev_close_mark: 128.0,
+        today_pnl: 562.5,
+        net_open_pnl: 1142.5,
+    });
+    assert.match(carriedHtml, /Today \+₹562\.50/);
+    assert.match(carriedHtml, /Total \+₹1,142\.50/);
+    assert.match(carriedHtml, /prev 128\.00/);
+    assert.match(carriedHtml, /15:30 prev close mark ₹128\.00/);
+
+    const sameDayHtml = OptionView.carryPnlSubHtml({
+        kind: "option",
+        carried_overnight: false,
+        today_pnl: -220.0,
+        net_open_pnl: -220.0,
+    });
+    assert.match(sameDayHtml, /Net −₹220\.00/);
+    assert.equal(OptionView.carryPnlSubHtml({ kind: "equity", unrealized_pnl: 100 }), "");
+});
+
+// --- Sprint D / Ticket D3: FROZEN_AT_SPAWN config-drift pill ---
+
+test("hasConfigDrift detects both strategy_code_changed and template expression drift", () => {
+    assert.equal(OptionView.hasConfigDrift({ config_drift: false, strategy_code_changed: false }), false);
+    assert.equal(OptionView.hasConfigDrift({ config_drift: true }), true);
+    assert.equal(OptionView.hasConfigDrift({ strategy_code_changed: true }), true);
+    assert.equal(OptionView.configDriftBadgeHtml({ config_drift: false }), "");
+});
+
+test("configDriftBadgeHtml renders amber respawn-when-flat pill with escaped reasons", () => {
+    const flatPill = OptionView.configDriftBadgeHtml({
+        config_drift: true,
+        open_positions: 0,
+        config_drift_reasons: ['carry_policy drifted (frozen=intraday, template=positional)'],
+    });
+    assert.match(flatPill, /badge-config-drift/);
+    assert.match(flatPill, /⚠️ Outdated config — respawn when flat/);
+    assert.match(flatPill, /Runner is flat/);
+
+    const openPill = OptionView.configDriftBadgeHtml({
+        config_drift: true,
+        open_positions: 1,
+        config_drift_reasons: ['"><script>alert(1)</script>'],
+    });
+    assert.equal(openPill.includes("<script>"), false);
+    assert.match(openPill, /1 open position/);
 });
 
 // ---------------------------------------------------------------------------

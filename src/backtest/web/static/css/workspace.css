@@ -193,6 +193,12 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; fon
 #halt-pill-dot::before, .broker-dot::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .broker-status { margin: 0; display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 4px 9px; font-size: 10px; font-family: var(--font-sans); background: var(--surface); color: var(--muted); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; white-space: nowrap; }
 .broker-status:hover { color: var(--text-strong); border-color: var(--faint); }
+/* Sprint A4: persistent login CTA. Deliberately louder than the status pill —
+   it only appears while the market is open and a session is unusable, and it
+   must survive the operator dismissing the popup it opens. */
+.broker-login-banner { margin: 0; display: inline-flex; align-items: center; min-height: 30px; padding: 4px 9px; font-size: 10px; font-weight: 600; font-family: var(--font-sans); background: var(--danger-tint); color: var(--danger-text); border: 1px solid var(--danger-shade); border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.broker-login-banner[hidden] { display: none; }
+.broker-login-banner[data-stage="urgent"] { background: var(--warning-tint); color: var(--warning-text); border-color: var(--warning-shade); }
 .broker-dot[data-state="authenticated"] { color: var(--success); }
 .broker-dot[data-state="expiring_soon"] { color: var(--warning); }
 .broker-dot[data-state="expired"], .broker-dot[data-state="unauthenticated"] { color: var(--danger); }
@@ -609,6 +615,7 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; fon
     .topbar-controls { gap: 5px; }
     .command-open { display: none; }
     .broker-status { padding: 5px 6px; }
+    .broker-login-banner { padding: 5px 6px; font-size: 9px; }
     .broker-strip { gap: 7px; }
     .broker-strip-item::after { font-size: 9px; }
     .theme-toggle { width: 29px; padding-left: 3px; }

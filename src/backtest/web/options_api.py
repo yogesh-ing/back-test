@@ -545,13 +545,27 @@ def register_options_routes(app: Flask) -> None:
             spot_prices=request.args.get("spot", type=dict) or None,
         )
 
+        # B9: this endpoint is a P&L surface, so ``realized_pnl`` owes the BUG-04
+        # NET half like every other card. ``total_realized_pnl`` is gross and
+        # ``total_costs_paid`` is the lifetime stack; the fees still sitting on
+        # open books belong to the mark, not to realized — the same attribution
+        # as ``PortfolioManager.get_dashboard_book_summary``.
+        gross_realized = float(broker.total_realized_pnl)
+        fees_paid = float(broker.total_costs_paid)
+        open_fees = sum(
+            float(s.total_commission) + float(s.statutory_fees or 0)
+            for s in structures
+        )
+
         return (
             jsonify(
                 {
                     "capital": float(broker.capital),
                     "available_cash": float(broker.available_cash),
                     "total_equity": float(broker.total_equity),
-                    "realized_pnl": float(broker.total_realized_pnl),
+                    "realized_pnl": gross_realized - (fees_paid - open_fees),
+                    "gross_realized_pnl": gross_realized,
+                    "total_fees_paid": fees_paid,
                     "margin_used": float(broker.total_margin_used),
                     "statutory_fees": float(broker.total_statutory_fees_paid),
                     "total_costs": float(broker.total_costs_paid),

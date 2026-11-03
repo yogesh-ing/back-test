@@ -223,12 +223,16 @@ def _runner_with_bundle(tmp_bundle):
 
 
 def test_rehydration_with_changed_bundle_pauses_runner():
+    from backtest.forward.paper_runner import STATUS_RUNNING
     from backtest.forward.state_store import capture_runner, restore_runner
     from backtest.strategy.bundle import strategy_bundle
     from backtest.strategy.registry import get_strategy
 
     good = strategy_bundle(get_strategy("buy_and_hold")).to_dict()
     original = _runner_with_bundle(good)
+    # Restore only demotes a book that was actually serving trades; a snapshot
+    # of a never-started runner stays STOPPED.
+    original.status = STATUS_RUNNING
     captured = capture_runner(original)
 
     tampered = {

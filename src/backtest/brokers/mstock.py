@@ -196,6 +196,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         self._session_token: str | None = None
         self._expires_at: datetime | None = None
         self._temp_auth_context: dict[str, Any] | None = None
+        self._forced_expired: bool = False
         if session_ttl_minutes is None:
             try:
                 session_ttl_minutes = float(
@@ -316,6 +317,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         self._session_token = token
         self._expires_at = expires_at
         self._temp_auth_context = None
+        self._forced_expired = False
         # Fresh logins must get the depth socket too: without it option
         # quotes stay LTP-only (bid/ask=0) and BidAskQuoteProvider fails
         # closed on every entry (2026-10-22: CE/PE runners blocked all day).
@@ -340,7 +342,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         """
         if not self._session_token or self._expires_at is None:
             return {
-                "status": STATUS_UNAUTHENTICATED,
+                "status": STATUS_EXPIRED if self._forced_expired else STATUS_UNAUTHENTICATED,
                 "expires_at": None,
                 "broker": self.broker_name,
             }
@@ -1167,6 +1169,7 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             expires_at = expires_at.astimezone().replace(tzinfo=None)
         self._session_token = token
         self._expires_at = expires_at
+        self._forced_expired = False
         
         # Initialize WebSocket feed for restored sessions too
         self._init_websocket_feed(token)
@@ -1175,8 +1178,8 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
         self._temp_auth_context = None
         logger.info("mStock session restored from remembered token (expires %s)", expires_at)
 
-    def logout(self) -> None:
-        """Clear all in-memory session state and tear down the WebSocket feed."""
+    def _teardown_session_state(self) -> bool:
+        """Clear token, expiry, and WebSocket subscriptions; return True if active."""
         had_session = self._session_token is not None
         self._session_token = None
         self._expires_at = None
@@ -1192,7 +1195,31 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             self._ws_token_modes.clear()
             self._ws_desired_modes.clear()
             self._ws_order_cache.clear()
-        if had_session:
+        return had_session
+
+    def mark_expired(self) -> None:
+        """Trip the session to ``STATUS_EXPIRED`` and clear credentials/WS (Ticket C2)."""
+        self._teardown_session_state()
+        self._forced_expired = True
+
+    def _trip_auth_kill_latch(self, status_code: int, context: str) -> None:
+        """Handle HTTP 401/403 from an authenticated TypeA endpoint immediately."""
+        self.mark_expired()
+        try:
+            from backtest.brokers import session_manager as sm_mod
+
+            mgr = sm_mod._default_manager
+            if mgr is not None and mgr._sessions.get(self.broker_name) is self:
+                mgr.mark_session_expired(
+                    self.broker_name, reason=f"HTTP {status_code} on {context}"
+                )
+        except Exception:  # noqa: BLE001 — never mask the caller's exception
+            logger.debug("session manager kill-latch notify failed", exc_info=True)
+
+    def logout(self) -> None:
+        """Clear all in-memory session state and tear down the WebSocket feed."""
+        self._forced_expired = False
+        if self._teardown_session_state():
             logger.info("mStock session cleared (logout)")
 
     # ------------------------------------------------------------------
@@ -1470,6 +1497,8 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             payload = None
 
         if not resp.ok:
+            if resp.status_code in (401, 403):
+                self._trip_auth_kill_latch(resp.status_code, path)
             raise MStockOrderError(
                 _rejection_reason(payload) or f"mStock {method} failed (HTTP {resp.status_code})",
                 status_code=resp.status_code,
@@ -1606,6 +1635,9 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             headers = self._session_token_headers(token)
             url = f"{self._base_url()}{_INSTRUMENT_MASTER_PATH}"
             resp = requests.get(url, headers=headers, timeout=self._http_timeout)
+            if resp.status_code in (401, 403):
+                self._trip_auth_kill_latch(resp.status_code, _INSTRUMENT_MASTER_PATH)
+                return []
             resp.raise_for_status()
 
             # Parse CSV instrument master
@@ -1805,6 +1837,9 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                     params=[("i", f"NFO:{symbol}")],
                     timeout=self._http_timeout,
                 )
+                if resp.status_code in (401, 403):
+                    self._trip_auth_kill_latch(resp.status_code, _OPTION_QUOTE_PATH)
+                    return {}
                 resp.raise_for_status()
                 payload = resp.json()
                 if isinstance(payload, dict) and "data" in payload:

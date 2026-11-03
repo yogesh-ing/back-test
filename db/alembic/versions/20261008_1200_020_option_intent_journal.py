@@ -13,6 +13,16 @@ Hand-applied equivalents: ``db/migrations/020_option_intent_journal.sql``
 (PostgreSQL) and ``020_option_intent_journal.sqlite.sql`` — use ONE path, not
 both (see revision 001's header).
 
+``020`` is the *kept* half of the duplicate-revision fork (BUG-38, unforked
+2026-10-30): the live ``forward_test`` ledger physically has this table and its
+three indexes, so the revision that owns it must stay ``020`` or a stamp would
+record something other than what the database contains. The other file that
+declared ``020`` on this same parent became ``021``.
+
+Because a hand-applied deployment is stamped at ``019`` with these objects
+already present, ``upgrade`` skips when the table exists — that is what makes
+``alembic upgrade 019:021`` safe on live without stamping first.
+
 Revision ID: 020
 Revises: 019
 Create Date: 2026-10-08
@@ -37,6 +47,8 @@ BIGPK = sa.BigInteger().with_variant(sa.Integer(), "sqlite")
 
 
 def upgrade() -> None:
+    if sa.inspect(op.get_bind()).has_table("option_intent_events"):
+        return  # already applied by the SQL-file path — see the header
     op.create_table(
         "option_intent_events",
         sa.Column("event_id", BIGPK, primary_key=True, nullable=False),
@@ -77,6 +89,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sa.inspect(op.get_bind()).has_table("option_intent_events"):
+        return
     for name in (
         "ix_opt_intent_events_recorded",
         "ix_opt_intent_events_intent",

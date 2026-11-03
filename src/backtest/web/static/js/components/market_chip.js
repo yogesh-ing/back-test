@@ -13,6 +13,8 @@
   const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
   let currentState = null;
+  let lastTransitionKey = null;
+  let marketPollTimer = null;
 
   function pad(n) {
     return n < 10 ? "0" + n : String(n);
@@ -88,6 +90,22 @@
     const live = resolveLiveState(state);
     if (!live) return;
 
+    const transitionKey = `${live.day_state || ""}:${live.session_state || ""}`;
+    if (transitionKey !== lastTransitionKey) {
+      lastTransitionKey = transitionKey;
+      window.__lastMarketState = Object.assign({}, currentState || state, {
+        session_state: live.session_state,
+        is_open: live.is_open,
+      });
+      if (typeof CustomEvent === "function" && document && typeof document.dispatchEvent === "function") {
+        try {
+          document.dispatchEvent(new CustomEvent("market:state", { detail: live }));
+        } catch (e) {
+          // Ignore in synthetic test DOMs
+        }
+      }
+    }
+
     let visualKey = "POST_CLOSE";
     let label = "NSE CLOSED";
 
@@ -157,6 +175,21 @@
     }
   }
 
+  function scheduleMarketPoll() {
+    if (marketPollTimer) {
+      clearTimeout(marketPollTimer);
+      marketPollTimer = null;
+    }
+    const delay = window.PollCadence
+      ? window.PollCadence.marketStatusDelay()
+      : 30000;
+    if (delay === null) return;
+    marketPollTimer = setTimeout(async () => {
+      await fetchMarketStatus();
+      scheduleMarketPoll();
+    }, delay);
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     const chip = document.getElementById("market-status-chip");
     if (chip && chip.dataset.market) {
@@ -178,7 +211,18 @@
       }
     }, 1000);
 
-    // 30-second poll fallback if page is open a long time
-    setInterval(fetchMarketStatus, 30000);
+    // Cadence-governed server sync (paused when SSE is fresh or tab is hidden;
+    // 5m on trading days, 30m on weekends/holidays).
+    scheduleMarketPoll();
+
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        if (!window.PollCadence || !window.PollCadence.isSseFresh()) {
+          fetchMarketStatus().then(scheduleMarketPoll);
+        }
+      } else {
+        scheduleMarketPoll();
+      }
+    });
   });
 })();

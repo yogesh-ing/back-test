@@ -273,6 +273,32 @@ def test_resolve_refuses_deletion_out_of_menu_and_undeclared_override():
         resolve_expression(spec=spec, user_selections={"stale_after_seconds": 3})
 
 
+def test_declared_carry_policy_survives_every_spawn_payload_shape():
+    """A strategy-owned carry horizon must not become a spawn-time landmine.
+
+    ``carry_policy`` is declareable (it is how a fast-timeframe book opts out of
+    the 15:10 flat) but is *not* in these strategies' ``allowed_overrides``. The
+    distinction that makes that work is naming a field vs moving it: a client
+    that echoes the strategy's own expression — the Phase 3 UI shape and a
+    playbook snapshot — restates it and must pass as a no-op, while a selection
+    that would move it refuses against the menu.
+    """
+    spec = _spec({**GOOD_DICT, "carry_policy": "positional"})
+    full = {k: v for k, v in spec.to_expression().items() if k != "expression_version"}
+    stale = {k: v for k, v in full.items() if k != "carry_policy"}
+
+    for selections in (None, full, stale):
+        resolved, provenance = resolve_expression(spec=spec, user_selections=selections)
+        assert resolved["carry_policy"] == "positional"
+        assert provenance["carry_policy"] == "strategy"
+
+    resolved, _ = resolve_expression(spec=spec, playbook_selections=full)
+    assert resolved["carry_policy"] == "positional"
+
+    with pytest.raises(ExecutionSpecError, match="allowed_overrides"):
+        resolve_expression(spec=spec, user_selections={"carry_policy": "intraday"})
+
+
 def test_resolve_preserves_legacy_expression_surface_keys():
     spec = _spec()
     resolved, provenance = resolve_expression(

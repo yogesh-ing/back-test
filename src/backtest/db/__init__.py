@@ -25,6 +25,8 @@ from backtest.db.manager import (
 )
 from backtest.db.models import (  # Enums
     Base,
+    DIARY_TABLES,
+    DiaryNote,
     EquityCurve,
     ExitReason,
     Fill,
@@ -74,6 +76,8 @@ __all__ = [
     "DEFAULT_CONFIG_PATH",
     # Models
     "Base",
+    "DiaryNote",
+    "DIARY_TABLES",
     "Portfolio",
     "Position",
     "Order",

@@ -286,6 +286,29 @@ only when the payload `version` changes; expanded state in
 page content can keep clear of it. Pinned by `tests/js/test_alert_widget.mjs`.
 See `docs/ALERTS-GUIDE.md`.
 
+### Global: Broker login banner (every page)
+**Template:** `templates/base.html` (`#broker-login-banner`, next to the
+`#broker-status` pill) **JS:** `static/js/broker_status.js`
+**CSS:** `static/css/workspace.css` (`.broker-login-banner`)
+
+A loud topbar CTA — `🔴 Broker login needed`, or `🟡 Re-login needed (<10m)`
+once a session is inside its last 10 minutes — that stays up until a
+re-login actually verifies. Unlike the alert widget it is *derived* from the
+`GET /api/broker/status` payload on every poll rather than latched to an
+event, so dismissing the popup it opens cannot clear it. Only one broker owns
+the slot at a time (expired > urgent > never-logged-in), and clicking it opens
+`BrokerAuthUI.open({broker})` targeted at that broker.
+
+It appears only while the market is open (`PRE_OPEN` or `OPEN`, read from
+`window.__lastMarketState` and re-evaluated on the chip's `market:state`
+event, so a tab left open overnight re-prompts at 09:00 without waiting for a
+poll). A never-logged-in broker prompts only when `waiting_runners > 0` — the
+count the server adds to each status row, so the banner means "a runner is
+pricing off a frozen mark", not "a broker happens to be offline". The popup
+auto-opens once per (broker, stage), so a 30-second poll cannot become a popup
+every 30 seconds; the pill click stays available at any hour.
+Pinned by `tests/js/test_broker_login_prompt.mjs`.
+
 ## Money formatting
 
 Every amount goes through `static/js/components/currency.js` (`Money.format`,
@@ -395,7 +418,7 @@ reference: `docs/PORTFOLIO-INTELLIGENCE.md`.
 - `reporting.js` — Consolidated P&L page (view models + exports/reconcile wiring)
 - `session_state.js` — LocalStorage session persistence
 - `broker_auth_modal.js` — Auth modal for broker login
-- `broker_status.js` — Broker connection status indicator
+- `broker_status.js` — Broker connection status indicator + market-hours login banner
 
 ## Static Assets
 ```
