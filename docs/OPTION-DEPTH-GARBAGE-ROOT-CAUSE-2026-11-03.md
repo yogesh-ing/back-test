@@ -273,6 +273,39 @@ without it.
 units, the `carry_policy` re-spawn, the at-rest restatement of the four trades)
 are separate work and still open.
 
+### 10.8 Clean-start square-off (2026-11-04, same branch)
+
+Four legs were still open in the stopped books when the operator chose to start
+04-Nov with new instances and nothing carried. On this deployment the live
+database is at alembic **022** — `option_open_structures` / `option_open_legs`
+do not exist, `trade_structures` has 0 rows and `trades` has 0 option rows — so
+an open option leg has **no DB row at all**: it lives only in
+`src/data/portfolio_state.json`, and `remove_runner`
+([portfolio_manager.py:1783](../src/backtest/forward/portfolio_manager.py#L1783))
+deletes that entry without closing the leg. Squaring off at rest is therefore
+the only way to retire these positions with a price on them instead of letting
+them vanish mid-air, and the full books are archived in the same step because
+removal would otherwise erase the option books' entire history.
+
+`scripts/squareoff_open_option_legs.py` (dry-run default, `bak_` snapshot,
+`--rollback`) settles each leg at its last known mark — the same fail-closed
+rule the writer uses when a close cannot get a quote
+([paper_trading.py:1101-1114](../src/backtest/options/paper_trading.py#L1101-L1114)) —
+after re-running §8b's intrinsic floor over that mark with the book's own
+`bridge.scalars.last_spot`, plus a distance check against its own entry using
+`LTP_DISTANCE_MAX_RATIO`. A mark that fails a gate is reported and left open;
+the script never invents a closing price. All four current marks pass
+(NIFTY 23350 CE 579.7 vs intrinsic 460.85; BANKNIFTY 55300 CE 868.0; the two
+puts OTM), so the square-off books ₹6,605.50 gross realized and ₹276.19 of exit
+statutory charges, using the writer's cash and fee arithmetic.
+
+Instance removal is deliberately *not* in the script: `remove_runner` folds the
+book's equity into the capital ledger and releases its feed subscriptions, so it
+has to go through `DELETE /api/portfolio/runner/<id>` after the restart.
+
+This is not §10.7 — the four already-closed fabricated trades are still to be
+restated.
+
 ## 11. Guardrails for whoever edits the feed
 
 Before touching `src/backtest/data/mticker.py`: read
