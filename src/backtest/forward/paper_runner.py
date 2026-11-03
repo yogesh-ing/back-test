@@ -4567,6 +4567,49 @@ class StrategyRunner:
             return f"{label} [{len(self.config.symbols)} symbols]"
         return self.config.symbols[0]
 
+    def config_drift_info(self) -> Dict[str, Any]:
+        """Detect frozen-spawn config/template drift without mutating live rules (Ticket D3)."""
+        reasons: List[str] = []
+        if bool(getattr(self, "strategy_code_changed", False)):
+            reasons.append("strategy code changed since spawn")
+        if self.options_bridge is not None:
+            try:
+                from backtest.strategy.registry import get_strategy
+
+                strat_cls = get_strategy(self.config.strategy_name)
+                spec_fn = getattr(strat_cls, "execution_spec", None)
+                spec = spec_fn() if callable(spec_fn) else None
+                if spec is not None:
+                    tpl_expr = spec.to_expression()
+                    tpl_carry = str(tpl_expr.get("carry_policy") or "").strip().lower()
+                    if tpl_carry in ("intraday", "positional") and (
+                        self.options_bridge.carry_policy != tpl_carry
+                    ):
+                        reasons.append(
+                            f"carry_policy drifted (frozen={self.options_bridge.carry_policy}, "
+                            f"template={tpl_carry})"
+                        )
+                    inst = self.config.instrument or {}
+                    prov = inst.get("expression_provenance")
+                    frozen_expr = inst.get("expression")
+                    if isinstance(frozen_expr, dict):
+                        has_custom = isinstance(prov, dict) and any(
+                            v in ("user", "playbook") for v in prov.values()
+                        )
+                        if not has_custom:
+                            from backtest.strategy.execution import config_sha256
+
+                            if config_sha256(frozen_expr) != config_sha256(tpl_expr):
+                                msg = "option expression defaults drifted from strategy template"
+                                if msg not in reasons:
+                                    reasons.append(msg)
+            except Exception:  # noqa: BLE001 — never fail get_state() on drift check
+                pass
+        return {
+            "config_drift": bool(reasons),
+            "config_drift_reasons": reasons,
+        }
+
     def get_state(self) -> Dict[str, Any]:
         """Compact row for the portfolio matrix table.
 
@@ -4586,6 +4629,8 @@ class StrategyRunner:
                 self.options_bridge.summary() if self.options_bridge is not None else None
             )
             open_structures = int((options_summary or {}).get("open_structures") or 0)
+            open_total = len(self.positions) + open_structures
+            drift = self.config_drift_info()
             daily_breakdown = self.daily_realized_breakdown()
             return {
                 "instance_id": self.instance_id,
@@ -4658,6 +4703,10 @@ class StrategyRunner:
                 "strategy_code_changed": bool(
                     getattr(self, "strategy_code_changed", False)
                 ),
+                "config_drift": drift["config_drift"],
+                "config_drift_reasons": drift["config_drift_reasons"],
+                "can_respawn": open_total == 0,
+                "carry_policy": (options_summary or {}).get("carry_policy"),
                 "options": options_summary,
                 # R1: runner-level mark freshness fields (mirrored from options_summary)
                 "mark_ts": (options_summary or {}).get("mark_ts"),

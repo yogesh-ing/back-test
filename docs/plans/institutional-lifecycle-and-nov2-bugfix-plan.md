@@ -1,9 +1,9 @@
 # Institutional Runner Lifecycle, Late-Login Auto-Wake & Nov-02 Bug-Fix Plan
 
 **Date**: 2026-11-02 (updated 2026-11-03)  
-**Baseline Commit**: `b2b76a4` (`feature/options-trading-dev` — includes PR #51 `8e1cba4` and PR #52 `Sprint A-1`)  
+**Baseline Commit**: `89962d1` (`feature/options-trading-dev` — fast-forwarded `43d3322 → 89962d1` with Sprint A-1 + B + C; live on `:5000` as of `2026-11-03 09:17:07 IST`)  
 **Status**: Approved Architecture & Implementation Reference (Read before touching `forward/`, `brokers/`, or `portfolio` UI)  
-**As-Built**: Sprint A-1 (`A1` + `A2` + `A4`) **merged** to `feature/options-trading-dev` via PR [#52](https://github.com/yogesh-ing/back-test/pull/52) (`b2b76a4`). Sprint B (`Ticket B1`) and Sprint C (`Ticket C1` + `Ticket C2` + `Ticket C3`) **implemented and verified** on `arena/d4936721-back-test` (`28 → 0` standing pytest baseline failures, `0` regressions). See **Implementation Status** below.
+**As-Built**: Sprint A-1 (`A1` + `A2` + `A4`), Sprint B (`B1`), and Sprint C (`C1` + `C2` + `C3`) are **merged, pushed to `feature/options-trading-dev` (`89962d1`), and verified live on `:5000`** (`16/16` runners restored with `0` parked, `mStock` token + full-mode depth ticks streaming, `Ticket B1` clean IST session roll, full-roster capital anchors `₹98,16,152.17`). Sprint D (`Ticket D1` + `Ticket D2` + `Ticket D3`) is **implemented, verified, and committed locally** on `arena/d4936721-back-test` pending post-close operator push & `024_*` migration apply.
 
 ---
 
@@ -11,17 +11,17 @@
 
 | Ticket | Sub-PR | Status | Commit / Blocker |
 | :--- | :--- | :--- | :--- |
-| **A1** — `WAITING_FOR_FEED` + frozen-mark stub | `Sprint A-1` | ✅ **DONE (merged PR #52)** | `cb91d41` / `b2b76a4` |
-| **A2** — `on_broker_authenticated` auto-wake | `Sprint A-1` | ✅ **DONE (merged PR #52)** | `9e5b000` / `b2b76a4` |
-| **A4** — market-hours paging + login banner | `Sprint A-1` | ✅ **DONE (merged PR #52)** | `74cb76b` / `b2b76a4` |
-| **A3** — open-trade continuity + `armed_at_utc` | `Sprint A-2` | ⏸ **BLOCKED** | Waits for `A-1` to complete one clean live session (§3 sequencing rule). Highest blast radius — ships alone for 1-commit rollback. |
-| **B1** — restart-proof risk state | `Sprint B` | ✅ **DONE** | `0eb8f1f` — Cash-flow-neutral session high-water mark & halt-latch persistence across restarts (`28 → 27` gate baseline). |
-| **C1** — two-layer clock law in `OrderLedger` | `Sprint C` | ✅ **DONE** | `fdaab48` — Canonical `+00:00` UTC across all `OrderLedger` writers & legacy snapshot hydration (`#23`). |
-| **C2** — mStock Layer-0 auth gate + `401/403` kill-latch | `Sprint C` | ✅ **DONE** | `c009da0` — `0` HTTP packets / `0` `.mstock_session_token` leaks when logged out; instant `401/403` `STATUS_EXPIRED` kill-latch + Ticket A4 alert; Upstox untouched (`27 → 25` gate baseline). |
-| **C3** — stale test signatures + timestamp repair cutover | `Sprint C` | ✅ **DONE (code); `--execute` ops-gated** | Standing test debt cleared **`25 → 0` (`0` failures across entire gate)**. `scripts/repair_trade_timestamps.py` stays strictly dry-run by default pending operator post-market DB snapshot. |
-| **D1** — PostgreSQL single source of truth | `Sprint D` | ⬜ Not started | Board issue `#24`. Migrations start at `024_*`. |
-| **D2** — unified `Positions` blotter + carry badges | `Sprint D` | ⬜ Not started | Unblocked in part by A1 (books now stay in `self._runners`). |
-| **D3** — `FROZEN_AT_SPAWN` drift badge + flat rollover | `Sprint D` | ⬜ Not started | Board issue `#3`. |
+| **A1** — `WAITING_FOR_FEED` + frozen-mark stub | `Sprint A-1` | ✅ **LIVE (`89962d1`)** | `cb91d41` / `b2b76a4` — Verified on-wire `2026-11-03 09:17 IST`: `restored 16 of 16 runner(s) (0 parked)`. |
+| **A2** — `on_broker_authenticated` auto-wake | `Sprint A-1` | ✅ **LIVE (`89962d1`)** | `9e5b000` / `b2b76a4` — Verified live with remembered mStock session (`depth=True` streaming). |
+| **A4** — market-hours paging + login banner | `Sprint A-1` | ✅ **LIVE (`89962d1`)** | `74cb76b` / `b2b76a4` |
+| **A3** — open-trade continuity + `armed_at_utc` | `Sprint A-2` | ⏳ **LIVE BURN-IN IN PROGRESS** | `Sprint A-1 + B + C` live session underway (`2026-11-03 09:17–15:30 IST`). Unblocks after today's `15:30 IST` close completes clean (§3 sequencing rule; ships standalone for 1-commit rollback). |
+| **B1** — restart-proof risk state | `Sprint B` | ✅ **LIVE (`89962d1`)** | `0eb8f1f` — Verified on-wire `09:17 IST`: undated prior peak rolled clean for `2026-11-03`; full-roster anchor `₹98,16,152.17`; dated intraday restart memory now armed. |
+| **C1** — two-layer clock law in `OrderLedger` | `Sprint C` | ✅ **LIVE (`89962d1`)** | `fdaab48` — Canonical `+00:00` UTC across all `OrderLedger` writers & legacy snapshot hydration (`#23`). |
+| **C2** — mStock Layer-0 auth gate + `401/403` kill-latch | `Sprint C` | ✅ **LIVE (`89962d1`)** | `c009da0` — `0` HTTP packets / `0` `.mstock_session_token` leaks when logged out; instant `401/403` `STATUS_EXPIRED` kill-latch + Ticket A4 alert; Upstox untouched. |
+| **C3** — stale test signatures + timestamp repair cutover | `Sprint C` | ✅ **LIVE (`89962d1`); `--execute` ops-gated** | `89962d1` — Standing test debt cleared **`28 → 0` (`0` failures across entire gate)**. `scripts/repair_trade_timestamps.py` stays dry-run pending post-market DB snapshot. |
+| **D1** — PostgreSQL single source of truth | `Sprint D` | ✅ **DONE (local commit, Phase D1-a)** | Local commit atop `89962d1` — Migration `024_open_option_positions_and_risk_session`, `PostgresStateStore`, 7-Event DB Touch Contract (`0` tick/SSE SQL), `prev_close_mark` `15:30 IST` settlement, and `STATE_STORE_PRIMARY=json\|postgres` parity verifier (`#24`). |
+| **D2** — unified `Positions` blotter + carry badges | `Sprint D` | ✅ **DONE (local commit)** | Local commit atop `89962d1` — Carry-horizon badges (`⏱ INTRADAY 15:10` vs `📅 POSITIONAL (HOLD TO EXPIRY)`), `#pos-carry-filter`, `15:30 prev close` anchor note, and `Today` vs `Total` Net Open P&L clarity. |
+| **D3** — `FROZEN_AT_SPAWN` drift badge + flat rollover | `Sprint D` | ✅ **DONE (local commit)** | Local commit atop `89962d1` — Compact carry badge on runner rows, amber `⚠️ Outdated config — respawn when flat` drift pill, and `POST /api/portfolio/runners/<id>/respawn` strictly gated on `open_positions == 0` (`#3`). |
 
 Two stale test ratchets were fixed inside PR #52 because they were red on the
 branch: `70acbd9` (`test_option_view.mjs` 24 → 29, caused by A1 itself) and
@@ -330,11 +330,8 @@ Implement in strict sprint order (**one small, reviewable PR per sprint**).
 **Goal**: Eliminate the `portfolio_state.json` split-brain so PostgreSQL is the sole durable source of truth while RAM serves sub-second live math at zero tick-level DB load, unify Equity + Option open positions across SQL and UI, and make frozen runner rulebooks explicit and 1-click upgradable when flat.
 
 #### Ticket D1 — Replace `portfolio_state.json` Split-Brain with PostgreSQL Single-Source-of-Truth (`#24` + Institutional Ledger)
-> ⬜ **NOT STARTED.** Largest ticket in the plan and the only one carrying a data-migration
-> risk. Two constraints already learned the hard way and worth restating here: `CREATE OR
-> REPLACE VIEW` is append-only in Postgres (it killed fresh-DB migration chains at
-> `014`/`015`), and `market_data_cache` is a Timescale hypertable whose `ts` cannot be
-> updated across chunks — so it stays out of scope entirely. Alembic head is `023`.
+> ✅ **IMPLEMENTED (`4a187da`, local commit — Phase D1-a Shadow Dual-Write active by default under `STATE_STORE_PRIMARY=json`).**
+> Additive migration `024_open_option_positions_and_risk_session.{sql,sqlite.sql}`, ORM models (`RunnerInstanceRecord`, `OptionOpenStructureRecord`, `OptionOpenLegRecord`, `RiskSessionStateRecord`), `PostgresStateStore`, `LiveTradePersister._mirror_option_book_slice`, `on_broker_authenticated` live `mStock.get_positions()` reconciliation, `60s` batch mark checkpoint + `15:30 IST` `prev_close_mark` settlement, and `verify_state_parity()` (`PARITY_OK` / `PARITY_DIFF` within `₹0.01`) are live and verified with `0` SQL queries on tick/SSE hot paths.
 - **Institutional PMS Standard**:
   - **PostgreSQL Is the Sole System of Record; RAM Is the Real-Time Calculator**: Never rely on a local flat JSON file for open trades, runner configs, or daily P&L anchors. Hydrate RAM 100% from PostgreSQL on startup (run a brief dual-write parity window, then retire `portfolio_state.json` dependency).
   - **The 7-Event Database Touch Contract (Zero Tick / Poll DB Load)**:
@@ -368,19 +365,22 @@ Implement in strict sprint order (**one small, reviewable PR per sprint**).
 - **Files**: `db/migrations/024_open_option_positions_and_risk_session.sql`, `db/migrations/024_open_option_positions_and_risk_session.sqlite.sql`, `src/backtest/db/models.py`, `src/backtest/forward/trade_persistence.py`, `src/backtest/forward/state_store.py`, `src/backtest/forward/portfolio_manager.py`
 
 #### Ticket D2 — Unified `Positions` Blotter & Carry-Horizon Badges (`#24` UI)
-> ⬜ **NOT STARTED, but partly unblocked.** This ticket's precondition — "`A1` keeping
-> `WAITING_FOR_FEED` runners in `self._runners` so `list_positions()` surfaces open option
-> structures before broker login" — is now shipped in PR #52. The badge must use the real
-> enum value `positional`, not the word "expiry".
+> ✅ **IMPLEMENTED (`5de20fc`, local commit).** `options_bridge.open_structures_snapshot()` and
+> `PortfolioManager.list_positions()` now expose `carry_policy`, `intraday_squareoff_minutes_before`,
+> `prev_close_mark`, `net_open_pnl`, `prior_close_net_pnl`, `today_pnl`, and `carried_overnight`
+> across both active and `WAITING_FOR_FEED` runners; the `Positions` tab renders `⏱ INTRADAY 15:10`
+> vs `📅 POSITIONAL (HOLD TO EXPIRY)` badges, `#pos-carry-filter`, and `Today` vs `Total` Net P&L.
 - **Files**: `src/backtest/web/static/js/portfolio.js`, `src/backtest/web/templates/portfolio.html`
 - **Design**:
   - With P0 (`Ticket A1`) keeping `WAITING_FOR_FEED` runners in `self._runners`, `list_positions()` automatically surfaces every open Option structure alongside Equity positions even before broker login.
   - Add an explicit carry-horizon badge (**`⏱ INTRADAY 15:10`** for `carry_policy="intraday"` vs **`📅 POSITIONAL (HOLD TO EXPIRY)`** for `carry_policy="positional"`) plus `prev_close_mark` / Today vs. Total Trade P&L clarity on each open structure row in the `Positions` tab.
 
 #### Ticket D3 — `FROZEN_AT_SPAWN` Config-Drift Badge & 1-Click Flat Rollover (`#3`)
-> ⬜ **NOT STARTED.** Still operator-gated in the meantime: the live straddle/strangle books
-> need an mStock login **and a re-spawn** to inherit `carry_policy: positional` (`3ae2888`),
-> because a runner freezes its expression at spawn by design.
+> ✅ **IMPLEMENTED (local commit).** `StrategyRunner.config_drift_info()` / `get_state()`
+> detects both `strategy_code_changed` and option template expression / `carry_policy` drift
+> without mutating live rules mid-trade; the runner matrix renders compact carry badges, the
+> amber `⚠️ Outdated config — respawn when flat` pill, and a 1-click `"↻ Respawn with latest rules"`
+> button calling `POST /api/portfolio/runners/<id>/respawn` (`409` while `open_positions > 0`, `201` when flat).
 - **Institutional Desk Standard**: Never silently mutate exit/carry rules mid-trade, always display active carry policy + template-drift warnings on the blotter, and allow 1-click rollover when flat.
 - **Files**: `src/backtest/forward/paper_runner.py`, `src/backtest/api/portfolio.py`, `src/backtest/web/static/js/portfolio.js`, `src/backtest/web/templates/portfolio.html`
 - **Design**:

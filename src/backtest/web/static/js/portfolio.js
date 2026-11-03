@@ -255,6 +255,15 @@
     } else if (r.status === "PAUSED") {
       html += '<button class="row-btn" data-act="resume" data-id="' + r.instance_id + '" title="Resume">▶</button>';
     }
+    if (OptionView.hasConfigDrift(r)) {
+      const flat = Number(r.open_positions || 0) === 0;
+      html += '<button class="row-btn row-btn-respawn" data-act="respawn" data-id="' +
+        r.instance_id + '"' + (flat ? "" : " disabled") +
+        ' title="' + (flat
+          ? "Respawn with latest rules (retires this flat runner and spawns from latest template)"
+          : "Respawn disabled while open_positions > 0 — wait until flat") + '">' +
+        "↻ Respawn with latest rules</button>";
+    }
     html += '<button class="row-btn row-btn-stop" data-act="stop" data-id="' + r.instance_id + '" title="Stop">⏹</button>';
     html += '<button class="row-btn" data-act="deep_dive" data-id="' + r.instance_id + '" title="Deep dive">🔍</button>';
     html += '<button class="row-btn row-btn-danger" data-act="remove" data-id="' + r.instance_id + '" title="Remove instance (flattens its book, deletes the row)">🗑</button>';
@@ -324,7 +333,8 @@
       // rows are untouched (every helper returns "" / null for them).
       const option = OptionView.isOption(r);
       const instrument = option
-        ? '<span class="badge badge-option">' + OptionView.instrumentLabel(r) + '</span>'
+        ? '<span class="badge badge-option">' + OptionView.instrumentLabel(r) + '</span>' +
+          OptionView.carryPolicyBadgeHtml(r, { compact: true })
         : typeBadge;
       const posCell = OptionView.positionsCell(r);
       const notes = OptionView.matrixNotes(r);
@@ -358,6 +368,7 @@
         '<td><span class="status-cell">' + (STATUS_DOT[r.status] || "⚪") + " " + r.status + "</span>" +
           warmupSubHtml(r) +
           OptionView.feedStateBadgeHtml(r) +
+          OptionView.configDriftBadgeHtml(r) +
           (r.duplicate_of
             ? '<div class="cell-sub cell-error" title="Duplicates active runner ' +
               String(r.duplicate_of).slice(0, 8) + '">⚠ duplicate</div>'
@@ -399,6 +410,9 @@
     if (state.posRulesOnly) {
       out = out.filter((r) => r.stop_loss !== null && r.stop_loss !== undefined ||
         (r.target !== null && r.target !== undefined));
+    }
+    if (state.posCarryFilter) {
+      out = out.filter((r) => OptionView.carryPolicyOf(r) === state.posCarryFilter);
     }
     return out;
   }
@@ -466,15 +480,21 @@
       ? '<span class="muted" title="Runner is not running — this mark is frozen, actions still work">⏸</span> '
       : "";
     const label = row.kind === "option"
-      ? '<span class="badge badge-option">OPTION</span> ' + (row.label || row.symbol) + " <span class=\"muted\">(net)</span>"
+      ? '<span class="badge badge-option">OPTION</span>' +
+        OptionView.carryPolicyBadgeHtml(row) + " " +
+        (row.label || row.symbol) + ' <span class="muted">(net)</span>'
       : row.label || row.symbol;
     const entered = row.entry_ts
       ? '<span class="muted" title="Entry executed ' + String(row.entry_ts).replace(/[<>&"]/g, "") + ' (server UTC)"> · in ' + execTimeLabel(row.entry_ts) + "</span>"
       : "";
+    const prevCloseNote = (row.kind === "option" && row.prev_close_mark !== null && row.prev_close_mark !== undefined)
+      ? " · prev close ₹" + Number(row.prev_close_mark).toFixed(2)
+      : "";
     const sub = row.kind === "option"
       ? '<div class="cell-sub">' + (row.structure_type || "").replace(/_/g, " ") +
         (row.expiry ? " · exp " + expiryLabelOf(row.expiry) : "") +
-        (row.bars_held ? " · " + row.bars_held + " bars" : "") + entered + "</div>"
+        (row.bars_held ? " · " + row.bars_held + " bars" : "") +
+        prevCloseNote + entered + "</div>"
       : '<div class="cell-sub">' + (row.strategy_name || "") + entered + "</div>";
     return (
       '<tr class="pos-row' + (row.stale ? " pos-row-stale" : "") +
@@ -493,7 +513,7 @@
       '<td class="num">' + Number(row.qty || 0).toLocaleString("en-IN") + "</td>" +
       '<td class="num">' + legPriceOf(row.entry_price) + "</td>" +
       '<td class="num">' + legPriceOf(row.current_price) + OptionView.staleBadgeHtml(row) + "</td>" +
-      '<td class="num ' + pnlClass(pnl) + '">' + fmtSigned(pnl) + "</td>" +
+      '<td class="num ' + pnlClass(pnl) + '">' + fmtSigned(pnl) + OptionView.carryPnlSubHtml(row) + "</td>" +
       posLevelCell(row.target, "target") +
       posLevelCell(row.stop_loss, "stop") +
       greeksCell(row) +
@@ -1675,6 +1695,17 @@
         window.DeepDive.open(id, state.portfolio);
       } else if (act === "refresh_marks") {
         refreshRunnerMarks(id);
+      } else if (act === "respawn") {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        try {
+          const data = await api("/api/portfolio/runners/" + id + "/respawn", "POST", {});
+          toast("Respawned with latest rules (" + String(data.instance_id || "").slice(0, 8) + ")", "success");
+          fetchBackendAudit();
+        } catch (err) {
+          btn.disabled = false;
+          toast("Respawn refused: " + err.message, "error");
+        }
       } else if (act === "remove") {
         // Destructive: confirm first — removal flattens the book and
         // deletes the instance; there is no undo.
@@ -1807,6 +1838,11 @@
       state.posRulesOnly = e.target.checked;
       renderPositionRows(POSITION_ROWS);
     });
+    const posCarryFilter = $("pos-carry-filter");
+    if (posCarryFilter) posCarryFilter.addEventListener("change", (e) => {
+      state.posCarryFilter = e.target.value || "";
+      renderPositionRows(POSITION_ROWS);
+    });
     const posRefresh = $("pos-refresh");
     if (posRefresh) posRefresh.addEventListener("click", () => {
       if (state.portfolio) renderAggregatePositions(state.portfolio);
@@ -1848,15 +1884,13 @@
 
   // ---------------------------------------------------------------- boot
   document.addEventListener("DOMContentLoaded", () => {
-    // CRITICAL: Check if broker is authenticated when market is open
-    // If not, show login modal immediately before allowing any trading
-    checkBrokerAuthOnStartup().then(() => {
-      bindEvents();
-      connectStream();
-      // Initial snapshot (SSE will take over)
-      const summaryUrl = "/api/portfolio/summary" + (PAGE_MODE ? "?mode=" + PAGE_MODE : "");
-      api(summaryUrl).then((d) => render(d.portfolio)).catch(() => {});
-    });
+    bindEvents();
+    connectStream();
+    // Initial snapshot (SSE will take over)
+    const summaryUrl = "/api/portfolio/summary" + (PAGE_MODE ? "?mode=" + PAGE_MODE : "");
+    api(summaryUrl).then((d) => render(d.portfolio)).catch(() => {});
+    // Check if broker is authenticated when market is open
+    checkBrokerAuthOnStartup();
   });
   
   async function checkBrokerAuthOnStartup() {

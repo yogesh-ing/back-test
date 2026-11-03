@@ -46,8 +46,11 @@ from backtest.forward.warmup import (
 )
 from backtest.forward.state_store import (
     PortfolioStateStore,
+    PostgresStateStore,
     capture_runner,
+    resolve_state_store_primary,
     restore_runner,
+    verify_state_parity,
 )
 from backtest.forward.paper_runner import (
     FEED_STATE_LIVE,
@@ -99,6 +102,8 @@ class PortfolioManager:
         async_warmup: Optional[bool] = None,
         reject_duplicate_runners: bool = False,
         persist_trades: bool = True,
+        db_manager: Optional[Any] = None,
+        allow_synthetic_db_state: bool = False,
     ) -> None:
         self.ledger = OrderLedger()
         self.broker = PaperBroker(self.ledger)
@@ -278,25 +283,48 @@ class PortfolioManager:
         #: each working order is reported once per band instead of every tick.
         self._aging_alerted: Dict[str, set] = {}
         self._state_store = PortfolioStateStore(state_path) if state_path else None
-        # GAP-4 (2026-09-21): permanent trade history in PostgreSQL. Fail-soft:
-        # a missing/unreachable DB degrades to the JSON snapshot only.
+        # GAP-4 (2026-09-21) & Sprint D / Ticket D1: permanent trade history +
+        # PostgreSQL Single-Source-of-Truth via the shared DatabaseManager pool
+        # (POOL-3: zero ad-hoc create_engine calls).
         self._trade_persister: Optional[Any] = None
-        # Ticket 2.4: ``persist_trades=False`` is the seam a hermetic test asks
-        # for. Without it the manager resolves a DB URL through the environment
-        # and survives only because the pytest firewall rewrites a live URL to
-        # ``sqlite:///:memory:`` — a backstop, not isolation by construction.
-        # With no persister, the boot reap below is a no-op as well.
-        if persist_trades:
+        self._pg_state_store: Optional[PostgresStateStore] = None
+        self.last_parity_report: Optional[Dict[str, Any]] = None
+        self._eod_settled_session: Optional[str] = None
+        self._last_risk_milestone_mono: float = 0.0
+        self._last_flushed_peaks: Dict[str, float] = {}
+        self._explicit_db_manager: bool = db_manager is not None
+        shared_db = db_manager
+        if persist_trades and shared_db is None:
+            try:
+                from backtest.db import DatabaseManager
+
+                shared_db = DatabaseManager.from_env()
+            except Exception:  # noqa: BLE001 — persistence is best-effort
+                logger.info("trade persistence disabled (no reachable database)", exc_info=True)
+                shared_db = None
+        if shared_db is not None:
             try:
                 from backtest.forward.trade_persistence import LiveTradePersister
 
-                from backtest.db import DatabaseManager
-
-                self._trade_persister = LiveTradePersister(DatabaseManager.from_env())
-                # B3: the execution ledger becomes durable at the transition itself.
+                self._trade_persister = LiveTradePersister(shared_db)
                 self._trade_persister.attach_order_ledger(self.ledger)
             except Exception:  # noqa: BLE001 — persistence is best-effort
-                logger.info("trade persistence disabled (no reachable database)", exc_info=True)
+                logger.info("trade persistence disabled (init failed)", exc_info=True)
+            enable_pg_store = (
+                "PYTEST_CURRENT_TEST" not in os.environ
+                or self._explicit_db_manager
+                or self._state_store is not None
+                or os.environ.get("STATE_STORE_PRIMARY", "").strip().lower()
+                in ("postgres", "pg", "postgresql", "db")
+            )
+            if enable_pg_store:
+                try:
+                    self._pg_state_store = PostgresStateStore(
+                        shared_db,
+                        allow_synthetic=bool(allow_synthetic_db_state),
+                    )
+                except Exception:  # noqa: BLE001 — fail-soft dual-write
+                    logger.info("postgres state store disabled (init failed)", exc_info=True)
         self._restoring = False  # suppress saves while rehydrating
         # Portfolio Intelligence (2026-09-26): read-only aggregate analytics +
         # alert rules. Built before the restore so restored runners register
@@ -1508,6 +1536,12 @@ class PortfolioManager:
                 for park_key, snap in self._parked_snapshots.items()
                 if self._waits_on_broker(snap.get("config") or {}, key)
             ]
+        # Event 2 (Sprint D / Ticket D1): reconcile mode="live" positions
+        # against broker.get_positions() on every authentication edge when live
+        # books are routed to this broker.
+        rec = self._reconcile_live_broker_positions(key)
+        if rec.get("checked"):
+            out["reconciliation"] = rec
         if not candidates and not parked:
             return out
 
@@ -1592,6 +1626,132 @@ class PortfolioManager:
             key, len(out["woken"]), len(out["unparked"]), len(out["still_waiting"]),
         )
         return out
+
+    def _reconcile_live_broker_positions(self, broker_key: str) -> Dict[str, Any]:
+        """Event 2 (Sprint D / Ticket D1): reconcile live positions on broker login.
+
+        Compares open ``mode="live"`` symbols across runners routed to
+        ``broker_key`` against ``broker.get_positions()``. Never silently mutates
+        books; logs and raises an operator alert if external/phone-app trades
+        caused a mismatch.
+        """
+        with self._lock:
+            live_runners = [
+                r
+                for r in self._runners.values()
+                if self._runner_bucket(r) == "live"
+                and str(
+                    r.config.execution_broker or r.config.source or ""
+                ).strip().lower()
+                == broker_key
+            ]
+        if not live_runners:
+            return {"checked": False, "reason": "no_live_runners", "mismatches": []}
+        try:
+            from backtest.brokers.session_manager import get_session_manager
+
+            broker = get_session_manager().get_authenticated_broker(broker_key)
+        except Exception:  # noqa: BLE001
+            return {"checked": False, "reason": "broker_unavailable", "mismatches": []}
+        get_pos = getattr(broker, "get_positions", None)
+        if not callable(get_pos):
+            return {"checked": False, "reason": "unsupported_by_broker", "mismatches": []}
+        try:
+            venue_raw = get_pos() or []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[reconcile] %s get_positions() failed: %s", broker_key, exc)
+            return {"checked": False, "reason": "fetch_failed", "mismatches": []}
+
+        # Build net signed qty per trading_symbol on our live books:
+        local_net: Dict[str, int] = {}
+        for r in live_runners:
+            for sym, pos in (getattr(r.portfolio, "positions", {}) or {}).items():
+                q = int(round(float(getattr(pos, "quantity", 0) or 0)))
+                if q != 0:
+                    local_net[str(sym).upper()] = local_net.get(str(sym).upper(), 0) + q
+            bridge = getattr(r, "options_bridge", None)
+            if bridge is not None:
+                for s in bridge.option_broker.get_open_structures():
+                    for leg in s.legs:
+                        tsym = str(leg.trading_symbol or "").upper()
+                        if not tsym:
+                            continue
+                        signed_units = int(leg.total_quantity) * (
+                            1 if leg.is_long else -1
+                        )
+                        local_net[tsym] = local_net.get(tsym, 0) + signed_units
+
+        venue_net: Dict[str, int] = {}
+        rows_iter = (
+            venue_raw.get("net", [])
+            if isinstance(venue_raw, dict)
+            else (venue_raw if isinstance(venue_raw, list) else [])
+        )
+        for item in rows_iter:
+            if not isinstance(item, dict):
+                continue
+            tsym = str(
+                item.get("tradingsymbol")
+                or item.get("trading_symbol")
+                or item.get("symbol")
+                or ""
+            ).upper()
+            if not tsym:
+                continue
+            qty = int(
+                round(
+                    float(
+                        item.get("quantity")
+                        or item.get("netqty")
+                        or item.get("net_qty")
+                        or 0
+                    )
+                )
+            )
+            if qty != 0:
+                venue_net[tsym] = venue_net.get(tsym, 0) + qty
+
+        mismatches: List[str] = []
+        for sym in sorted(set(local_net) | set(venue_net)):
+            lq = local_net.get(sym, 0)
+            vq = venue_net.get(sym, 0)
+            if lq != vq:
+                mismatches.append(f"{sym}: local={lq} venue={vq}")
+
+        if mismatches:
+            detail = "; ".join(mismatches)
+            logger.error(
+                "[reconcile] LIVE_POSITION_MISMATCH on %s: %s", broker_key, detail
+            )
+            self._audit_log(
+                f"LIVE_POSITION_MISMATCH {broker_key}",
+                scope="live",
+                detail=detail,
+            )
+            try:
+                from backtest.alerts.broker import get_alert_broker
+
+                get_alert_broker().raise_alert(
+                    key=f"live_position_mismatch:{broker_key}",
+                    alert_type="risk_breach",
+                    severity="warning",
+                    title=f"Live position mismatch on {broker_key}",
+                    message=f"Local vs venue open qty diverged: {detail}",
+                    metadata={"broker": broker_key, "mismatches": mismatches},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            logger.info(
+                "[reconcile] LIVE_POSITION_OK on %s (%d symbol(s))",
+                broker_key,
+                len(local_net),
+            )
+        return {
+            "checked": True,
+            "ok": len(mismatches) == 0,
+            "mismatches": mismatches,
+        }
 
     def remove_runner(self, instance_id: str) -> bool:
         with self._lock:
@@ -1718,6 +1878,130 @@ class PortfolioManager:
                         state = r.get_state()
         return state
 
+    def respawn_runner(
+        self,
+        instance_id: str,
+        *,
+        auto_start: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Retire a flat runner and spawn a replacement from latest template rules (Ticket D3).
+
+        Strictly gated on ``open_positions == 0`` (equity + option structures):
+        never mutates or closes an open position mid-trade.
+        """
+        with self._lock:
+            runner = self._runners.get(instance_id)
+            if runner is None:
+                raise KeyError(f"unknown runner: {instance_id}")
+            eq_open = len(getattr(runner, "positions", {}) or {})
+            opt_open = (
+                len(runner.options_bridge.option_broker.get_open_structures())
+                if runner.options_bridge is not None
+                else 0
+            )
+            if (eq_open + opt_open) > 0:
+                raise ValueError(
+                    f"cannot respawn runner {runner.config.name!r} while "
+                    f"{eq_open + opt_open} position(s) are open — "
+                    "flatten or wait until flat"
+                )
+            old_cfg = runner.config
+            old_status = runner.status
+            bucket = self._runner_bucket(runner)
+
+        # Resolve latest strategy bundle & execution spec outside the lock:
+        from backtest.strategy.bundle import engine_git_sha, strategy_bundle as _bundle
+        from backtest.strategy.registry import get_strategy
+
+        strat_cls = get_strategy(old_cfg.strategy_name)
+        new_instrument: Dict[str, Any] = dict(old_cfg.instrument or {"type": "equity"})
+        if str(new_instrument.get("type", "equity")).lower() == "option":
+            spec_fn = getattr(strat_cls, "execution_spec", None)
+            spec = spec_fn() if callable(spec_fn) else None
+            if spec is not None:
+                from backtest.options.execution_gate import PreTradeRiskGate
+                from backtest.strategy.execution import (
+                    resolve_expression,
+                    validate_expression,
+                )
+
+                gate = PreTradeRiskGate(mode=old_cfg.mode or "paper")
+                old_expr = new_instrument.get("expression") or {}
+                qty_sel: Optional[Dict[str, Any]] = None
+                if isinstance(old_expr, dict) and old_expr.get("quantity") is not None:
+                    qty_sel = {"quantity": old_expr["quantity"]}
+                try:
+                    resolved, provenance = resolve_expression(
+                        spec=spec, user_selections=qty_sel
+                    )
+                except Exception:  # noqa: BLE001 — fall back to pure template defaults
+                    resolved, provenance = resolve_expression(spec=spec)
+                errs = validate_expression(
+                    resolved, permitted_structures=gate.permitted_structures()
+                )
+                if errs:
+                    raise ValueError("; ".join(errs))
+                new_instrument = {
+                    "type": "option",
+                    "expression": resolved,
+                    "expression_provenance": provenance,
+                }
+
+        new_bundle: Optional[Dict[str, Any]] = None
+        try:
+            from backtest.risk_limits import load_risk_limits
+            from backtest.strategy.execution import config_sha256
+
+            new_bundle = _bundle(strat_cls).to_dict()
+            new_bundle["engine_git_sha"] = engine_git_sha()
+            new_bundle["risk_limits_sha256"] = load_risk_limits().sha256
+            new_bundle["config_sha256"] = config_sha256(
+                new_instrument.get("expression") or {}
+            )
+        except Exception:  # noqa: BLE001
+            new_bundle = old_cfg.strategy_bundle
+
+        new_cfg = RunnerConfig(
+            name=old_cfg.name,
+            strategy_name=old_cfg.strategy_name,
+            allocated_capital=old_cfg.allocated_capital,
+            target_type=old_cfg.target_type,
+            symbols=list(old_cfg.symbols) if old_cfg.symbols else None,
+            universe_id=old_cfg.universe_id,
+            timeframe=old_cfg.timeframe,
+            strategy_params=dict(old_cfg.strategy_params or {}),
+            max_pool_positions=old_cfg.max_pool_positions,
+            position_pct=old_cfg.position_pct,
+            max_drawdown_pct=old_cfg.max_drawdown_pct,
+            daily_loss_limit_pct=old_cfg.daily_loss_limit_pct,
+            allow_short=old_cfg.allow_short,
+            mode=old_cfg.mode,
+            source=old_cfg.source,
+            instrument=new_instrument,
+            retry_policy=old_cfg.retry_policy,
+            segment=old_cfg.segment,
+            execution_broker=old_cfg.execution_broker,
+            strategy_bundle=new_bundle,
+        )
+        should_start = (
+            (old_status == STATUS_RUNNING) if auto_start is None else bool(auto_start)
+        )
+        self.remove_runner(instance_id)
+        new_id = self.add_runner(new_cfg, start=should_start)
+        new_runner = self.get_runner(new_id)
+        self._audit_log(
+            f"RESPAWN {old_cfg.name}",
+            scope=bucket,
+            instance_id=new_id,
+            detail=f"retired={instance_id[:8]} new={new_id[:8]}",
+        )
+        self._persist_state()
+        return {
+            "retired_instance_id": instance_id,
+            "instance_id": new_id,
+            "runner": new_runner.get_state() if new_runner is not None else None,
+        }
+
     # ------------------------------------------------------------------ #
     # Live Order Management (2026-09-23)
     # ------------------------------------------------------------------ #
@@ -1796,9 +2080,19 @@ class PortfolioManager:
                         "units": row.get("units"),
                         "entry_price": row.get("entry_price"),
                         "current_price": row.get("current_price"),
+                        "prev_close_mark": row.get("prev_close_mark"),
                         "unrealized_pnl": row.get("unrealized_pnl"),
+                        "net_open_pnl": row.get("net_open_pnl"),
+                        "prior_close_net_pnl": row.get("prior_close_net_pnl"),
+                        "today_pnl": row.get("today_pnl"),
                         "pnl_pct": row.get("open_pnl_pct"),
                         "entry_ts": row.get("entry_ts"),
+                        "carry_policy": row.get("carry_policy"),
+                        "intraday_squareoff_minutes_before": row.get(
+                            "intraday_squareoff_minutes_before"
+                        ),
+                        "entry_session_date": row.get("entry_session_date"),
+                        "carried_overnight": bool(row.get("carried_overnight", False)),
                         # R1: mark freshness contract on position rows
                         "mark_ts": row.get("mark_ts"),
                         "mark_stale": bool(row.get("mark_stale")),
@@ -1875,6 +2169,10 @@ class PortfolioManager:
                 self.run_eod_squareoff_sweep()
             except Exception:  # noqa: BLE001 — watchdog must never crash
                 logger.exception("[session-clock] EOD square-off sweep failed")
+            try:
+                self.run_eod_mark_settlement()
+            except Exception:  # noqa: BLE001 — watchdog must never crash
+                logger.exception("[session-clock] EOD mark settlement failed")
             if now_mono < next_mtm_pass:
                 continue
             next_mtm_pass = now_mono + interval
@@ -2066,12 +2364,83 @@ class PortfolioManager:
                 runner_results.append(
                     {"instance_id": runner.instance_id, "name": runner.config.name, **res}
                 )
+        # Event 6 (Sprint D / Ticket D1): 60s market-hours batch crash checkpoint
+        # (1 batch transaction/min; zero per-tick DB chatter).
+        checkpointed = 0
+        if self._pg_state_store is not None:
+            try:
+                with self._lock:
+                    all_runners = list(self._runners.values())
+                checkpointed = self._pg_state_store.flush_mark_checkpoint(
+                    all_runners, settle_prev_close=False
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("[mtm-watchdog] 60s mark checkpoint failed")
         return {
             "skipped": False,
             "checked": checked_total,
             "repaired": repaired_total,
             "still_failing": failing_total,
+            "checkpointed": checkpointed,
             "runners": runner_results,
+        }
+
+    def run_eod_mark_settlement(
+        self, now: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """Event 6 (Sprint D / Ticket D1): official 15:30 IST EOD settlement.
+
+        Once per IST trading day at/after 15:30:00 IST, stamps ``prev_close_mark``
+        and ``prior_close_net_pnl`` on all carried open option legs/structures,
+        dual-writes state, and runs the Phase D1-a/b parity check.
+        """
+        reference = now or now_utc()
+        now_ist = reference.astimezone(EXCHANGE_TZ)
+        if now_ist.weekday() >= 5:
+            return {"settled": False, "reason": "weekend"}
+        if (now_ist.hour, now_ist.minute) < (15, 30):
+            return {"settled": False, "reason": "before_close"}
+        sess_iso = now_ist.date().isoformat()
+        if self._eod_settled_session == sess_iso:
+            return {"settled": False, "reason": "already_settled", "session": sess_iso}
+        self._eod_settled_session = sess_iso
+
+        settled_legs = 0
+        with self._lock:
+            all_runners = list(self._runners.values())
+        for r in all_runners:
+            bridge = getattr(r, "options_bridge", None)
+            if bridge is None:
+                continue
+            for s in bridge.option_broker.get_open_structures():
+                if s.last_mark_net_pnl is not None:
+                    s.prior_close_net_pnl = s.last_mark_net_pnl
+                for leg in s.legs:
+                    if leg.current_price is not None and leg.current_price > 0:
+                        leg.prev_close_mark = leg.current_price
+                        settled_legs += 1
+        if self._pg_state_store is not None:
+            try:
+                self._pg_state_store.flush_mark_checkpoint(
+                    all_runners, settle_prev_close=True
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("[session-clock] EOD postgres settlement failed")
+        self._persist_state()
+        if self._state_store is not None and self._pg_state_store is not None:
+            try:
+                self.last_parity_report = verify_state_parity(
+                    self._state_store.load(),
+                    self._pg_state_store.load(),
+                    allow_synthetic=self._pg_state_store.allow_synthetic,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("[session-clock] EOD parity check failed")
+        return {
+            "settled": True,
+            "session": sess_iso,
+            "settled_legs": settled_legs,
+            "parity": self.last_parity_report,
         }
 
     def refresh_runner_marks(
@@ -2846,7 +3215,7 @@ class PortfolioManager:
 
         tick_tokens = set(str(k) for k in quotes_by_token.keys())
         exited_runners: List[StrategyRunner] = []
-        entered_any = False
+        entered_runners: List[StrategyRunner] = []
 
         for runner in running_mstock:
             matched_spot = False
@@ -2861,7 +3230,7 @@ class PortfolioManager:
                     if res.get("exited"):
                         exited_runners.append(runner)
                     elif res.get("structure_id"):
-                        entered_any = True
+                        entered_runners.append(runner)
 
             if not matched_spot and runner.options_bridge is not None and runner.config.symbols:
                 held_hits = runner.open_option_tokens().intersection(tick_tokens)
@@ -2879,13 +3248,17 @@ class PortfolioManager:
                     if isinstance(res, dict) and res.get("exited"):
                         exited_runners.append(runner)
 
-        if exited_runners or entered_any:
+        if exited_runners or entered_runners:
             with self._lock:
                 if exited_runners:
                     self._evaluate_risk()
                 self._persist_state()
             if self._trade_persister is not None and not self._restoring:
-                for runner in exited_runners:
+                seen_ids: set = set()
+                for runner in entered_runners + exited_runners:
+                    if runner.instance_id in seen_ids:
+                        continue
+                    seen_ids.add(runner.instance_id)
                     try:
                         self._trade_persister.flush_runner(runner)
                     except Exception:  # noqa: BLE001
@@ -2986,16 +3359,43 @@ class PortfolioManager:
             "runners": runners,
         }
 
-    def save_state(self) -> bool:
-        """Persist now (public — also usable from ops/API). Returns success."""
-        if self._state_store is None:
+    def save_state(self, *, include_db: bool = True) -> bool:
+        """Event 4 (Sprint D / Ticket D1): dual-write JSON + PostgreSQL SSoT."""
+        db_store = self._pg_state_store if include_db else None
+        if self._state_store is None and db_store is None:
             return False
-        try:
-            self._state_store.save(self._snapshot_payload())
-            return True
-        except Exception:  # noqa: BLE001 — persistence must never break trading
-            logger.exception("portfolio state save failed (%s)", self._state_store.path)
-            return False
+        payload = self._snapshot_payload()
+        json_ok = False
+        pg_ok = False
+        if self._state_store is not None:
+            try:
+                self._state_store.save(payload)
+                json_ok = True
+            except Exception:  # noqa: BLE001 — persistence must never break trading
+                logger.exception(
+                    "portfolio JSON state save failed (%s)", self._state_store.path
+                )
+        if db_store is not None:
+            try:
+                db_store.save(payload)
+                pg_ok = True
+                self._last_flushed_peaks["global"] = float(
+                    (payload.get("manager") or {}).get("session_peak_daily_pnl")
+                    or 0.0
+                )
+                for sk, b_snap in (payload.get("buckets") or {}).items():
+                    if isinstance(b_snap, dict):
+                        self._last_flushed_peaks[sk] = float(
+                            b_snap.get("session_peak_daily_pnl") or 0.0
+                        )
+            except Exception:  # noqa: BLE001 — fail-soft dual-write
+                logger.exception("portfolio PostgreSQL state save failed")
+        primary = resolve_state_store_primary()
+        if primary == "postgres" and db_store is not None:
+            return pg_ok
+        if self._state_store is not None:
+            return json_ok
+        return pg_ok
 
     def persist_risk_config(self) -> None:
         """Best-effort snapshot save after a live risk-config change.
@@ -3043,25 +3443,75 @@ class PortfolioManager:
             }
         return result
 
-    def _persist_state(self) -> None:
+    def _persist_state(self, *, include_db: bool = True) -> None:
         if self._restoring:
             return  # never re-write the file we are reading from
-        self.save_state()
+        self.save_state(include_db=include_db)
 
     def _restore_state(self) -> None:
-        """Rehydrate configs, books and breaker latches from the state file.
+        """Event 1 (Sprint D / Ticket D1): rehydrate state from SSoT on boot.
 
-        Runners saved as RUNNING come back PAUSED (fail-closed). Any failure
-        logs loudly and boots clean — persistence must never prevent a start.
+        Honours ``STATE_STORE_PRIMARY=json|postgres`` (default ``json`` during
+        Phase D1-a shadow dual-write; ``postgres`` in Phase D1-b/c) and runs
+        the parity verifier when both stores have payloads.
         """
-        if self._state_store is None:
+        primary = resolve_state_store_primary()
+        allow_pg_boot = (
+            self._pg_state_store is not None
+            and (
+                "PYTEST_CURRENT_TEST" not in os.environ
+                or self._explicit_db_manager
+                or self._state_store is not None
+                or os.environ.get("STATE_STORE_PRIMARY", "").strip().lower()
+                == "postgres"
+            )
+        )
+        if self._state_store is None and not allow_pg_boot:
             return
-        payload = self._state_store.load()
+
+        json_payload = self._state_store.load() if self._state_store is not None else None
+        pg_payload: Optional[Dict[str, Any]] = None
+        if allow_pg_boot and self._pg_state_store is not None:
+            try:
+                pg_payload = self._pg_state_store.load()
+            except Exception:  # noqa: BLE001 — fail-soft DB boot
+                logger.exception("[state] PostgreSQL load failed — falling back to JSON")
+                pg_payload = None
+
+        if json_payload is not None and pg_payload is not None:
+            try:
+                self.last_parity_report = verify_state_parity(
+                    json_payload,
+                    pg_payload,
+                    allow_synthetic=(
+                        self._pg_state_store.allow_synthetic
+                        if self._pg_state_store is not None
+                        else False
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("[state] boot parity check failed")
+
+        if primary == "postgres":
+            payload = pg_payload if pg_payload is not None else json_payload
+            source_label = (
+                "PostgreSQL SSoT"
+                if pg_payload is not None
+                else str(getattr(self._state_store, "path", "json"))
+            )
+        else:
+            payload = json_payload if json_payload is not None else pg_payload
+            source_label = (
+                str(self._state_store.path)
+                if (json_payload is not None and self._state_store is not None)
+                else "PostgreSQL SSoT"
+            )
+
         if not payload:
             return
-        # Freeze what the file held before this process can rewrite it — the
-        # safety net under "a save rebuilds the runner list from memory".
-        self._state_store.boot_backup()
+        if self._state_store is not None and json_payload is not None:
+            # Freeze what the file held before this process can rewrite it.
+            self._state_store.boot_backup()
         try:
             self._restoring = True
             try:
@@ -3085,13 +3535,13 @@ class PortfolioManager:
                     if waiting
                     else ""
                 ),
-                self._state_store.path,
+                source_label,
                 self._last_restore_risk_note
                 or "session risk state initialized",
             )
         except Exception:  # noqa: BLE001 — a bad restore must not block boot
             logger.exception(
-                "[state] restore from %s failed — starting clean", self._state_store.path
+                "[state] restore from %s failed — starting clean", source_label
             )
 
     def _reap_orphan_portfolio_rows(self) -> None:
@@ -3469,9 +3919,11 @@ class PortfolioManager:
             # V2: bounded save rate. The %60 was tuned for 1s synthetic ticks
             # (one save/min); the live mStock feed ticks once per SWEEP (60s),
             # so %60 meant one save per HOUR (live-session finding 2026-09-21).
-            # Every 5 sweeps ≈ 5 min on live, 5s on synthetic — bounded either way.
+            # Every 5 sweeps ≈ 5 min on live, 5s on synthetic — JSON hot-standby
+            # only; SQL mark checkpoints run on Event 6 (60s market-hours batch)
+            # so non-trading 1-minute bar sweeps execute 0 SQL queries.
             if self._state_store is not None and self.tick_index % 5 == 0:
-                self._persist_state()
+                self._persist_state(include_db=False)
             # GAP-4: flush newly closed trades to Postgres on the same cadence
             # — idempotent (dedupe in the persister), fail-soft.
             if self._trade_persister is not None and self.tick_index % 5 == 0:
@@ -3673,9 +4125,68 @@ class PortfolioManager:
             pass
 
         if any_fresh_halt:
-            # Institutional RMS: flush tripped halt latches to disk immediately
-            # rather than waiting for the periodic 5-sweep checkpoint.
+            # Event 5 (Sprint D / Ticket D1): immediate flush on halted = True.
             self._persist_state()
+        else:
+            self._maybe_flush_risk_milestone()
+
+    def _maybe_flush_risk_milestone(
+        self,
+        *,
+        min_step_inr: float = 500.0,
+        min_interval_s: float = 30.0,
+    ) -> bool:
+        """Event 5 (Sprint D / Ticket D1): throttled session_peak_daily_pnl write.
+
+        Writes to ``risk_session_state`` ONLY when a slice's peak advances by at
+        least ``min_step_inr`` and ``min_interval_s`` has elapsed since the last
+        milestone write — zero DB queries on ordinary ticks.
+        """
+        if self._restoring or self._pg_state_store is None:
+            return False
+        now_mono = time.monotonic()
+        if (
+            self._last_risk_milestone_mono > 0
+            and (now_mono - self._last_risk_milestone_mono) < min_interval_s
+        ):
+            return False
+        candidates: Dict[str, float] = {"global": float(self._session_peak_daily_pnl)}
+        for mode in ("paper", "live"):
+            candidates[mode] = float(self._bucket_session_peak_pnl.get(mode, 0.0))
+        advanced = any(
+            (val - self._last_flushed_peaks.get(k, 0.0)) >= min_step_inr
+            for k, val in candidates.items()
+        )
+        if not advanced:
+            return False
+
+        slices: Dict[str, Dict[str, Any]] = {
+            "global": {
+                "peak_daily_pnl": self._session_peak_daily_pnl,
+                "current_daily_pnl": self._aggregate_daily_pnl(),
+                "deployed_capital": self.total_capital,
+                "halted": self.halted,
+                "halt_reason": self.halt_reason,
+            }
+        }
+        for mode in ("paper", "live"):
+            slices[mode] = {
+                "peak_daily_pnl": self._bucket_session_peak_pnl.get(mode, 0.0),
+                "current_daily_pnl": self._bucket_daily_pnl(mode),
+                "deployed_capital": self._bucket_capital(mode),
+                "halted": self._bucket_halted.get(mode, False),
+                "halt_reason": self._bucket_halt_reason.get(mode),
+            }
+        try:
+            self._pg_state_store.save_risk_milestone(
+                current_session_date().isoformat(), slices
+            )
+            self._last_risk_milestone_mono = now_mono
+            self._last_flushed_peaks.update(candidates)
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception("[risk] milestone flush failed")
+            return False
 
     def _raise_breaker_alert(
         self,

@@ -379,6 +379,92 @@ test("a refusal string cannot break out of the title attribute", () => {
     assert.match(html, /&quot;/);
 });
 
+// --- Sprint D / Ticket D2: carry-horizon badges & Today vs Total P&L clarity ---
+
+test("carryPolicyBadgeHtml renders exact intraday 15:10 vs positional badges", () => {
+    const intra = OptionView.carryPolicyBadgeHtml({
+        kind: "option",
+        carry_policy: "intraday",
+        intraday_squareoff_minutes_before: 20,
+    });
+    assert.match(intra, /badge-carry-intraday/);
+    assert.match(intra, /⏱ INTRADAY 15:10/);
+
+    const custom = OptionView.carryPolicyBadgeHtml({
+        kind: "option",
+        carry_policy: "intraday",
+        intraday_squareoff_minutes_before: 25,
+    });
+    assert.match(custom, /⏱ INTRADAY 15:05/);
+
+    const posFull = OptionView.carryPolicyBadgeHtml({
+        kind: "option",
+        carry_policy: "positional",
+    });
+    assert.match(posFull, /badge-carry-positional/);
+    assert.match(posFull, /📅 POSITIONAL \(HOLD TO EXPIRY\)/);
+
+    const posCompact = OptionView.carryPolicyBadgeHtml(
+        { instrument: { type: "option" }, options: { carry_policy: "positional" } },
+        { compact: true },
+    );
+    assert.match(posCompact, /📅 POSITIONAL</);
+
+    assert.equal(OptionView.carryPolicyBadgeHtml({ kind: "equity" }), "");
+});
+
+test("carryPnlSubHtml distinguishes carried Today vs Total P&L and prev_close_mark", () => {
+    const carriedHtml = OptionView.carryPnlSubHtml({
+        kind: "option",
+        carried_overnight: true,
+        entry_session_date: "2026-11-02",
+        prev_close_mark: 128.0,
+        today_pnl: 562.5,
+        net_open_pnl: 1142.5,
+    });
+    assert.match(carriedHtml, /Today \+₹562\.50/);
+    assert.match(carriedHtml, /Total \+₹1,142\.50/);
+    assert.match(carriedHtml, /prev 128\.00/);
+    assert.match(carriedHtml, /15:30 prev close mark ₹128\.00/);
+
+    const sameDayHtml = OptionView.carryPnlSubHtml({
+        kind: "option",
+        carried_overnight: false,
+        today_pnl: -220.0,
+        net_open_pnl: -220.0,
+    });
+    assert.match(sameDayHtml, /Net −₹220\.00/);
+    assert.equal(OptionView.carryPnlSubHtml({ kind: "equity", unrealized_pnl: 100 }), "");
+});
+
+// --- Sprint D / Ticket D3: FROZEN_AT_SPAWN config-drift pill ---
+
+test("hasConfigDrift detects both strategy_code_changed and template expression drift", () => {
+    assert.equal(OptionView.hasConfigDrift({ config_drift: false, strategy_code_changed: false }), false);
+    assert.equal(OptionView.hasConfigDrift({ config_drift: true }), true);
+    assert.equal(OptionView.hasConfigDrift({ strategy_code_changed: true }), true);
+    assert.equal(OptionView.configDriftBadgeHtml({ config_drift: false }), "");
+});
+
+test("configDriftBadgeHtml renders amber respawn-when-flat pill with escaped reasons", () => {
+    const flatPill = OptionView.configDriftBadgeHtml({
+        config_drift: true,
+        open_positions: 0,
+        config_drift_reasons: ['carry_policy drifted (frozen=intraday, template=positional)'],
+    });
+    assert.match(flatPill, /badge-config-drift/);
+    assert.match(flatPill, /⚠️ Outdated config — respawn when flat/);
+    assert.match(flatPill, /Runner is flat/);
+
+    const openPill = OptionView.configDriftBadgeHtml({
+        config_drift: true,
+        open_positions: 1,
+        config_drift_reasons: ['"><script>alert(1)</script>'],
+    });
+    assert.equal(openPill.includes("<script>"), false);
+    assert.match(openPill, /1 open position/);
+});
+
 // ---------------------------------------------------------------------------
 
 if (process.exitCode) {

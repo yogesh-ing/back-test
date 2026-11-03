@@ -1194,6 +1194,27 @@ def remove_runner(instance_id: str) -> Tuple[Response, int]:
     return jsonify({"success": True, "removed": instance_id}), 200
 
 
+@portfolio_bp.post("/api/portfolio/runners/<instance_id>/respawn")
+@portfolio_bp.post("/api/portfolio/runner/<instance_id>/respawn")
+def respawn_runner_route(instance_id: str) -> Tuple[Response, int]:
+    """Sprint D / Ticket D3: 1-click flat rollover to latest template rules."""
+    data = request.get_json(silent=True) or {}
+    raw_start = data.get("auto_start")
+    auto_start = bool(raw_start) if raw_start is not None else None
+    try:
+        out = _manager().respawn_runner(instance_id, auto_start=auto_start)
+    except KeyError:
+        return _error(f"unknown runner: {instance_id}", 404)
+    except (ValueError, RuntimeError) as exc:
+        return _error(str(exc), 409)
+    log.info(
+        "runner %s respawned -> %s",
+        instance_id,
+        out.get("instance_id"),
+    )
+    return jsonify({"success": True, **out}), 201
+
+
 # ---------------------------------------------------------------------------
 # Bulk / global control
 # ---------------------------------------------------------------------------

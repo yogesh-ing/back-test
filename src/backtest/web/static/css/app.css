@@ -1174,6 +1174,51 @@ textarea.input { line-height: 1.7; }
     border: 1px dashed rgba(245,158,11,.55);
     cursor: help;
 }
+/* Sprint D / Ticket D2 & D3: carry-horizon & config-drift pills. */
+.badge-carry-intraday {
+    background: rgba(59,130,246,.16);
+    color: var(--info, #60a5fa);
+    border: 1px solid rgba(59,130,246,.38);
+    font-size: .68rem;
+    font-weight: 600;
+    margin-left: 4px;
+    cursor: help;
+}
+.badge-carry-positional {
+    background: rgba(139,92,246,.16);
+    color: var(--violet, #a78bfa);
+    border: 1px solid rgba(139,92,246,.4);
+    font-size: .68rem;
+    font-weight: 600;
+    margin-left: 4px;
+    cursor: help;
+}
+.pos-pnl-split {
+    font-size: .7rem;
+    margin-top: 2px;
+    white-space: nowrap;
+}
+.badge-config-drift {
+    display: inline-block;
+    margin-top: 2px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: .7rem;
+    font-weight: 600;
+    background: rgba(245,158,11,.18);
+    color: var(--warning-text, #f59e0b);
+    border: 1px solid rgba(245,158,11,.48);
+    cursor: help;
+}
+.row-btn-respawn {
+    border-color: rgba(245,158,11,.55);
+    color: var(--warning-text, #f59e0b);
+    font-size: .78rem;
+}
+.row-btn-respawn:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+}
 .matrix-table tr.stale-mark-row td,
 .dd-table tr.stale-mark-row td {
     background: rgba(245,158,11,.08);
