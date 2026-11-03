@@ -114,4 +114,18 @@ await test("without the segments read a code still becomes words, and a dead end
     assert.equal(Labels.segment("equity_delivery"), "Equity delivery");
 });
 
+await test("a stored trade symbol keeps its underlying and labels its structure", () => {
+    const Labels = boot();
+    // the option books persist "<UNDERLYING> <structure_type>" (paper_runner.py:1872)
+    assert.equal(Labels.symbol("NIFTY short_straddle"), "NIFTY Short straddle");
+    assert.equal(Labels.symbol("BANKNIFTY long_put"), "BANKNIFTY Long put");
+    assert.equal(Labels.symbol("NIFTY bull_call_spread"), "NIFTY Bull call spread");
+    // exchange symbols and operator-chosen names are not structures
+    assert.equal(Labels.symbol("TCS"), "TCS");
+    assert.equal(Labels.symbol("NIFTY_50"), "NIFTY_50");
+    assert.equal(Labels.symbol("NIFTY 25000 CE"), "NIFTY 25000 CE");
+    assert.equal(Labels.symbol(""), "");
+    assert.equal(Labels.symbol(null), "");
+});
+
 console.log(`\n${passed} tests passed`);

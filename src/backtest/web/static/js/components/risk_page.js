@@ -529,7 +529,7 @@
             const kindIcon = t.kind === "option" ? "📝" : "📈";
             return `<div class="trade-row">
               <span>${icon} ${kindIcon}</span>
-              <span><strong>${t.symbol||t.underlying||""}</strong> <span class="muted">${t.runner_name||""}</span></span>
+              <span><strong title="${t.symbol||t.underlying||""}">${Labels.symbol(t.symbol||t.underlying||"")}</strong> <span class="muted">${t.runner_name||""}</span></span>
               <span class="${t.side==="BUY"?"pnl-pos":"pnl-neg"}">${t.side||""}</span>
               <span class="num">${t.qty||""}</span>
               <span class="num ${t.net_pnl>=0?"pnl-pos":"pnl-neg"}">${fmtSigned(t.net_pnl||0)}</span>

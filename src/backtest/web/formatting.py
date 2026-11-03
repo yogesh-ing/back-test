@@ -28,7 +28,8 @@ def _group_integer(digits: str, locale: str) -> str:
             return digits
         head, tail = digits[:-3], digits[-3:]
         pairs = (len(head) % 2)
-        chunks = ([head[:pairs]] if pairs else []) + [head[i:i + 2] for i in range(pairs, len(head), 2)]
+        chunks = [head[:pairs]] if pairs else []
+        chunks += [head[i:i + 2] for i in range(pairs, len(head), 2)]
         return ",".join(chunks) + f",{tail}"
     chunks = []
     while len(digits) > 3:

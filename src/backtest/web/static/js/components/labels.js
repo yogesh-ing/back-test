@@ -101,7 +101,22 @@ const Labels = (() => {
         return structure(code).split(" (")[0];
     }
 
-    return { humanise, strategy, segment, structure, structureShort, warm };
+    /**
+     * An option book stores its trade symbol as "<UNDERLYING> <structure_type>"
+     * (paper_runner.py:1872, options_bridge.py:1285), so the persisted value
+     * carries a governed key and every surface that prints it would leak
+     * "NIFTY short_straddle". The underlying is an exchange symbol and stays
+     * verbatim; only a lowercase snake_case token after it can be a structure.
+     */
+    function symbol(raw) {
+        return String(raw ?? "").split(" ").map((token, index) => (
+            index > 0 && /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(token)
+                ? structureShort(token)
+                : token
+        )).join(" ");
+    }
+
+    return { humanise, strategy, segment, structure, structureShort, symbol, warm };
 })();
 
 // Browser global; the Node harness reads the same file and evaluates it.
