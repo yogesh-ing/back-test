@@ -1257,6 +1257,11 @@ class OptionsBridge:
                         "qty": leg.total_quantity,
                         "entry_price": float(leg.entry_price),
                         "current_price": float(leg.current_price),
+                        "prev_close_mark": (
+                            round(float(leg.prev_close_mark), 2)
+                            if getattr(leg, "prev_close_mark", None) is not None
+                            else None
+                        ),
                         "pnl": float(leg.unrealized_pnl),
                         # R1: per-leg mark freshness contract
                         "mark_ts": leg.mark_ts,
@@ -1275,7 +1280,36 @@ class OptionsBridge:
                 )
             entry = _net_premium("entry_price")
             current = _net_premium("current_price")
+            has_all_prev_close = bool(legs) and all(
+                getattr(lg, "prev_close_mark", None) is not None for lg in legs
+            )
+            prev_close_net = (
+                round(_net_premium("prev_close_mark"), 2)
+                if has_all_prev_close
+                else None
+            )
             unrealized = float(structure.total_unrealized_pnl)
+            net_open_dec = (
+                structure.total_unrealized_pnl
+                - structure.total_commission
+                - getattr(structure, "statutory_fees", Decimal("0"))
+            )
+            net_open_pnl = round(float(net_open_dec), 2)
+            carried = bool(getattr(structure, "carried_overnight", False))
+            raw_prior_net = getattr(structure, "prior_close_net_pnl", None)
+            prior_close_net_pnl = (
+                round(float(raw_prior_net), 2) if raw_prior_net is not None else None
+            )
+            if carried and raw_prior_net is not None:
+                today_pnl: Optional[float] = round(
+                    float(net_open_dec - raw_prior_net), 2
+                )
+            elif carried and prev_close_net is not None and units > 0:
+                today_pnl = round((current - prev_close_net) * units, 2)
+            elif not carried:
+                today_pnl = net_open_pnl
+            else:
+                today_pnl = None
             structure_stale = bool(
                 self.runner_running and structure.is_mark_stale(self.stale_after_seconds)
             )
@@ -1291,16 +1325,21 @@ class OptionsBridge:
                     "lot_size": legs[0].lot_size if legs else 0,
                     "entry_price": round(entry, 2),
                     "current_price": round(current, 2),
+                    "prev_close_mark": prev_close_net,
                     "unrealized_pnl": round(unrealized, 2),
+                    "net_open_pnl": net_open_pnl,
+                    "prior_close_net_pnl": prior_close_net_pnl,
+                    "today_pnl": today_pnl,
                     "entry_cost": round(entry * units, 2),
                     "open_pnl_pct": (
                         round(unrealized / (entry * units), 4) if entry * units else 0.0
                     ),
                     "entry_ts": structure.opened_at.isoformat() if structure.opened_at else None,
-                    # BUG-18: say which session this risk was taken in, and stop
-                    # the reader guessing whether it has been sleeping in it.
+                    # BUG-18 & Sprint D / Ticket D2: carry horizon + session slice clarity
+                    "carry_policy": self.carry_policy,
+                    "intraday_squareoff_minutes_before": self.intraday_squareoff_minutes_before,
                     "entry_session_date": getattr(structure, "entry_session_date", None),
-                    "carried_overnight": bool(getattr(structure, "carried_overnight", False)),
+                    "carried_overnight": carried,
                     # R1: per-structure mark freshness contract
                     "mark_ts": structure.mark_ts,
                     "mark_stale": structure_stale,
@@ -1326,7 +1365,9 @@ class OptionsBridge:
                     # on this row: a structure id is unique for the life of
                     # the structure, unlike a symbol label.
                     "position_key": structure.structure_id,
-                    "stop_loss": self._operator_level_for(structure.structure_id, self.manual_stop_loss),
+                    "stop_loss": self._operator_level_for(
+                        structure.structure_id, self.manual_stop_loss
+                    ),
                     "target": self._operator_level_for(structure.structure_id, self.manual_target),
                     # Net Greeks for the whole structure (units-scaled), or
                     # None when they cannot be computed honestly.

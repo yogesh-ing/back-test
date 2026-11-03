@@ -181,6 +181,12 @@
                         <span id="pos-summary"></span></div>
                 </div>
                 <div class="pos-toolbar-controls">
+                    <select id="pos-carry-filter" class="input input-select" style="min-width:140px;"
+                            aria-label="Filter positions by carry horizon">
+                        <option value="">All horizons</option>
+                        <option value="intraday">⏱ Intraday</option>
+                        <option value="positional">📅 Positional</option>
+                    </select>
                     <input id="pos-search" class="input" type="text"
                            placeholder="Filter symbol / instance…" autocomplete="off">
                     <label class="pos-check muted" title="Hide rows with no stop or target armed">
