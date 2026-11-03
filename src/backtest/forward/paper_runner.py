@@ -81,6 +81,7 @@ from backtest.timekeeping import (
     entry_window_refusal,
     from_market_clock,
     from_stored_utc,
+    iso_utc,
     now_utc,
 )
 
@@ -456,6 +457,50 @@ def _infer_wing_distance_pct(strategy: Any) -> Optional[float]:
     return None
 
 
+def _ledger_iso_utc(ts: Any = None) -> str:
+    """Normalize any OrderLedger timestamp to canonical aware-UTC ISO-8601 (Ticket C1).
+
+    Institutional Two-Layer Clock Law:
+      * Engine, in-memory OrderLedger, and SQL storage use canonical UTC
+        (``YYYY-MM-DDTHH:MM:SS...+00:00``) so lexicographical sorting, hold
+        duration, and latency math across equity (wall-clock) and option-leg
+        (bar-clock) fills never drift by 5h 30m.
+      * Naive strings/datetimes arriving from market feeds or option bridges
+        represent exchange time (IST ``+05:30``) and enter through
+        :func:`from_market_clock`; aware strings/datetimes convert preserving
+        the exact instant; missing/unparseable values fall back fail-soft to
+        :func:`now_utc` so a malformed vendor string never drops a fill.
+    """
+    if ts is None or (isinstance(ts, str) and not ts.strip()):
+        return iso_utc(now_utc()) or ""
+    try:
+        parsed = from_market_clock(ts)
+        if parsed is not None:
+            return iso_utc(parsed) or ""
+    except (TypeError, ValueError):
+        logger.warning(
+            "[ledger] unparseable timestamp %r handed to OrderLedger; falling back to now_utc()",
+            ts,
+        )
+    return iso_utc(now_utc()) or ""
+
+
+def _ledger_stored_iso_utc(ts: Any = None) -> str:
+    """Normalize a previously persisted ledger timestamp (`reattach_order`) to aware UTC."""
+    if ts is None or (isinstance(ts, str) and not ts.strip()):
+        return _ledger_iso_utc()
+    try:
+        parsed = from_stored_utc(ts)
+        if parsed is not None:
+            return iso_utc(parsed) or ""
+    except (TypeError, ValueError):
+        logger.warning(
+            "[ledger] unparseable stored timestamp %r in reattach_order; falling back to now_utc()",
+            ts,
+        )
+    return _ledger_iso_utc()
+
+
 class OrderLedger:
     """Thread-safe order tagging & fill-routing ledger.
 
@@ -553,7 +598,7 @@ class OrderLedger:
             order_type=request.order_type,
             limit_price=request.limit_price,
             status=ORDER_PENDING,
-            created_ts=datetime.now(timezone.utc).isoformat(),
+            created_ts=_ledger_iso_utc(),
             tag=dict(request.tag),
         )
         with self._lock:
@@ -569,7 +614,7 @@ class OrderLedger:
             if order is None or order.status != ORDER_PENDING:
                 return False
             order.status = ORDER_CANCELLED
-            order.updated_ts = datetime.now(timezone.utc).isoformat()
+            order.updated_ts = _ledger_iso_utc()
         self._notify_persistence(order)
         return True
 
@@ -586,7 +631,7 @@ class OrderLedger:
                 return False
             order.status = ORDER_REJECTED
             order.reject_reason = str(reason or "rejected")
-            order.updated_ts = datetime.now(timezone.utc).isoformat()
+            order.updated_ts = _ledger_iso_utc()
         self._notify_persistence(order)
         return True
 
@@ -635,7 +680,7 @@ class OrderLedger:
                 order.limit_price = new_price
                 order.amended_limit_price = new_price
             order.amend_count += 1
-            order.amended_ts = datetime.now(timezone.utc).isoformat()
+            order.amended_ts = _ledger_iso_utc()
             order.updated_ts = order.amended_ts
             return order
 
@@ -657,6 +702,7 @@ class OrderLedger:
         Raises ``KeyError`` if the client order id is unknown — an unknown
         order id must never silently fill.
         """
+        fill_ts = _ledger_iso_utc(ts)
         with self._lock:
             instance_id = self._routing.get(client_order_id)
             if instance_id is None:
@@ -671,7 +717,7 @@ class OrderLedger:
                 side=order.side,
                 quantity=qty,
                 price=float(price),
-                ts=ts or datetime.now(timezone.utc).isoformat(),
+                ts=fill_ts,
                 tag=dict(order.tag or {}),
                 commission=float(commission or 0.0),
                 statutory_fees=float(statutory_fees or 0.0),
@@ -753,7 +799,7 @@ class OrderLedger:
         if side not in (SIDE_BUY, SIDE_SELL):
             raise ValueError(f"order side must be BUY or SELL, got {side!r}")
 
-        stamp = ts or datetime.now(timezone.utc).isoformat()
+        stamp = _ledger_iso_utc(ts)
         coid = self._make_client_order_id(instance_id)
         norm_type = str(order_type or "MARKET").strip().upper() or "MARKET"
         order = Order(
@@ -843,7 +889,7 @@ class OrderLedger:
             order_type="MARKET",
             limit_price=None,
             status=ORDER_PENDING,
-            created_ts=str(spec.get("created_ts") or datetime.now(timezone.utc).isoformat()),
+            created_ts=_ledger_stored_iso_utc(spec.get("created_ts")),
             tag=dict(spec.get("tag") or {}),
             broker_order_id=broker_order_id,
         )
@@ -998,12 +1044,12 @@ class OrderLedger:
         if not created_ts:
             return 0.0
         try:
-            created = datetime.fromisoformat(str(created_ts).replace("Z", "+00:00"))
+            created = from_stored_utc(str(created_ts))
         except ValueError:
             return 0.0
-        if created.tzinfo is None:
-            created = created.replace(tzinfo=timezone.utc)
-        return max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
+        if created is None:
+            return 0.0
+        return max(0.0, (now_utc() - created).total_seconds())
 
     @property
     def fill_count(self) -> int:

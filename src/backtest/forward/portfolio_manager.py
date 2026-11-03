@@ -126,6 +126,9 @@ class PortfolioManager:
         # Aggregate anchors (manager-level — used for combined views)
         self.total_capital: float = 0.0
         self.peak_equity: float = 0.0
+        self._session_peak_daily_pnl: float = 0.0
+        self._risk_session_date_ist: str = current_session_date().isoformat()
+        self._last_restore_risk_note: str = ""
         self._day_start_equity: float = 0.0
         self._current_day: Optional[str] = None
 
@@ -144,6 +147,7 @@ class PortfolioManager:
         # that cannot be derived.)
         # ----------------------------------------------------------------
         self._bucket_peak: Dict[str, float] = {"paper": 0.0, "live": 0.0}
+        self._bucket_session_peak_pnl: Dict[str, float] = {"paper": 0.0, "live": 0.0}
         self._bucket_halted: Dict[str, bool] = {"paper": False, "live": False}
         self._bucket_halt_reason: Dict[str, Optional[str]] = {"paper": None, "live": None}
         self._bucket_halt_mode: Dict[str, Optional[str]] = {"paper": None, "live": None}
@@ -398,6 +402,9 @@ class PortfolioManager:
         """
         if not delta:
             return
+        removed_pos_pnl = (
+            max(0.0, self._safe_runner_daily_pnl(runner)) if delta < 0 else 0.0
+        )
         for key in self._anchor_keys(runner, self._runner_bucket(runner)):
             anchor = self._bucket_day_start.get(key, 0.0)
             if anchor > 0:
@@ -405,10 +412,19 @@ class PortfolioManager:
             peak = self._bucket_peak.get(key, 0.0)
             if peak > 0:
                 self._bucket_peak[key] = round(max(peak + delta, 0.0), 2)
+            if removed_pos_pnl > 0:
+                self._bucket_session_peak_pnl[key] = round(
+                    max(0.0, self._bucket_session_peak_pnl.get(key, 0.0) - removed_pos_pnl),
+                    2,
+                )
         if self._day_start_equity > 0:
             self._day_start_equity = round(self._day_start_equity + delta, 2)
         if self.peak_equity > 0:
             self.peak_equity = round(max(self.peak_equity + delta, 0.0), 2)
+        if removed_pos_pnl > 0:
+            self._session_peak_daily_pnl = round(
+                max(0.0, self._session_peak_daily_pnl - removed_pos_pnl), 2
+            )
         logger.info(
             "[ledger] capital flow %+.2f applied to anchors (runner=%s bucket=%s)",
             delta,
@@ -590,12 +606,141 @@ class PortfolioManager:
         """Initialize per-bucket state if not yet present (idempotent)."""
         if mode not in self._bucket_peak:
             self._bucket_peak[mode] = 0.0
+            self._bucket_session_peak_pnl[mode] = 0.0
             self._bucket_halted[mode] = False
             self._bucket_halt_reason[mode] = None
             self._bucket_halt_mode[mode] = None
             self._bucket_halted_ts[mode] = None
             self._bucket_day_start[mode] = 0.0
             self._bucket_day[mode] = None
+        elif mode not in self._bucket_session_peak_pnl:
+            self._bucket_session_peak_pnl[mode] = 0.0
+
+    def _slice_runners_for_key(self, key: str) -> List[StrategyRunner]:
+        """Resolve runners belonging to a bucket ('paper'|'live') or 'segment:<name>'."""
+        if key in ("paper", "live"):
+            return self._bucket_runners(key)
+        if key.startswith("segment:"):
+            return self._segment_runners(key.split(":", 1)[1])
+        return []
+
+    @staticmethod
+    def _safe_runner_daily_pnl(runner: StrategyRunner) -> float:
+        """Read a runner's session P&L without prematurely stamping ``_pnl_session``.
+
+        Calling ``runner.daily_pnl()`` on a freshly spawned runner before its
+        first bar stamps ``_pnl_session = current_session_date()`` (wall clock),
+        preventing ``_capture_pnl_session()`` from rolling on earlier-dated
+        replay bars. Before any bar or restored session anchor exists, session
+        P&L is simply ``equity() - allocated_capital``.
+        """
+        if (
+            getattr(runner, "_pnl_session", None) is not None
+            or getattr(runner, "_last_bar_ts", None)
+        ):
+            return float(runner.daily_pnl())
+        alloc = float(
+            getattr(getattr(runner, "config", None), "allocated_capital", 0.0) or 0.0
+        )
+        return (float(runner.equity()) - alloc) if alloc > 0 else 0.0
+
+    def _maybe_roll_risk_session_ist(self) -> bool:
+        """Roll session high-water marks & auto-halt latches cleanly at 00:00 IST."""
+        today_ist = current_session_date().isoformat()
+        prev_session = self._risk_session_date_ist
+        bar_sessions = [
+            str(getattr(r, "_pnl_session", "") or "")
+            for r in self._runners.values()
+            if getattr(r, "_pnl_session", None)
+        ]
+        cur_bar_session = max(bar_sessions) if bar_sessions else None
+        prev_bar_session = getattr(self, "_bar_risk_session", None)
+        if cur_bar_session:
+            self._bar_risk_session = cur_bar_session
+        if (
+            prev_bar_session
+            and cur_bar_session
+            and cur_bar_session > prev_bar_session
+        ):
+            # Bar-clock session advanced (replay / synthetic multi-day run):
+            # zero intraday peak P&L so yesterday's gain is not added on top of
+            # today's new open baseline.
+            self._session_peak_daily_pnl = 0.0
+            for key in list(self._bucket_session_peak_pnl.keys()):
+                self._bucket_session_peak_pnl[key] = 0.0
+        if prev_session and prev_session != today_ist:
+            self._risk_session_date_ist = today_ist
+            self._session_peak_daily_pnl = 0.0
+            agg_eq = self._aggregate_equity()
+            self.peak_equity = agg_eq if self._runners else 0.0
+            self._day_start_equity = agg_eq if self._runners else 0.0
+            cleared_subjects: List[str] = []
+            if self.halted:
+                cleared_subjects.append("portfolio")
+            self.halted = False
+            self.halt_reason = None
+            self.halt_mode = None
+            self.halted_ts = None
+            for key in list(self._bucket_peak.keys()):
+                self._bucket_session_peak_pnl[key] = 0.0
+                s_runners = self._slice_runners_for_key(key)
+                s_eq = sum(float(r.equity()) for r in s_runners)
+                self._bucket_peak[key] = s_eq if s_runners else 0.0
+                self._bucket_day_start[key] = s_eq if s_runners else 0.0
+                if self._bucket_halted.get(key):
+                    cleared_subjects.append(f"bucket:{key}")
+                self._bucket_halted[key] = False
+                self._bucket_halt_reason[key] = None
+                self._bucket_halt_mode[key] = None
+                self._bucket_halted_ts[key] = None
+            logger.info(
+                "[risk] rolled session risk peak & breaker latches from %s to new IST session %s",
+                prev_session,
+                today_ist,
+            )
+            if cleared_subjects:
+                self._resolve_breaker_alerts(cleared_subjects)
+            return True
+        self._risk_session_date_ist = today_ist
+        return False
+
+    def _sync_slice_session_peak(
+        self, key: Optional[str], runners: List[StrategyRunner]
+    ) -> float:
+        """Update cash-flow-neutral session peak P&L and effective peak equity.
+
+        ``open_baseline = equity - daily_pnl`` is invariant to trading gains/losses
+        within the IST session and shifts strictly by capital added/removed, so
+        ``open_baseline + session_peak_daily_pnl`` preserves intraday drawdown %
+        even across mid-day restarts or offline runner additions/removals.
+        """
+        if key is None:
+            if not runners:
+                self._session_peak_daily_pnl = 0.0
+                self.peak_equity = 0.0
+                return 0.0
+            equity = sum(float(r.equity()) for r in runners)
+            daily_pnl = sum(self._safe_runner_daily_pnl(r) for r in runners)
+            open_baseline = max(0.0, equity - daily_pnl)
+            if daily_pnl > self._session_peak_daily_pnl:
+                self._session_peak_daily_pnl = daily_pnl
+            cf_peak = open_baseline + self._session_peak_daily_pnl
+            self.peak_equity = max(self.peak_equity, equity, cf_peak)
+            return self.peak_equity
+
+        self._ensure_bucket_state(key)
+        if not runners:
+            self._bucket_session_peak_pnl[key] = 0.0
+            self._bucket_peak[key] = 0.0
+            return 0.0
+        equity = sum(float(r.equity()) for r in runners)
+        daily_pnl = sum(self._safe_runner_daily_pnl(r) for r in runners)
+        open_baseline = max(0.0, equity - daily_pnl)
+        if daily_pnl > self._bucket_session_peak_pnl.get(key, 0.0):
+            self._bucket_session_peak_pnl[key] = daily_pnl
+        cf_peak = open_baseline + self._bucket_session_peak_pnl[key]
+        self._bucket_peak[key] = max(self._bucket_peak.get(key, 0.0), equity, cf_peak)
+        return self._bucket_peak[key]
 
     def get_bucket_aggregates(self) -> Dict[str, Dict[str, Any]]:
         """Per-bucket aggregate snapshot — the C4 embedded bucket data.
@@ -1492,12 +1637,16 @@ class PortfolioManager:
             # If this was the last runner in the bucket, reset bucket state
             if not self._bucket_runners(bucket):
                 self._bucket_peak[bucket] = 0.0
+                self._bucket_session_peak_pnl[bucket] = 0.0
                 self._bucket_halted[bucket] = False
                 self._bucket_halt_reason[bucket] = None
                 self._bucket_halt_mode[bucket] = None
                 self._bucket_halted_ts[bucket] = None
                 self._bucket_day_start[bucket] = 0.0
                 self._bucket_day[bucket] = None
+            if not self._runners:
+                self._session_peak_daily_pnl = 0.0
+                self.peak_equity = 0.0
             logger.info("Runner removed: %s (bucket=%s)", runner.config.name, bucket)
             self._persist_state()
             try:
@@ -2495,11 +2644,22 @@ class PortfolioManager:
         with self._lock:
             for runner in self._runners.values():
                 runner.reset_daily_anchor()
+            self._risk_session_date_ist = current_session_date().isoformat()
             self._day_start_equity = self._aggregate_equity()
-            # Per-bucket day anchors
-            for mode in ("paper", "live"):
-                self._bucket_day_start[mode] = self._bucket_equity(mode)
-                self._bucket_day[mode] = datetime.now(timezone.utc).date().isoformat()
+            self._session_peak_daily_pnl = 0.0
+            self.peak_equity = self._day_start_equity
+            # Per-bucket + per-segment day anchors
+            for key in list(
+                {"paper", "live"}
+                | {k for k in self._bucket_peak.keys() if k.startswith("segment:")}
+            ):
+                s_runners = self._slice_runners_for_key(key)
+                s_eq = sum(float(r.equity()) for r in s_runners)
+                self._bucket_day_start[key] = s_eq
+                self._bucket_session_peak_pnl[key] = 0.0
+                self._bucket_peak[key] = s_eq
+                if key in ("paper", "live"):
+                    self._bucket_day[key] = datetime.now(timezone.utc).date().isoformat()
             logger.info("Daily PnL anchors reset (baseline=%.2f)", self._day_start_equity)
             self._persist_state()
 
@@ -2754,8 +2914,63 @@ class PortfolioManager:
         for key, snapshot in self._parked_snapshots.items():
             if key not in live_ids:
                 runners.append(snapshot)
+        session_date_ist = self._risk_session_date_ist or current_session_date().isoformat()
+        agg_eq = sum(float(r.equity()) for r in live)
+        agg_daily = sum(self._safe_runner_daily_pnl(r) for r in live)
+        agg_base = max(0.0, agg_eq - agg_daily)
+        implied_mgr_peak_pnl = (
+            (self.peak_equity - agg_base) if (live and self.peak_equity > 0) else 0.0
+        )
+        mgr_peak_pnl = (
+            round(max(0.0, self._session_peak_daily_pnl, agg_daily, implied_mgr_peak_pnl), 2)
+            if live
+            else 0.0
+        )
+
+        bucket_keys = ["paper", "live"] + sorted(
+            k
+            for k in (set(self._bucket_peak.keys()) | set(self._bucket_halted.keys()))
+            if k.startswith("segment:")
+        )
+        buckets_payload: Dict[str, Dict[str, Any]] = {}
+        for mode in bucket_keys:
+            s_runners = self._slice_runners_for_key(mode)
+            s_eq = sum(float(r.equity()) for r in s_runners)
+            s_daily = sum(self._safe_runner_daily_pnl(r) for r in s_runners)
+            s_base = max(0.0, s_eq - s_daily)
+            b_peak = self._bucket_peak.get(mode, 0.0)
+            implied_b_peak_pnl = (
+                (b_peak - s_base) if (s_runners and b_peak > 0) else 0.0
+            )
+            b_peak_pnl = (
+                round(
+                    max(
+                        0.0,
+                        self._bucket_session_peak_pnl.get(mode, 0.0),
+                        s_daily,
+                        implied_b_peak_pnl,
+                    ),
+                    2,
+                )
+                if s_runners
+                else 0.0
+            )
+            buckets_payload[mode] = {
+                "session_date_ist": session_date_ist,
+                "session_peak_daily_pnl": b_peak_pnl,
+                "peak": b_peak,
+                "halted": self._bucket_halted.get(mode, False),
+                "halt_reason": self._bucket_halt_reason.get(mode),
+                "halt_mode": self._bucket_halt_mode.get(mode),
+                "halted_ts": self._bucket_halted_ts.get(mode),
+                "day_start": self._bucket_day_start.get(mode, 0.0),
+                "day": self._bucket_day.get(mode),
+            }
+
         return {
             "manager": {
+                "session_date_ist": session_date_ist,
+                "session_peak_daily_pnl": mgr_peak_pnl,
                 "total_capital": self.total_capital,
                 "peak_equity": self.peak_equity,
                 "day_start_equity": self._day_start_equity,
@@ -2767,18 +2982,7 @@ class PortfolioManager:
                 "tick_count": self.tick_count,
                 "tick_index": self.tick_index,
             },
-            "buckets": {
-                mode: {
-                    "peak": self._bucket_peak.get(mode, 0.0),
-                    "halted": self._bucket_halted.get(mode, False),
-                    "halt_reason": self._bucket_halt_reason.get(mode),
-                    "halt_mode": self._bucket_halt_mode.get(mode),
-                    "halted_ts": self._bucket_halted_ts.get(mode),
-                    "day_start": self._bucket_day_start.get(mode, 0.0),
-                    "day": self._bucket_day.get(mode),
-                }
-                for mode in ("paper", "live")
-            },
+            "buckets": buckets_payload,
             "runners": runners,
         }
 
@@ -2871,7 +3075,7 @@ class PortfolioManager:
             )
             logger.warning(
                 "[state] restored %d of %d runner(s) (%d parked, still saved)%s "
-                "+ breaker latches from %s — restored runners are PAUSED; "
+                "from %s (%s) — restored runners are PAUSED; "
                 "resume explicitly",
                 restored,
                 len(payload.get("runners", [])),
@@ -2882,6 +3086,8 @@ class PortfolioManager:
                     else ""
                 ),
                 self._state_store.path,
+                self._last_restore_risk_note
+                or "session risk state initialized",
             )
         except Exception:  # noqa: BLE001 — a bad restore must not block boot
             logger.exception(
@@ -2974,70 +3180,175 @@ class PortfolioManager:
             self._parked_snapshots.pop(park_key, None)
             restored += 1
 
-        manager = payload.get("manager", {})
+        manager = payload.get("manager", {}) or {}
         # BUG-03: never re-adopt the saved scalar — it is whatever the
         # accumulator had drifted to when the file was written. The runners
         # restored above are the capital.
         self._sync_total_capital()
-        self.peak_equity = float(manager.get("peak_equity", 0.0))
-        # CRITICAL FIX 2026-10-15: Do NOT restore day_start_equity from state —
-        # it's a GHOST from a previous session and causes false daily-loss breaches.
-        # Will be initialized from current equity below (after runners restored).
-        # self._day_start_equity = float(manager.get("day_start_equity", 0.0))
-        self._current_day = manager.get("current_day")
-        self.halted = False
-        self.halt_reason = None
-        self.halt_mode = None
-        self.halted_ts = None
         self.tick_count = int(manager.get("tick_count", 0))
         self.tick_index = int(manager.get("tick_index", 0))
-        # 2026-09-23: halt latches are deliberately NOT restored. Yesterday's
-        # emergency-stop latched the breaker into the state file and it
-        # re-armed on every boot — the dashboard showed "🔴 HALTED: Emergency
-        # flatten (user requested full stop)" forever despite fresh trading.
-        # A halt is a session-scoped circuit state: it guards THIS session's
-        # P&L, so it starts clean each boot (fail-safe for trading, unlike
-        # fail-closed for the boot — owner hit this mid-testing).
-        # Same rule for the DAY ANCHOR + PEAK: a saved day_start from a
-        # previous session is a GHOST — the book may have been rebuilt since
-        # (the ₹1.73 Cr anchor vs a ₹20 L book computed daily PnL of
-        # -₹1.53 Cr and tripped the global breaker instantly). The anchor is
-        # re-baselined to the restored book on the first bar (see _on_bar).
-        # CRITICAL FIX 2026-10-15: Do NOT leave anchors at 0.0 — if no bars
-        # arrive before the first risk check (e.g., market closed, all runners
-        # paused), the daily PnL calc becomes garbage (equity - 0 = massive
-        # fake gain/loss). Initialize from current aggregate so risk checks
-        # are sane even before the first bar.
-        self._day_start_equity = 0.0  # Will be set below after runners restored
-        self.peak_equity = 0.0
         self._current_day = None
         self._bucket_day_start = {"paper": 0.0, "live": 0.0}
         self._bucket_day = {"paper": None, "live": None}
 
-        for mode, bucket in payload.get("buckets", {}).items():
-            self._bucket_peak[mode] = 0.0  # session-scoped like the day anchor
-            self._bucket_halted[mode] = False
-            self._bucket_halt_reason[mode] = None
-            self._bucket_halt_mode[mode] = None
-            self._bucket_halted_ts[mode] = None
-            # day_start / day stay session-scoped (re-baselined on first bar)
+        today_ist = current_session_date().isoformat()
+        saved_session_date_ist = (
+            str(manager.get("session_date_ist") or "").strip() or None
+        )
+        same_ist_session = saved_session_date_ist == today_ist
+        self._risk_session_date_ist = today_ist
 
-        # CRITICAL FIX 2026-10-15: Initialize daily loss anchors from CURRENT
-        # equity after all runners are restored. This prevents false breaker
-        # trips when the state file has old day_start values from a previous
-        # session and no bars arrive before the first risk check.
-        current_equity = self._aggregate_equity()
-        if current_equity > 0:
-            self._day_start_equity = current_equity
-            for mode in ("paper", "live"):
-                if self._bucket_runners(mode):
-                    self._bucket_day_start[mode] = self._bucket_equity(mode)
+        all_runners = list(self._runners.values())
+        agg_equity = self._aggregate_equity()
+        agg_daily_pnl = sum(self._safe_runner_daily_pnl(r) for r in all_runners)
+        agg_open_baseline = max(0.0, agg_equity - agg_daily_pnl) if all_runners else 0.0
+        self._day_start_equity = (
+            round(agg_open_baseline if agg_open_baseline > 0 else max(0.0, agg_equity), 2)
+            if all_runners
+            else 0.0
+        )
+
+        saved_buckets = payload.get("buckets", {}) or {}
+        all_slice_keys = sorted(
+            {"paper", "live"}
+            | set(saved_buckets.keys())
+            | {k for k in self._bucket_peak.keys() if k.startswith("segment:")}
+        )
+
+        if same_ist_session:
+            # Institutional RMS Same-Day Restart (Sprint B / Ticket B1):
+            # Reconstruct cash-flow-neutral peak equity from the surviving
+            # runners' session-open baseline + persisted session_peak_daily_pnl,
+            # and keep active halt latches locked for the rest of today_ist.
+            saved_mgr_peak_pnl = max(
+                0.0, float(manager.get("session_peak_daily_pnl", 0.0) or 0.0)
+            )
+            self._session_peak_daily_pnl = (
+                round(max(0.0, saved_mgr_peak_pnl, agg_daily_pnl), 2)
+                if all_runners
+                else 0.0
+            )
+            self.peak_equity = (
+                round(
+                    max(
+                        0.0,
+                        agg_equity,
+                        agg_open_baseline + self._session_peak_daily_pnl,
+                    ),
+                    2,
+                )
+                if all_runners
+                else 0.0
+            )
+            self.halted = bool(manager.get("halted", False))
+            self.halt_reason = manager.get("halt_reason") if self.halted else None
+            self.halt_mode = manager.get("halt_mode") if self.halted else None
+            self.halted_ts = manager.get("halted_ts") if self.halted else None
+
+            for key in all_slice_keys:
+                self._ensure_bucket_state(key)
+                b_snap = saved_buckets.get(key) or {}
+                b_session = (
+                    str(b_snap.get("session_date_ist") or saved_session_date_ist or "").strip()
+                    or None
+                )
+                s_runners = self._slice_runners_for_key(key)
+                s_eq = sum(float(r.equity()) for r in s_runners)
+                s_daily = sum(self._safe_runner_daily_pnl(r) for r in s_runners)
+                s_base = max(0.0, s_eq - s_daily) if s_runners else 0.0
+                self._bucket_day_start[key] = (
+                    round(s_base if s_base > 0 else max(0.0, s_eq), 2)
+                    if s_runners
+                    else 0.0
+                )
+                self._bucket_day[key] = None
+                if b_session == today_ist:
+                    saved_b_peak_pnl = max(
+                        0.0, float(b_snap.get("session_peak_daily_pnl", 0.0) or 0.0)
+                    )
+                    self._bucket_session_peak_pnl[key] = (
+                        round(max(0.0, saved_b_peak_pnl, s_daily), 2)
+                        if s_runners
+                        else 0.0
+                    )
+                    self._bucket_peak[key] = (
+                        round(
+                            max(
+                                0.0,
+                                s_eq,
+                                s_base + self._bucket_session_peak_pnl[key],
+                            ),
+                            2,
+                        )
+                        if s_runners
+                        else 0.0
+                    )
+                    b_halted = bool(b_snap.get("halted", False))
+                    self._bucket_halted[key] = b_halted
+                    self._bucket_halt_reason[key] = (
+                        b_snap.get("halt_reason") if b_halted else None
+                    )
+                    self._bucket_halt_mode[key] = (
+                        b_snap.get("halt_mode") if b_halted else None
+                    )
+                    self._bucket_halted_ts[key] = (
+                        b_snap.get("halted_ts") if b_halted else None
+                    )
+                else:
+                    self._bucket_session_peak_pnl[key] = 0.0
+                    self._bucket_peak[key] = 0.0
+                    self._bucket_halted[key] = False
+                    self._bucket_halt_reason[key] = None
+                    self._bucket_halt_mode[key] = None
+                    self._bucket_halted_ts[key] = None
+
+            self._last_restore_risk_note = (
+                f"same-day session risk peak & breaker latches restored (session={today_ist})"
+            )
+        else:
+            # New IST Trading Day (or undated legacy state file):
+            # Roll session peak P&L and halt latches clean so prior-day ghosts
+            # never carry into a fresh morning session.
+            self._session_peak_daily_pnl = 0.0
+            self.peak_equity = 0.0
+            self.halted = False
+            self.halt_reason = None
+            self.halt_mode = None
+            self.halted_ts = None
+
+            for key in all_slice_keys:
+                self._ensure_bucket_state(key)
+                s_runners = self._slice_runners_for_key(key)
+                s_eq = sum(float(r.equity()) for r in s_runners)
+                s_daily = sum(self._safe_runner_daily_pnl(r) for r in s_runners)
+                s_base = max(0.0, s_eq - s_daily) if s_runners else 0.0
+                self._bucket_session_peak_pnl[key] = 0.0
+                self._bucket_peak[key] = 0.0
+                self._bucket_halted[key] = False
+                self._bucket_halt_reason[key] = None
+                self._bucket_halt_mode[key] = None
+                self._bucket_halted_ts[key] = None
+                self._bucket_day_start[key] = (
+                    round(s_base if s_base > 0 else max(0.0, s_eq), 2)
+                    if s_runners
+                    else 0.0
+                )
+                self._bucket_day[key] = None
+
+            prior_label = saved_session_date_ist or "undated"
+            self._last_restore_risk_note = (
+                f"prior-session ({prior_label}) risk peak & breaker latches "
+                f"rolled clean for new IST session ({today_ist})"
+            )
+
+        if self._day_start_equity > 0:
             logger.info(
-                "[state] daily loss anchors initialized from current equity: "
-                "manager=%.2f, paper=%.2f, live=%.2f",
+                "[state] daily loss anchors initialized: "
+                "manager=%.2f, paper=%.2f, live=%.2f (%s)",
                 self._day_start_equity,
                 self._bucket_day_start.get("paper", 0.0),
                 self._bucket_day_start.get("live", 0.0),
+                self._last_restore_risk_note,
             )
 
         return restored
@@ -3196,10 +3507,12 @@ class PortfolioManager:
         NOT halt 'live' — the breakers are independent (C1/C5). The manager
         also tracks a global halt for the master-kill path.
         """
+        self._maybe_roll_risk_session_ist()
         now_ts = datetime.now(timezone.utc).isoformat()
         # Buckets that tripped *in this pass* — the master alert is suppressed
         # when one of them already raised its own (no double notification).
         fresh_buckets = []
+        any_fresh_halt = False
 
         # --- Per-bucket risk evaluation (independent breakers) ---
         for mode in ("paper", "live"):
@@ -3208,8 +3521,7 @@ class PortfolioManager:
                 continue
 
             equity = self._bucket_equity(mode)
-            if equity > self._bucket_peak.get(mode, 0.0):
-                self._bucket_peak[mode] = equity
+            self._sync_slice_session_peak(mode, bucket_runners)
 
             # The day, not the life. ``equity - day_start`` was the anchor taken
             # at the bucket's first bar and never rolled, so it fed the breaker
@@ -3233,6 +3545,7 @@ class PortfolioManager:
                 self._bucket_halt_mode[mode] = report.halt_mode
                 self._bucket_halted_ts[mode] = now_ts
                 fresh_buckets.append(mode)
+                any_fresh_halt = True
                 logger.critical(
                     "BUCKET HALT [%s]: %s (mode=%s)",
                     mode.upper(),
@@ -3275,8 +3588,7 @@ class PortfolioManager:
             self._ensure_bucket_state(key)
 
             seg_equity = sum(r.equity() for r in seg_runners)
-            if seg_equity > self._bucket_peak.get(key, 0.0):
-                self._bucket_peak[key] = seg_equity
+            self._sync_slice_session_peak(key, seg_runners)
             if self._bucket_day_start.get(key, 0.0) <= 0:
                 self._bucket_day_start[key] = seg_equity
 
@@ -3294,6 +3606,7 @@ class PortfolioManager:
                 self._bucket_halt_reason[key] = report.halt_reason
                 self._bucket_halt_mode[key] = report.halt_mode
                 self._bucket_halted_ts[key] = now_ts
+                any_fresh_halt = True
                 logger.critical(
                     "SEGMENT HALT [%s → %s]: %s (mode=%s)",
                     seg_name,
@@ -3315,8 +3628,7 @@ class PortfolioManager:
         # when each individual segment is inside its own limits.
         all_runners = list(self._runners.values())
         equity = self._aggregate_equity()
-        if equity > self.peak_equity:
-            self.peak_equity = equity
+        self._sync_slice_session_peak(None, all_runners)
 
         report = self.supervisor.evaluate(
             runners=all_runners,
@@ -3334,6 +3646,7 @@ class PortfolioManager:
             self.halt_reason = report.halt_reason
             self.halt_mode = report.halt_mode
             self.halted_ts = now_ts
+            any_fresh_halt = True
             logger.critical("PORTFOLIO HALT: %s (mode=%s)", self.halt_reason, self.halt_mode)
             if not fresh_buckets:
                 # Combined-book breach with no single bucket tripping: this is
@@ -3358,6 +3671,11 @@ class PortfolioManager:
         elif self.halted and not report.halted:
             # Supervisor says clear but latch stays until explicit reset.
             pass
+
+        if any_fresh_halt:
+            # Institutional RMS: flush tripped halt latches to disk immediately
+            # rather than waiting for the periodic 5-sweep checkpoint.
+            self._persist_state()
 
     def _raise_breaker_alert(
         self,
@@ -3436,19 +3754,20 @@ class PortfolioManager:
 
     def _refresh_anchors(self) -> None:
         """Refresh manager-level + per-bucket peak/day-start anchors."""
+        self._maybe_roll_risk_session_ist()
+        all_runners = list(self._runners.values())
         equity = self._aggregate_equity()
-        if equity > self.peak_equity:
-            self.peak_equity = equity
+        self._sync_slice_session_peak(None, all_runners)
         # Session baseline: fixed at the first runner's first bar (or reset).
         if self._day_start_equity <= 0:
             self._day_start_equity = equity
 
         # Per-bucket anchors
         for mode in ("paper", "live"):
+            b_runners = self._bucket_runners(mode)
             b_equity = self._bucket_equity(mode)
-            if b_equity > self._bucket_peak.get(mode, 0.0):
-                self._bucket_peak[mode] = b_equity
-            if self._bucket_day_start.get(mode, 0.0) <= 0 and self._bucket_runners(mode):
+            self._sync_slice_session_peak(mode, b_runners)
+            if self._bucket_day_start.get(mode, 0.0) <= 0 and b_runners:
                 self._bucket_day_start[mode] = b_equity
 
         # Per-segment anchors (Phase D) — same rule, one slice per live
@@ -3462,9 +3781,9 @@ class PortfolioManager:
         for seg_name in seg_names:
             key = self._segment_key(seg_name)
             self._ensure_bucket_state(key)
-            s_equity = sum(r.equity() for r in self._segment_runners(seg_name))
-            if s_equity > self._bucket_peak.get(key, 0.0):
-                self._bucket_peak[key] = s_equity
+            s_runners = self._segment_runners(seg_name)
+            s_equity = sum(r.equity() for r in s_runners)
+            self._sync_slice_session_peak(key, s_runners)
             if self._bucket_day_start.get(key, 0.0) <= 0:
                 self._bucket_day_start[key] = s_equity
 

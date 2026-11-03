@@ -1,0 +1,431 @@
+# Institutional Runner Lifecycle, Late-Login Auto-Wake & Nov-02 Bug-Fix Plan
+
+**Date**: 2026-11-02 (updated 2026-11-03)  
+**Baseline Commit**: `b2b76a4` (`feature/options-trading-dev` — includes PR #51 `8e1cba4` and PR #52 `Sprint A-1`)  
+**Status**: Approved Architecture & Implementation Reference (Read before touching `forward/`, `brokers/`, or `portfolio` UI)  
+**As-Built**: Sprint A-1 (`A1` + `A2` + `A4`) **merged** to `feature/options-trading-dev` via PR [#52](https://github.com/yogesh-ing/back-test/pull/52) (`b2b76a4`). Sprint B (`Ticket B1`) and Sprint C (`Ticket C1` + `Ticket C2` + `Ticket C3`) **implemented and verified** on `arena/d4936721-back-test` (`28 → 0` standing pytest baseline failures, `0` regressions). See **Implementation Status** below.
+
+---
+
+## Implementation Status (as-built, updated 2026-11-03)
+
+| Ticket | Sub-PR | Status | Commit / Blocker |
+| :--- | :--- | :--- | :--- |
+| **A1** — `WAITING_FOR_FEED` + frozen-mark stub | `Sprint A-1` | ✅ **DONE (merged PR #52)** | `cb91d41` / `b2b76a4` |
+| **A2** — `on_broker_authenticated` auto-wake | `Sprint A-1` | ✅ **DONE (merged PR #52)** | `9e5b000` / `b2b76a4` |
+| **A4** — market-hours paging + login banner | `Sprint A-1` | ✅ **DONE (merged PR #52)** | `74cb76b` / `b2b76a4` |
+| **A3** — open-trade continuity + `armed_at_utc` | `Sprint A-2` | ⏸ **BLOCKED** | Waits for `A-1` to complete one clean live session (§3 sequencing rule). Highest blast radius — ships alone for 1-commit rollback. |
+| **B1** — restart-proof risk state | `Sprint B` | ✅ **DONE** | `0eb8f1f` — Cash-flow-neutral session high-water mark & halt-latch persistence across restarts (`28 → 27` gate baseline). |
+| **C1** — two-layer clock law in `OrderLedger` | `Sprint C` | ✅ **DONE** | `fdaab48` — Canonical `+00:00` UTC across all `OrderLedger` writers & legacy snapshot hydration (`#23`). |
+| **C2** — mStock Layer-0 auth gate + `401/403` kill-latch | `Sprint C` | ✅ **DONE** | `c009da0` — `0` HTTP packets / `0` `.mstock_session_token` leaks when logged out; instant `401/403` `STATUS_EXPIRED` kill-latch + Ticket A4 alert; Upstox untouched (`27 → 25` gate baseline). |
+| **C3** — stale test signatures + timestamp repair cutover | `Sprint C` | ✅ **DONE (code); `--execute` ops-gated** | Standing test debt cleared **`25 → 0` (`0` failures across entire gate)**. `scripts/repair_trade_timestamps.py` stays strictly dry-run by default pending operator post-market DB snapshot. |
+| **D1** — PostgreSQL single source of truth | `Sprint D` | ⬜ Not started | Board issue `#24`. Migrations start at `024_*`. |
+| **D2** — unified `Positions` blotter + carry badges | `Sprint D` | ⬜ Not started | Unblocked in part by A1 (books now stay in `self._runners`). |
+| **D3** — `FROZEN_AT_SPAWN` drift badge + flat rollover | `Sprint D` | ⬜ Not started | Board issue `#3`. |
+
+Two stale test ratchets were fixed inside PR #52 because they were red on the
+branch: `70acbd9` (`test_option_view.mjs` 24 → 29, caused by A1 itself) and
+`a1d0de8` (`test_orders_tab.mjs` 21 → 23, caused by `a80e689` back in Sprint 2).
+Both counts went *up*, so no test was dropped — the pytest wrappers were the
+stale side.
+
+### Where the build deviated from this document
+
+Recorded so a reviewer does not read the spec below as a description of the code:
+
+1. **`session_state` vocabulary (§A4 line "Outside `09:00–15:30 IST`")**. `get_market_day_state()`
+   only ever returns `PRE_OPEN`, `OPEN`, `POST_CLOSE`. `CLOSED_TODAY`,
+   `CLOSED_WEEKEND` and `CLOSED_HOLIDAY` do not exist in the code. The **gate
+   condition** this plan specifies (`in ("PRE_OPEN", "OPEN")`) is correct as
+   written — do not "fix" it by matching the closed-state names.
+2. **`broker_auth_modal.js` was not modified** (§A4 Files list). The banner is
+   *derived* from the `/api/broker/status` payload on every poll rather than
+   latched to an event, so the existing success path
+   (`handleTotp` → `refreshAndShowAuth()` → `BrokerStatus.refresh()`) already
+   clears it the instant a TOTP verifies. Nothing in the modal needed to change
+   to satisfy "persists until `verify-totp` succeeds".
+3. **`mstock.py` and `market_status.py` were not modified** (§A4 Files list).
+   The market gate reads the existing helper as-is; the `401/403` kill-latch and
+   the Layer-0 packet gate are Ticket C2's scope, deliberately kept out of A-1.
+4. **`broker_auth.py` was not modified** (§A2 Files list). The post-auth notify
+   lives entirely inside `session_manager` (`_notify_portfolio_authenticated`),
+   which already owns both the `verify_totp` success path and the
+   remembered-session boot restore, so the API layer needed no hook.
+5. **Rate-limit bypass needed no notifier change** (§A4 Design 3). `notifier.py`
+   skips rate limiting entirely at or above `critical`, so raising the new rung
+   at CRITICAL buys both the quiet-hour and the hourly-cap exemption. Naming
+   unimplemented channels (`slack`, `discord`, `sms`, `desktop`) in routing is
+   harmless: `build_channels` accepts and skips them, and `log` is the floor.
+6. **`waiting_runners` was added to `get_all_status()`** — not in this plan. The
+   browser cannot tell whether an unauthenticated broker actually has books
+   waiting on it, and §A4 conditions the morning prompt on "active `mstock`
+   runners exist". Counted via `peek_portfolio_manager()` (never `get_`) so a
+   status poll cannot construct the portfolio as a side effect.
+7. **No live countdown inside the modal** (§A4 ladder stage 2). The urgency is
+   carried by the alert message ("expires in N minutes"), the amber
+   `🟡 Re-login needed (<10m)` banner, and the CRITICAL all-channel page. A
+   ticking countdown widget was not built — it would be the one piece of this
+   ticket that is decoration rather than a decision input.
+8. **A1 also widened the restore loop's catch to `RuntimeError`** (not in this
+   plan). `BrokerSessionExpired` is one, so a single logged-out broker used to
+   escape the `(ValueError, KeyError)` catch, blow through the loop, and take
+   every paper runner after it plus the manager scalars — all reported as
+   "starting clean". Found while testing A1; fixing it was a precondition for
+   A1's own promise.
+
+---
+
+## 1. Core Institutional Doctrine
+
+At an institutional prop desk or systematic fund, runner lifecycle management obeys **one non-negotiable invariant**:
+
+> **“Never go blind on an open position, and never abandon a live trade.”**
+
+Broker authentication (`mStock` / `Zerodha` / `Upstox` TOTP) must be treated as **turning on the live market-data & execution pipe** — **never** as rebuilding the portfolio or forcing an operator to restart processes or manually hunt down paused open trades.
+
+### 1.1 Separating Feed State, Position Protection, and New-Entry Arming
+
+Current code conflates `RUNNING` vs `PAUSED` with broker login state and hides unauthenticated option runners inside `_parked_snapshots`. The target architecture separates **three orthogonal concerns**:
+
+| Situation | Current App Behavior (`43d3322`) | Target Institutional Behavior |
+| :--- | :--- | :--- |
+| **1. Server boots at `08:30 IST` while broker is logged out (`remembered: false`)** | Option runners fail construction with `ValueError` and vanish into `_parked_snapshots` (`0` option runners visible on screen). | **All runners load and render on screen immediately** with yesterday's closing P&L, strikes, lots, and SL/TP levels under status badge **`WAITING_FOR_FEED`**. Nothing is hidden. |
+| **2. Operator logs in late (e.g. `09:45 IST` after `09:15 IST` open)** | `_parked_snapshots` stay dead in memory until the Python server is restarted; restored runners stay `PAUSED`. | **Zero-restart auto-wake (< 1s)** on `verify-totp`: live quote providers + shared bar/WS feeds bind automatically, marks refresh immediately, and P&L updates live. |
+| **3. Instance holds an OPEN trade / option structure across restart or late login** | `state_store.py:572` blindly forces `RUNNING -> PAUSED` on every runner alike, leaving open risk unmanaged until manual Resume. | **Open trades are NEVER paused** (unless halted by a risk circuit breaker). In-trade instances auto-enter **`RUNNING`** the moment the feed attaches, immediately checking SL / Target / Expiry exits. |
+| **4. Today's P&L when logging in after `09:15 IST`** | Works once running (`_prev_close_open_pnl` anchor), but invisible while parked. | **Flat book**: starts at `₹0.00` at login and counts trades from login onward.<br>**Overnight carry book**: immediately marks `Live Price (09:45) − Yesterday 15:30 Close` so real morning gap P&L is never hidden from accounting or the `₹2.5L` daily fuse. |
+| **5. Pre-login bars (`09:15–09:44 IST`) on flat strategies** | Risk of firing late on historical warmup bars if resumed blindly. | **No stale-signal chasing**: warmup populates indicator lookbacks (`EMA`, `ATR`, `VWAP`), while new entries only fire on bars/ticks sealed **at or after** `armed_at_utc`. |
+| **6. Mid-day broker token/WS drop (e.g. `13:15 IST`)** | Logs quote failures; requires manual intervention if session died. | Flips to **`DEGRADED_FEED`** (blocks *new* entries while blind, keeps last known P&L + staleness timer visible) and **auto-heals** to `RUNNING` the instant TOTP/WS reconnects. |
+| **7. Mid-day server restart after losses** | Daily `₹2.5L` fuse survives (via runner `daily_pnl()`), **but** `peak_equity` / `_bucket_peak` and `halted` banner reset to `0` / `False`. | **Same-session risk memory**: `(session_date_ist, peak_equity, _bucket_peak, halted_state)` persist across same-day restarts and reset cleanly only on a new IST session date (`00:00 IST`). |
+
+---
+
+## 2. Ground-Truth Audit of the Nov-02 Engineering Board
+
+Before writing code, engineers must work from **verified code facts** at `43d3322` rather than assumptions:
+
+1. **Manager Daily Loss Fuse vs. Drawdown Peak (`portfolio_manager.py:2687, 2815-2845, 3015-3031, 3115-3123`)**
+   - **Verified Fact**: The bucket, segment, and global `₹2.5L` **Daily Loss Fuses** do **not** read `_bucket_day_start` or `_day_start_equity`. They evaluate `sum(r.daily_pnl() for r in runners)`, which uses each runner's persisted `pnl_session` / `_prev_close_realized_net` / `_prev_close_open_pnl` anchors (fixed in `7fc3a08`). `_bucket_day_start` is only used as a fallback denominator for `daily_pnl_pct` (`:618`, `:3360`), and `test_state_persistence.py::test_bucket_anchors_are_session_scoped` (`2026-09-23`) is stale against the `2026-10-15` denominator initialization.
+   - **Real Gap to Fix**: `self.peak_equity`, `self._bucket_peak[mode]`, and same-day `halted` / `_bucket_halted[mode]` latches **are** wiped on every restart (`:2794, :2817, :2822`), which resets **Max Drawdown %** peak memory mid-session and clears active halt latches — **even while `portfolio_manager.py:2687` logs the misleading message `"restored … + breaker latches"`!**
+
+2. **Parked Option Books & Blanket `RUNNING -> PAUSED` (`portfolio_manager.py:2758-2768`, `state_store.py:569-578`)**
+   - **Verified Fact**: `_parked_snapshots` has **no** rehydration hook when `verify_totp` succeeds (`_parked_snapshots` is only touched at boot, `remove_runner`, and `_persist_state`). And `restore_runner()` maps `STATUS_RUNNING -> STATUS_PAUSED` unconditionally without checking whether `runner.positions` or `runner.options_bridge.get_open_structures()` holds live exposure.
+
+3. **Option Structures Missing from SQL `positions` & Parked UI (`#24` — `trade_persistence.py:194-199`, `portfolio_manager.py:1454-1491`)**
+   - **Verified Fact**: `PortfolioManager.list_positions()` (`:1454`) already emits open option structures to the UI `Positions` tab when runners are in `self._runners` (they vanished on screen only when hidden in `_parked_snapshots`). In PostgreSQL, `OrderLedger.record_filled()` intentionally leaves `position_id = None` so option legs never pollute the equity share-simulator `Portfolio.positions`.
+
+4. **Frozen Runner Configuration at Spawn (`#3` — `state_store.py:514-530`, `options_bridge.py:147`, `3ae2888`)**
+   - **Verified Fact**: By design, `RunnerConfig` (`expression`, `carry_policy`, SL/TP) is frozen at spawn so code deploys never mutate a live trade's carry horizon mid-flight. The canonical enum is `CARRY_POLICIES = {"intraday", "positional"}` (`options_bridge.py:147`) — existing intraday option runners must be retired/respawned once (when flat) to adopt `carry_policy = "positional"`, and the UI should surface a clear `CONFIG_DRIFT / FROZEN_AT_SPAWN` indicator when template defaults changed.
+
+5. **Two-Clock Strings in `OrderLedger` (`#23` — `paper_runner.py:674, 756, 1917`)**
+   - **Verified Fact**: SQL persistence (`trade_persistence.py:150`) already normalizes to UTC `TIMESTAMPTZ` at rest, so Postgres is clean. Only in-memory `OrderLedger` JSON mixes `+05:30` bar strings with `+00:00` fallback strings, scrambling text-sorted `Orders` rows by `5h 30m`.
+
+6. **Manual Mark Refresh `broker.calls == 2` (`test_options_forward_mtm.py:948`, `quote_providers.py:501-539`, `mstock.py:1702-1715`)**
+   - **Verified Fact**: On **mStock**, `get_option_quote("49228")` checks the in-memory WebSocket cache and short-circuits (`if self._is_numeric_key: return {}` at `mstock.py:1711`) with **zero HTTP calls**, then fetches `"NIFTY261024800CE"` over HTTP (**1 HTTP call total**). The test's `_CountingBroker` lacked `bid`/`ask` and counted the in-memory numeric probe as an HTTP call. (`UpstoxBroker.get_option_quote` at `upstox.py:780` lacks that numeric-key guard, but zero calls ever cross from mStock to Upstox and Upstox remains parked/untouched for now.)
+
+---
+
+## 3. Sequenced Implementation Plan (Sprints A → D)
+
+Implement in strict sprint order (**one small, reviewable PR per sprint**).
+
+---
+
+### Sprint A (P0 — Highest Priority, Staged Across 2 Sub-PRs for Blast-Radius Control)
+**Goal**: Logging in before *or* after `09:15 IST` wakes all waiting runners automatically in `< 1s`, updates P&L immediately, pages the operator inside active market hours, and (in sub-PR `A-2` after `A-1` bakes cleanly in a live session) guarantees any instance with an open trade is actively `RUNNING` and protected.
+
+> **Release Sequencing Rule (Junior Review Guardrail)**:
+> - **PR `Sprint A-1` (`Tickets A1 + A2 + A4`)** ships **first**: unauthenticated boot visibility (`WAITING_FOR_FEED` with strict zero-synthetic invariant), `< 1s` `verify-totp` auto-wake, and market-hours-only `T − 10m` / expired operator paging + `"Broker login needed"` topbar banner. — ✅ **SHIPPED to review as PR #52 on 2026-11-03** (`cb91d41` + `9e5b000` + `74cb76b`, plus two stale-ratchet fixes). Awaiting merge; not deployed.
+> - **PR `Sprint A-2` (`Ticket A3`)** ships **second** (in its own isolated PR after `A-1` completes a live session): reverses the legacy blanket `RUNNING -> PAUSED` restore rule for open-exposure books (`has_open_exposure() -> RUNNING` + `armed_at_utc` stale-signal guard), giving 1-commit rollback isolation. — ⏸ **still gated**: `A-1` has not yet run a live session, so `A3` stays unstarted even though nothing in it is blocked technically.
+
+#### Ticket A1 (`Sprint A-1`) — Construct Unauthenticated Runners in `WAITING_FOR_FEED` (Hard Zero-Synthetic Invariant)
+> ✅ **DONE — `cb91d41`, PR #52.** All three design points shipped as specified.
+> Both synthetic doors (`OptionsBridge.__init__` and `_generator()`) now refuse a
+> `DisconnectedQuoteProvider`, the second one even under the testing profile where
+> synthetic is enabled. Entries are edge-triggered through `_journal_halt_once` so a
+> blind book seeing a bar a minute writes one journal row, not 375 — and the gate sits
+> *after* `on_intent`'s open-structure branch on purpose, so exits keep running off the
+> last honest mark. UI pill is `OptionView.feedStateBadgeHtml`. Also widened the restore
+> loop's catch to `RuntimeError` (deviation 8 above).
+- **Files**: `src/backtest/forward/portfolio_manager.py`, `src/backtest/forward/feed_registry.py`, `src/backtest/forward/paper_runner.py`, `src/backtest/forward/options_bridge.py`
+- **Hard Non-Negotiable Invariant (Synthetic-Data Ban Preserved)**:
+  - `WAITING_FOR_FEED` must **NEVER** instantiate `SyntheticChainGenerator`, Black-Scholes pricing, or generated candles (`synthetic: enabled: false` in `config/data_sources.yaml` stays 100% enforced).
+  - Instead, attach an explicit **`DisconnectedQuoteProvider` (Frozen-Mark Stub)** while unauthenticated: `get_quote()` returns unavailable (`mark_stale = True`), open structures strictly display their **frozen yesterday/`last_mark_price`** (never a fabricated mark), and any new entry attempt fails closed with reason `WAITING_FOR_FEED`.
+- **Design**:
+  1. When `PortfolioManager` restores or spawns a runner whose `source` (`mstock` / `upstox` / `dhan`) or `mode="live"` broker is currently unauthenticated, **do not fail construction into `_parked_snapshots`** (reserve `_parked_snapshots` strictly for corrupt/deleted strategy names).
+  2. Construct the `StrategyRunner` + restore its `portfolio` and `options_bridge` book against `DisconnectedQuoteProvider` so all open structures, strikes, lots, frozen yesterday P&L, and manual SL/TP levels are **immediately visible in `/portfolio/paper` and `/portfolio/live`**.
+  3. Set an explicit feed-readiness state on the runner (`feed_state = "WAITING_FOR_FEED"`, surfaced in `get_state()`) with a clear UI status pill (`Waiting for mStock login · Frozen mark`).
+
+#### Ticket A2 (`Sprint A-1`) — Automatic `on_broker_authenticated(broker_name)` Hook on Login / TOTP Verify
+> ✅ **DONE — `9e5b000`, PR #52.** All three design points shipped: unpark (with
+> re-park on failure so a bad snapshot is not lost), atomic hot-swap to
+> `live:mstock+bidask` via `_maybe_upgrade_to_live_chain()` flipping
+> `feed_state = "LIVE"`, then `_repair_runner_marks_internal(force=True)` +
+> `_evaluate_risk()`. The notify runs on a **detached thread** with per-broker
+> in-flight dedup (`_WAKE_INFLIGHT`), so the `verify-totp` response never waits on a
+> chain acquire and a second wake for the same session is skipped rather than queued.
+> A wake that raises is swallowed and logged — it must never surface on the login.
+> `broker_auth.py` was not needed (deviation 4); `peek_portfolio_manager()` was added so
+> neither a login nor a status poll can *construct* the portfolio as a side effect.
+- **Files**: `src/backtest/brokers/session_manager.py`, `src/backtest/api/broker_auth.py`, `src/backtest/forward/portfolio_manager.py`
+- **Design**:
+  1. Register a lightweight post-auth callback in `BrokerSessionManager.verify_totp()` (and session-restore on boot when `remembered: true`) that notifies `PortfolioManager.on_broker_authenticated(broker_name)`.
+  2. Inside `on_broker_authenticated(broker_name)`:
+     - Unpark any legacy `_parked_snapshots` belonging to `broker_name`.
+     - Atomically hot-swap `DisconnectedQuoteProvider` → `BidAskQuoteProvider(LiveChainProvider(broker))` + live execution gateway + shared bar/WS feed subscriptions onto every runner using `broker_name`, flipping `feed_state = "LIVE"`.
+     - Trigger an immediate non-blocking `refresh_option_marks(force=True)` + `_evaluate_risk()` pass so Today's P&L (`Live Mark − Yesterday Close`) updates within `1–2s` of TOTP submit — **zero server restart required**.
+
+#### Ticket A4 (`Sprint A-1`) — Active-Market-Window `T − 10 min` All-Channel Paging, Auto-Popup Login Modal & Persistent `"Broker login needed"` Topbar Banner
+> ✅ **DONE — `74cb76b`, PR #52.** All four design points shipped: `MONITOR_INTERVAL_SECONDS`
+> `300.0 → 30.0`; `_raise_session_alert` gated on `session_state in ("PRE_OPEN", "OPEN")`
+> (fails **open** — an unreadable holiday calendar must not mute a live session death);
+> new `broker_session_expiring_urgent` rung at CRITICAL routed to every configured
+> channel; banner + auto-popup in `broker_status.js` with the manual pill click still
+> working at any hour. Read deviations 1, 2, 3, 5, 6 and 7 above before comparing this
+> spec to the code — in particular the T−10m check runs on **every** expiring-soon tick
+> rather than on a status edge, because a 30s poll first sees `expiring_soon` at
+> roughly T−30m and would otherwise step over the boundary.
+>
+> Two design choices worth flagging for review. (a) The publish latch is *"is the alert
+> already open"*, not *"is this the first tick that saw it"* — those differ exactly when
+> it matters, because a session dying at 20:00 has its first observation suppressed by
+> the market gate and an edge-only latch would lose it forever; holding it back means it
+> fires at 09:00. (b) The auto-open latch is per `(broker, stage)` and is **dropped when
+> the market window closes**, so a tab left open overnight re-prompts at 09:00 on the
+> chip's `market:state` transition without waiting for a poll.
+>
+> **Not yet exercised.** Nothing here is live until `:5000` is restarted, and the gate
+> suppresses every page and banner outside `09:00–15:30 IST` by design — so this ticket
+> cannot be validated in production until a trading session is open.
+- **Institutional EMS Connectivity Standard ("Market-Hours-Only Operator Paging")**:
+  - **Strict Active Market Window (`session_state in {"PRE_OPEN", "OPEN"}` = `09:00–15:30 IST` on NSE `TRADING_DAY`s only, via `src/backtest/live/market_status.py`)**:
+    - Institutional desks **never** page operators or throw login popups after `15:30 IST`, overnight, on weekends, or on NSE holidays when live market feeds are idle and tokens naturally expire.
+    - Outside `09:00–15:30 IST` (`CLOSED_TODAY`, `CLOSED_WEEKEND`, `CLOSED_HOLIDAY`): **zero outbound alerts**, **zero auto-popup login modals** (so evening backtesting/research/diary review is never interrupted), and a calm/neutral topbar chip.
+    - At **`09:00 IST` (`PRE_OPEN`) on the next `TRADING_DAY`**: if `mstock` is unauthenticated while active `mstock` runners exist, the window opens cleanly — firing the morning reminder once, showing **`🔴 Broker login needed`**, and opening the login popup ahead of the `09:15 IST` bell.
+  - **3-Stage Escalation Ladder (Active ONLY inside `09:00–15:30 IST` on `TRADING_DAY`)**:
+    1. **Soft Heads-Up (`T − 30 min`)**: Topbar badge turns Amber (`🟡 Expiring soon`).
+    2. **Urgent Action Gate (`T − 10 min`)**: Broadcasts across **every configured alert channel** (Telegram, Email, Slack, Discord, SMS, Desktop, In-App Alert Widget — exempt from rate limits) **AND automatically pops open the Login/TOTP Modal** on screen with a live countdown so the operator re-authenticates seamlessly *before* a single tick is dropped.
+    3. **Hard Expiry (`T = 0` or `401`) / Unauthenticated Active Book**: Fires a `CRITICAL` all-channel alert, **immediately pops open the Login Modal** on screen, and pins a high-visibility **persistent red topbar CTA (`🔴 Broker login needed`)** across all workspace pages until `verify-totp` succeeds (even if the operator dismisses `[×]` the modal temporarily).
+- **Files**: `src/backtest/brokers/session_manager.py`, `src/backtest/brokers/mstock.py`, `src/backtest/live/market_status.py`, `config/alerts.yaml`, `src/backtest/web/static/js/broker_status.js`, `src/backtest/web/static/js/broker_auth_modal.js`, `src/backtest/web/templates/base.html`
+- **Design (Closing Current Code Gaps)**:
+  1. Tighten `BrokerSessionManager` monitor cadence from `300s` (5 min) to **`30s`** so the `T − 10 min` boundary and `09:00 IST` pre-open gate are never missed.
+  2. Gate all session-expiry / login-needed outbound alerts (`_raise_session_alert`) on **`get_market_day_state()["session_state"] in ("PRE_OPEN", "OPEN")`** (`09:00–15:30 IST` on `TRADING_DAY`). Outside that window, silently clear expired tokens without firing Telegram/Email/toast noise.
+  3. Add an explicit **`expiring_10m` (`broker_session_expiring_urgent`)** transition alongside `expired` (`broker_session_expired`), and update `config/alerts.yaml` routing so both fan out to **all configured outbound channels** (`[telegram, email, slack, discord, sms, desktop, log]`, rate-limit bypass enabled).
+  4. Update `broker_status.js` + `broker_auth_modal.js` (gated on `#market-status-chip` / `session_state in {"PRE_OPEN", "OPEN"}`):
+     - Inside `09:00–15:30 IST` on a `TRADING_DAY`:
+       - At **`T <= 10 min`** (once per session cycle): **auto-open `BrokerAuthUI.open("mstock")`**.
+       - On **`expired`** transition (or page load / `09:00 IST` transition when `unauthenticated`/`expired` while active `mstock` runners exist): **auto-open `BrokerAuthUI.open("mstock")`** immediately and pin **`🔴 Broker login needed`** in the topbar (`🟡 Re-login needed (<10m)` inside 10 min).
+     - Outside `09:00–15:30 IST`, weekends, and NSE holidays: suppress all auto-popups and red `"Broker login needed"` banners (manual click on `Brokers` still works anytime).
+
+#### Ticket A3 (`Sprint A-2` — Isolated Sub-PR After `A-1` Live Session Bake) — Open-Trade Continuity Rule & No-Stale-Signal Entry Guard
+> ⏸ **BLOCKED — not started, by design.** §3's sequencing rule holds this until `A-1`
+> has completed one clean live session, so it stays a 1-commit rollback. What `A-1`
+> already built for it: `feed_state` on the runner, `_maybe_upgrade_to_live_chain()` as
+> the hot-swap seam, and `on_broker_authenticated()` as the wake entry point — so A3's
+> remaining scope is the `state_store.restore_runner` blanket `RUNNING → PAUSED` rule,
+> `has_open_exposure()`, and the `armed_at_utc` stale-signal guard. Do not fold it into
+> PR #52.
+- **Files**: `src/backtest/forward/state_store.py`, `src/backtest/forward/paper_runner.py`
+- **Design**:
+  1. Helper `runner.has_open_exposure() -> bool`: returns `True` when `len(runner.portfolio.positions) > 0` or `runner.options_bridge.has_open_structure()` (or working live venue orders exist).
+  2. **Restore & Auto-Wake Status Rule**:
+     - If `runner.has_open_exposure()` is `True` **and** bucket/runner is **not** risk-halted (`BLOCKED_BY_RISK` / circuit breaker):
+       - Restore/wake directly into **`STATUS_RUNNING`** (even if `strategy_code_changed` is flagged — log a warning badge `CODE_UPDATED_WHILE_IN_TRADE` and block *new* entries after exit if desired, **never** abandon protection of the currently open trade!).
+       - On the very first live quote/tick after login (e.g. `09:45 IST`), evaluate SL / Target / Expiry exits immediately so a morning gap breach exits cleanly at `09:45 IST` market price.
+     - If `runner.has_open_exposure()` is `False` (flat book):
+       - On unexpected process restart: restore as `STATUS_PAUSED` (`pause_reason="RESTART_FLAT_SAFETY"`) unless operator clicks `Resume All`.
+       - Stamp `armed_at_utc = now_utc()` whenever a runner transitions to `RUNNING` or attaches to feed mid-session; ignore entry intents on historical warmup bars with `bar_close_utc < armed_at_utc` (prevents chasing a stale `09:16 IST` signal at `09:45 IST`).
+
+---
+
+### Sprint B (P1 — Institutional RMS Risk Integrity): Cash-Flow-Neutral Session High-Water Mark & Restart-Proof Halt Latches
+**Goal**: Match Tier-1 institutional Risk Management System (RMS) behavior on intraday restarts without ever resurrecting cross-day ghost anchors or triggering false drawdown trips when runners are added/deleted.
+
+#### Institutional RMS Standard Adopted
+1. **Separate Intraday Session Peak vs. Lifetime HWM**: Intraday drawdown breakers track *today's* IST session peak (`09:15–15:30 IST`), while multi-week/month cumulative High-Water Mark lives in `/diary` and `/analytics`.
+2. **Restart-Proof Risk State**: Restarting the server mid-day must **never** erase morning peak drawdown or unlock an active `🔴 HALTED` circuit breaker.
+3. **Cash-Flow Neutrality (`session_peak_daily_pnl`)**: Anchor today's high-water mark on **pure session Net P&L (`max(0, max_today(daily_pnl))`)** rather than raw rupee `equity`. If an operator deletes 3 runners (`−₹3L` capital) or spawns 2 runners (`+₹2L` capital) while the server is down, `effective_peak_equity = current_allocated_capital + prev_close_pnl_offset + session_peak_daily_pnl` — **zero fake drawdown spikes, zero forgotten trading losses**.
+4. **Session Lockout vs. Next-Day Roll**: An auto-tripped breaker stays locked (`halted = True`) across all restarts for the rest of `today_ist` until an explicit operator **Risk Override / Reset Breaker** action, and rolls clean automatically on the next IST session date (`saved_session_date_ist < today_ist`).
+
+#### Ticket B1 — Persist `(session_date_ist, session_peak_daily_pnl, halted)` Across Same-Day Restarts
+> ✅ **DONE (2026-11-03).** Implemented in `src/backtest/forward/portfolio_manager.py` and
+> verified in `tests/forward/test_state_persistence.py` (`29 passed`), dropping the
+> standing sprint-gate baseline from **`28 → 27`** (`0` new regressions via `comm`).
+> As-built refinements recorded alongside the spec:
+> 1. **Immediate Halt Durability**: `_evaluate_risk()` now calls `self._persist_state()`
+>    immediately whenever any fresh bucket, `segment:*`, or master halt trips (`any_fresh_halt`),
+>    closing the prior up-to-5-tick (`self.tick_index % 5 == 0`, ~5 min on 60s sweeps)
+>    crash window.
+> 2. **Full `segment:*` Serialization & Live `00:00 IST` Rollover**: `_snapshot_payload()`
+>    persists all active `segment:*` keys inside `buckets` alongside `"paper"` and `"live"`,
+>    and `_maybe_roll_risk_session_ist()` clears session high-water marks + auto-halt
+>    latches cleanly across `00:00 IST` in long-running processes.
+> 3. **In-Process `remove_runner` Alignment & Bar-Clock Guard**: `_record_capital_flow()`
+>    adjusts `_session_peak_daily_pnl` / `_bucket_session_peak_pnl` when a profitable
+>    runner is removed in-process so smaller surviving runners never inherit phantom
+>    drawdown ceilings, and `_safe_runner_daily_pnl()` avoids calling `runner.daily_pnl()`
+>    on freshly spawned un-marked runners so multi-day historical bar replays roll
+>    `runner._pnl_session` cleanly (`test_breaker_independence.py` & `test_cross_broker_risk.py`
+>    100% green).
+- **Files**: `src/backtest/forward/portfolio_manager.py`, `tests/forward/test_state_persistence.py`
+- **Design**:
+  1. Stamp `session_date_ist = current_session_date().isoformat()` plus `session_peak_daily_pnl` (`>= 0.0`) and `halted` / `halt_reason` / `halt_mode` / `halted_ts` into `manager`, `buckets[mode]`, and `segment:*` inside `portfolio_state.json`.
+  2. Recompute effective peak dynamically from cash-flow-neutral P&L (`peak_equity = baseline_session_open_equity + session_peak_daily_pnl`), so adding/removing runners mid-day or offline never distorts drawdown %.
+  3. On `_apply_state_payload()` boot:
+     - **If `saved_session_date_ist == today_ist` (Same-Day Restart)**:
+       - Restore `session_peak_daily_pnl` and active `halted` / `_bucket_halted[mode]` latches verbatim! Mid-day restarts preserve exact drawdown % and cannot bypass a tripped `-₹2.5L` or Max-DD fuse.
+       - Fix the boot log at `portfolio_manager.py:2687` so it truthfully reports `"same-day session risk peak & breaker latches restored (session=%s)"`.
+     - **If `saved_session_date_ist != today_ist` (New Trading Day)**:
+       - Reset `session_peak_daily_pnl = 0.0` and `halted = False` cleanly for the new IST session (preventing cross-day ghost halts), and make `portfolio_manager.py:2687` log `"prior-session (%s) risk peak & breaker latches rolled clean for new IST session (%s)"` instead of falsely claiming breaker latches were restored.
+  4. Replace the stale Sept-23 `test_bucket_anchors_are_session_scoped` with three explicit RMS contract tests:
+     - `test_prior_day_anchors_and_halts_reset_on_new_ist_session`
+     - `test_same_day_restart_preserves_peak_drawdown_and_halt_latch`
+     - `test_offline_runner_removal_does_not_trigger_false_drawdown_on_restart`
+
+---
+
+### Sprint C (P2 — Institutional Clock Law, mStock Layer-0 Auth Gate & Test Debt): Clean Board
+**Goal**: Lock the Two-Layer Clock Law (`UTC` engine / `IST` display), enforce a strict zero-packet Layer-0 Auth Gate on mStock when logged out (**keeping Upstox 100% parked & untouched**), and turn legacy test debt green.
+
+#### Ticket C1 (P2-A — Shipped `fdaab48`) — Institutional Two-Layer Clock Law in `OrderLedger` (`#23`)
+> ✅ **SHIPPED (`fdaab48`, 2026-11-03).** Normalized every `OrderLedger` write path and
+> legacy snapshot hydration in `src/backtest/forward/paper_runner.py` to canonical aware
+> UTC (`+00:00`) via `_ledger_iso_utc(ts)` and `_ledger_stored_iso_utc(raw)`, backed
+> strictly by `src/backtest/timekeeping.py` (`0` new raw `datetime.now()` calls).
+- **Institutional OMS Standard**: Engine, memory, and database store **100% canonical UTC (`+00:00` / `Z`)** so sorting, latency math, and hold-time queries can never shift by 5h 30m; conversion to **`Asia/Kolkata` (`IST`)** happens strictly at the UI / Diary display boundary.
+- **Files**: `src/backtest/forward/paper_runner.py`, `tests/forward/test_order_ledger_clock.py`
+- **As-Built Design & Verification**:
+  - Passed `ts` across `OrderLedger.submit()`, `apply_fill()`, `record_filled()`, `cancel()`, `reject()`, `amend()`, and `reattach_order()` through `_ledger_iso_utc(ts)` (`iso_utc(from_market_clock(ts))` / `iso_utc(now_utc())`), and normalized restored JSON rows in `from_dict()` via `_ledger_stored_iso_utc()`.
+  - Verified `96/96` clock/ledger/timekeeping tests (`tests/forward/test_order_ledger_clock.py`, `test_orders_clock.py`, `test_ledger_persistence.py`, `test_portfolio_engine.py`, `test_timekeeping_policy.py`) — mixed `+05:30` IST equity bars and `+00:00` UTC option ticks sort 100% chronologically under lexicographical string comparison while rendering exact IST in UI formatters.
+
+#### Ticket C2 (P2-B — Shipped `c009da0`, Upstox Untouched) — Layer-0 mStock Auth Gate & MTM Test Mock Fix
+> ✅ **SHIPPED (`c009da0`, 2026-11-03).** Enforced Layer-0 zero-packet gating when logged
+> out and an instant `401/403` kill-latch across `BrokerSessionManager`, `MStockBroker`,
+> `MStockLiveFeed`, and `MStockBarFeed`. `upstox.py` and `upstox_live_feed.py` remain
+> 100% untouched (`0` diff lines).
+- **Institutional Market-Data Standard**:
+  1. **Zero Packets Before Login**: If `SessionManager.is_authenticated("mstock")` is `False`, background pollers and quote providers send **`0` HTTP packets**, **`0` retries**, and **never** read stale `.mstock_session_token` files or trigger CLI `connect/login` calls from server threads.
+  2. **Instant `401/403` Kill-Latch**: On the very first HTTP `401/403` token rejection mid-session, trip `SessionManager` to `expired` immediately (triggering Ticket A4's all-channel alert + UI login popup + `"Broker login needed"` topbar banner) instead of hammering mStock across remaining symbols.
+  3. **Upstox Parked**: Zero code paths cross from mStock to Upstox; leave `upstox.py` completely untouched while parked.
+- **Files**: `src/backtest/brokers/session_manager.py`, `src/backtest/brokers/mstock.py`, `src/backtest/data/mstock_live_feed.py`, `src/backtest/forward/feed_registry.py`, `tests/brokers/test_mstock_layer0_auth_gate.py`, `tests/forward/test_options_forward_mtm.py`
+- **As-Built Design & Verification**:
+  - Added `BrokerSessionManager.mark_session_expired(broker_name, reason="")` and `MStockBroker.mark_expired()` (`_forced_expired`), distinguishing involuntary mid-session `401/403` revocation (`STATUS_EXPIRED`, firing Ticket A4's market-hours-gated CRITICAL `broker_session_expired` alert immediately) from explicit operator `logout()` (`STATUS_UNAUTHENTICATED`).
+  - Gated `MStockBarFeed._poll_once()` and `MStockLiveFeed._credentials()` strictly on `get_session_manager().get_active_session_token("mstock")` (raising `MStockUnauthenticatedError` with `0` HTTP packets, `0` retries, `0` `.mstock_session_token` reads, and `0` CLI `login()` calls when logged out).
+  - Updated `_LiveBroker` and `_CountingBroker` in `tests/forward/test_options_forward_mtm.py` to short-circuit numeric instrument keys in RAM (`0` HTTP calls for numeric WS probe, `1` HTTP call for trading symbol), matching `MStockBroker._is_numeric_key`.
+
+#### Ticket C3 — Shipped Stale Test-Suite Signatures (`25 → 0` Gate Failures); Historical Repair Script Kept Dry-Run Safe
+> ✅ **SHIPPED (2026-11-03).** Cleared all `25` remaining stale test failures across the
+> standing suite (**`28 → 0` total failures**) without touching `config/risk_limits.yaml`
+> or protected strategy/execution files. `scripts/repair_trade_timestamps.py` remains
+> strictly **dry-run by default**; live `--execute` requires an operator post-market
+> window and DB snapshot.
+- **Files**: `tests/forward/test_options_forward_mtm.py`, `tests/forward/test_paper_trading_validation.py`, `tests/forward/test_phase3_subsecond_options_and_ticks.py`, `docs/plans/institutional-lifecycle-and-nov2-bugfix-plan.md`
+- **As-Built Design & Verification**:
+  - Removed obsolete `preserve_candle_timestamps=True` kwarg and raised synthetic pricing-isolation `stop_loss_points` (`10_000 → 1_000_000`) in `tests/forward/test_options_forward_mtm.py` (`35/35` green).
+  - Aligned `tests/forward/test_paper_trading_validation.py` onto `SlippageCalculator(model="fixed")` (`5 bps`) and unified `run_engine_loop` / `PaperRunner` attributes (`quantity=25` within ₹10L capital, `OrderRow`/`FillRow` persistence, `daily_pnl()`, `closed_positions`, `equity_history` — `8/8` green).
+  - Eliminated calendar-drift DTE inflation on synthetic `CE_instant_buy` tick tests in `tests/forward/test_phase3_subsecond_options_and_ticks.py` (`21/21` green) while keeping production `max_loss_per_trade_inr: 25_000` in `config/risk_limits.yaml` 100% untouched.
+
+---
+
+### Sprint D (P3 — Institutional PMS Architecture & Operator UX): PostgreSQL Single-Source-of-Truth, Exact P&L Engine & Config-Drift Rollover
+**Goal**: Eliminate the `portfolio_state.json` split-brain so PostgreSQL is the sole durable source of truth while RAM serves sub-second live math at zero tick-level DB load, unify Equity + Option open positions across SQL and UI, and make frozen runner rulebooks explicit and 1-click upgradable when flat.
+
+#### Ticket D1 — Replace `portfolio_state.json` Split-Brain with PostgreSQL Single-Source-of-Truth (`#24` + Institutional Ledger)
+> ⬜ **NOT STARTED.** Largest ticket in the plan and the only one carrying a data-migration
+> risk. Two constraints already learned the hard way and worth restating here: `CREATE OR
+> REPLACE VIEW` is append-only in Postgres (it killed fresh-DB migration chains at
+> `014`/`015`), and `market_data_cache` is a Timescale hypertable whose `ts` cannot be
+> updated across chunks — so it stays out of scope entirely. Alembic head is `023`.
+- **Institutional PMS Standard**:
+  - **PostgreSQL Is the Sole System of Record; RAM Is the Real-Time Calculator**: Never rely on a local flat JSON file for open trades, runner configs, or daily P&L anchors. Hydrate RAM 100% from PostgreSQL on startup (run a brief dual-write parity window, then retire `portfolio_state.json` dependency).
+  - **The 7-Event Database Touch Contract (Zero Tick / Poll DB Load)**:
+    1. **Server Boot (`READ` once)**: Hydrate active/paused `portfolios`, open Equity + Option `positions` (with `entry_price` & `prev_close_mark`), and today's `risk_session_state` into RAM via the shared SQLAlchemy pool.
+    2. **Broker Login `verify-totp` (`READ/WRITE` once)**: For `mode="live"`, reconcile `mStock.get_positions()` against DB `positions` and raise a loud mismatch alert if external/phone-app trades occurred; record first live mark.
+    3. **Order / Fill Entry or Exit (`WRITE` atomic tx)**: Persist `orders` + `fills` + open/update/close `positions` (both Equity and Option structures/legs tagged `instrument_type = 'EQ' | 'OPT'` without mixing options into equity share-averaging) + closed `trades`.
+    4. **Operator UI Action (`WRITE`)**: Spawn, Pause, Resume, Delete, manual SL/TP edit, Flatten, or Risk Override.
+    5. **Risk Milestone (`WRITE` throttled/immediate)**: Throttled update on new `session_peak_daily_pnl`; immediate write on `halted = True`.
+    6. **60s Crash Checkpoint & `15:30 IST` EOD Settlement (`WRITE` 1 batch query/min during `09:15–15:30 IST`)**: Flush `last_mark_price` once per minute in one batch SQL statement; at `15:30 IST` stamp official `prev_close_mark` on all open carry positions.
+    7. **Diary / Analytics / Reports Views (`READ`)**: Read via shared DB pool (`POOL-3` compliant — zero ad-hoc `create_engine`).
+    - *Explicit Non-Touch Rule*: Live WebSocket ticks (`10–100/s`), non-trading 1-minute candle evaluations, and `/api/portfolio` SSE/HTTP UI refreshes run **100% in RAM (`0` DB queries)**.
+  - **Canonical P&L Formulas (Zero JSON Anchors Required)**:
+    - **Individual Trade P&L (Entry → Now / Exit)**:
+      - *Open*: `(Live Mark − Entry Price) × Signed Qty − Entry Commission`
+      - *Closed (`trades`)*: `Gross P&L − Total Commission = Net P&L` (single combined `Commission = entry_fee + exit_fee`).
+    - **Day's P&L (`09:15–15:30 IST` Session Slice)**:
+      - Anchor = `Entry Price` (if opened today) **or** `prev_close_mark` from `15:30 IST` DB settlement (if carried from a prior day; flat morning book = `₹0.00`).
+      - `Day P&L = Sum(Today's Closed Slices) + Sum((Live Mark − Anchor) × Signed Qty − Today's Fee Slice)` — guaranteeing `Sum of Daily P&L Slices == Lifetime Individual Trade Net P&L` to the paisa.
+  - **3-Layer P&L Update Cadence**:
+    1. *Engine & Risk Fuse (`RAM`)*: Every coalesced WebSocket tick (`~100–250 ms`) + 1-min bar close (`30s` HTTP repair watchdog fallback if a leg misses WS ticks).
+    2. *Operator Browser UI (`SSE → RAM`)*: Every `1–2s` via SSE push (`5s` HTTP fallback; idle outside market hours).
+    3. *PostgreSQL Checkpoint (`Batch SQL`)*: Once every `60s` (`09:15–15:30 IST`) + on fills + at `15:30 IST` close.
+  - **Repository Schema Constraints & Migration Safety Rules (Mandatory)**:
+    1. **Migration Chain (`db/migrations/024_*.sql` + `024_*.sqlite.sql`)**: Current migration head is `db/migrations/023_diary_journal_notes.sql` (dual Postgres `.sql` + SQLite `.sqlite.sql` test-parity files — **not** Alembic). Sprint D starts at `024_`.
+    2. **Append-Only PostgreSQL Views (`014`/`015` Lesson)**: Never reorder, rename, or drop existing columns in `CREATE OR REPLACE VIEW` statements (Postgres rejects in-place column shifts on fresh migration chains). Keep new state in **additive tables** (`option_open_structures`, `option_open_legs`, `risk_session_state`) or strictly additive nullable columns on `positions` — never mutating existing view column order.
+    3. **TimescaleDB Hypertable Non-Interference**: `market_data_cache` is a TimescaleDB hypertable where cross-chunk key `UPDATE`s fail and writes use `ON CONFLICT DO NOTHING`. Sprint D **never** touches `market_data_cache`; `last_mark_price` and `prev_close_mark` live strictly on relational `positions` / `option_open_structures` tables.
+  - **Institutional 3-Phase Dual-Write Parity & Zero-Downtime Rollback Plan**:
+    - **Phase D1-a — Shadow Dual-Write (`STATE_STORE_PRIMARY=json`, 5 Live Sessions)**: `portfolio_state.json` remains the primary boot reader. All 7 state-change events dual-write to PostgreSQL (`024_*`) inside fail-soft wrappers. An automated parity verifier runs on every boot and `15:30 IST` close comparing JSON vs. PG (`runner count`, `open structures/legs`, `prev_close_mark`, `daily_pnl` within `₹0.01`) and logs `PARITY_OK` / `PARITY_DIFF`.
+    - **Phase D1-b — Cutover with Hot-Standby Rollback (`STATE_STORE_PRIMARY=postgres`, 5 Live Sessions)**: Flip primary boot hydration to PostgreSQL while continuing to write `portfolio_state.json` as hot standby. **Rollback SLA (< 10 seconds, zero SQL rollback)**: flipping `STATE_STORE_PRIMARY=json` in `.env` immediately reverts boot authority to JSON without dropping a single table or row.
+    - **Phase D1-c — Retire JSON Dependency**: Decommission `portfolio_state.json` writes only after **5 consecutive trading sessions under `STATE_STORE_PRIMARY=postgres` with `0` `PARITY_DIFF` events**.
+- **Files**: `db/migrations/024_open_option_positions_and_risk_session.sql`, `db/migrations/024_open_option_positions_and_risk_session.sqlite.sql`, `src/backtest/db/models.py`, `src/backtest/forward/trade_persistence.py`, `src/backtest/forward/state_store.py`, `src/backtest/forward/portfolio_manager.py`
+
+#### Ticket D2 — Unified `Positions` Blotter & Carry-Horizon Badges (`#24` UI)
+> ⬜ **NOT STARTED, but partly unblocked.** This ticket's precondition — "`A1` keeping
+> `WAITING_FOR_FEED` runners in `self._runners` so `list_positions()` surfaces open option
+> structures before broker login" — is now shipped in PR #52. The badge must use the real
+> enum value `positional`, not the word "expiry".
+- **Files**: `src/backtest/web/static/js/portfolio.js`, `src/backtest/web/templates/portfolio.html`
+- **Design**:
+  - With P0 (`Ticket A1`) keeping `WAITING_FOR_FEED` runners in `self._runners`, `list_positions()` automatically surfaces every open Option structure alongside Equity positions even before broker login.
+  - Add an explicit carry-horizon badge (**`⏱ INTRADAY 15:10`** for `carry_policy="intraday"` vs **`📅 POSITIONAL (HOLD TO EXPIRY)`** for `carry_policy="positional"`) plus `prev_close_mark` / Today vs. Total Trade P&L clarity on each open structure row in the `Positions` tab.
+
+#### Ticket D3 — `FROZEN_AT_SPAWN` Config-Drift Badge & 1-Click Flat Rollover (`#3`)
+> ⬜ **NOT STARTED.** Still operator-gated in the meantime: the live straddle/strangle books
+> need an mStock login **and a re-spawn** to inherit `carry_policy: positional` (`3ae2888`),
+> because a runner freezes its expression at spawn by design.
+- **Institutional Desk Standard**: Never silently mutate exit/carry rules mid-trade, always display active carry policy + template-drift warnings on the blotter, and allow 1-click rollover when flat.
+- **Files**: `src/backtest/forward/paper_runner.py`, `src/backtest/api/portfolio.py`, `src/backtest/web/static/js/portfolio.js`, `src/backtest/web/templates/portfolio.html`
+- **Design**:
+  1. Display active `carry_policy` badge (`INTRADAY 15:10` for `"intraday"` vs `POSITIONAL` for `"positional"`, matching `CARRY_POLICIES` in `options_bridge.py:147`) on every Option runner row.
+  2. Show an amber **`⚠️ Outdated config — respawn when flat`** pill whenever a runner's frozen spawn snapshot differs from the current strategy template on disk (`strategy_code_changed` or `expression` / `carry_policy` defaults drift).
+  3. Add a **1-click `"Respawn with latest rules"`** action (enabled strictly when `open_positions == 0`) that retires the flat runner and spawns its replacement from the latest template defaults with zero manual re-typing.
+
+---
+
+## 4. Non-Negotiable Guardrails During Implementation
+
+1. **Protected WebSocket & Strategy Files**: Do **not** modify `src/backtest/data/mticker.py` or `tests/test_mticker_ws_fixes.py`. Keep `config/risk_limits.yaml` `entitlement.live` strictly `[long_call, long_put]`.
+2. **Single Clock Authority (`src/backtest/timekeeping.py`)**: All IST session dates (`EXCHANGE_TZ`) and UTC conversions must use `src/backtest/timekeeping.py`. `pytest tests/test_timekeeping_policy.py` must stay 100% green without raising ratchet baselines.
+3. **PnL Diary & E2 Ledger Invariant**: Preserve strict `paper` vs `live` book isolation and single combined `Commission` (`Gross − Commission = Net` to `2dp`).
+4. **Verification Gate per Sprint**:
+   - `PYTHONPATH=src pytest tests/forward/ tests/diary/ tests/test_workspace_design.py tests/test_timekeeping_policy.py`
+   - `node --test tests/js/test_*.mjs`
+   - `python3 -m flake8 --max-line-length=100 <touched_files>` (`0` warnings)
+
+   **Measured at `43d3322` (`28`), updated after Ticket B1 (`27`), and retired to `0` in Sprint C (`C2` + `C3`) —
+   the standing pytest gate is now 100% green (`842 passed, 0 failed`):**
+
+   | Count | File |
+   | :--- | :--- |
+   | ~~15~~ → 0 | ~~`tests/forward/test_options_forward_mtm.py`~~ (**retired by Tickets C2 + C3**) |
+   | ~~8~~ → 0 | ~~`tests/forward/test_paper_trading_validation.py`~~ (**retired by Ticket C3**) |
+   | ~~4~~ → 0 | ~~`tests/forward/test_phase3_subsecond_options_and_ticks.py`~~ (**retired by Ticket C3**) |
+   | ~~1~~ → 0 | ~~`tests/forward/test_state_persistence.py::TestRestartCycle::test_bucket_anchors_are_session_scoped`~~ (**retired by Ticket B1**) |
+
+   Compare sorted `FAILED`/`ERROR` node-ID lists with `comm` against a **full-output
+   file**. Piping pytest through `tail` and eyeballing it once produced 22 phantom
+   regressions.
+
+   Two practical notes on the JS gate. Most `tests/js/*.mjs` harnesses are plain scripts
+   with their own `test()` helper, and nearly all have a **pytest wrapper** that
+   subprocess-runs node and asserts an exact `"<N> tests passed"` string — running the
+   wrappers (`tests/test_broker_ui.py`, `tests/test_web_components.py`,
+   `tests/test_options_view.py`, `tests/test_options_spawn_ui.py`,
+   `tests/test_reporting_ui.py`, `tests/test_provenance.py`, `tests/test_orders_clock.py`,
+   `tests/test_settings_panel.py`) covers the harnesses and skips cleanly when node is
+   absent. **Those count assertions are a ratchet: growing a harness without bumping its
+   wrapper leaves the gate red.** Two such were found and fixed in PR #52. If the count
+   went *up*, nothing was dropped and the wrapper is the stale side.
+
+   Also excluded from any sprint's regression accounting: two
+   `tests/test_settings_panel.py::TestBrokerCatalogue` failures are **worktree-environment**
+   drift (a copied config/DB makes `upstox` group `configured` rather than `catalogue`),
+   not code defects.

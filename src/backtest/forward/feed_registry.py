@@ -704,10 +704,16 @@ class _BrokerBarFeedBase:
             elapsed = time.monotonic() - started
             self._stop.wait(max(0.0, self.poll_interval_s - elapsed))
 
+    def _has_live_auth(self) -> bool:
+        """Layer-0 authentication gate before touching any symbol or HTTP socket."""
+        return True
+
     def _poll_once(self) -> int:
         with self._lock:
             symbols = list(self._symbols)
         if not symbols:
+            return 0
+        if not self._has_live_auth():
             return 0
 
         market_open = self._market_open()
@@ -726,7 +732,7 @@ class _BrokerBarFeedBase:
 
         delivered = 0
         for symbol in symbols:
-            if self._stop.is_set():
+            if self._stop.is_set() or not self._has_live_auth():
                 break
             if not market_open and symbol in self._last_ts:
                 continue
@@ -907,6 +913,17 @@ class MStockBarFeed(_BrokerBarFeedBase):
 
             feed_client = MStockLiveFeed(poll_interval_s=poll_interval_s)
         super().__init__(feed_client=feed_client, poll_interval_s=poll_interval_s)
+
+    def _has_live_auth(self) -> bool:
+        """Layer-0 mStock auth gate: 0 HTTP packets when logged out or expired (Ticket C2)."""
+        from backtest.data.mstock_live_feed import MStockLiveFeed, has_mstock_live_auth
+
+        if (
+            isinstance(self._client, MStockLiveFeed)
+            and getattr(self._client, "client", None) is None
+        ):
+            return has_mstock_live_auth()
+        return True
 
 
 class DhanBarFeed(_BrokerBarFeedBase):

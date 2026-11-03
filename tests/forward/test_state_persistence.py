@@ -29,7 +29,7 @@ import pytest
 
 from backtest.forward.feed_registry import reset_data_bus
 from backtest.forward.portfolio_manager import PortfolioManager
-from backtest.forward.paper_runner import SIDE_BUY, RunnerConfig
+from backtest.forward.paper_runner import SIDE_BUY, SIDE_SELL, RunnerConfig
 from backtest.forward.risk_supervisor import GlobalRiskConfig
 from backtest.forward.state_store import PortfolioStateStore, STATE_SCHEMA_VERSION
 from options_support import research_profile
@@ -233,71 +233,324 @@ class TestRestartCycle:
         finally:
             mgr2.shutdown()
 
-    def test_tripped_breaker_stays_tripped(self, tmp_path):
-        """2026-09-23 DESIGN CHANGE: halt latches are NO LONGER restored.
-
-        The old behaviour re-armed yesterday's emergency stop on every boot —
-        the dashboard showed a permanent "🔴 HALTED: Emergency flatten" over
-        fresh trading. A halt guards THIS session's P&L, so it is
-        session-scoped and boots clean (breaches re-trip within the session).
+    def test_tripped_breaker_stays_tripped(self, tmp_path, caplog):
+        """Ticket B1: on a SAME-DAY IST restart, a tripped breaker stays latched
+        until an operator explicitly calls ``reset_circuit_breaker``.
         """
         state = tmp_path / "state.json"
         mgr1 = _manager(state)
         mgr1.add_runner(_runner_config("HALTED"))
         mgr1._bucket_halted["paper"] = True
         mgr1._bucket_halt_reason["paper"] = "daily loss limit breached"
-        mgr1._bucket_halt_mode["paper"] = "daily_loss_limit"
-        mgr1._bucket_halted_ts["paper"] = "2026-09-17T10:00:00+00:00"
+        mgr1._bucket_halt_mode["paper"] = "pause"
+        mgr1._bucket_halted_ts["paper"] = "2026-11-03T05:00:00+00:00"
         mgr1.shutdown()
 
-        mgr2 = _manager(state)
+        with caplog.at_level("WARNING"):
+            mgr2 = _manager(state)
         try:
+            assert mgr2._bucket_halted["paper"] is True
+            assert mgr2._bucket_halt_reason["paper"] == "daily loss limit breached"
+            assert "same-day session risk peak & breaker latches restored" in caplog.text
+            # Scoped resume is refused while the same-day halt latch is active:
+            with pytest.raises(RuntimeError, match="halted"):
+                mgr2.resume_all("paper")
+            # Explicit operator reset clears the latch and allows resume:
+            mgr2.reset_circuit_breaker("paper")
             assert mgr2._bucket_halted["paper"] is False
-            assert mgr2._bucket_halt_reason["paper"] is None
-            # a scoped resume works again — no stale latch to refuse it
-            mgr2.resume_all("paper")  # must not raise
+            mgr2.resume_all("paper")
         finally:
             mgr2.shutdown()
 
-    def test_manager_level_halt_does_not_survive(self, tmp_path):
+    def test_manager_level_halt_survives_same_day_and_clears_next_day(self, tmp_path):
+        """Ticket B1: manager-level master kill persists within the same IST
+        session, and rolls clean on a new IST session.
+        """
         state = tmp_path / "state.json"
         mgr1 = _manager(state)
+        mgr1.add_runner(_runner_config("MASTER-HALT"))
         mgr1.halted = True
         mgr1.halt_reason = "master kill"
+        mgr1.halt_mode = "flatten"
+        mgr1.halted_ts = "2026-11-03T06:00:00+00:00"
         mgr1.shutdown()
-        mgr2 = _manager(state)
+
+        # Same IST session -> stays latched
+        mgr_same = _manager(state)
         try:
-            assert mgr2.halted is False and mgr2.halt_reason is None
+            assert mgr_same.halted is True
+            assert mgr_same.halt_reason == "master kill"
         finally:
-            mgr2.shutdown()
+            mgr_same.shutdown()
 
-    def test_bucket_anchors_are_session_scoped(self, tmp_path):
-        """2026-09-23: peak/day anchors are session-scoped like halts.
+        # Stamp prior IST session date -> rolls clean on morning boot
+        raw = json.loads(state.read_text(encoding="utf-8"))
+        raw["manager"]["session_date_ist"] = "2026-09-21"
+        for b in raw.get("buckets", {}).values():
+            b["session_date_ist"] = "2026-09-21"
+        state.write_text(json.dumps(raw), encoding="utf-8")
 
-        A saved ₹1.73 Cr day anchor against a rebuilt ₹20 L book computed a
-        -₹1.53 Cr "daily loss" and tripped the global breaker on the first
-        tick after restart. Anchors re-baseline to the restored book on the
-        first bar instead of resurrecting old-session numbers.
+        mgr_next = _manager(state)
+        try:
+            assert mgr_next.halted is False
+            assert mgr_next.halt_reason is None
+        finally:
+            mgr_next.shutdown()
+
+    def test_prior_day_anchors_and_halts_reset_on_new_ist_session(self, tmp_path, caplog):
+        """Ticket B1 (replaces contradictory Sept-23/Oct-15 test):
+        Prior-session peaks (`₹51.7L`) and halts are wiped when `session_date_ist`
+        differs from today's IST session date, while `_day_start_equity` seeds
+        from the restored book's session baseline (`₹1,00,000`) so pre-bar risk
+        checks never divide by zero or resurrect ghost losses.
         """
         state = tmp_path / "state.json"
         mgr1 = _manager(state)
         mgr1.add_runner(_runner_config())
+        mgr1._risk_session_date_ist = "2026-09-21"
+        mgr1._session_peak_daily_pnl = 450_000.0
+        mgr1._bucket_session_peak_pnl["paper"] = 23_456.0
         mgr1._bucket_peak["paper"] = 123_456.0
+        mgr1._bucket_halted["paper"] = True
+        mgr1._bucket_halt_reason["paper"] = "Emergency flatten (yesterday)"
         mgr1._bucket_day_start["paper"] = 99_000.0
         mgr1._bucket_day["paper"] = "2026-09-17"
         mgr1._day_start_equity = 17_300_000.0
         mgr1.peak_equity = 5_174_942.0
+        mgr1.halted = True
+        mgr1.halt_reason = "Emergency flatten (yesterday)"
         mgr1._current_day = "2026-09-21"
         mgr1.shutdown()
 
+        with caplog.at_level("WARNING"):
+            mgr2 = _manager(state)
+        try:
+            assert mgr2._session_peak_daily_pnl == 0.0
+            assert mgr2._bucket_session_peak_pnl["paper"] == 0.0
+            assert mgr2._bucket_peak["paper"] == 0.0
+            assert mgr2.peak_equity == 0.0
+            assert mgr2.halted is False
+            assert mgr2._bucket_halted["paper"] is False
+            assert mgr2._day_start_equity == pytest.approx(100_000.0)
+            assert mgr2._bucket_day_start["paper"] == pytest.approx(100_000.0)
+            assert mgr2._bucket_day["paper"] is None
+            assert mgr2._current_day is None
+            assert (
+                "prior-session (2026-09-21) risk peak & breaker latches rolled clean"
+                in caplog.text
+            )
+            mgr2.resume_all("paper")  # must not raise
+        finally:
+            mgr2.shutdown()
+
+    def test_same_day_restart_preserves_peak_drawdown_and_halt_latch(self, tmp_path):
+        """Ticket B1: intraday high-water mark (`session_peak_daily_pnl`) survives
+        a mid-day restart and immediately trips `max_drawdown_pct` when the book
+        gives back more than the allowed drawdown from morning peak — AND the
+        resulting halt flushes to disk immediately without waiting 5 ticks.
+        """
+        state = tmp_path / "state.json"
+
+        def _tight_mgr() -> PortfolioManager:
+            return PortfolioManager(
+                risk_config=GlobalRiskConfig(
+                    daily_loss_limit=500_000,
+                    max_drawdown_pct=0.10,  # 10% trailing intraday peak drawdown
+                ),
+                tick_seconds=1.0,
+                warmup_bars=5,
+                auto_start_feed=False,
+                state_path=state,
+                persist_trades=False,
+            )
+
+        mgr1 = _tight_mgr()
+        rid = mgr1.add_runner(_runner_config("PEAK-TEST"))
+        # Morning rally: buy 800 @ 100, sell 800 @ 125 (~+₹20,000 net peak):
+        mgr1.broker.submit_market(rid, "RELIANCE", SIDE_BUY, 800, 100.0)
+        mgr1.broker.submit_market(rid, "RELIANCE", SIDE_SELL, 800, 125.0)
+        mgr1._evaluate_risk()
+        peak_pnl_1 = mgr1._session_peak_daily_pnl
+        peak_eq_1 = mgr1.peak_equity
+        assert peak_pnl_1 > 19_500.0
+        assert peak_eq_1 == pytest.approx(100_000.0 + peak_pnl_1)
+        assert mgr1.halted is False
+
+        # Slight pullback before restart (~-₹4,000 -> ~3.4% off peak, still +₹16k on day):
+        mgr1.broker.submit_market(rid, "RELIANCE", SIDE_BUY, 800, 100.0)
+        mgr1.broker.submit_market(rid, "RELIANCE", SIDE_SELL, 800, 95.0)
+        mgr1._evaluate_risk()
+        assert mgr1.halted is False
+        mgr1.shutdown()
+
+        # Mid-day restart on the same IST session:
+        mgr2 = _tight_mgr()
+        try:
+            assert mgr2._session_peak_daily_pnl == pytest.approx(peak_pnl_1)
+            assert mgr2.peak_equity == pytest.approx(peak_eq_1)
+            assert mgr2._bucket_peak["paper"] == pytest.approx(peak_eq_1)
+            assert mgr2.halted is False
+
+            # Post-restart reversal (~-₹10,400 -> equity ~₹105.5k: STILL +₹5.5k UP on
+            # the day, yet ~12% below the ~₹120k morning peak, exceeding 10% limit!):
+            mgr2.broker.submit_market(rid, "RELIANCE", SIDE_BUY, 800, 100.0)
+            mgr2.broker.submit_market(rid, "RELIANCE", SIDE_SELL, 800, 87.0)
+            assert mgr2.get_runner(rid).daily_pnl() > 0.0, "still net green on the day"
+            mgr2._evaluate_risk()
+            assert mgr2._bucket_halted["paper"] is True
+            assert mgr2.halted is True
+            assert "drawdown" in (mgr2.halt_reason or "").lower()
+
+            # Immediate durability: even WITHOUT calling shutdown() or running 5 ticks,
+            # a crash-recovery boot (`mgr3`) sees the halt latch on disk right away!
+            mgr3 = _tight_mgr()
+            try:
+                assert mgr3.halted is True
+                assert mgr3._bucket_halted["paper"] is True
+            finally:
+                mgr3.shutdown()
+        finally:
+            mgr2.shutdown()
+
+    def test_offline_runner_removal_does_not_trigger_false_drawdown_on_restart(
+        self, tmp_path
+    ):
+        """Ticket B1: cash-flow-neutral peak reconstruction (`open_baseline +
+        session_peak_daily_pnl`) prevents a phantom 50% drawdown crash when one
+        of two ₹5L runners is removed offline from `portfolio_state.json`.
+        """
+        state = tmp_path / "state.json"
+
+        def _tight_mgr() -> PortfolioManager:
+            return PortfolioManager(
+                risk_config=GlobalRiskConfig(
+                    daily_loss_limit=500_000,
+                    max_drawdown_pct=0.10,  # 10% max drawdown
+                ),
+                tick_seconds=1.0,
+                warmup_bars=5,
+                auto_start_feed=False,
+                state_path=state,
+                persist_trades=False,
+            )
+
+        mgr1 = _tight_mgr()
+        id1 = mgr1.add_runner(
+            _runner_config("SURVIVOR", symbol="RELIANCE", allocated_capital=500_000)
+        )
+        mgr1.add_runner(
+            _runner_config("REMOVED-OFFLINE", symbol="TCS", allocated_capital=500_000)
+        )
+        # SURVIVOR makes ~+₹10k intraday gain -> ~₹10.1L raw combined peak:
+        mgr1.broker.submit_market(id1, "RELIANCE", SIDE_BUY, 1_000, 100.0)
+        mgr1.broker.submit_market(id1, "RELIANCE", SIDE_SELL, 1_000, 110.0)
+        mgr1._evaluate_risk()
+        peak_pnl_1 = mgr1._session_peak_daily_pnl
+        assert peak_pnl_1 > 9_500.0
+        assert mgr1.peak_equity == pytest.approx(1_000_000.0 + peak_pnl_1)
+        mgr1.shutdown()
+
+        # Operator removes `REMOVED-OFFLINE` from the state file while offline:
+        raw = json.loads(state.read_text(encoding="utf-8"))
+        raw["runners"] = [
+            r for r in raw["runners"] if r["config"]["name"] == "SURVIVOR"
+        ]
+        state.write_text(json.dumps(raw), encoding="utf-8")
+
+        # Same-day boot: raw saved peak was ~₹10.1L vs ~₹5.1L survivor equity,
+        # which would have been a fake 49.5% drawdown under raw scalar restore.
+        # Cash-flow-neutral reconstruction yields ₹5.0L + peak_pnl_1 (0% DD)!
+        mgr2 = _tight_mgr()
+        try:
+            expected_survivor_peak = 500_000.0 + peak_pnl_1
+            assert mgr2.peak_equity == pytest.approx(expected_survivor_peak)
+            assert mgr2._bucket_peak["paper"] == pytest.approx(expected_survivor_peak)
+            mgr2._evaluate_risk()
+            assert mgr2.halted is False
+            assert mgr2._bucket_halted["paper"] is False
+        finally:
+            mgr2.shutdown()
+
+    def test_in_process_profitable_runner_removal_does_not_trip_survivor_drawdown(
+        self, tmp_path
+    ):
+        """Ticket B1: removing a profitable runner in-process adjusts
+        `session_peak_daily_pnl` alongside `_record_capital_flow` so a smaller
+        surviving runner does not inherit the retired runner's ₹80k gain as a
+        phantom drawdown ceiling.
+        """
+        state = tmp_path / "state.json"
+        mgr = PortfolioManager(
+            risk_config=GlobalRiskConfig(
+                daily_loss_limit=500_000,
+                max_drawdown_pct=0.10,
+            ),
+            tick_seconds=1.0,
+            warmup_bars=5,
+            auto_start_feed=False,
+            state_path=state,
+            persist_trades=False,
+        )
+        try:
+            id_big = mgr.add_runner(
+                _runner_config("BIG-WINNER", symbol="RELIANCE", allocated_capital=500_000)
+            )
+            mgr.add_runner(
+                _runner_config("SMALL-FLAT", symbol="TCS", allocated_capital=100_000)
+            )
+            mgr.broker.submit_market(id_big, "RELIANCE", SIDE_BUY, 2_000, 100.0)
+            mgr.broker.submit_market(id_big, "RELIANCE", SIDE_SELL, 2_000, 140.0)
+
+            mgr._evaluate_risk()
+            assert mgr._session_peak_daily_pnl > 79_000.0
+
+            assert mgr.remove_runner(id_big) is True
+            assert mgr._session_peak_daily_pnl == pytest.approx(0.0)
+            assert mgr.peak_equity == pytest.approx(100_000.0)
+
+            mgr._evaluate_risk()
+            assert mgr.halted is False
+            assert mgr._bucket_halted["paper"] is False
+        finally:
+            mgr.shutdown()
+
+    def test_segment_slice_persists_same_day_and_live_midnight_rolls_clean(
+        self, tmp_path, monkeypatch
+    ):
+        """Ticket B1: `segment:*` breaker latches round-trip across same-day
+        restarts in `buckets`, and `_maybe_roll_risk_session_ist` clears active
+        halts + peaks automatically when `current_session_date()` advances across
+        00:00 IST in a long-running process.
+        """
+        from datetime import date
+        import backtest.forward.portfolio_manager as pm_mod
+
+        state = tmp_path / "state.json"
+        monkeypatch.setattr(pm_mod, "current_session_date", lambda: date(2026, 11, 3))
+
+        mgr1 = _manager(state)
+        mgr1.add_runner(_runner_config("SEG-PAPER"))
+        seg_key = mgr1._segment_key("nse_fno")
+        mgr1._ensure_bucket_state(seg_key)
+        mgr1._bucket_halted[seg_key] = True
+        mgr1._bucket_halt_reason[seg_key] = "segment daily loss breached"
+        mgr1._bucket_halt_mode[seg_key] = "pause"
+        mgr1._bucket_halted_ts[seg_key] = "2026-11-03T07:00:00+00:00"
+        mgr1.shutdown()
+
+        # Same-day boot (2026-11-03) -> segment latch preserved!
         mgr2 = _manager(state)
         try:
-            assert mgr2._bucket_peak["paper"] == 0.0
-            assert mgr2._bucket_day_start["paper"] == 0.0
-            assert mgr2._bucket_day["paper"] is None
-            assert mgr2._day_start_equity == 0.0
-            assert mgr2.peak_equity == 0.0
-            assert mgr2._current_day is None
+            assert mgr2._bucket_halted[seg_key] is True
+            assert mgr2._bucket_halt_reason[seg_key] == "segment daily loss breached"
+
+            # Advance clock across 00:00 IST to 2026-11-04 in-process:
+            monkeypatch.setattr(pm_mod, "current_session_date", lambda: date(2026, 11, 4))
+            mgr2._evaluate_risk()
+            assert mgr2._risk_session_date_ist == "2026-11-04"
+            assert mgr2._bucket_halted[seg_key] is False
+            assert mgr2._bucket_halt_reason[seg_key] is None
+            assert mgr2._session_peak_daily_pnl == 0.0
         finally:
             mgr2.shutdown()
 
