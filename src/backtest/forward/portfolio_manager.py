@@ -2420,11 +2420,23 @@ class PortfolioManager:
         Once per IST trading day at/after 15:30:00 IST, stamps ``prev_close_mark``
         and ``prior_close_net_pnl`` on all carried open option legs/structures,
         dual-writes state, and runs the Phase D1-a/b parity check.
+
+        A holiday would otherwise stamp the previous session's last marks as
+        today's ``prev_close_mark`` anchor, so the day-state check is the same
+        server truth the square-off sweep uses.
         """
         reference = now or now_utc()
         now_ist = reference.astimezone(EXCHANGE_TZ)
-        if now_ist.weekday() >= 5:
+        try:
+            from backtest.live.market_status import get_market_day_state
+
+            day_state = str(get_market_day_state(now_ist).get("day_state") or "")
+        except Exception:  # noqa: BLE001 — fall back to the weekday-only gate
+            day_state = "WEEKEND" if now_ist.weekday() >= 5 else "TRADING_DAY"
+        if day_state == "WEEKEND":
             return {"settled": False, "reason": "weekend"}
+        if day_state == "HOLIDAY":
+            return {"settled": False, "reason": "holiday"}
         if (now_ist.hour, now_ist.minute) < (15, 30):
             return {"settled": False, "reason": "before_close"}
         sess_iso = now_ist.date().isoformat()

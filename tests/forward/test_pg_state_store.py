@@ -383,6 +383,34 @@ def test_event6_eod_mark_settlement_stamps_prev_close_mark_once(
     db.disconnect()
 
 
+def test_event6_settlement_skips_nse_holiday(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Mon–Fri holiday must not stamp yesterday's last marks as today's anchor."""
+    db = _make_sqlite_db(tmp_path, "event6_holiday.sqlite")
+    mgr = PortfolioManager(
+        auto_start_feed=False,
+        state_path=tmp_path / "state.json",
+        db_manager=db,
+        allow_synthetic_db_state=True,
+    )
+    runner = mgr.get_runner(mgr.add_runner(_option_runner_config()))
+    struct = _seed_open_option_structure(runner, mark="152.75")
+    struct.last_mark_net_pnl = Decimal("2436.25")
+    struct.legs[0].prev_close_mark = None  # nothing settled yet
+
+    monkeypatch.setattr(
+        "backtest.live.market_status.get_market_day_state",
+        lambda *a, **kw: {"day_state": "HOLIDAY", "session_state": "CLOSED"},
+    )
+    at_close = datetime(2026, 11, 6, 10, 0, tzinfo=timezone.utc)  # Fri 15:30 IST
+    res = mgr.run_eod_mark_settlement(at_close)
+    assert res["settled"] is False
+    assert res["reason"] == "holiday"
+    assert struct.legs[0].prev_close_mark is None
+    db.disconnect()
+
+
 def test_event2_broker_login_reconciles_live_positions(tmp_path: Path) -> None:
     """Event 2 reconciles mode='live' runners against broker.get_positions()."""
     db = _make_sqlite_db(tmp_path, "event2.sqlite")
