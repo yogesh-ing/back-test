@@ -145,6 +145,10 @@ async function runBacktest() {
         // instrument DOES hold, which is the whole instruction the user needs;
         // a 3-second toast is gone before it can be read, let alone typed.
         showRunError(message);
+        // The loader claimed a run was in progress; a failure ends that claim.
+        // Leaving it up puts a "Running backtest…" spinner directly under the
+        // banner that says the run failed.
+        hideLoader("metricsCards");
         $("results").hidden = true;
         $("emptyState").hidden = false;
     } finally {

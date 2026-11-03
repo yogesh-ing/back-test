@@ -180,6 +180,31 @@ def test_backtest_chart_panes_behaviour():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_failed_backtest_clears_its_loader():
+    """BT-02: a run that failed must stop claiming it is still running.
+
+    ``runBacktest`` paints "Running backtest…" into ``#metricsCards`` before the
+    POST and only cleared it on the success path, so a data error left a spinner
+    directly under the sticky banner reporting the failure — the two opposite
+    states on screen at once, and the same untruthful-state class as F8. The
+    harness drives the real controller through both outcomes: the failure clears
+    the loader and keeps the banner, and the in-flight loader is still painted
+    for a run that answers, so the fix cannot delete the only progress signal.
+    """
+    result = subprocess.run(
+        ["node", str(_REPO_ROOT / "tests" / "js" / "test_backtest_failure_clears_loader.mjs")],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "2 tests passed" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_richer_metric_sections_behaviour():
     """PRD backTest-enhance §2.2: the four expandable metric sections and the
     insufficient-trade-count banner.

@@ -586,6 +586,22 @@ strip wrap or collapse to dots, keep every broker's state visible (a dot still s
 **Acceptance:** `document.scrollWidth === innerWidth` at 1024 and 768 on all 14 routes (the pw_pass.js
 geometry probe already computes this; add the two widths to its matrix).
 
+**Status: DONE (S8, 2026-11-04).**
+- New band in `workspace.css` at `@media (max-width: 1100px)`: `.topbar-controls` wraps, and the words
+  give before the page does — `.command-open`, `.broker-strip-item::after`, `.market-status-text` and
+  `.freshness-text` drop to `display: none`, and the two chips lose their `min-width`. Each broker's
+  dot stays on screen (connected/not is still readable); the Broker Board the button opens carries the
+  names, and the status chip's `title` carries the reason.
+- Measured on the mirror with a completed run on screen (results change the topbar's content):
+  390×844 `docW 386 / overflow false / unclipped offenders []` (was 450 with 8 offenders);
+  820×900 `docW 815 / overflow false / topbar 815 of 815` (was 922 with a 923px topbar);
+  1000×900 `docW 995 / overflow false`; 1280×900 and 1440×900 unchanged and still non-overflowing,
+  with the labels visible again (`commandOpen flex`, `marketStatusText block`).
+- Gate: `tests/test_workspace_design.py` → 28 passed, including the new band ratchet
+  `test_topbar_cannot_drag_the_document_sideways_above_the_mobile_band`, which parses the 1100px block's
+  rules and requires all four `display: none` selectors plus `flex-wrap: wrap`. It fails on the pre-fix
+  tree (no such band existed).
+
 ### F14 — risk_page.js interpolates server strings into innerHTML with no escaper (found during F11)
 
 ```
@@ -611,6 +627,98 @@ file buys false confidence, and the two rules would then fail together for unrel
 
 ---
 
+## /backtest functional pass (2026-11-04) — BT findings
+
+This pass validated *behaviour*, not strategy quality: how the page handles a run, a refusal, a stored
+result, and a narrow viewport. The QA cache is small (217 symbols, limited history) and that is an
+accepted condition, not a finding — no run below is being certified or tuned.
+
+**Verified working** (re-measured on the mirror, no action needed): the two guards (no symbol / no
+dates) refuse client-side without a POST; a daily run returns in ~1 s and an intraday run in ~11 s with
+the button disabled and `aria-busy` set for the whole period; all three chart tabs render from the
+wrapped payloads; a missing metric prints NOTHING rather than a confident 0.00; `quick_screen`
+self-flags red in the provenance badges; a data error is a persistent banner naming the dates and
+timeframes the instrument *does* hold, with the `[req …]` id; a stored run reads back with zero POSTs,
+the caption "stored run …, source db", and the form pre-filled; the `NOT STORED` badge logic and the
+Recent Runs ledger (`total_trades`) are consistent. F3 and S5 hold here — "No broker feed", ₹ en-IN
+grouping, and "Bollinger reversion" rather than the registry key.
+
+### BT-01 — trade stamps render UTC, not exchange time (OPEN, needs a scope decision)
+
+```
+Issue ID / task ID: BT-01
+Priority: P1 (correctness of the number a reader trusts, on the money page)
+Actual: a trade ledger entry is stamped in UTC while the chart, the run window and the storage layer all
+  speak exchange time. On a 1hour run the session visibly starts at 08:30 IST instead of 09:15.
+Root cause: two layers, and the display layer is the smaller one.
+  1. `_fmt()` in src/backtest/engine/trades.py:168 drops the time only when hour/minute/second are all
+     zero, so an aware-UTC timestamp prints its UTC clock face.
+  2. `src/backtest/data/db_source.py` bulk path converts to Asia/Kolkata and then strips the zone
+     (line 206), but `get_candles()` (~line 298) only calls `pd.to_datetime` — so single-symbol loads
+     hand the engine naive UTC. The repo's own gate, scripts/diagnose_timeframe_alignment.py, says the
+  same thing: storage is UTC, resampling does not convert, and resampled-1day vs native-1day MISMATCH.
+Classification: data/clock, surfaced in the UI
+Files: src/backtest/engine/trades.py, src/backtest/data/db_source.py
+```
+
+Deliberately **not** fixed in this pass. Layer 2 is the correct fix ("fix at source, not on read") and
+`get_candles()` has ~14 callers spanning forward, live, optimization and the simulator — converting
+there moves every resample boundary on those paths, which is a clock-policy change under
+`agents.md` → `src/backtest/timekeeping.py`. Layer 1 alone would make the ledger *look* right while the
+bars under it stayed UTC, which is the exact read-side compensation this repo forbids. Needs an
+operator scope call: accept the blast radius on the trading paths, or keep BT-01 open.
+
+### BT-02 — a failed run left its own "Running backtest…" spinner on screen
+
+```
+Issue ID / task ID: BT-02 (same family as F8: a state that describes what is not happening)
+Priority: P1
+Actual: runBacktest() paints showLoader("metricsCards", "Running backtest…") and only clears it on the
+  success path. A failure therefore rendered a spinner directly beneath the banner saying the run
+  failed — two mutually contradictory states on one screen.
+Root cause: hideLoader() was called in renderResults(), which the catch block never reaches.
+Classification: UI state
+Files: static/js/backtest.js (runBacktest catch block)
+```
+
+**Status: DONE (2026-11-04).** `hideLoader("metricsCards")` added to the catch block. Harness
+`tests/js/test_backtest_failure_clears_loader.mjs` (2 tests) boots the real `backtest.js` in a `node:vm`
+sandbox with a stub DOM and fetch: the failing run must clear the loader, show the banner, hide results,
+re-enable the button and drop `aria-busy`; the succeeding run must paint the loader exactly once and
+clear it. Wrapped by `tests/test_web_components.py::test_failed_backtest_clears_its_loader`. Re-measured
+live on the mirror (ABB, 2019 dates → 400): `loaderInMetricsCards false`, `metricsCardsHtmlLen 0`,
+`runErrorHidden false`, `resultsHidden true`, `btnDisabled false`, `btnAriaBusy null`.
+
+### BT-04 — at 390px the trade table and the readiness panel forced a sideways page
+
+```
+Issue ID / task ID: BT-04 (F13's rule, one layer down: a component that sets a hard content floor)
+Priority: P2
+Actual: with results on screen at 390×844 the document was 450px wide with 8 unclipped offenders.
+Root cause: `#tradeTable { min-width: 570px }` — a floor below the desktop viewport but above a phone,
+  so the table widened the page instead of taking the scroll its own `#tradeTable-wrap` already
+  provides; and `.cmp-ready-grid`'s `minmax(300px, 1fr)` track, where the 300px is a hard minimum.
+Classification: UI
+Files: static/css/workspace.css, static/css/app.css
+```
+
+**Status: DONE (2026-11-04).** The table is `width: 100%` and its wrapper keeps the scroll; the panel's
+track floor became `minmax(min(300px, 100%), 1fr)`, which preserves two columns at 1440 (measured
+`381.8px 381.8px`) but does not shrink the 300px floor inside a percentage-resolved track, so below 560px
+each check now stacks deterministically. Ratchet:
+`tests/test_workspace_design.py::test_a_component_grid_may_never_set_a_hard_content_floor`. Re-measured
+at 390×844 with a completed run on screen: `docW 386, overflow false, unclipped offenders []`.
+
+### Retracted during the /backtest pass (all four were my probes, not defects)
+
+- `-₹90,759.30` in a paise column is `Money.signed` behaving correctly, not a scale bug.
+- `recentRunTiles: 0` and `trades=None` were wrong selectors in my own probe — tiles carry `data-idx`,
+  ledger rows carry `total_trades`.
+- `trade_table.js:63`'s hard-coded `$` is the no-`Money` fallback path; the browser renders ₹.
+- Console 400s during these runs were the intentional bad-dates probes.
+
+---
+
 ## Suggested order of work
 
 | Slice | Contents | Why here |
@@ -622,7 +730,7 @@ file buys false confidence, and the two rules would then fail together for unrel
 | S5 | F9 (one money formatter + ratchet test) — **DONE 2026-11-03** | Touches many files; land before other template edits |
 | S6 | F6 (diary truncation) **DONE 2026-11-03** + F8 (analytics states) **DONE 2026-11-03** | Per-page, independent |
 | S7 | F10 (description spacing sweep) **DONE 2026-11-03** + F11 (label resolver) **DONE 2026-11-03** + F12 | Copy/consistency batch |
-| S8 | F13 (topbar at 561–1100px) — found during S6 | Same rule as S3, wrong breakpoint band |
+| S8 | F13 (topbar at 561–1100px) **DONE 2026-11-04** + BT-02/BT-04 (backtest-page pass) | Same rule as S3, wrong breakpoint band |
 | S9 | F14 (risk_page.js escaping) — found during S7 | One file, no visual change; needs its own static rule so it cannot be half-done |
 
 Regression command for every slice (from [UI-REDESIGN-PLAN.md](UI-REDESIGN-PLAN.md):217-227), run in
@@ -641,12 +749,13 @@ spacing); they are in the slice command, not a separate run, so a later slice ca
 without the gate going red.
 
 Known failures on this mirror that are **not** regressions (verified against a clean HEAD worktree,
-2026-11-03): 8 in `test_portfolio_ui_views.py` — every one arms a live runner and dies in
-`assert_live_arming_allowed()` (segments_store.py:335), which the mirror's own DB state deliberately
-trips; 1 in `test_web_components.py` — `test_orders_tab.mjs` prints 23 and the Python wrapper asserts
-"21 tests passed" (a stale count, harness itself exits 0); `tests/js/test_mtm_staleness.mjs` fails on
-its `portfolio.js` SSE assertion. Its four `option_view.js` unit tests pass, including after F11 made
-`option_view.js` depend on `labels.js`.
+2026-11-03; re-confirmed 2026-11-04): 8 in `test_portfolio_ui_views.py` — every one arms a live runner
+and dies in `assert_live_arming_allowed()` (segments_store.py:335), which the mirror's own DB state
+deliberately trips. `test_web_components.py` is now green on its own (50 passed — the stale `test_orders_tab.mjs` count was
+synced to 23 by a1d0de8).
+`tests/js/test_mtm_staleness.mjs` fails on its `portfolio.js` SSE assertion — its four `option_view.js`
+unit tests pass, including after F11 made `option_view.js` depend on `labels.js`, and none of the files
+it loads were touched by this pass. It is not wrapped by pytest, so the slice gate stays green.
 
 Static edits (CSS/JS) are served from disk, but **Python and template edits need a mirror restart** —
 the reporting fix measured 157.8 s until PID 21136 was replaced, and F11's `data-raw-key` markers only

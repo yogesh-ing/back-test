@@ -1798,7 +1798,10 @@ select.input option.sym-no-data:disabled { cursor: not-allowed; }
 .cmp-ready-fail { color: var(--danger-text); }
 .cmp-ready-part { color: var(--warning-text); }
 
-.cmp-ready-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 2px 20px; }
+/* min(300px, 100%) — a bare 300px floor is a hard minimum the track may not
+   break, so below ~340px of content box the grid grew past the viewport and put
+   the whole document into horizontal scroll (BT-04, measured 390px). */
+.cmp-ready-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 2px 20px; }
 .cmp-ready-row {
     display: grid; grid-template-columns: 20px 1fr auto;
     align-items: baseline; gap: 8px;

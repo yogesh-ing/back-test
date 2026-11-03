@@ -5,6 +5,7 @@ in scripts/check_workspace_ui.py exercises layout, focus and theme changes.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from html.parser import HTMLParser
@@ -184,6 +185,52 @@ def test_diary_table_columns_stay_reachable():
     wrap = css.split(".diary-tree-table td:first-child {", 1)[1].split("}", 1)[0]
     assert "white-space: normal" in wrap, "the name column must wrap, not widen the table"
     assert ".diary-scroll-cue" in css and ".diary-table-wrap:focus-visible" in css
+
+
+def test_topbar_cannot_drag_the_document_sideways_above_the_mobile_band():
+    """F13/S8: the same overflow S3 fixed at <=560px went on until ~1100px.
+
+    The topbar's right cluster has a min-content width of about 600px, so at a
+    820px viewport it measured 923px inside an 815px bar and put the whole
+    document into horizontal scroll. The mobile block already answers this by
+    trading words for dots; the tablet band needs the same trade, or the page
+    it is standing on scrolls sideways for the sake of a label.
+    """
+    css = (WEB / "static" / "css" / "workspace.css").read_text(encoding="utf-8")
+    band = css.split("@media (max-width: 1100px) {", 1)
+    assert len(band) == 2, "the 561-1100px band has no rule for the topbar cluster"
+    block = band[1].split("@media", 1)[0]
+    # the band's own rule list, minus its trailing closing brace
+    rules = re.findall(r"([^{}]+)\{([^{}]*)\}", block[:-1])
+    hidden = {
+        s.strip()
+        for selectors, body in rules if re.search(r"display:\s*none", body)
+        for s in selectors.split(",")
+    }
+    for selector in (".broker-strip-item::after", ".market-status-text", ".freshness-text", ".command-open"):
+        # matched per selector, so grouping several into one rule stays legal
+        assert selector in hidden, f"{selector} still occupies the controls row"
+    assert "flex-wrap: wrap" in block, "the controls row must be allowed to stack"
+
+
+def test_a_component_grid_may_never_set_a_hard_content_floor():
+    """BT-04: the readiness grid's 300px track floor widened the page at 390px.
+
+    ``repeat(auto-fit, minmax(300px, 1fr))`` reads as "one column when narrow",
+    but 300px is a MINIMUM the track may not break: once the content box falls
+    below it the grid is wider than the viewport and the whole document scrolls
+    sideways. ``min(300px, 100%)`` keeps the intent above the breakpoint and
+    lets the column give below it. The trade table lost its matching
+    ``min-width: 570px`` for the same reason — its wrapper already scrolls.
+    """
+    app_css = (WEB / "static" / "css" / "app.css").read_text(encoding="utf-8")
+    grid = app_css.split(".cmp-ready-grid {", 1)[1].split("}", 1)[0]
+    assert "minmax(min(300px, 100%), 1fr)" in grid, (
+        "a bare px floor in a minmax track can outgrow the viewport"
+    )
+    css = (WEB / "static" / "css" / "workspace.css").read_text(encoding="utf-8")
+    table = css.split("#tradeTable {", 1)[1].split("}", 1)[0]
+    assert "min-width" not in table, "the trade table must not set a content floor"
 
 
 def test_chrome_cannot_submit_a_trading_request():
