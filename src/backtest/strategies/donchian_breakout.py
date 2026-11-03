@@ -13,12 +13,12 @@ class DonchianBreakout(EquityStrategy):
     )
     description_sections = {
         'overview': (
-            'Channel breakout trend-follower: buys strength at a new lookback high and rides the'
+            'Channel breakout trend-follower: buys strength at a new lookback high and rides the '
             'move until the channel breaks the other way.'
         ),
         'regime': (
             'Works in trending markets with expanding ranges — breakouts that keep going.'
-            'Struggles in tight ranges, where repeated false breakouts generate small consecutive'
+            'Struggles in tight ranges, where repeated false breakouts generate small consecutive '
             'losses.'
         ),
         'entry': (
@@ -29,12 +29,12 @@ class DonchianBreakout(EquityStrategy):
             'Single-instrument equity/index position, long only, one position at a time.'
         ),
         'exits_risk': (
-            'Exits on a new lookback low (the trailing channel exit), which acts as a trailing'
-            'stop once the trade moves in favour. Worst case is a failed breakout reversing'
+            'Exits on a new lookback low (the trailing channel exit), which acts as a trailing '
+            'stop once the trade moves in favour. Worst case is a failed breakout reversing '
             'through the entry before the exit triggers — no fixed stop or target caps it.'
         ),
         'parameters': (
-            'lookback=20 (channel window for both entry highs and exit lows). Longer windows take'
+            'lookback=20 (channel window for both entry highs and exit lows). Longer windows take '
             'fewer, later trades with wider effective stops.'
         ),
     }

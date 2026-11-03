@@ -26,28 +26,28 @@ class MomentumROC(EquityStrategy):
     )
     description_sections = {
         'overview': (
-            'Rate-of-change momentum: holds the instrument only while its recent percent change'
+            'Rate-of-change momentum: holds the instrument only while its recent percent change '
             'clears a threshold — momentum on, risk on.'
         ),
         'regime': (
-            'Works when strong moves continue (momentum persistence). Struggles at turning points'
-            'and in range markets, where the percent change oscillates around the threshold and'
+            'Works when strong moves continue (momentum persistence). Struggles at turning points '
+            'and in range markets, where the percent change oscillates around the threshold and '
             'churns the position.'
         ),
         'entry': (
-            "Enters long when the close's percent change over the lookback window exceeds the"
+            "Enters long when the close's percent change over the lookback window exceeds the "
             'threshold.'
         ),
         'construction': (
             'Single-instrument equity/index position, long only, one position at a time.'
         ),
         'exits_risk': (
-            'Exits when momentum fades back below the threshold. No hard stop: worst case is a'
-            'reversal fast enough to carry price well below entry before the lookback window'
+            'Exits when momentum fades back below the threshold. No hard stop: worst case is a '
+            'reversal fast enough to carry price well below entry before the lookback window '
             'registers the fade.'
         ),
         'parameters': (
-            'lookback=10 (bars for the percent change), threshold_pct=1.0 (minimum % change to be'
+            'lookback=10 (bars for the percent change), threshold_pct=1.0 (minimum % change to be '
             'long). Higher thresholds take only the strongest moves, later.'
         ),
     }

@@ -36,11 +36,11 @@ class SwingEmaPullback(EquityStrategy):
         ),
         'regime': (
             'Works in healthy, stair-stepping uptrends with orderly pullbacks. Struggles when the'
-            "'pullback' is a trend change — the 200-SMA filter exits late, after much of the"
+            "'pullback' is a trend change — the 200-SMA filter exits late, after much of the "
             'reversal has already happened.'
         ),
         'entry': (
-            'Trend filter on (close > 200-SMA and EMA20 > EMA50), then enter when price pulls'
+            'Trend filter on (close > 200-SMA and EMA20 > EMA50), then enter when price pulls '
             'back to and reclaims the 20-EMA.'
         ),
         'construction': (
@@ -48,7 +48,7 @@ class SwingEmaPullback(EquityStrategy):
         ),
         'exits_risk': (
             'Exits when the close loses the slow trend EMA (EMA50) — the trend-break is the stop.'
-            'Worst case is the distance from the 20-EMA entry to a decisive EMA50 break, widest'
+            'Worst case is the distance from the 20-EMA entry to a decisive EMA50 break, widest '
             'in volatile names; no fixed stop or target.'
         ),
         'parameters': (

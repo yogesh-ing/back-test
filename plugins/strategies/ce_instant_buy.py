@@ -37,13 +37,13 @@ class CeInstantBuy(InstantLongOptionStrategy):
     )
     description_sections = {
         'overview': (
-            'Mechanics validator, not an edge: buys an ATM NIFTY call on the first bar and holds'
-            'it for the day so live/paper plumbing (fills, MTM, charges) can be verified'
+            'Mechanics validator, not an edge: buys an ATM NIFTY call on the first bar and holds '
+            'it for the day so live/paper plumbing (fills, MTM, charges) can be verified '
             'end-to-end.'
         ),
         'regime': (
             'There is no regime logic — it trades on every deploy, up days and down days alike.'
-            'Expect it to make or lose roughly whatever an ATM call does that day; do not read'
+            'Expect it to make or lose roughly whatever an ATM call does that day; do not read '
             'performance into it.'
         ),
         'entry': (
@@ -55,9 +55,9 @@ class CeInstantBuy(InstantLongOptionStrategy):
             'Defined risk: the premium paid is the most the position itself can lose.'
         ),
         'exits_risk': (
-            'Held for the day — no stop or target in the declared plan; the position rides to the'
-            'session/day close unless the operator exits. Worst case is the full premium if the'
-            'call expires worthless intraday-value-wise; the risk gate still prices and caps'
+            'Held for the day — no stop or target in the declared plan; the position rides to the '
+            'session/day close unless the operator exits. Worst case is the full premium if the '
+            'call expires worthless intraday-value-wise; the risk gate still prices and caps '
             'every entry.'
         ),
         'parameters': (

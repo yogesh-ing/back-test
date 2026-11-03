@@ -30,12 +30,12 @@ class OneMinScalp(EquityStrategy):
     )
     description_sections = {
         'overview': (
-            'One-minute scalper for paper-trading tests: buys the bar after a green candle and'
+            'One-minute scalper for paper-trading tests: buys the bar after a green candle and '
             'takes a quick fixed target.'
         ),
         'regime': (
             'Works when green candles reliably see next-bar continuation at 1-minute scale'
-            '(strong intraday momentum). Struggles in choppy minute bars — green/red alternation'
+            '(strong intraday momentum). Struggles in choppy minute bars — green/red alternation '
             'triggers entries right into reversals, and costs dominate the 5-point target.'
         ),
         'entry': (
@@ -46,12 +46,12 @@ class OneMinScalp(EquityStrategy):
             'one trade at a time.'
         ),
         'exits_risk': (
-            'Fixed bracket on every trade: +5 points take-profit, -3 points stop-loss. Worst case'
+            'Fixed bracket on every trade: +5 points take-profit, -3 points stop-loss. Worst case '
             'per trade is the 3-point stop plus slippage — the entire edge rests on hitting +5'
             'first more often than chance.'
         ),
         'parameters': (
-            'take_profit=5.0, stop_loss=3.0, symbol=RELIANCE. Points are absolute — retune for'
+            'take_profit=5.0, stop_loss=3.0, symbol=RELIANCE. Points are absolute — retune for '
             'other instruments.'
         ),
     }

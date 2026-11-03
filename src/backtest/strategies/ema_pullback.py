@@ -32,16 +32,16 @@ class EmaPullback(EquityStrategy):
     )
     description_sections = {
         'overview': (
-            'Trend pullback: only buys dips inside an established uptrend — waiting for price to'
+            'Trend pullback: only buys dips inside an established uptrend — waiting for price to '
             'come back to the fast EMA rather than chasing strength.'
         ),
         'regime': (
-            'Works in orderly uptrends with regular shallow pullbacks. Struggles when the trend'
-            'turns choppy or the pullback is the start of a real reversal — entries keep'
+            'Works in orderly uptrends with regular shallow pullbacks. Struggles when the trend '
+            'turns choppy or the pullback is the start of a real reversal — entries keep '
             'triggering into a falling market until the trend filter switches off.'
         ),
         'entry': (
-            'Requires the slow EMA uptrend (price/fast EMA above slow EMA), then enters when'
+            'Requires the slow EMA uptrend (price/fast EMA above slow EMA), then enters when '
             'price pulls back to touch the fast EMA.'
         ),
         'construction': (
@@ -49,11 +49,11 @@ class EmaPullback(EquityStrategy):
         ),
         'exits_risk': (
             'Exits on a stretch-target above the fast EMA or when the trend breaks (fast EMA'
-            'loses the slow EMA). The trend break is the de-facto stop; worst case is the adverse'
+            'loses the slow EMA). The trend break is the de-facto stop; worst case is the adverse '
             'move between entry and that break.'
         ),
         'parameters': (
-            'fast=10, slow=50 (EMA windows), stretch_pct=1.0 (% stretch above the fast EMA that'
+            'fast=10, slow=50 (EMA windows), stretch_pct=1.0 (% stretch above the fast EMA that '
             "counts as 'target reached')."
         ),
     }

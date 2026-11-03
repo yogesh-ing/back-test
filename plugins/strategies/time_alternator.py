@@ -45,12 +45,12 @@ class TimeAlternator(DirectionalOptionStrategy):
     )
     description_sections = {
         'overview': (
-            'Mechanics validator, not an edge: alternates bullish/bearish views by bar parity to'
+            'Mechanics validator, not an edge: alternates bullish/bearish views by bar parity to '
             'force constant, clean turnover through the whole execution chain.'
         ),
         'regime': (
-            'Deliberately regime-blind — it flips on schedule in trends, ranges, and crashes'
-            'alike. Its P&L is noise by design; judge it only on whether trades open/close'
+            'Deliberately regime-blind — it flips on schedule in trends, ranges, and crashes '
+            'alike. Its P&L is noise by design; judge it only on whether trades open/close '
             'correctly.'
         ),
         'entry': (
@@ -58,20 +58,20 @@ class TimeAlternator(DirectionalOptionStrategy):
             'There is no market condition whatsoever.'
         ),
         'construction': (
-            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put'
+            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put '
             "on the underlying's nearest eligible expiry — a defined-risk, single-leg structure."
             'Size is 1 lot by default (override 1-5 lots where the spawn form allows).'
         ),
         'exits_risk': (
-            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit'
-            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst'
-            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long'
-            'option can never lose more than the premium paid. In practice most exits are the'
+            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit '
+            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst '
+            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long '
+            'option can never lose more than the premium paid. In practice most exits are the '
             'parity flip reversing the position.'
         ),
         'parameters': (
             'alternate_every=1, min_confidence=0.0, underlying=NIFTY. Size defaults to 1 lot;'
-            'quantity (and, where listed, exit levels) can be overridden at spawn within the'
+            'quantity (and, where listed, exit levels) can be overridden at spawn within the '
             'declared menu.'
         ),
     }

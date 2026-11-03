@@ -14,12 +14,12 @@ class RsiReversion(EquityStrategy):
     )
     description_sections = {
         'overview': (
-            'RSI mean-reversion: buys oversold dips (RSI below the lower level) and sells the'
+            'RSI mean-reversion: buys oversold dips (RSI below the lower level) and sells the '
             'recovery once RSI normalises.'
         ),
         'regime': (
-            'Works in range-bound markets where oversold readings reliably bounce. Struggles in'
-            'strong downtrends — RSI can stay oversold for long stretches while price keeps'
+            'Works in range-bound markets where oversold readings reliably bounce. Struggles in '
+            'strong downtrends — RSI can stay oversold for long stretches while price keeps '
             'making new lows.'
         ),
         'entry': (
@@ -30,7 +30,7 @@ class RsiReversion(EquityStrategy):
         ),
         'exits_risk': (
             'Exits when RSI recovers past the exit level (default 55) — a momentum-recovery exit,'
-            'not a price target. No hard stop; worst case is a downtrend that keeps RSI pinned'
+            'not a price target. No hard stop; worst case is a downtrend that keeps RSI pinned '
             'while price falls.'
         ),
         'parameters': (

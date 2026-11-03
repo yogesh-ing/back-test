@@ -37,27 +37,27 @@ class BankNiftyEmaMomentum(DirectionalOptionStrategy):
         ),
         'regime': (
             "Works on BankNifty's trending, high-beta intraday sessions. Struggles on range days"
-            "— BankNifty's wide swings trigger confident signals in both directions and the"
+            "— BankNifty's wide swings trigger confident signals in both directions and the "
             'premium stops accumulate.'
         ),
         'entry': (
-            'Bullish/bearish views from EMA fast-vs-slow momentum, gated by a minimum confidence'
+            'Bullish/bearish views from EMA fast-vs-slow momentum, gated by a minimum confidence '
             'score so weak crossovers stay silent.'
         ),
         'construction': (
-            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put'
-            "on BANKNIFTY's nearest eligible expiry — a defined-risk, single-leg structure. Size"
+            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put '
+            "on BANKNIFTY's nearest eligible expiry — a defined-risk, single-leg structure. Size "
             'is 1 lot by default (override 1-5 lots where the spawn form allows).'
         ),
         'exits_risk': (
-            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit'
-            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst'
-            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long'
+            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit '
+            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst '
+            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long '
             'option can never lose more than the premium paid.'
         ),
         'parameters': (
             'fast_period=9, slow_period=21, scale_points=150.0, min_confidence=0.25,'
-            'underlying=BANKNIFTY. Size defaults to 1 lot; quantity (and, where listed, exit'
+            'underlying=BANKNIFTY. Size defaults to 1 lot; quantity (and, where listed, exit '
             'levels) can be overridden at spawn within the declared menu.'
         ),
     }

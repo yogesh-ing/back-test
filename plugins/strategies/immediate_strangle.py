@@ -62,22 +62,22 @@ class ImmediateStrangle(StructureStrategy):
     )
     description_sections = {
         'overview': (
-            'Immediate short strangle: on deploy it sells a strangle (~2% OTM call and put) to'
+            'Immediate short strangle: on deploy it sells a strangle (~2% OTM call and put) to '
             'harvest premium from a range-bound underlying. It is a volatility-selling structure,'
             'not a directional view.'
         ),
         'regime': (
-            'Works in calm, range-bound markets where realised volatility stays below what the'
-            'sold premium priced in. Struggles violently in trending or event-driven markets — a'
+            'Works in calm, range-bound markets where realised volatility stays below what the '
+            'sold premium priced in. Struggles violently in trending or event-driven markets — a '
             'fast one-sided move runs through a short leg and losses accelerate.'
         ),
         'entry': (
-            'Unconditional: the entry intent fires on the first bar after deploy, with no signal'
+            'Unconditional: the entry intent fires on the first bar after deploy, with no signal '
             "condition. Timing the market regime is entirely the operator's job."
         ),
         'construction': (
-            'Short strangle: simultaneously sold OTM call and OTM put (~2% away) on the same'
-            'expiry, 1 lot by default (max 3). Short options carry margin requirements and'
+            'Short strangle: simultaneously sold OTM call and OTM put (~2% away) on the same '
+            'expiry, 1 lot by default (max 3). Short options carry margin requirements and '
             'theoretically uncapped risk on the call side.'
         ),
         'exits_risk': (
