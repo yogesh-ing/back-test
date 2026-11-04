@@ -892,6 +892,9 @@ Present before BT-01 (measured on the pre-fix tree), so it is recorded separatel
 that fix. Out of scope for the /backtest behavioural pass: no run here is being certified, and a volume
 definition question belongs to whoever owns the fetch path.
 
+Carried into §7 of [UI-PENDING-TASKS.md](UI-PENDING-TASKS.md) as the one open finding from this pass, so
+it stays on the ledger with an owner needed on the fetch path instead of ending here.
+
 ### BT-02 — a failed run left its own "Running backtest…" spinner on screen
 
 ```
