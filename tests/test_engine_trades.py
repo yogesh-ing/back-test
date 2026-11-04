@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 from backtest.engine.backtester import BacktestConfig, Backtester
-from backtest.engine.trades import trade_stats, walk_trades
+from backtest.engine.trades import index_is_day_granular, trade_stats, walk_trades
 
 
 def _series(values, start="2024-01-01"):
@@ -284,3 +284,52 @@ def test_result_dict_keys_are_backwards_compatible():
         "worst_trade_pnl",
     ):
         assert key in m, f"new breakdown key {key} missing"
+
+
+# ---------------------------------------------------------------------------
+# Labels — what one bar's stamp reads as (BT-05)
+# ---------------------------------------------------------------------------
+
+
+def _daily_at_session_open(values, first="2026-09-01"):
+    """Daily bars stamped 09:15, the way the DB stores them.
+
+    ``data/base.py:bar_timestamp`` anchors a ``1day``/``1week`` bar to the
+    session open, so the clock face says where the bar sits inside its own day —
+    which is not what a reader of a daily backtest is looking for.
+    """
+    idx = pd.date_range(first, periods=len(values), freq="B") + pd.Timedelta(
+        hours=9, minutes=15
+    )
+    return pd.Series([float(v) for v in values], index=idx)
+
+
+def test_granularity_is_bar_spacing_not_a_midnight_guess():
+    assert index_is_day_granular(_daily_at_session_open([1] * 10).index)
+    assert index_is_day_granular(pd.date_range("2026-09-07", periods=8, freq="W"))
+    assert not index_is_day_granular(pd.date_range("2026-09-01 09:15", periods=40, freq="4h"))
+    assert not index_is_day_granular(pd.date_range("2026-09-01 09:15", periods=40, freq="1h"))
+    assert not index_is_day_granular(pd.DatetimeIndex(["2026-09-01 09:15"]))
+
+
+def test_a_day_granular_run_labels_trades_by_date():
+    equity = _daily_at_session_open([1000, 1000, 900, 800, 700, 700])
+    position = _daily_at_session_open([0, 1, 1, 1, 0, 0])
+    close = _daily_at_session_open([100, 100, 90, 80, 70, 70])
+
+    trades = walk_trades(equity, position, close)
+
+    assert len(trades) == 1
+    assert trades[0].entry_date == "2026-09-02", "no clock face on a daily row"
+    assert trades[0].exit_date == "2026-09-07"
+
+
+def test_an_intraday_run_keeps_the_clock_face():
+    idx = pd.date_range("2026-09-02 09:15", periods=6, freq="1min")
+    equity = pd.Series([1000, 1000, 900, 800, 700, 700], index=idx, dtype=float)
+    position = pd.Series([0, 1, 1, 1, 0, 0], index=idx, dtype=float)
+
+    trades = walk_trades(equity, position)
+
+    assert trades[0].entry_date == "2026-09-02 09:16"
+    assert trades[0].exit_date == "2026-09-02 09:19"

@@ -14,18 +14,10 @@ import pandas as pd
 from backtest.engine.backtester import BacktestResult
 from backtest.engine.benchmark import build_benchmark
 from backtest.engine.monte_carlo import monte_carlo_trade_order
-from backtest.engine.trades import walk_trades
+from backtest.engine.trades import fmt_bar, index_is_day_granular, walk_trades
 from backtest.logging_config import get_logger
 
 log = get_logger(__name__)
-
-
-def _fmt_dt(ts: Any) -> str:
-    """Format a pandas Timestamp as a compact, locale-free string."""
-    t = pd.Timestamp(ts)
-    if t.hour == 0 and t.minute == 0 and t.second == 0:
-        return t.strftime("%Y-%m-%d")
-    return t.strftime("%Y-%m-%d %H:%M")
 
 
 def _f(value: Any, ndigits: int = 4) -> float:
@@ -53,6 +45,15 @@ class BacktestAdapter:
         self._candles: pd.DataFrame = result.candles
         self._metrics: dict[str, Any] = result.metrics
         self._capital: float = float(result.config.initial_capital)
+        #: One decision for the whole payload, made from the bars themselves: a
+        #: day-granular run labels every series by date, so the trade table, the
+        #: equity axis and the candle markers cannot disagree about what a bar is
+        #: (finding BT-05).
+        self._day_granular = index_is_day_granular(self._equity.index)
+
+    def _label(self, ts: Any) -> str:
+        """Compact, locale-free stamp for one bar of this run."""
+        return fmt_bar(ts, day_granular=self._day_granular)
 
     # ------------------------------------------------------------------
     # Metrics cards
@@ -185,7 +186,7 @@ class BacktestAdapter:
     def to_equity(self) -> dict[str, Any]:
         bench = self._benchmark().reindex(self._equity.index).ffill()
         return {
-            "dates": [_fmt_dt(d) for d in self._equity.index],
+            "dates": [self._label(d) for d in self._equity.index],
             "values": [_f(v, 2) for v in self._equity.values],
             "benchmark": [_f(v, 2) for v in bench.values],
         }
@@ -197,9 +198,9 @@ class BacktestAdapter:
     def to_drawdown(self) -> dict[str, Any]:
         dd = self._equity / self._equity.cummax() - 1
         worst = float(dd.min()) if len(dd) else 0.0
-        worst_date = _fmt_dt(dd.idxmin()) if len(dd) else ""
+        worst_date = self._label(dd.idxmin()) if len(dd) else ""
         return {
-            "dates": [_fmt_dt(d) for d in dd.index],
+            "dates": [self._label(d) for d in dd.index],
             "values": [_f(v, 4) for v in dd.values],
             "worst_dd_pct": _f(worst * 100, 2),
             "worst_dd_date": worst_date,
@@ -249,7 +250,7 @@ class BacktestAdapter:
 
         candles_out = [
             {
-                "date": _fmt_dt(idx),
+                "date": self._label(idx),
                 "open": _f(self._candles.loc[idx, "open"]),
                 "high": _f(self._candles.loc[idx, "high"]),
                 "low": _f(self._candles.loc[idx, "low"]),
@@ -263,7 +264,7 @@ class BacktestAdapter:
         for idx in pos.index:
             cur = float(pos.loc[idx])
             price = float(close.loc[idx])
-            d = _fmt_dt(idx)
+            d = self._label(idx)
             if cur > 0 and prev <= 0:
                 buys.append({"date": d, "price": _f(price, 2)})
             elif (cur == 0 and prev > 0) or (cur < 0 and prev >= 0):

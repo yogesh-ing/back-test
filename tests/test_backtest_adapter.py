@@ -143,3 +143,59 @@ def test_trades_are_the_same_numbers_the_cards_show():
     wins = sum(1 for r in closed if r["result"] == "Win")
     expected = 100.0 * wins / len(closed) if closed else 0.0
     assert metrics["win_rate_pct"] == pytest.approx(expected, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# BT-05 — one granularity decision, applied to every series in the payload
+# ---------------------------------------------------------------------------
+
+
+def _anchored_candles(freq="B", first="2021-01-04", periods=140, anchor="09:15"):
+    """Bars anchored at a session open, the way a stored 1day/1hour bar arrives."""
+    idx = pd.date_range(f"{first} {anchor}", periods=periods, freq=freq)
+    close = pd.Series([100.0 + (i % 13) for i in range(periods)], index=idx)
+    return pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "volume": 1000.0,
+        },
+        index=idx,
+    )
+
+
+def _payload(candles):
+    result = run_on_candles(
+        candles,
+        "sma_crossover",
+        {"fast": 5, "slow": 20},
+        "TEST",
+        BacktestConfig(initial_capital=100_000.0),
+    )
+    return BacktestAdapter(result).to_all()
+
+
+def test_a_day_granular_payload_labels_every_series_by_date():
+    """The trade table, the equity axis and the candle markers agree (BT-05).
+
+    A stored daily bar is anchored to the 09:15 session open, so the old
+    midnight-only rule printed "2021-01-04 09:15" — and before BT-01 it printed
+    "2021-01-04 03:45". Neither is what a daily reader means by the date.
+    """
+    payload = _payload(_anchored_candles())
+    assert payload["trades"], "fixture produced no trades to label"
+    for row in payload["trades"]:
+        assert len(row["date"]) == 10 and len(row["exit_date"]) == 10, row
+    for series in (payload["equity"], payload["drawdown"]):
+        assert all(len(d) == 10 for d in series["dates"]), series["dates"][:3]
+    assert all(len(c["date"]) == 10 for c in payload["signals"]["candles"])
+
+
+def test_an_intraday_payload_still_labels_to_the_minute():
+    """The other direction: spacing decides, so an hourly run keeps its clock."""
+    payload = _payload(_anchored_candles(freq="h", first="2021-01-04", periods=120))
+    assert all(len(d) == 16 for d in payload["equity"]["dates"])
+    assert payload["trades"], "fixture produced no trades to label"
+    assert len(payload["trades"][0]["date"]) == 16

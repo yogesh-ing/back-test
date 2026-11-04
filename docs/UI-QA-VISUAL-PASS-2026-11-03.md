@@ -693,14 +693,50 @@ plus `tests/test_forward_engine.py::test_a_replay_of_the_current_session_is_not_
 which fails with "Backtest replay finished: 0 loops" if `from_market_clock` is dropped.
 
 Two things deliberately left open, neither a clock bug:
-- **BT-05 (new, P3):** `_fmt()`/`_fmt_dt()` print date-only only for a midnight stamp, so a `1day` ledger row
-  now reads `2026-09-01 09:15` — truthful (daily bars are anchored to the session open by `bar_timestamp`)
-  but noisy where the reader thinks in days. It read `03:45` before, so this is not a regression; making
-  coarse bars date-only is a display decision that needs the operator's call, not a silent heuristic.
+- **BT-05 (fixed the same day, 2026-11-04):** `_fmt()`/`_fmt_dt()` printed date-only only for a midnight
+  stamp, so a `1day` ledger row now read `2026-09-01 09:15` — truthful (daily bars are anchored to the
+  session open by `bar_timestamp`) but noisy where the reader thinks in days. It read `03:45` before, so
+  this was not a regression; see the BT-05 section.
 - Stored ledger rows written before this fix keep their UTC stamps. `PAYLOAD_VERSION` did not change (the
   shape is the same, only the clock), so an old run still reads back — with its old, frozen stamps. The
   ledger is an immutable record of what one build produced (`code_fingerprint`), so the repair belongs in
   a new run, not in rewriting history.
+
+### BT-05 — a day-granular run labelled its bars with a clock face
+
+```
+Issue ID / task ID: BT-05 (surfaced by the BT-01 fix, which moved the clock face from 03:45 to 09:15)
+Priority: P3 (presentation of a correct number, on every daily run)
+Actual: a 1day trade row read "2026-09-01 09:15" and the equity axis said the same. The reader asked for
+  a daily backtest; the time carries no information about the day it sits inside.
+Root cause: the label rule was "is this stamp midnight?", which only fires for synthetic frames anchored
+  at 00:00. A stored coarse bar is anchored to the 09:15 session open (data/base.py:bar_timestamp), so it
+  always took the datetime branch. The same heuristic was also written out three times — engine/trades.py,
+  adapters/backtest_adapter.py and api/forward.py — which is how BT-01 happened in the first place.
+Classification: display/data contract
+Files: src/backtest/engine/trades.py, src/backtest/adapters/backtest_adapter.py, src/backtest/api/forward.py
+```
+
+**Status: DONE (2026-11-04).** Granularity is decided by the bars, once:
+`index_is_day_granular()` (src/backtest/engine/trades.py:175) calls a frame day-granular when the median
+spacing between stamps is ≥ 20h, and `fmt_bar(ts, day_granular=…)` is the only label function left. The
+trade walk computes it from its own index; the adapter computes it once per payload, so the equity axis,
+the drawdown series, the candle markers and the trade rows cannot disagree; `ForwardSession` dropped its
+third copy and shares the decision, because its revealed-prefix filter compares these strings against each
+other. A daily run with weekend gaps still measures one day at the median, and `1hour`/`4hour` stay on the
+clock face — spacing, not a magic time, is the rule.
+
+Live on the mirror (:5001 restarted), RELIANCE Sep-2026: `1day` → equity/candle labels `2026-09-01`,
+`2026-09-02`, trade rows `2026-08-14 → 2026-08-18`, `worst_dd_date 2026-09-10`; `1hour` → `2026-09-02
+09:00, 10:00` with trade `2026-09-23 09:00 → 2026-09-24 12:00`. No `PAYLOAD_VERSION` bump: the keys and
+types are unchanged, only the string a bar renders as, so old rows still read back (with their old labels).
+
+Ratchets: `tests/test_engine_trades.py` (spacing rule + daily/intraday label pair),
+`tests/test_backtest_adapter.py` (whole payload agrees) and
+`tests/test_api_forward.py::test_a_day_granular_replay_stamps_agree_with_its_candle_rows` — 5 new tests,
+2 of them red with the `day_granular` branch removed. 76 green in those three files, 277 across
+engine/reporting/diary/metrics, 161 across analytics/ledger/web-components.
+
 
 ### BT-06 — section 3 of the timeframe gate still reports a volume MISMATCH (OPEN, not a clock bug)
 

@@ -41,6 +41,7 @@ from backtest.data.sources_policy import SourceDisabledError, policy_key, requir
 from backtest.engine.backtest_runner import resolve_interval, resolve_warmup_start, run_quick_screen
 from backtest.engine.backtester import BacktestResult
 from backtest.engine.metrics import compute_metrics
+from backtest.engine.trades import fmt_bar, index_is_day_granular
 from backtest.logging_config import get_logger, timed
 from backtest.runner import build_source
 from backtest.simulator.bucket_risk import resolve_bucket_risk
@@ -106,13 +107,6 @@ def _f(value: Any, ndigits: int = 4) -> float:
         return round(float(value), ndigits)
     except (TypeError, ValueError):
         return 0.0
-
-
-def _fmt_ts(ts: Any) -> str:
-    t = pd.Timestamp(ts)
-    if t.hour == 0 and t.minute == 0 and t.second == 0:
-        return t.strftime("%Y-%m-%d")
-    return t.strftime("%Y-%m-%d %H:%M")
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +192,11 @@ class ForwardSession:
         self.buy_signals = signals["buys"]
         self.sell_signals = signals["sells"]
         self._dates = [c["date"] for c in self.candles_rows]
+        #: One granularity decision for the whole session, shared with the
+        #: adapter: a day-granular replay labels its bars by date, so the
+        #: revealed-prefix filter, the open leg's entry stamp and `last_bar_ts`
+        #: can never disagree with the candle rows they are compared against.
+        self._day_granular = index_is_day_granular(self.candles.index)
 
         self.bars_per_second = max(0.0, min(float(bars_per_second), MAX_BARS_PER_SECOND))
 
@@ -370,7 +369,7 @@ class ForwardSession:
         already advertising entries months ahead (a lookahead leak in the payload,
         gap G4). Filtering on the bar date is the actual rule.
         """
-        cutoff_str = _fmt_ts(cutoff) if cutoff is not None else ""
+        cutoff_str = self._label(cutoff) if cutoff is not None else ""
         candles = [c for c in self.candles_rows if c["date"] <= cutoff_str]
         return {
             "candles": candles,
@@ -399,7 +398,7 @@ class ForwardSession:
         direction = 1.0 if cur_pos > 0 else -1.0
         price_change = (last_close / entry - 1.0) * direction if entry else 0.0
         pnl = float(open_trade["pnl"]) if open_trade else 0.0
-        entry_date = open_trade["date"] if open_trade else _fmt_ts(last_idx)
+        entry_date = open_trade["date"] if open_trade else self._label(last_idx)
         bars_held = max(0, (n - 1) - self._index_of(entry_date)) if open_trade else 0
         return [
             {
@@ -419,6 +418,10 @@ class ForwardSession:
                 "bars_held": bars_held,
             }
         ]
+
+    def _label(self, ts: Any) -> str:
+        """Compact, locale-free stamp for one bar of this replay."""
+        return fmt_bar(ts, day_granular=self._day_granular)
 
     def _index_of(self, date_str: str) -> int:
         try:
@@ -480,7 +483,7 @@ class ForwardSession:
                 "total_bars": n,
                 "bars_in_memory": n,
                 "total_trades": metrics["total_trades"],
-                "last_bar_ts": _fmt_ts(last_idx) if last_idx is not None else None,
+                "last_bar_ts": self._label(last_idx) if last_idx is not None else None,
                 "market_open": self._is_market_open(),
                 "unrealized_pnl": round(sum(p["unrealized_pnl"] for p in positions), 2),
                 "error": self.error,
