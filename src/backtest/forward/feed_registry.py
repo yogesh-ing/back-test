@@ -49,7 +49,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -731,6 +731,7 @@ class _BrokerBarFeedBase:
                 return 0
 
         delivered = 0
+        newest_bar_ts = ""
         for symbol in symbols:
             if self._stop.is_set() or not self._has_live_auth():
                 break
@@ -746,8 +747,10 @@ class _BrokerBarFeedBase:
             if self.on_bar is not None:
                 self.on_bar(symbol, bar)
                 delivered += 1
+                if bar["ts"] > newest_bar_ts:
+                    newest_bar_ts = bar["ts"]
         if delivered and self.on_tick_end is not None:
-            self.on_tick_end(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+            self.on_tick_end(newest_bar_ts)
         return delivered
 
     def ingest_ws_bar(
@@ -782,7 +785,7 @@ class _BrokerBarFeedBase:
         if self.on_bar is not None:
             self.on_bar(sym, bar)
         if emit_tick_end and self.on_tick_end is not None:
-            self.on_tick_end(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+            self.on_tick_end(bar["ts"])
         return True
 
     def ingest_ws_tick(
@@ -871,11 +874,19 @@ class _BrokerBarFeedBase:
             if raw_ts is None or (isinstance(raw_ts, str) and not raw_ts.strip()):
                 return None
             if isinstance(raw_ts, (int, float)) and raw_ts > 1_000_000_000_000:
-                ts = pd.to_datetime(raw_ts, unit="ms")
+                ts = pd.to_datetime(raw_ts, unit="ms", utc=True)
             else:
                 ts = pd.to_datetime(raw_ts)
             if pd.isna(ts):
                 return None
+            # ``ts`` is the string every downstream guard re-reads through
+            # ``from_market_clock``, whose declared convention is "naive means
+            # exchange time". An instant therefore has to be rendered in IST
+            # *before* the offset is dropped — flattening a UTC stamp here is
+            # what made 14:31 read as "09:01 is before the 09:15 open"
+            # (2026-11-04).
+            if getattr(ts, "tzinfo", None) is not None:
+                ts = ts.tz_convert(EXCHANGE_TZ).tz_localize(None)
             close = float(raw["close"])
             return {
                 "ts": ts.strftime("%Y-%m-%d %H:%M:%S"),

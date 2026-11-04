@@ -10,10 +10,14 @@ Three jobs, in order:
    gate that could never fire inside a session, and a one-bar trade recorded as
    a 330-minute hold.
 3. **The ratchet** (:class:`TestClockRatchet`) — an AST sweep of
-   ``src/backtest`` that fails when a call site re-introduces one of the four
-   patterns this incident came from. Counts are frozen at the post-fix baseline,
-   so the test tolerates a decrease (drop the entry, don't leave it stale) and
-   fails on an increase.
+   ``src/backtest`` that fails when a call site re-introduces one of the five
+   patterns this incident came from: the four *construction* doors (naive
+   ``utcnow``/bare ``now``/tzinfo stripping/duplicated IST) plus the
+   *serialization* door — ``strftime`` applied to an expression that still holds
+   an instant, which is how a compliant-looking line still blocked every pool
+   entry on 2026-11-04. Counts are frozen at the post-fix baseline, so the test
+   tolerates a decrease (drop the entry, don't leave it stale) and fails on an
+   increase.
 """
 
 from __future__ import annotations
@@ -274,7 +278,13 @@ _MISSING = object()
 def _call_sites(rel_path: str) -> dict[str, list[int]]:
     """Classify the clock-hazard call nodes in one module."""
     tree = ast.parse((SRC_ROOT / rel_path).read_text(encoding="utf-8"))
-    found: dict[str, list[int]] = {"utcnow": [], "bare_now": [], "strip_tz": [], "local_ist": []}
+    found: dict[str, list[int]] = {
+        "utcnow": [],
+        "bare_now": [],
+        "strip_tz": [],
+        "local_ist": [],
+        "flatten": [],
+    }
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -294,7 +304,51 @@ def _call_sites(rel_path: str) -> dict[str, list[int]]:
             found["strip_tz"].append(node.lineno)
         if _defines_ist(node):
             found["local_ist"].append(node.lineno)
+        if _flattens_an_instant(node):
+            found["flatten"].append(node.lineno)
     return found
+
+
+#: Receivers that carry an unambiguous instant; formatting them drops the offset.
+_INSTANT_MARKERS = (
+    "timezone.utc",
+    "utcnow(",
+    "now_utc(",
+    "now_exchange(",
+    "astimezone(",
+    "fromtimestamp(",
+)
+
+
+def _flattens_an_instant(node: ast.Call) -> bool:
+    """Match ``<expression holding an instant>.strftime("<time, no zone>")``.
+
+    The four constructor rules above cannot see the serialization door:
+    ``datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")`` is not
+    ``utcnow``, is not a bare ``now()``, strips no ``tzinfo``, and defines no
+    local IST — yet the output is a naive UTC string, and the one door that
+    reads such a string in the live path (``from_market_clock``) declares
+    "naive means exchange time". On 2026-11-04 that turned 14:31 into
+    "09:01 is before the 09:15 open" and blocked every pool entry for a day.
+
+    A format that writes its own zone (``"... UTC"`` or a trailing ``Z``) is a
+    declared value, not an undeclared one, and is not counted.
+    """
+    if not (isinstance(node.func, ast.Attribute) and node.func.attr == "strftime"):
+        return False
+    fmt = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else ""
+    if not isinstance(fmt, str) or "%H" not in fmt:
+        return False
+    if "UTC" in fmt or "IST" in fmt or fmt.endswith("Z"):
+        return False
+    receiver = ast.unparse(node.func.value)
+    # A naive string is only safe when its clock is the one every reader assumes;
+    # rendering in EXCHANGE_TZ first is the sanctioned producer shape.
+    if any(marker in receiver for marker in ("EXCHANGE_TZ", "now_exchange(", "IST")):
+        return False
+    if "to_datetime(" in receiver and "unit=" in receiver:
+        return "utc=True" not in receiver  # epoch millis/seconds are naive UTC
+    return any(marker in receiver for marker in _INSTANT_MARKERS)
 
 
 def _defines_ist(node: ast.Call) -> bool:
@@ -343,6 +397,39 @@ class TestClockRatchet:
         corrupted the trade rows. Zero tolerance."""
         offenders = [rel for rel, sites in sweep.items() if sites["utcnow"]]
         assert offenders == []
+
+    def test_no_instant_is_flattened_into_an_undeclared_string(self, sweep):
+        """The serialization door: ``strftime`` on an expression that holds an
+        instant drops the offset, and ``from_market_clock`` then reads the naive
+        result as exchange time. Zero tolerance (2026-11-04)."""
+        offenders = [
+            f"{rel}:{sites['flatten']}" for rel, sites in sweep.items() if sites["flatten"]
+        ]
+        assert offenders == []
+
+    def test_the_flatten_rule_actually_detects_the_2026_11_04_shape(self):
+        """A ratchet that matches nothing is worse than no ratchet — this class of
+        line hid from it for five days, so pin the detector on the exact shape that
+        leaked plus the spellings that must stay legal."""
+        cases = [
+            ('x = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")', True),
+            ('x = pd.to_datetime(ms, unit="ms").strftime("%Y-%m-%d %H:%M:%S")', True),
+            ('x = pd.to_datetime(ms, unit="ms", utc=True).strftime("%Y-%m-%d %H:%M:%S")', False),
+            ('x = now_utc().strftime("%H:%M:%S")', True),
+            (
+                'x = ts.tz_convert(EXCHANGE_TZ).tz_localize(None).strftime("%Y-%m-%d %H:%M:%S")',
+                False,
+            ),
+            ('x = datetime.now(EXCHANGE_TZ).strftime("%Y-%m-%d %H:%M:%S")', False),
+            ('x = now_utc().strftime("%d-%b-%Y %H:%M UTC")', False),
+            ('x = bar["ts"].strftime("%Y-%m-%d")', False),
+        ]
+        for src, expected in cases:
+            tree = ast.parse(src)
+            found = any(
+                _flattens_an_instant(node) for node in ast.walk(tree) if isinstance(node, ast.Call)
+            )
+            assert found is expected, src
 
     def test_bare_datetime_now_stays_at_baseline(self, sweep):
         """Local-clock reads are fine for filenames and display, never for a

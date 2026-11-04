@@ -3370,6 +3370,8 @@ class PortfolioManager:
             buckets_payload[mode] = {
                 "session_date_ist": session_date_ist,
                 "session_peak_daily_pnl": b_peak_pnl,
+                "current_daily_pnl": round(s_daily, 2),
+                "deployed_capital": round(sum(r.deployed_capital() for r in s_runners), 2),
                 "peak": b_peak,
                 "halted": self._bucket_halted.get(mode, False),
                 "halt_reason": self._bucket_halt_reason.get(mode),
@@ -3383,6 +3385,8 @@ class PortfolioManager:
             "manager": {
                 "session_date_ist": session_date_ist,
                 "session_peak_daily_pnl": mgr_peak_pnl,
+                "current_daily_pnl": round(agg_daily, 2),
+                "deployed_capital": round(sum(r.deployed_capital() for r in live), 2),
                 "total_capital": self.total_capital,
                 "peak_equity": self.peak_equity,
                 "day_start_equity": self._day_start_equity,
@@ -4256,7 +4260,7 @@ class PortfolioManager:
             "global": {
                 "peak_daily_pnl": self._session_peak_daily_pnl,
                 "current_daily_pnl": self._aggregate_daily_pnl(),
-                "deployed_capital": self.total_capital,
+                "deployed_capital": self._aggregate_deployed(),
                 "halted": self.halted,
                 "halt_reason": self.halt_reason,
             }
@@ -4265,7 +4269,7 @@ class PortfolioManager:
             slices[mode] = {
                 "peak_daily_pnl": self._bucket_session_peak_pnl.get(mode, 0.0),
                 "current_daily_pnl": self._bucket_daily_pnl(mode),
-                "deployed_capital": self._bucket_capital(mode),
+                "deployed_capital": self._bucket_deployed(mode),
                 "halted": self._bucket_halted.get(mode, False),
                 "halt_reason": self._bucket_halt_reason.get(mode),
             }
@@ -4354,6 +4358,15 @@ class PortfolioManager:
 
     def _aggregate_daily_pnl(self) -> float:
         return sum(r.daily_pnl() for r in self._runners.values())
+
+    def _aggregate_deployed(self) -> float:
+        """Money actually at work across every live book — NOT allocated capital.
+
+        ``risk_session_state.deployed_capital`` used to receive ``total_capital``
+        (the allocation, Rs7,00,000 on 2026-11-04) while the book had Rs9,94,200.40
+        deployed, so a restart reading the SSoT saw the wrong exposure.
+        """
+        return sum(r.deployed_capital() for r in self._runners.values())
 
     def _refresh_anchors(self) -> None:
         """Refresh manager-level + per-bucket peak/day-start anchors."""
@@ -4778,7 +4791,10 @@ class PortfolioManager:
         from datetime import timedelta as _td
 
         with self._lock:
-            ts = (datetime.now(timezone.utc) + _td(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+            # Exchange wall time: every consumer re-reads this string through
+            # ``from_market_clock``, whose convention is "naive means IST".
+            moment = now_utc().astimezone(EXCHANGE_TZ) + _td(minutes=1)
+            ts = moment.strftime("%Y-%m-%d %H:%M:%S")
             injected = 0
             for runner in self._runners.values():
                 for symbol in list(runner.positions.keys()):

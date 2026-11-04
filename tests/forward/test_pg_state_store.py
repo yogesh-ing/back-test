@@ -45,7 +45,7 @@ from backtest.forward.state_store import (
     verify_state_parity,
 )
 from backtest.options.paper_trading import OptionPosition, StructurePosition
-from backtest.timekeeping import EXCHANGE_TZ
+from backtest.timekeeping import EXCHANGE_TZ, current_session_date
 
 
 def _make_sqlite_db(tmp_path: Path, name: str = "ssot.sqlite") -> DatabaseManager:
@@ -337,6 +337,56 @@ def test_event5_risk_milestone_throttle_and_immediate_halt_flush(
             .one()
         )
         assert paper_row.peak_daily_pnl == Decimal("750.0")
+    db.disconnect()
+
+
+def test_risk_slices_publish_the_live_numbers_not_the_allocation(
+    tmp_path: Path,
+) -> None:
+    """2026-11-04: the close wrote ``current_daily_pnl 0.0000`` and
+    ``deployed_capital`` = the whole allocation into ``risk_session_state``, so a
+    restart reading the SSoT saw a flat, unexposed day. Both writers — the
+    snapshot payload and the Event-5 milestone — must carry the derived numbers."""
+    db = _make_sqlite_db(tmp_path, "risk_numbers.sqlite")
+    mgr = PortfolioManager(
+        auto_start_feed=False,
+        state_path=tmp_path / "state.json",
+        db_manager=db,
+        allow_synthetic_db_state=True,
+    )
+    runner = mgr.get_runner(mgr.add_runner(_option_runner_config()))
+    _seed_open_option_structure(runner, mark="135.50")
+    mgr._evaluate_risk()
+
+    payload = mgr._snapshot_payload()
+    manager_meta = payload["manager"]
+    assert manager_meta["deployed_capital"] == pytest.approx(mgr._aggregate_deployed())
+    assert manager_meta["deployed_capital"] < runner.config.allocated_capital, (
+        "deployed is the premium at work, not the book's allocation"
+    )
+    assert manager_meta["current_daily_pnl"] == pytest.approx(mgr._aggregate_daily_pnl())
+    assert payload["buckets"]["paper"]["deployed_capital"] == pytest.approx(
+        mgr._bucket_deployed("paper")
+    )
+
+    mgr.save_state()
+    with db.session() as session:
+        rows = {
+            r.slice_key: r
+            for r in session.query(RiskSessionStateRecord).filter_by(
+                session_date=current_session_date()
+            )
+        }
+    assert set(rows) >= {"global", "paper"}
+    assert float(rows["global"].deployed_capital) == pytest.approx(
+        mgr._aggregate_deployed()
+    )
+    assert float(rows["global"].current_daily_pnl) == pytest.approx(
+        mgr._aggregate_daily_pnl()
+    )
+    assert float(rows["paper"].deployed_capital) == pytest.approx(
+        mgr._bucket_deployed("paper")
+    )
     db.disconnect()
 
 

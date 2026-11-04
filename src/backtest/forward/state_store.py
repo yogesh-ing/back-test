@@ -872,7 +872,7 @@ class PostgresStateStore:
                     )
                 ),
                 current_daily_pnl=_dec_zero(mgr_meta.get("current_daily_pnl")),
-                deployed_capital=_dec_zero(mgr_meta.get("total_capital")),
+                deployed_capital=_dec_zero(mgr_meta.get("deployed_capital")),
                 halted=bool(mgr_meta.get("halted", False)),
                 halt_reason=mgr_meta.get("halt_reason"),
                 now=now,

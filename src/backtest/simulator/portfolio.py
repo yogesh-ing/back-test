@@ -1192,12 +1192,13 @@ class Portfolio:
         the last call.
 
         Keys live in the caller's ``written`` set (per runner, per process) as
-        ``"<position_id>:<status>"``, ``"<order_id>:<status>:<fill_count>"`` and
-        the bare ``<fill_id>``. A position is therefore written once while it is
-        open — so its fills and its closed trade have a row to point at — and
-        once more when it closes, which is the write that carries the final
-        realised P&L, the exit mark and ``closed_at``. Marks in between stay in
-        memory, where the Positions tab already reads them.
+        ``"<position_id>:<status>:<current_price>"``,
+        ``"<order_id>:<status>:<fill_count>"`` and the bare ``<fill_id>``. An open
+        position is therefore re-sent whenever its mark moves — so the row a
+        restart or an overnight read sees is the live mark, not the cost basis —
+        and once more when it closes, which is the write that carries the final
+        realised P&L, the exit mark and ``closed_at``. Cadence is whatever the
+        caller has: :meth:`flush_runner` runs per delivered bar, never per tick.
 
         The ``portfolios`` row is deliberately not touched. In the live path it
         is owned by
@@ -1215,7 +1216,12 @@ class Portfolio:
         from backtest.db.models import Position as PositionRow
 
         def position_key(position: Position) -> str:
-            return f"{position.position_id}:{position.status}"
+            # The mark rides in the key, so an open position is re-sent whenever
+            # its MTM moves. With only ``id:status`` here a row was written at
+            # open and then frozen at cost until it closed — on 2026-11-04 five
+            # equity rows sat overnight claiming ``unrealized_pnl 0`` while the
+            # live book carried +₹1,663.50.
+            return f"{position.position_id}:{position.status}:{position.current_price}"
 
         def order_key(order: Any) -> str:
             # The fill count rides on the key because a partial fill changes it

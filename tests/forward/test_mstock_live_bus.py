@@ -33,6 +33,7 @@ from backtest.forward.feed_registry import MStockBarFeed, reset_data_bus
 from backtest.forward.portfolio_manager import PortfolioManager
 from backtest.forward.paper_runner import RunnerConfig
 from backtest.forward.risk_supervisor import GlobalRiskConfig
+from backtest.timekeeping import from_market_clock
 
 
 # ---------------------------------------------------------------------------
@@ -115,12 +116,17 @@ class TestNormalization:
         bar = MStockBarFeed._normalize_bar(ISO_BAR)
         assert bar == ISO_BAR
 
-    def test_epoch_millis_ts_is_absorbed(self):
+    def test_epoch_millis_ts_becomes_exchange_wall_time(self):
+        """An epoch is an instant; the canonical ``ts`` is the IST wall time of
+        that instant. Flattening the UTC side instead hands a naive-UTC string to
+        ``from_market_clock``, which reads it as IST — the 2026-11-04 −5h30 bug."""
+        from datetime import datetime, timezone
+
         raw = {"ts": 1_758_105_900_000, "close": 101.5, "volume": 10}
         bar = MStockBarFeed._normalize_bar(raw)
         assert bar is not None
-        assert bar["ts"] == "2025-09-17 10:45:00"  # canonical %Y-%m-%d %H:%M:%S
-        assert bar["close"] == 101.5
+        assert bar["ts"] == "2025-09-17 16:15:00"  # 10:45Z in exchange time
+        assert from_market_clock(bar["ts"]) == datetime(2025, 9, 17, 10, 45, tzinfo=timezone.utc)
 
     def test_missing_fields_default_to_close(self):
         bar = MStockBarFeed._normalize_bar({"ts": "2026-09-17 10:00:00", "close": 55.0})
@@ -258,6 +264,32 @@ class TestPolling:
         assert len(ticks) == 1, "one sweep = one tick-end, not one per symbol"
         feed._poll_once()  # fully deduped → nothing delivered
         assert len(ticks) == 1, "an empty sweep fires no tick-end"
+
+    def test_tick_end_carries_the_sealed_bar_not_the_wall_clock(self):
+        """The pool entry guards re-read this stamp through ``from_market_clock``,
+        which declares "naive means exchange time". A UTC-flattened ``now()`` here
+        made every 2026-11-04 pool entry refuse itself 5h30 in the past."""
+        from datetime import datetime, timezone
+
+        ticks: list[str] = []
+        client = FakeClient({"NIFTY": ISO_BAR})
+        feed = MStockBarFeed(feed_client=client)
+        feed.on_bar = lambda sym, bar: None
+        feed.on_tick_end = lambda ts: ticks.append(ts)
+        feed.add_symbols(["NIFTY"])
+        feed._poll_once()
+        assert ticks == [ISO_BAR["ts"]], "the bar that closed, not the moment we noticed"
+        assert from_market_clock(ticks[0]) == datetime(2026, 9, 17, 4, 15, tzinfo=timezone.utc)
+
+    def test_ws_bar_tick_end_carries_the_bar_stamp(self):
+        ticks: list[str] = []
+        client = FakeClient({})
+        feed = MStockBarFeed(feed_client=client)
+        feed.on_bar = lambda sym, bar: None
+        feed.on_tick_end = lambda ts: ticks.append(ts)
+        feed.add_symbols(["NIFTY"])
+        assert feed.ingest_ws_bar("NIFTY", dict(ISO_BAR, ts=1_758_105_900_000))
+        assert ticks == ["2025-09-17 16:15:00"], "exchange wall time, never UTC"
 
     def test_dedupe_state_cleared_on_remove(self):
         client = FakeClient({"NIFTY": ISO_BAR})

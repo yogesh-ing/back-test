@@ -2107,7 +2107,7 @@ class OptionsBridge:
         self.last_unrealized_pnl = self.option_broker.total_unrealized_pnl
         self._after_mtm_attempt(symbol=self.underlying)
 
-        time_label = now_dt.astimezone().strftime("%H:%M:%S")
+        time_label = now_dt.astimezone(EXCHANGE_TZ).strftime("%H:%M:%S IST")
         if failing_count > 0:
             msg = f"refreshed {time_label} — still failing: {self.quote_error or 'quote failed'}"
         else:

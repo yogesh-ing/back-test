@@ -23,6 +23,12 @@ THE CONTRACT
    (:func:`ensure_utc`, :func:`parse_utc_iso`) rather than guessed. The single
    place that accepts one is :func:`from_market_clock`, which is the declared
    home of the convention "market feeds hand out naive IST".
+4. **Formatting is a clock decision too.** ``datetime.now(timezone.utc).strftime(
+   "%Y-%m-%d %H:%M:%S")`` strips the offset in a sibling call, so it looks
+   compliant and still lands 5h30 in the past once :func:`from_market_clock`
+   reads it as IST — that is how pool entries were blocked all of 2026-11-04.
+   Serialize an instant with :func:`iso_utc` (it states its own clock) or render
+   it in :data:`EXCHANGE_TZ` first; never flatten a UTC wall time.
 
 Why a fixed +05:30 offset instead of ``ZoneInfo("Asia/Kolkata")``: India has
 observed no daylight saving since 1962, so the offset is exact, it costs

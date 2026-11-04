@@ -588,6 +588,28 @@ class TestSliceOrdering:
 
         assert book.save_ledger_slice_to_db(book_db, written) == 0
 
+    def test_a_moved_mark_re_sends_the_row_so_the_ledger_never_freezes_at_cost(
+        self, book_db
+    ):
+        """The 2026-11-04 finding: five equity rows were still at
+        ``current_price == average_entry_price``, ``unrealized_pnl 0`` and
+        ``last_updated == opened_at`` overnight, because the open-position key
+        carried no mark and the row was therefore never written again."""
+        book = self._book()
+        written: set[str] = set()
+        book.save_ledger_slice_to_db(book_db, written)
+
+        book.update_prices({"RELIANCE": 110})
+        assert book.save_ledger_slice_to_db(book_db, written) == 1, "a new mark is new state"
+
+        row = book_db.fetch_one(
+            "SELECT current_price, unrealized_pnl, last_updated, opened_at FROM positions"
+        )
+        assert float(row["current_price"]) == 110.0
+        assert float(row["unrealized_pnl"]) == 100.0
+        assert row["last_updated"] > row["opened_at"]
+        assert book.save_ledger_slice_to_db(book_db, written) == 0, "an unchanged mark is free"
+
     def test_a_rolled_back_slice_stays_retryable(self, book_db, monkeypatch):
         """Keys are only recorded once the transaction commits, so a failed
         sweep retries instead of quietly deciding the rows were sent."""
