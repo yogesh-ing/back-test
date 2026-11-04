@@ -103,3 +103,28 @@ naked short strangle is open.
    points rule pre-empts.
 5. Cross-runner net exposure, so a CE and a PE on the same strike/expiry are one position.
 6. `exit_reason` attribution; `deployed_capital` for short structures; refusal notifications.
+
+## Deployed 2026-11-04 17:00 IST (post-close) — what the new build proved on live data
+
+`64a4340` on `feature/options-trading-dev`, restarted onto :5000 (old PID 14948 → new PID 6764,
+single listener on 127.0.0.1, repo-root cwd, system Python311, no `--source`). mStock came back from
+the remembered token without a TOTP (`authenticated`, valid to 22:26:47), so no book was refused at
+restore.
+
+Restore fidelity: 7 runners back, 6 open equity positions intact, deployed ₹9,94,200.40 unchanged.
+`strangle_wing_points` held its open strangle (`struct_20261104065624_0003`, SELL 24200CE + SELL
+23350PE) and woke straight into RUNNING — the open-exposure continuity rule, not a resume. The five
+flat books came back `PAUSED / RESTART_FLAT_SAFETY` by design and were resumed to the state the
+operator had before the restart.
+
+| Fix | Live proof on the new build |
+|---|---|
+| #1 clock seam | Post-restart log has zero `is before the 09:15:00 open` refusals. Real proof needs a flowing 1-min bar, so it lands at tomorrow's 09:15 open. |
+| #2 frozen equity marks | `positions` rows opened 14:45:30 re-sent at 17:00:54–17:01:07 with `current_price` off cost and non-zero unrealized (HDFCLIFE 528.00→532.50 = +₹1,701; BAJAJFINSV 1747.70→1756.50; KOTAKBANK 457.40→459.40). The pre-fix rows (ICICIBANK 03-Nov, RELIANCE 02-Nov) are still frozen at cost — they will only move when those books mark again. |
+| #3 risk session state | `risk_session_state` 2026-11-04 rows (`global`, `paper`, `live`) written 17:02:09 with `deployed_capital` 994,200.40 — money at work, not the ₹70,00,000 allocation — and non-zero `current_daily_pnl`. The JSON mirror gained `current_daily_pnl` + `deployed_capital` keys the old build never emitted. |
+
+Two numbers to keep apart tomorrow: the concentration check measures the short strangle at
+₹41,13,002 gross exposure (75.7% of NIFTY, `concentration_high`, 200 occurrences) while
+`deployed_capital` reports ₹9,94,200.40 — the open item that short structures are not in the
+deployed figure. And a restart re-baselines the day anchors, so post-restart `daily_pnl` (+1,205.18)
+is not comparable to the pre-restart figure (−1,055.52); the 2026-11-05 session rolls its own.
