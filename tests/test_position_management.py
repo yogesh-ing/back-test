@@ -551,6 +551,43 @@ class TestOptionStructureControl:
 
         assert bridge._leg_vol(Known()) == pytest.approx(0.12)
 
+    def test_a_logged_out_broker_still_renders_its_open_legs(self):
+        """Sprint A1's promise: the book stays visible when the broker leaves.
+
+        ``/portfolio`` renders ``open_structures_snapshot()`` → ``_leg_greeks``
+        → ``_leg_vol``, whose fallback reads the generator's *static*
+        per-underlying ``VOL`` table. That lookup went through the trade-gated
+        ``_generator()``, so a book still holding legs with no broker session —
+        the after-hours state after any restart — pushed
+        ``SourceDisabledError`` through ``get_state()`` and 500'd the page
+        instead of showing the legs with "—" for Greeks. Degrading is what
+        :meth:`leg_pricing_inputs` already documents, so assert the same bridge
+        both ways: the render path degrades, the entry path keeps refusing.
+        """
+        from backtest.data.sources_policy import SourceDisabledError
+        from backtest.options.quote_providers import DisconnectedQuoteProvider
+
+        runner = _option_runner()
+        _open_option_structure(runner)
+        _feed(runner, "NIFTY", [24_850.0], start_day=2)
+        bridge = runner.options_bridge
+
+        # Greeks are real while the session is up — without this the test could
+        # pass on a book that never had anything to lose.
+        live = runner.get_state()["options"]["open_structures_detail"][0]
+        assert live["net_delta"] is not None, "fixture opened nothing to render"
+
+        bridge.quote_provider = DisconnectedQuoteProvider("mstock", "NIFTY")
+        assert bridge.feed_disconnected is True
+
+        row = runner.get_state()["options"]["open_structures_detail"][0]
+        assert row["net_delta"] is None and row["net_theta"] is None
+        leg = row["legs_detail"][0]
+        assert leg["iv"] is None and leg["delta"] is None
+
+        with pytest.raises(SourceDisabledError, match="is disconnected"):
+            bridge._generator()
+
     def test_the_bridge_refuses_levels_with_nothing_open(self):
         bridge = OptionsBridge(
             capital=100_000,
