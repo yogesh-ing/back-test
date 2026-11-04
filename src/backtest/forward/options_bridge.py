@@ -2621,7 +2621,18 @@ class OptionsBridge:
                 except (TypeError, ValueError):
                     return None
         underlying = str(getattr(leg, "underlying", "") or self.underlying or "").upper()
-        default_vols = getattr(self._generator(), "VOL", None)
+        try:
+            default_vols = getattr(self._generator(), "VOL", None)
+        except SourceDisabledError:
+            # This column reads a *static* table (``VOL`` is a class constant on
+            # the chain surface), so nothing here invents a market — while
+            # ``_generator()`` refuses precisely because the only chain it could
+            # hand back without a broker session is a synthetic one. Letting that
+            # refusal escape took ``/portfolio`` down at 500 for a book holding
+            # legs after its broker logged out. The honest answer for a display
+            # column is no vol, which ``_leg_greeks`` already documents as
+            # "no Greeks → the UI shows —". Entry paths keep hitting the raise.
+            return None
         if isinstance(default_vols, dict) and underlying in default_vols:
             try:
                 return float(default_vols[underlying])
