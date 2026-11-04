@@ -446,3 +446,26 @@ def test_tune_this_prefill_behaviour():
         result.returncode == 0
     ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "28 tests passed" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_risk_page_escapes_every_server_string():
+    """F14: /risk renders from innerHTML, so a stored value must arrive as text.
+
+    The payloads here are strings an operator can type — a runner name, a halt
+    reason, an audit action, a limit — with markup in them. The static half of
+    the rule lives in ``tests/test_web_escaping.py``; this drives the real
+    component so escaping is proven at the render boundary, not only at the
+    source line.
+    """
+    result = subprocess.run(
+        ["node", str(_REPO_ROOT / "tests" / "js" / "test_risk_page_escaping.mjs")],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "8 tests passed" in result.stdout

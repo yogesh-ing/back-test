@@ -602,7 +602,7 @@ geometry probe already computes this; add the two widths to its matrix).
   rules and requires all four `display: none` selectors plus `flex-wrap: wrap`. It fails on the pre-fix
   tree (no such band existed).
 
-### F14 — risk_page.js interpolates server strings into innerHTML with no escaper (found during F11)
+### F14 — risk_page.js interpolates server strings into innerHTML with no escaper (found during F11) — DONE 2026-11-04
 
 ```
 Issue ID / task ID: none — new, found 2026-11-03 while fixing the audit Details column (F11)
@@ -624,6 +624,48 @@ of a server string; the audit row edited for F11 is a start, not a fix.
 through `esc()` or a numeric formatter — assertable statically the way `test_label_resolver.py`
 asserts the label rule. Deliberately **not** folded into F11: escaping one row of a wholly unescaped
 file buys false confidence, and the two rules would then fail together for unrelated reasons.
+
+**Fix (2026-11-04):** the house escaper is now in the file ([risk_page.js:19](../src/backtest/web/static/js/components/risk_page.js))
+and all 22 `innerHTML` sinks route stored values through it — halt reason and mode in the breaker
+banner, the gauge `value`/`sub`, both broker/segment card builders, the warnings banners, the
+exposure tables and their concentration lines, every audit cell (including the `title` fallback that
+holds `JSON.stringify(record)`), the trades rows, the rulebook's entitlement row, and the config
+form's stored limits, which are echoed straight into `value="…"` attributes.
+
+Two of those are worth naming. `<strong>${mode.toUpperCase()}</strong>` in the bucket form uppercases
+a *stored key* — it is now `esc(m.toUpperCase())`, so the display still reads `LIVE`/`PAPER` and a
+key with markup in it stays text. And the F11 `Reset & Resume` button wrote a raw `&` into an
+attribute-free position; it is `&amp;` now, which parses back to the same character.
+
+Numeric-only interpolations (pagination counts, `toFixed`, class ternaries whose two branches are
+literals) are deliberately **not** wrapped — they carry no string from the wire, and escaping them
+would imply the rule covers things it does not.
+
+**Ratchet (two halves):**
+- `tests/test_web_escaping.py` — the static rule, in the `test_label_resolver.py` shape: a governed
+  vocabulary (`halt_reason`, `action`, `symbol`, `runner_name`, `value`, …), any `${ … }` that sits
+  in markup on a line that opens a tag, must reach it through `esc()`/`fmtMoney`/`fmtSigned`/
+  `Labels.*` or be a literal-branch ternary. Third test proves the scan can fail (a raw field is
+  caught, an escaped/formatter-guarded/literal-ternary one is not) so the rule is not decoration.
+- `tests/js/test_risk_page_escaping.mjs` (8 tests, wrapped by `tests/test_web_components.py`) — the
+  real component in a stub DOM whose `innerHTML` setter records every write, driven with hostile
+  payloads (`breach <img src=x onerror=alert(1)>`, `flattening"><script>alert(2)</script>`,
+  `reason="x"><img …>` in an audit detail, a `<b>`-wrapped structure key). Asserts each arrives as
+  `&lt;…&gt;`, that no `onerror=` attribute and no raw probe survives anywhere, that the *attribute*
+  cases stay inside their quotes, and — the other direction — that the chrome survives: gauge labels,
+  card classes, `Reset &amp; Resume`, and a plain halt reason still reading plain.
+
+Red on the pre-fix file: 7/8 harness tests fail and both static rules list ~20 raw sites (verified by
+swapping `git show HEAD:` over the file and restoring; md5-checked after). Green now, 34 passed across
+`test_web_components.py`, `test_web_escaping.py`, `test_label_resolver.py`.
+
+**Live check (QA mirror :5001, static file — no restart needed):** /risk renders 6 gauges with the
+same labels and values, 2 broker cards, bucket blocks `LIVE`/`PAPER` with their inputs populated
+(`bucket-value-live=10000.0000`, `bucket-positions-live=5`), the correlation group card, the rulebook
+rows, 6 audit rows with intact timestamps/scope/action/reason/runner-id cells, and 36 KB of grouped
+trades (`📅 2026-11-02 — 73 trades`, `title="NIFTY short_straddle"` → `NIFTY Short straddle`). Zero
+console errors. Nothing on this page stores or reads a hostile value today — the fix closes the path,
+the harness proves it with payloads the QA DB never contains.
 
 ---
 
@@ -818,8 +860,8 @@ at 390×844 with a completed run on screen: `docW 386, overflow false, unclipped
 | S5 | F9 (one money formatter + ratchet test) — **DONE 2026-11-03** | Touches many files; land before other template edits |
 | S6 | F6 (diary truncation) **DONE 2026-11-03** + F8 (analytics states) **DONE 2026-11-03** | Per-page, independent |
 | S7 | F10 (description spacing sweep) **DONE 2026-11-03** + F11 (label resolver) **DONE 2026-11-03** + F12 | Copy/consistency batch |
-| S8 | F13 (topbar at 561–1100px) **DONE 2026-11-04** + BT-02/BT-04 (backtest-page pass) + BT-01 (loader clock) **DONE 2026-11-04** | Same rule as S3, wrong breakpoint band |
-| S9 | F14 (risk_page.js escaping) — found during S7 | One file, no visual change; needs its own static rule so it cannot be half-done |
+| S8 | F13 (topbar at 561–1100px) **DONE 2026-11-04** + BT-02/BT-04 (backtest-page pass) + BT-01 (loader clock) **DONE 2026-11-04** + BT-05 (bar labels) **DONE 2026-11-04** | Same rule as S3, wrong breakpoint band |
+| S9 | F14 (risk_page.js escaping) — found during S7 — **DONE 2026-11-04** | One file, no visual change; needs its own static rule so it cannot be half-done |
 
 Regression command for every slice (from [UI-REDESIGN-PLAN.md](UI-REDESIGN-PLAN.md):217-227), run in
 this isolated mirror, never against :5000:
@@ -828,19 +870,20 @@ this isolated mirror, never against :5000:
 PYTHONPATH=src python -m pytest tests/test_workspace_design.py tests/test_web_components.py \
   tests/test_broker_ui.py tests/test_web_taxonomy.py tests/test_portfolio_ui_views.py \
   tests/test_reporting_ui.py tests/test_options_spawn_ui.py \
-  tests/test_number_formatting.py tests/test_label_resolver.py tests/test_strategy_prose.py -q
+  tests/test_number_formatting.py tests/test_label_resolver.py tests/test_strategy_prose.py \
+  tests/test_web_escaping.py -q
 for test in tests/js/test_*.mjs; do node "$test" || exit 1; done
 ```
 
-The last three pytest files are the ratchets this pass added (S5 money, S7 label resolver, S7 prose
-spacing); they are in the slice command, not a separate run, so a later slice cannot regress them
-without the gate going red.
+The last four pytest files are the ratchets this pass added (S5 money, S7 label resolver, S7 prose
+spacing, S9 escaping); they are in the slice command, not a separate run, so a later slice cannot
+regress them without the gate going red.
 
 Known failures on this mirror that are **not** regressions (verified against a clean HEAD worktree,
 2026-11-03; re-confirmed 2026-11-04): 8 in `test_portfolio_ui_views.py` — every one arms a live runner
 and dies in `assert_live_arming_allowed()` (segments_store.py:335), which the mirror's own DB state
-deliberately trips. `test_web_components.py` is now green on its own (50 passed — the stale `test_orders_tab.mjs` count was
-synced to 23 by a1d0de8).
+deliberately trips. `test_web_components.py` is green on its own (23 passed, one per harness — the
+`test_orders_tab.mjs` count was synced to 23 by a1d0de8).
 `tests/js/test_mtm_staleness.mjs` fails on its `portfolio.js` SSE assertion — its four `option_view.js`
 unit tests pass, including after F11 made `option_view.js` depend on `labels.js`, and none of the files
 it loads were touched by this pass. It is not wrapped by pytest, so the slice gate stays green.

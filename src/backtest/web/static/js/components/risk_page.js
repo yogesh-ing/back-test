@@ -13,6 +13,12 @@
     return (v >= 0 ? "+₹" : "-₹") + Math.abs(v).toLocaleString("en-IN");
   };
   const pct = (x) => ((x || 0) * 100).toFixed(1) + "%";
+  /* Same escaper backtest.js and compare.js carry: the markup in this file is ours,
+     the strings interpolated into it come off the wire (a runner name, a halt
+     reason, an audit action) and land in innerHTML (finding F14). */
+  const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (m) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]
+  ));
 
   let currentRisk = null;
   let currentConfig = null;
@@ -52,14 +58,14 @@
         ["Rulebook fingerprint", String(lim.sha256 || "—").slice(0, 16) + "…"],
       ];
       const entitlement = Object.entries(lim.entitlement || {})
-        .map(([mode, structs]) => "<tr><td class='muted'>Permitted · " + mode +
-          "</td><td title='" + structs.join(", ") + "'>" +
-          structs.map((s) => Labels.structure(s)).join(", ") + "</td></tr>").join("");
+        .map(([mode, structs]) => "<tr><td class='muted'>Permitted · " + esc(mode) +
+          "</td><td title='" + esc(structs.join(", ")) + "'>" +
+          structs.map((s) => esc(Labels.structure(s))).join(", ") + "</td></tr>").join("");
       body.innerHTML = "<table class='dd-table dd-kv'><tbody>" +
-        rows.map(([k, v]) => "<tr><td class='muted'>" + k + "</td><td>" + v + "</td></tr>").join("") +
+        rows.map(([k, v]) => "<tr><td class='muted'>" + k + "</td><td>" + esc(v) + "</td></tr>").join("") +
         entitlement + "</tbody></table>";
     } catch (e) {
-      body.innerHTML = "<div class='card-error'>Rulebook unavailable: " + e.message + "</div>";
+      body.innerHTML = "<div class='card-error'>Rulebook unavailable: " + esc(e.message) + "</div>";
     }
   }
 
@@ -74,7 +80,7 @@
       renderExposure(data.risk);
     } catch (e) {
       const grid = $("risk-dashboard-grid");
-      if (grid) grid.innerHTML = `<div class="card-error">Failed: ${e.message}</div>`;
+      if (grid) grid.innerHTML = `<div class="card-error">Failed: ${esc(e.message)}</div>`;
     }
   }
 
@@ -91,25 +97,25 @@
     box.hidden = false;
     const brokerCards = byBroker.map((b) => `
       <div class="risk-broker-card">
-        <div class="risk-broker-card-head"><strong>${b.broker}</strong>
-          <span class="muted">${b.runner_count} runner${b.runner_count === 1 ? "" : "s"}</span></div>
+        <div class="risk-broker-card-head"><strong>${esc(b.broker)}</strong>
+          <span class="muted">${esc(b.runner_count)} runner${b.runner_count === 1 ? "" : "s"}</span></div>
         <div>Equity <strong>${fmtMoney(b.equity || 0)}</strong></div>
         <div>Day P&amp;L <strong class="${(b.daily_pnl || 0) >= 0 ? "pos" : "neg"}">${fmtMoney(b.daily_pnl || 0)}</strong></div>
-        <div class="muted">${b.open_positions || 0} open position${(b.open_positions || 0) === 1 ? "" : "s"}</div>
+        <div class="muted">${esc(b.open_positions || 0)} open position${(b.open_positions || 0) === 1 ? "" : "s"}</div>
       </div>`).join("");
     const segCards = segNames.map((name) => {
       const s = segments[name] || {};
       const halted = !!s.halted;
       return `
       <div class="risk-broker-card${halted ? " risk-broker-card-halted" : ""}">
-        <div class="risk-broker-card-head"><strong>${s.display_name || name}</strong>
-          <span class="muted">${s.broker} · ${s.mode}</span></div>
+        <div class="risk-broker-card-head"><strong>${esc(s.display_name || name)}</strong>
+          <span class="muted">${esc(s.broker)} · ${esc(s.mode)}</span></div>
         <div>Equity <strong>${fmtMoney(s.equity || 0)}</strong> / alloc ${fmtMoney(s.allocated_capital || 0)}</div>
         <div>Day P&amp;L <strong class="${(s.daily_pnl || 0) >= 0 ? "pos" : "neg"}">${fmtMoney(s.daily_pnl || 0)}</strong>
           ${s.risk && s.risk.daily_loss_limit ? `<span class="muted">/ limit ${fmtMoney(s.risk.daily_loss_limit)}</span>` : ""}</div>
         <div>${halted
-          ? `<span class="risk-halt-flag">⛔ HALTED</span> <span class="muted">${s.halt_reason || ""}</span>`
-          : `<span class="muted">${s.runner_count || 0} live runner${(s.runner_count || 0) === 1 ? "" : "s"} · breaker armed</span>`}</div>
+          ? `<span class="risk-halt-flag">⛔ HALTED</span> <span class="muted">${esc(s.halt_reason || "")}</span>`
+          : `<span class="muted">${esc(s.runner_count || 0)} live runner${(s.runner_count || 0) === 1 ? "" : "s"} · breaker armed</span>`}</div>
       </div>`;
     }).join("");
     box.innerHTML =
@@ -145,9 +151,9 @@
       const cls = gaugeClass(g.raw, g.thresh);
       const barColor = cls === "danger" ? "var(--danger)" : cls === "warning" ? "var(--warning)" : "var(--success)";
       return `<div class="risk-gauge-large ${cls}">
-        <div class="gauge-label">${g.label}</div>
-        <div class="gauge-value">${g.value}</div>
-        <div class="muted small">${g.sub}</div>
+        <div class="gauge-label">${esc(g.label)}</div>
+        <div class="gauge-value">${esc(g.value)}</div>
+        <div class="muted small">${esc(g.sub)}</div>
         <div class="gauge-bar"><div class="gauge-bar-fill" style="width:${Math.min(100, g.bar)}%; background:${barColor}"></div></div>
       </div>`;
     }).join("");
@@ -158,7 +164,7 @@
       if (cur.halted) {
         cbBanner.hidden = false;
         cbBanner.className = "cb-banner";
-        cbBanner.innerHTML = `<span class="cb-icon">🚨</span><div class="cb-body"><strong>CIRCUIT BREAKER HALTED</strong><span class="cb-reason">${cur.halt_reason || ""} (${cur.halt_mode || ""})</span></div><button class="btn btn-ghost" id="risk-reset-breaker" type="button">Reset & Resume</button>`;
+        cbBanner.innerHTML = `<span class="cb-icon">🚨</span><div class="cb-body"><strong>CIRCUIT BREAKER HALTED</strong><span class="cb-reason">${esc(cur.halt_reason || "")} (${esc(cur.halt_mode || "")})</span></div><button class="btn btn-ghost" id="risk-reset-breaker" type="button">Reset &amp; Resume</button>`;
         cbBanner.querySelector("#risk-reset-breaker")?.addEventListener("click", async () => {
           try { await fetchJSON("/api/portfolio/control/reset_breaker", { method: "POST" }); loadRisk(); if (window.showToast) showToast("Breaker reset", "success"); } catch(e){ showToast(e.message,"error"); }
         });
@@ -173,7 +179,7 @@
       if (warns.length) {
         warnBanner.hidden = false;
         warnBanner.className = "warning-banner";
-        warnBanner.innerHTML = warns.map(w => `<div class="warning-line">⚠️ ${w}</div>`).join("");
+        warnBanner.innerHTML = warns.map(w => `<div class="warning-line">⚠️ ${esc(w)}</div>`).join("");
       } else {
         warnBanner.hidden = true;
       }
@@ -187,7 +193,7 @@
       renderConfig(data);
     } catch (e) {
       const el = $("risk-global-config-form");
-      if (el) el.innerHTML = `<div class="card-error">Failed: ${e.message}</div>`;
+      if (el) el.innerHTML = `<div class="card-error">Failed: ${esc(e.message)}</div>`;
     }
   }
 
@@ -196,11 +202,11 @@
     if (globalForm) {
       const g = cfg.global || {};
       globalForm.innerHTML = `
-        <div class="risk-config-row"><label for="cfg-daily-loss">Daily loss limit</label><input id="cfg-daily-loss" type="range" min="1000" max="100000" step="1000" value="${g.daily_loss_limit || 50000}" class="risk-slider"><span id="cfg-daily-loss-val">${fmtMoney(g.daily_loss_limit || 50000)}</span></div>
+        <div class="risk-config-row"><label for="cfg-daily-loss">Daily loss limit</label><input id="cfg-daily-loss" type="range" min="1000" max="100000" step="1000" value="${esc(g.daily_loss_limit || 50000)}" class="risk-slider"><span id="cfg-daily-loss-val">${fmtMoney(g.daily_loss_limit || 50000)}</span></div>
         <div class="risk-config-row"><label for="cfg-drawdown">Max Drawdown %</label><input id="cfg-drawdown" type="range" min="1" max="50" step="1" value="${(g.max_drawdown_pct || 0.25)*100}" class="risk-slider"><span id="cfg-drawdown-val">${pct(g.max_drawdown_pct || 0.25)}</span></div>
-        <div class="risk-config-row"><label for="cfg-leverage">Max Leverage</label><input id="cfg-leverage" type="range" min="1" max="5" step="0.1" value="${g.max_leverage || 1}" class="risk-slider"><span id="cfg-leverage-val">${g.max_leverage || 1}x</span></div>
+        <div class="risk-config-row"><label for="cfg-leverage">Max Leverage</label><input id="cfg-leverage" type="range" min="1" max="5" step="0.1" value="${esc(g.max_leverage || 1)}" class="risk-slider"><span id="cfg-leverage-val">${esc(g.max_leverage || 1)}x</span></div>
         <div class="risk-config-row"><label for="cfg-breach-mode">Breach Mode</label><select id="cfg-breach-mode" class="input input-select"><option value="PAUSE_AND_HOLD" ${g.breach_mode==="PAUSE_AND_HOLD"?"selected":""}>Pause & Hold</option>      <option value="EMERGENCY_FLATTEN" ${g.breach_mode==="EMERGENCY_FLATTEN"?"selected":""}>Flatten & Halt</option></select><span></span></div>
-        <div class="risk-config-row"><label for="cfg-corr">Correlation Warn Threshold</label><input id="cfg-corr" type="range" min="1" max="10" step="1" value="${g.correlation_warning_threshold || 3}" class="risk-slider"><span id="cfg-corr-val">${g.correlation_warning_threshold || 3}</span></div>
+        <div class="risk-config-row"><label for="cfg-corr">Correlation Warn Threshold</label><input id="cfg-corr" type="range" min="1" max="10" step="1" value="${esc(g.correlation_warning_threshold || 3)}" class="risk-slider"><span id="cfg-corr-val">${esc(g.correlation_warning_threshold || 3)}</span></div>
       `;
       // Bind live updates
       $("cfg-daily-loss")?.addEventListener("input", e => { $("cfg-daily-loss-val").textContent = fmtMoney(parseFloat(e.target.value)); });
@@ -212,14 +218,16 @@
     const bucketForm = $("risk-bucket-config-form");
     if (bucketForm) {
       const buckets = cfg.buckets || {};
-      bucketForm.innerHTML = Object.entries(buckets).map(([mode, lim]) => `
+      bucketForm.innerHTML = Object.entries(buckets).map(([m, lim]) => {
+        const mode = esc(m);
+        return `
         <div style="border:1px solid var(--border); border-radius:8px; padding:10px; margin-bottom:8px;">
-          <strong>${mode.toUpperCase()}</strong>
+          <strong>${esc(m.toUpperCase())}</strong>
           <div class="risk-config-row"><label for="slider-pos-${mode}">Max Position %</label><input data-bucket="${mode}" data-field="max_position_pct" type="range" min="1" max="100" step="1" value="${(lim.max_position_pct||0.1)*100}" class="risk-slider" id="slider-pos-${mode}"><span id="span-pos-${mode}">${pct(lim.max_position_pct||0.1)}</span></div>
-          <div class="risk-config-row"><label for="bucket-value-${mode}">Max Position Value</label><input id="bucket-value-${mode}" data-bucket="${mode}" data-field="max_position_value" type="number" value="${lim.max_position_value||10000}" class="input" style="max-width:140px;"><span>${fmtMoney(lim.max_position_value||0)}</span></div>
-          <div class="risk-config-row"><label for="bucket-positions-${mode}">Max Open Positions</label><input id="bucket-positions-${mode}" data-bucket="${mode}" data-field="max_open_positions" type="number" min="1" max="100" value="${lim.max_open_positions||''}" class="input" style="max-width:100px;"><span></span></div>
+          <div class="risk-config-row"><label for="bucket-value-${mode}">Max Position Value</label><input id="bucket-value-${mode}" data-bucket="${mode}" data-field="max_position_value" type="number" value="${esc(lim.max_position_value||10000)}" class="input" style="max-width:140px;"><span>${fmtMoney(lim.max_position_value||0)}</span></div>
+          <div class="risk-config-row"><label for="bucket-positions-${mode}">Max Open Positions</label><input id="bucket-positions-${mode}" data-bucket="${mode}" data-field="max_open_positions" type="number" min="1" max="100" value="${esc(lim.max_open_positions||'')}" class="input" style="max-width:100px;"><span></span></div>
         </div>
-      `).join("");
+      `}).join("");
       
       // Bind position slider updates
       Object.keys(buckets).forEach(mode => {
@@ -239,8 +247,8 @@
       corrEl.innerHTML = `<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:8px;">` +
         Object.entries(groups).map(([gid, meta]) => `
           <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:8px;">
-            <strong>${meta.label || gid}</strong> <span class="muted">thr ${meta.threshold}</span>
-            <div class="muted small" style="margin-top:4px; word-break:break-all;">${(meta.symbols||[]).slice(0,8).join(", ")}${(meta.symbols||[]).length>8?"…":""}</div>
+            <strong>${esc(meta.label || gid)}</strong> <span class="muted">thr ${esc(meta.threshold)}</span>
+            <div class="muted small" style="margin-top:4px; word-break:break-all;">${(meta.symbols||[]).slice(0,8).map(esc).join(", ")}${(meta.symbols||[]).length>8?"…":""}</div>
           </div>
         `).join("") + `</div>`;
     }
@@ -328,7 +336,7 @@
       renderAudit();
     } catch (e) {
       const tbody = $("audit-tbody");
-      if (tbody) tbody.innerHTML = `<tr><td colspan="5" class="card-error">Failed: ${e.message}</td></tr>`;
+      if (tbody) tbody.innerHTML = `<tr><td colspan="5" class="card-error">Failed: ${esc(e.message)}</td></tr>`;
     }
   }
 
@@ -351,11 +359,11 @@
         const reason = e.reason || e.detail;
         const fallback = JSON.stringify(e);
         return `<tr class="${cls}">
-          <td>${ts.slice(0,19).replace("T"," ")}</td>
-          <td><span class="badge badge-${e.scope==='live'?'live':'paper'}">${e.scope||""}</span></td>
-          <td><strong>${e.action||""}</strong></td>
-          <td${reason ? "" : ` title="${fallback}"`}>${reason || "—"}</td>
-          <td>${e.runner_id || e.instance_id || ""}</td>
+          <td>${esc(ts.slice(0,19).replace("T"," "))}</td>
+          <td><span class="badge badge-${e.scope==='live'?'live':'paper'}">${esc(e.scope||"")}</span></td>
+          <td><strong>${esc(e.action||"")}</strong></td>
+          <td${reason ? "" : ` title="${esc(fallback)}"`}>${esc(reason || "—")}</td>
+          <td>${esc(e.runner_id || e.instance_id || "")}</td>
         </tr>`;
       }).join("");
     }
@@ -393,11 +401,11 @@
 
     const symBody = $("exp-symbol-tbody");
     if (symBody) {
-      symBody.innerHTML = bySymbol.slice(0,20).map(s => `<tr><td>${s.symbol}</td><td class="num">${fmtMoney(s.notional)}</td><td class="num">${s.runners}</td></tr>`).join("") || `<tr><td colspan="3" class="muted">No exposure</td></tr>`;
+      symBody.innerHTML = bySymbol.slice(0,20).map(s => `<tr><td>${esc(s.symbol)}</td><td class="num">${fmtMoney(s.notional)}</td><td class="num">${esc(s.runners)}</td></tr>`).join("") || `<tr><td colspan="3" class="muted">No exposure</td></tr>`;
     }
     const corrBody = $("exp-corr-tbody");
     if (corrBody) {
-      corrBody.innerHTML = byCorr.map(c => `<tr><td>${c.label||c.group}</td><td class="num">${fmtMoney(c.notional)}</td><td class="num">${c.count||0}</td></tr>`).join("") || `<tr><td colspan="3" class="muted">No correlation exposure</td></tr>`;
+      corrBody.innerHTML = byCorr.map(c => `<tr><td>${esc(c.label||c.group)}</td><td class="num">${fmtMoney(c.notional)}</td><td class="num">${esc(c.count||0)}</td></tr>`).join("") || `<tr><td colspan="3" class="muted">No correlation exposure</td></tr>`;
     }
 
     // Charts
@@ -460,7 +468,7 @@
       byCorr.forEach(c => {
         if (c.count >= (c.threshold || 3)) warnings.push(`⚠️ Correlation breach: ${c.label||c.group} has ${c.count} positions (threshold ${c.threshold||3})`);
       });
-      warnEl.innerHTML = warnings.map(w => `<div class="concentration-warn">${w}</div>`).join("");
+      warnEl.innerHTML = warnings.map(w => `<div class="concentration-warn">${esc(w)}</div>`).join("");
     }
   }
 
@@ -475,7 +483,7 @@
       renderTrades(data);
     } catch (e) {
       const el = $("trades-grouped");
-      if (el) el.innerHTML = `<div class="card-error">Failed: ${e.message}</div>`;
+      if (el) el.innerHTML = `<div class="card-error">Failed: ${esc(e.message)}</div>`;
     }
   }
 
@@ -496,7 +504,7 @@
       const worst = total ? Math.min(...pnls) : 0;
       const avg = total ? netShown / total : 0;
       summaryEl.innerHTML = `
-        <div class="perf-stat"><div class="label">Total Trades</div><div class="value">${s.total||total}</div></div>
+        <div class="perf-stat"><div class="label">Total Trades</div><div class="value">${esc(s.total||total)}</div></div>
         <div class="perf-stat"><div class="label">Net P&L (shown)</div><div class="value ${netShown>=0?"pnl-pos":"pnl-neg"}">${fmtSigned(netShown)}</div></div>
         <div class="perf-stat"><div class="label">Win Rate</div><div class="value">${((s.win_rate||0)*100).toFixed(1)}%</div></div>
         <div class="perf-stat"><div class="label">Wins / Losses</div><div class="value">${wins} / ${total-wins}</div></div>
@@ -522,16 +530,17 @@
     groupedEl.innerHTML = Object.entries(groups).sort((a,b)=>b[0].localeCompare(a[0])).map(([day, dayTrades]) => {
       const dayPnl = dayTrades.reduce((s,t)=>s+(t.net_pnl||0),0);
       return `<div class="trade-group">
-        <div class="trade-group-head">📅 ${day} — ${dayTrades.length} trades — <span class="${dayPnl>=0?"pnl-pos":"pnl-neg"}">${fmtSigned(dayPnl)}</span></div>
+        <div class="trade-group-head">📅 ${esc(day)} — ${dayTrades.length} trades — <span class="${dayPnl>=0?"pnl-pos":"pnl-neg"}">${fmtSigned(dayPnl)}</span></div>
         <div class="trade-group-body">
           ${dayTrades.map(t => {
             const icon = t.net_pnl >= 0 ? "✅" : "❌";
             const kindIcon = t.kind === "option" ? "📝" : "📈";
+            const sym = t.symbol || t.underlying || "";
             return `<div class="trade-row">
               <span>${icon} ${kindIcon}</span>
-              <span><strong title="${t.symbol||t.underlying||""}">${Labels.symbol(t.symbol||t.underlying||"")}</strong> <span class="muted">${t.runner_name||""}</span></span>
-              <span class="${t.side==="BUY"?"pnl-pos":"pnl-neg"}">${t.side||""}</span>
-              <span class="num">${t.qty||""}</span>
+              <span><strong title="${esc(sym)}">${esc(Labels.symbol(sym))}</strong> <span class="muted">${esc(t.runner_name||"")}</span></span>
+              <span class="${t.side==="BUY"?"pnl-pos":"pnl-neg"}">${esc(t.side||"")}</span>
+              <span class="num">${esc(t.qty||"")}</span>
               <span class="num ${t.net_pnl>=0?"pnl-pos":"pnl-neg"}">${fmtSigned(t.net_pnl||0)}</span>
             </div>`;
           }).join("")}
