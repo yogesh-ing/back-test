@@ -45,6 +45,7 @@ from backtest.api.symbols import symbols_bp
 from backtest.brokers.session_manager import get_session_manager
 from backtest.data.source_tags import SOURCE_TAG_VALUES, app_source_tag
 from backtest.data.sources_policy import build_policy
+from backtest.web.formatting import format_count, format_label, format_money
 from backtest.logging_config import (
     bind_request_id,
     configure_logging,
@@ -421,6 +422,20 @@ def create_app(
     app.config["CURRENCY"] = money["code"]
     app.config["CURRENCY_SYMBOL"] = money["symbol"]
     app.config["CURRENCY_LOCALE"] = money["locale"]
+    # One house formatter for server-rendered money (finding F9). Templates must
+    # not reach for "{:,.0f}": that groups western-style while currency.js groups
+    # en-IN, so the same equity figure appeared two ways on one screen.
+    app.jinja_env.filters["money"] = lambda value, dp=0: format_money(
+        value, symbol=app.config["CURRENCY_SYMBOL"],
+        locale=app.config["CURRENCY_LOCALE"], dp=dp,
+    )
+    app.jinja_env.filters["count"] = lambda value: format_count(
+        value, locale=app.config["CURRENCY_LOCALE"],
+    )
+    # One house resolver for identifiers that have a human name (finding F11):
+    # a template must not print a strategy key next to a page script that
+    # prints the label, or the same runner reads two ways on one screen.
+    app.jinja_env.filters["label"] = format_label
     speed = replay_speed
     if speed is None:
         speed = os.getenv("FORWARD_REPLAY_SPEED", DEFAULT_REPLAY_SPEED)
@@ -826,8 +841,19 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Unified Trading Bot Platform")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=5000)
+    parser.add_argument(
+        "--host",
+        default=os.getenv("BACKTEST_HOST", "0.0.0.0"),
+        help="Bind address (env: BACKTEST_HOST)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("BACKTEST_PORT", "5000")),
+        help="Bind port (env: BACKTEST_PORT). Second checkouts — the QA mirror "
+        "pins 5001 — so an extra instance can never contend with the "
+        "production listener or be silently shadowed by it.",
+    )
     parser.add_argument(
         "--source",
         default=os.getenv("BACKTEST_SOURCE", ""),

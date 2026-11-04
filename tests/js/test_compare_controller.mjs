@@ -156,6 +156,10 @@ function boot({ slotsResponse } = {}) {
     };
     sandbox.globalThis = sandbox;
     vm.createContext(sandbox);
+    // base.html loads the shared label resolver before every page script; the
+    // `globalThis` tail publishes it the way a browser <script> tag would.
+    vm.runInContext(read("src/backtest/web/static/js/components/labels.js") + "\n;globalThis.Labels = Labels;",
+        sandbox, { filename: "labels.js" });
     vm.runInContext(read("src/backtest/web/static/js/compare.js"), sandbox,
         { filename: "compare.js" });
 
@@ -326,7 +330,10 @@ test("switching modes rebuilds the slots rather than mutating them", async () =>
 test("the slot label names what distinguishes it in each mode", async () => {
     const env = await ready(boot());
     env.ctx("slots[0].strategy = 'sma_crossover'; slots[0].symbol = 'INFY';");
-    assert.equal(env.ctx("slots[0].label"), "sma_crossover");
+    // the label is what the legends and correlation axes read, so it is the
+    // human name; the model keeps the key, because that is what the run sends
+    assert.equal(env.ctx("slots[0].label"), "SMA crossover");
+    assert.equal(env.ctx("slots[0].strategy"), "sma_crossover");
     env.sandbox.setMode("generalization");
     // Change the symbol the way the page does — set the <select> and fire the
     // event it would fire — rather than poking the model directly.

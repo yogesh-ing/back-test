@@ -121,7 +121,7 @@
       tbody.innerHTML = rows.length ? rows.map((r) => `
         <tr class="${r.stale ? "pi-row-stale" : ""}">
           <td>${esc(r.label)} <span class="muted">${esc(r.mode || "")}</span></td>
-          <td>${esc(r.strategy)}</td>
+          <td title="${esc(r.strategy)}">${esc(Labels.strategy(r.strategy))}</td>
           <td class="num">${num(r.delta, 0)}</td>
           <td class="num ${r.gamma < 0 ? "pnl-neg" : ""}">${num(r.gamma, 1)}</td>
           <td class="num">${money(r.vega, true)}</td>
@@ -247,7 +247,7 @@
           ${r.transitioning ? `<span class="pi-regime-trans">⚡ transitioning</span>` : ""}
         </div>
         <div class="muted">Source: ${esc(r.source || "none")} · bands: low &lt; ${num(bands.low_max, 0)} ≤ moderate &lt; ${num(bands.high_min, 0)} ≤ high
-          ${r.regime_since ? " · since " + esc(new Date(r.regime_since).toLocaleString()) : ""}</div>
+          ${r.regime_since ? " · since " + esc(new Date(r.regime_since).toLocaleString("en-IN")) : ""}</div>
         ${proxy}`;
     }
     const fit = $("pi-regime-fit");
@@ -256,7 +256,7 @@
       const icon = { favorable: "✅", unfavorable: "⚠️", any: "➖", unknown: "❔" };
       fit.innerHTML = rows.length ? rows.map((f) => `
         <tr class="${f.status === "unfavorable" ? "pi-row-flag" : ""}">
-          <td>${esc(f.runner)}</td><td>${esc(f.strategy)}</td>
+          <td>${esc(f.runner)}</td><td title="${esc(f.strategy)}">${esc(Labels.strategy(f.strategy))}</td>
           <td>${f.range ? "VIX " + num(f.range[0], 0) + "–" + num(f.range[1], 0) : "any"}</td>
           <td>${icon[f.status] || ""} ${esc(f.status)}</td></tr>`).join("")
         : `<tr><td colspan="4" class="muted">No runners.</td></tr>`;

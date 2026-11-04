@@ -227,6 +227,7 @@
       rows = rows.filter((r) =>
         r.name.toLowerCase().includes(q) ||
         r.strategy_name.toLowerCase().includes(q) ||
+        Labels.strategy(r.strategy_name).toLowerCase().includes(q) ||
         r.target_label.toLowerCase().includes(q) ||
         r.symbols.some((s) => s.toLowerCase().includes(q)));
     }
@@ -354,7 +355,7 @@
           ' status-' + r.status.toLowerCase() + '">' +
         '<td>' + (i + 1) + '</td>' +
         '<td class="cell-name">' + kindBadge(r) + r.name +
-          '<div class="cell-sub">' + r.strategy_name + " · " + r.timeframe + '</div></td>' +
+          '<div class="cell-sub" title="' + r.strategy_name + '">' + Labels.strategy(r.strategy_name) + " · " + r.timeframe + '</div></td>' +
         '<td>' + targetCell + '</td>' +
         '<td>' + instrument + '</td>' +
         '<td>' + badgeHtml(r.mode, r.source) + '</td>' +
@@ -405,6 +406,7 @@
         String(r.label || "").toLowerCase().includes(q) ||
         String(r.runner || "").toLowerCase().includes(q) ||
         String(r.strategy_name || "").toLowerCase().includes(q) ||
+        Labels.strategy(String(r.strategy_name || "")).toLowerCase().includes(q) ||
         String(r.instance_id || "").toLowerCase().includes(q));
     }
     if (state.posRulesOnly) {
@@ -491,11 +493,11 @@
       ? " · prev close ₹" + Number(row.prev_close_mark).toFixed(2)
       : "";
     const sub = row.kind === "option"
-      ? '<div class="cell-sub">' + (row.structure_type || "").replace(/_/g, " ") +
+      ? '<div class="cell-sub">' + Labels.structure(row.structure_type || "") +
         (row.expiry ? " · exp " + expiryLabelOf(row.expiry) : "") +
         (row.bars_held ? " · " + row.bars_held + " bars" : "") +
         prevCloseNote + entered + "</div>"
-      : '<div class="cell-sub">' + (row.strategy_name || "") + entered + "</div>";
+      : '<div class="cell-sub" title="' + (row.strategy_name || "") + '">' + Labels.strategy(row.strategy_name || "") + entered + "</div>";
     return (
       '<tr class="pos-row' + (row.stale ? " pos-row-stale" : "") +
         (row.mark_stale ? " stale-mark-row" : "") +
@@ -596,7 +598,7 @@
           withRules + " with a manual level · open P&L " +
           (pnls.reduce((a, b) => a + b, 0) >= 0 ? "" : "-") +
           fmtMoney(Math.abs(pnls.reduce((a, b) => a + b, 0))) + brokerStrip
-        : "nothing held";
+        : "Nothing held";
     }
     const footEl = $("pos-footnote");
     if (footEl) {
@@ -770,7 +772,7 @@
 
     // (c) Runner comparison table
     const rows = (snap.per_runner || []).map((r) =>
-      '<tr><td>' + r.name + '</td><td>' + r.strategy + '</td><td>' + r.target +
+      '<tr><td>' + r.name + '</td><td title="' + r.strategy + '">' + Labels.strategy(r.strategy) + '</td><td>' + r.target +
       '</td><td class="num">' + fmtMoney(r.equity) + '</td><td class="num ' + pnlClass(r.realized_pnl) + '">' + fmtSigned(r.realized_pnl) +
       '</td><td class="num ' + pnlClass(r.daily_pnl) + '">' + fmtSigned(r.daily_pnl) +
       '</td><td class="num">' + (r.win_rate == null ? "—" : (r.win_rate * 100).toFixed(1) + "%") +

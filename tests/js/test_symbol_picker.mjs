@@ -30,6 +30,14 @@ import assert from "node:assert/strict";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const read = (p) => readFileSync(path.join(root, p), "utf8");
 const pickerCode = read("src/backtest/web/static/js/components/symbol_picker.js");
+const currencyCode = read("src/backtest/web/static/js/components/currency.js");
+
+/** base.html loads currency.js before every component, so each sandbox must too. */
+function boot(box, code, name) {
+    vm.createContext(box);
+    vm.runInContext(currencyCode, box, { filename: "currency.js" });
+    vm.runInContext(code, box, { filename: name });
+}
 const tfCode = read("src/backtest/web/static/js/components/timeframes.js");
 
 // ------------------------------------------------------------------ tiny DOM
@@ -137,8 +145,7 @@ function mountWith(payload, idPrefix) {
         URLSearchParams, Object, Array, JSON, Number, String, Promise, setTimeout, clearTimeout,
     };
     box.globalThis = box;
-    vm.createContext(box);
-    vm.runInContext(pickerCode, box, { filename: "symbol_picker.js" });
+    boot(box, pickerCode, "symbol_picker.js");
     const picker = box.SymbolPicker.mount({
         select: `${idPrefix}`, search: `${idPrefix}-s`, tabs: `${idPrefix}-t`, summary: `${idPrefix}-sum`,
     });
@@ -160,8 +167,7 @@ const sandbox = {
     URLSearchParams, Object, Array, JSON, Number, String, Promise, setTimeout, clearTimeout,
 };
 sandbox.globalThis = sandbox;
-vm.createContext(sandbox);
-vm.runInContext(tfCode, sandbox, { filename: "timeframes.js" });
+boot(sandbox, tfCode, "timeframes.js");
 vm.runInContext(pickerCode, sandbox, { filename: "symbol_picker.js" });
 
 const { Timeframes, SymbolPicker } = sandbox;
@@ -376,8 +382,7 @@ await test("no hidden symbols means no nag: the hint class and title stay away",
         URLSearchParams, Object, Array, JSON, Number, String, Promise, setTimeout, clearTimeout,
     };
     quiet.globalThis = quiet;
-    vm.createContext(quiet);
-    vm.runInContext(pickerCode, quiet, { filename: "symbol_picker.js" });
+    boot(quiet, pickerCode, "symbol_picker.js");
     quiet.SymbolPicker.mount({ select: "p11", search: "p11s", tabs: "p11t", summary: "p11sum" });
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
@@ -398,8 +403,7 @@ await test("a truncated page says how many more with-data rows exist", async () 
         URLSearchParams, Object, Array, JSON, Number, String, Promise, setTimeout, clearTimeout,
     };
     busy.globalThis = busy;
-    vm.createContext(busy);
-    vm.runInContext(pickerCode, busy, { filename: "symbol_picker.js" });
+    boot(busy, pickerCode, "symbol_picker.js");
     busy.SymbolPicker.mount({ select: "p12", search: "p12s", tabs: "p12t", summary: "p12sum" });
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
@@ -436,8 +440,7 @@ await test("a failed load says so instead of showing an empty picker", async () 
         URLSearchParams, Object, Array, JSON, Number, String, Promise, setTimeout, clearTimeout,
     };
     failing.globalThis = failing;
-    vm.createContext(failing);
-    vm.runInContext(pickerCode, failing, { filename: "symbol_picker.js" });
+    boot(failing, pickerCode, "symbol_picker.js");
     const picker = failing.SymbolPicker.mount({ select: "p8", search: "p8s", tabs: "p8t", summary: "p8sum" });
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));

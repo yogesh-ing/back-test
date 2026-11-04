@@ -122,6 +122,17 @@ const Reporting = (() => {
         };
     }
 
+    // An option leg is stored as "<UNDERLYING> <structure_code>" — that is what
+    // options_bridge.py and the paper runner write into the trade's symbol — so
+    // the ledger used to print "BANKNIFTY long_put". The code gets the same
+    // label the risk rulebook uses; the stored string stays in a title. An
+    // equity symbol has no lowercase_code tail, so it passes through untouched.
+    function labelTradeSymbol(symbol) {
+        const raw = String(symbol ?? "");
+        const split = raw.match(/^(.*?)\s*([a-z][a-z0-9]*(?:_[a-z0-9]+)+)$/);
+        return split ? `${split[1]} ${Labels.structure(split[2])}`.trim() : raw;
+    }
+
     function ledgerModel(report, limit) {
         const cap = limit || 200;
         const trades = (report && report.trades) || [];
@@ -131,6 +142,7 @@ const Reporting = (() => {
                 broker: t.broker,
                 mode: t.mode,
                 symbol: t.symbol,
+                symbolLabel: labelTradeSymbol(t.symbol),
                 quantity: Number(t.quantity || 0),
                 gross: Number(t.gross_pnl || 0),
                 fees: Number(t.fees || 0),
@@ -298,7 +310,7 @@ const Reporting = (() => {
         const body = m.rows.map((row) =>
             "<tr><td style=\"padding:3px 8px;\">" + escapeHtml(row.exit) + "</td>" +
             "<td style=\"padding:3px 8px;\">" + escapeHtml(row.broker) + "</td>" +
-            "<td style=\"padding:3px 8px;\">" + escapeHtml(row.symbol) + "</td>" +
+            "<td style=\"padding:3px 8px;\" title=\"" + escapeHtml(row.symbol) + "\">" + escapeHtml(row.symbolLabel) + "</td>" +
             '<td style="padding:3px 8px; text-align:right;">' + row.quantity + "</td>" +
             '<td style="padding:3px 8px; text-align:right;">' + money(row.fees) + "</td>" +
             '<td style="padding:3px 8px; text-align:right;">' + money(row.net) + "</td>" +
@@ -380,10 +392,18 @@ const Reporting = (() => {
     }
 
     function loadReport() {
+        // A slow read must not look like a dead one: the consolidator walks every
+        // closed trade in the period, so say how long it has been working.
+        const started = Date.now();
         message("Loading…", "info");
+        const ticker = setInterval(() => {
+            const secs = Math.round((Date.now() - started) / 1000);
+            if (secs >= 2) message("Loading… " + secs + "s — consolidating the ledger", "info");
+        }, 1000);
         return fetch(queryString("/api/reporting/pnl/consolidated"))
             .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
             .then(({ ok, body }) => {
+                clearInterval(ticker);
                 if (!ok || !body || body.success === false) {
                     message((body && body.error) || "report failed", "bad");
                     return null;
@@ -393,6 +413,7 @@ const Reporting = (() => {
                 return body;
             })
             .catch((err) => {
+                clearInterval(ticker);
                 message("report failed: " + err, "bad");
                 return null;
             });
@@ -522,6 +543,7 @@ const Reporting = (() => {
         init, render, loadReport, money, pct,
         summaryModel, brokerModel, taxModel, warningModel, reconcileModel, ledgerModel,
         summaryHtml, brokerHtml, taxHtml, caveatsHtml, reconcileHtml, ledgerHtml,
+        labelTradeSymbol,
     };
 })();
 

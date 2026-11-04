@@ -224,6 +224,36 @@ Fix: src/backtest/web/static/js/portfolio.js render() now filters p.positions
      filter, so scoped pages drop other buckets' positions.
 Result: code-verified 2026-10-06; needs a live retest with paper + live books.
 Update decision: Fixed in code — pending live retest
+Operational actions performed: None
+
+Issue ID / task ID: BT-06 → UI-07 (cached data / timeframe alignment)
+Priority: P3 (data content; no UI defect, no unsafe number on screen)
+Environment: isolated research — QA mirror worktree, DB forward_test_qa,
+  branch qa/environment, app served on :5001
+Page, theme, viewport, market/session state: /data-manager and the loader
+  behind /backtest; market closed; theme/viewport not involved
+Expected behavior and authoritative reference/basis: for one symbol-day the
+  volume summed from stored 1min bars must equal the volume on the native
+  1day row. scripts/diagnose_timeframe_alignment.py section 3 is the gate
+  that compares derived vs native and prints MATCH / MISMATCH.
+Actual behavior: RELIANCE still reports MISMATCH on the volume column after
+  the BT-01 clock fix. OHLC agrees, and there are no duplicate minute rows;
+  the 1min sum is roughly 2x the value stored on the native 1day row.
+Evidence location (not committed; sanitized): the diagnostic run plus
+  docs/UI-QA-VISUAL-PASS-2026-11-03.md section "BT-06".
+Classification: backend-data-execution follow-up (data/fetch), not UI
+Files changed / related issue: none in this pass. Upstream of this repo's
+  loader: the 1day writer and the mStock export, which disagree on what
+  "volume" means for a session row. Present before BT-01, so it is recorded
+  separately rather than folded into that fix.
+Retest: rerun section 3 of the diagnostic once the fetch path is reconciled;
+  the derived-vs-native volume diff must reach zero rows.
+Result: Blocked — outside the scope of the UI/backtest behavioural pass
+Update decision: Recorded as open, with an owner needed on the fetch path.
+  No run in this pass is being certified or tuned, so a volume-definition
+  question does not gate any finding here; it does gate any future claim
+  that a volume-dependent strategy result is trustworthy.
+Operational actions performed: None
 ```
 
 Blank template for new issues:

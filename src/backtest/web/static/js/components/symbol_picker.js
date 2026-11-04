@@ -69,7 +69,7 @@
         const bits = [];
         const stored = row.timeframes_stored || [];
         if (stored.length) bits.push(stored.join("/"));
-        if (row.bars_count) bits.push(`${row.bars_count.toLocaleString()} bars`);
+        if (row.bars_count) bits.push(`${Money.count(row.bars_count)} bars`);
         return bits.join(" · ");
     }
 

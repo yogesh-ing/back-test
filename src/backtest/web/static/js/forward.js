@@ -433,7 +433,7 @@ async function init() {
         }
         const isOpt = !!(strat.signal_kind === "option" || String(strat.name).includes("option"));
         const seg = strat.default_segment || (isOpt ? "options_index" : "equity_intraday");
-        let html = `<span>Linked segment:</span> <span class="badge badge-subtle" style="font-family:monospace;">${escapeHtml(seg)}</span> <span class="text-muted" style="font-size:11px;">(execution fees & margins follow Settings)</span>`;
+        let html = `<span>Linked segment:</span> <span class="badge badge-subtle" title="${escapeHtml(seg)}">${escapeHtml(Labels.segment(seg))}</span> <span class="text-muted" style="font-size:11px;">(execution fees & margins follow Settings)</span>`;
         if (strat.readable_criteria && (strat.readable_criteria.entry || strat.readable_criteria.entry_strike)) {
             const rc = strat.readable_criteria;
             html += `<div style="width:100%; font-size:11px; color:var(--muted); margin-top:2px;">`
@@ -445,11 +445,16 @@ async function init() {
                 + `</div>`;
         }
         infoEl.innerHTML = html;
+        // the operator's own display name arrives with the segments read; repaint
+        // once it is in hand so this badge cannot disagree with Settings
+        Labels.warm().then(() => {
+            if ($("strategy").value === stratName) infoEl.innerHTML = html;
+        });
     }
 
     try {
         strategies = await fetchJSON("/api/strategies");
-        $("strategy").innerHTML = strategies.map((s) => `<option value="${s.name}">${s.name}</option>`).join("");
+        $("strategy").innerHTML = strategies.map((s) => `<option value="${escapeHtml(s.name)}" title="${escapeHtml(s.name)}">${escapeHtml(Labels.strategy(s.name))}</option>`).join("");
     } catch {
         $("strategy").innerHTML = '<option value="">failed to load</option>';
     }

@@ -62,30 +62,30 @@ class DeltaMomentum(DirectionalOptionStrategy):
             'expressible as ATM legs or delta-targeted (0.40) strikes via the spawn expression.'
         ),
         'regime': (
-            'Works when trends develop with a measurable slope — quiet drift without slope stays'
-            'untraded by design. Struggles at trend exhaustion: slope confirms late, so entries'
+            'Works when trends develop with a measurable slope — quiet drift without slope stays '
+            'untraded by design. Struggles at trend exhaustion: slope confirms late, so entries '
             'cluster near local tops/bottoms.'
         ),
         'entry': (
-            'Bullish when the trigger EMA is above the slow EMA with slope beyond the points'
+            'Bullish when the trigger EMA is above the slow EMA with slope beyond the points '
             'threshold; bearish mirrored. Slope below the threshold emits silence.'
         ),
         'construction': (
-            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put'
+            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put '
             "on the underlying's nearest eligible expiry — a defined-risk, single-leg structure."
-            'Size is 1 lot by default (override 1-5 lots where the spawn form allows). Spawned'
+            'Size is 1 lot by default (override 1-5 lots where the spawn form allows). Spawned '
             'with a delta expression, the bridge instead picks the strike nearest delta 0.40'
             '(cheaper, more leveraged, faster theta).'
         ),
         'exits_risk': (
-            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit'
-            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst'
-            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long'
+            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit '
+            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst '
+            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long '
             'option can never lose more than the premium paid.'
         ),
         'parameters': (
             'ema_slow=21, ema_trigger=9, slope_points=25.0, underlying=NIFTY. Size defaults to 1'
-            'lot; quantity (and, where listed, exit levels) can be overridden at spawn within the'
+            'lot; quantity (and, where listed, exit levels) can be overridden at spawn within the '
             'declared menu.'
         ),
     }

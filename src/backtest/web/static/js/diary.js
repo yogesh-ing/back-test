@@ -296,6 +296,7 @@
     if (pPay) pPay.hidden = state.activeTab !== 'payoff';
     if (pGrad) pGrad.hidden = state.activeTab !== 'graduation';
     if (pSess) pSess.hidden = state.activeTab !== 'sessions';
+    markScrollCues();
   }
 
   function setPresetPills(preset) {
@@ -356,7 +357,8 @@
       if (!s) continue;
       if (s === current) found = true;
       html += '<option value="' + escapeHtml(s) + '"' +
-        (s === current ? ' selected' : '') + '>' + escapeHtml(s) + '</option>';
+        (s === current ? ' selected' : '') + ' title="' + escapeHtml(s) + '">' +
+        escapeHtml(Labels.strategy(s)) + '</option>';
     }
     sel.innerHTML = html;
     if (current && !found) {
@@ -398,9 +400,9 @@
     var scopeCounts = document.getElementById('diary-scope-counts');
     if (scopeCounts) {
       scopeCounts.textContent =
-        '(' + (data.trade_count || 0) + ' closed trades across ' +
+        '(' + (data.trade_count || 0) + ' closed trade' + ((data.trade_count || 0) === 1 ? '' : 's') + ' across ' +
         (data.active_days || 0) + ' active IST session' + ((data.active_days === 1) ? '' : 's') +
-        (state.strategy ? ' · Strategy: ' + state.strategy : '') + ')';
+        (state.strategy ? ' · Strategy: ' + Labels.strategy(state.strategy) : '') + ')';
     }
 
     var reconPill = document.getElementById('diary-recon-pill');
@@ -436,7 +438,13 @@
     var commSub = document.getElementById('dkpi-commission-sub');
     if (commSub) {
       if (data.commission_drag_pct != null) {
-        commSub.textContent = 'Drag: ' + Number(data.commission_drag_pct).toFixed(1) + '% of gross profit';
+        var drag = Number(data.commission_drag_pct);
+        // Past 100% the ratio stops carrying information — "Drag: 1494.0% of
+        // gross profit" reads like a broken number, so name the condition
+        // instead (finding F12).
+        commSub.textContent = drag > 100
+          ? 'Cost ' + fmtInrAbs(data.commission) + ' exceeds gross ' + fmtInrAbs(data.gross_pnl)
+          : 'Drag: ' + drag.toFixed(1) + '% of gross profit';
       } else if (Number(data.commission || 0) > 0) {
         commSub.textContent = 'Gross ≤ ₹0 · Cost compounds drawdown';
       } else {
@@ -733,7 +741,8 @@
       if (inst.trades_truncated) {
         html += '<div style="margin-top:6px;">' +
           '<button type="button" class="btn btn-ghost btn-small" data-load-full-instance="' +
-          escapeHtml(inst.instance_key) + '">Load all ' + inst.trade_count + ' trades for this instance</button>' +
+          escapeHtml(inst.instance_key) + '">Load all ' + inst.trade_count + ' trade' +
+          (inst.trade_count === 1 ? '' : 's') + ' for this instance</button>' +
           '</div>';
       }
     }
@@ -800,9 +809,10 @@
       html += '<tr class="diary-row-strategy">' +
         '<td>' +
         '<button type="button" class="diary-expand-btn" data-toggle-strategy="' + escapeHtml(sName) + '" ' +
+        'title="' + escapeHtml(sName) + '" ' +
         'aria-expanded="' + (sOpen ? 'true' : 'false') + '">' +
         '<span class="diary-chevron">&#9654;</span>' +
-        '<span>' + escapeHtml(sName) + '</span>' +
+        '<span>' + escapeHtml(Labels.strategy(sName)) + '</span>' +
         '</button>' +
         '<span class="diary-cfg-pill" style="margin-left:6px;">' +
         st.instance_count + ' inst (' + st.active_instance_count + ' live · ' + st.retired_instance_count + ' ret)' +
@@ -818,7 +828,10 @@
         '<td class="num ' + pnlToneClass(st.expectancy_net) + '">' + fmtInrSigned(st.expectancy_net) + '</td>' +
         '<td class="num ' + pnlToneClass(st.gross_pnl) + '">' + fmtInrSigned(st.gross_pnl) + '</td>' +
         '<td class="num">' + fmtInrAbs(st.commission) +
-        (st.commission_drag_pct != null ? ' <span class="muted" style="font-size:10px;">(' + Number(st.commission_drag_pct).toFixed(0) + '%)</span>' : '') +
+        (st.commission_drag_pct == null ? ''
+          : Number(st.commission_drag_pct) > 100
+            ? ' <span class="muted" style="font-size:10px;" title="Cost is larger than the gross this row earned, so the ratio is not a percentage of anything">(cost &gt; gross)</span>'
+            : ' <span class="muted" style="font-size:10px;">(' + Number(st.commission_drag_pct).toFixed(0) + '%)</span>') +
         '</td>' +
         '<td class="num">' +
         '<div class="diary-contrib-wrap">' +
@@ -910,6 +923,7 @@
 
     html += '</tbody></table>';
     wrap.innerHTML = html;
+    markScrollCues();
   }
 
   function computeMatrixCellHeat(netPnl, maxAbsNet, tradeCount) {
@@ -1499,7 +1513,7 @@
         '<td>' +
           '<div><strong>' + escapeHtml(inst.instance_label || inst.display_name || '') + '</strong>' + linkHtml + '</div>' +
           '<div class="muted" style="font-size:11px;">' +
-            escapeHtml(inst.strategy || '') + ' &middot; ' + escapeHtml(inst.lifecycle_status || '') +
+            '<span title="' + escapeHtml(inst.strategy || '') + '">' + escapeHtml(Labels.strategy(inst.strategy || '')) + '</span> &middot; ' + escapeHtml(inst.lifecycle_status || '') +
           '</div>' +
           (badgesHtml ? '<div style="margin-top:3px;">' + badgesHtml + '</div>' : '') +
           (teleHtml ? '<div class="diary-tele-strip">' + teleHtml + '</div>' : '') +
@@ -1552,7 +1566,7 @@
       }
       var scopePills = '';
       if (n.strategy_name) {
-        scopePills += '<span class="diary-cfg-pill">' + escapeHtml(n.strategy_name) + '</span>';
+        scopePills += '<span class="diary-cfg-pill" title="' + escapeHtml(n.strategy_name) + '">' + escapeHtml(Labels.strategy(n.strategy_name)) + '</span>';
       }
       if (n.instance_label) {
         scopePills += '<span class="diary-cfg-pill">' + escapeHtml(n.instance_label) + '</span>';
@@ -2315,6 +2329,7 @@
         }
       }
       renderSessionBreakdownTable(windowDays);
+      markScrollCues();
     }).catch(function (err) {
       var scopeLabel = document.getElementById('diary-scope-label');
       if (scopeLabel) {
@@ -2372,7 +2387,58 @@
     renderAttributionTree();
   }
 
+  /* F6: a table wider than its card hid its right-hand columns silently — the
+     attribution tree lost "Running MTM" at 1440 with no scroll cue at all. Name
+     what is still out of view and make the box focusable so ← → can reach it. */
+  function scrollCueFor(wrap) {
+    var cue = wrap._diaryScrollCue;
+    if (cue && cue.parentNode) return cue;
+    cue = document.createElement('p');
+    cue.className = 'diary-scroll-cue';
+    cue.hidden = true;
+    if (wrap.parentNode) wrap.parentNode.insertBefore(cue, wrap);
+    wrap._diaryScrollCue = cue;
+    return cue;
+  }
+
+  function markScrollCues() {
+    var wraps = document.querySelectorAll('.diary-table-wrap');
+    for (var i = 0; i < wraps.length; i++) {
+      var wrap = wraps[i];
+      var box = wrap.getBoundingClientRect();
+      if (!box.width) continue;
+      var hidden = [];
+      var heads = wrap.querySelectorAll('thead th');
+      for (var j = 0; j < heads.length; j++) {
+        if (heads[j].getBoundingClientRect().right > box.right + 1) {
+          hidden.push(heads[j].textContent.trim());
+        }
+      }
+      var cue = scrollCueFor(wrap);
+      if (!hidden.length) {
+        cue.hidden = true;
+        cue.textContent = '';
+        wrap.removeAttribute('tabindex');
+        continue;
+      }
+      cue.textContent = hidden.join(', ') +
+        ' out of view to the right — scroll sideways, or click here and press →.';
+      cue.hidden = false;
+      wrap.tabIndex = 0;
+      if (!wrap.getAttribute('role')) {
+        wrap.setAttribute('role', 'region');
+        wrap.setAttribute('aria-label', 'Scrollable diary table');
+      }
+    }
+  }
+
   function bindEvents() {
+    var tableWraps = document.querySelectorAll('.diary-table-wrap');
+    for (var tw = 0; tw < tableWraps.length; tw++) {
+      tableWraps[tw].addEventListener('scroll', markScrollCues);
+    }
+    window.addEventListener('resize', markScrollCues);
+
     var modeEl = document.getElementById('diary-mode');
     if (modeEl) {
       modeEl.addEventListener('change', function () {
@@ -2691,6 +2757,7 @@
     buildRosterTableHtml: buildRosterTableHtml,
     buildRosterJournalNotePayload: buildRosterJournalNotePayload,
     buildJournalFeedHtml: buildJournalFeedHtml,
+    markScrollCues: markScrollCues,
     monthBounds: monthBounds,
     mondayOfWeekIso: mondayOfWeekIso,
     sortAttributionStrategies: sortAttributionStrategies,

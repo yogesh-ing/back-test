@@ -427,7 +427,8 @@ class ConsolidatedPnL:
                 "DEMO BOOK: this report contains explicitly-labelled sample trades "
                 "and is not a record of any real account"
             )
-        excluded = [t for t in all_records if t not in selected]
+        kept = {id(t) for t in selected}
+        excluded = [t for t in all_records if id(t) not in kept]
         if excluded:
             paper = sum(1 for t in excluded if t.mode == "paper")
             broker_filtered = len(excluded) - paper

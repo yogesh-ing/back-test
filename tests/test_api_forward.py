@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
+import pandas as pd
 import pytest
 
 from backtest.api import forward as fwd
@@ -22,6 +23,8 @@ from backtest.brokers.base import (
     BrokerAuthBase,
 )
 from backtest.brokers.session_manager import get_session_manager, reset_default_manager
+from backtest.engine.backtester import BacktestConfig
+from backtest.runner import run_on_candles
 from backtest.web.app import create_app
 
 
@@ -617,3 +620,57 @@ def test_status_does_not_require_auth(client_unauthenticated):
     resp = client.get("/api/forward/status")
     assert resp.status_code == 200
     assert resp.get_json()["status"] == "idle"
+
+
+# ---------------------------------------------------------------------------
+# BT-05 — one label rule per session, shared with the payload it slices
+# ---------------------------------------------------------------------------
+
+
+def _bt05_session(freq: str, periods: int) -> "fwd.ForwardSession":
+    idx = pd.date_range("2021-01-04 09:15", periods=periods, freq=freq)
+    close = pd.Series([100.0 + (i % 13) for i in range(periods)], index=idx)
+    candles = pd.DataFrame(
+        {"open": close, "high": close * 1.01, "low": close * 0.99, "close": close, "volume": 1000.0},
+        index=idx,
+    )
+    result = run_on_candles(
+        candles,
+        "sma_crossover",
+        {"fast": 5, "slow": 20},
+        "TEST",
+        BacktestConfig(initial_capital=100_000.0),
+    )
+    return fwd.ForwardSession(
+        state_id="bt05",
+        result=result,
+        strategy="sma_crossover",
+        symbol="TEST",
+        timeframe="1day" if freq == "B" else "1hour",
+        capital=100_000.0,
+        params={"fast": 5, "slow": 20},
+        from_date="2021-01-04",
+        to_date="2021-12-31",
+        bars_per_second=0,
+    )
+
+
+def test_a_day_granular_replay_stamps_agree_with_its_candle_rows():
+    """The prefix filter compares these strings, so they must be one format.
+
+    `snapshot()["last_bar_ts"]` and an open leg's `entry_date` used to come from
+    a second copy of the midnight heuristic while the candle rows came from the
+    adapter's, so a day-granular run could label the same bar two ways.
+    """
+    session = _bt05_session("B", 60)
+    labels = [c["date"] for c in session.candles_rows]
+    assert all(len(d) == 10 for d in labels)
+    assert session._label(session.candles.index[-1]) == labels[-1]
+    assert session._index_of(labels[7]) == 7
+
+
+def test_an_intraday_replay_keeps_the_minute_on_both_sides():
+    session = _bt05_session("h", 80)
+    labels = [c["date"] for c in session.candles_rows]
+    assert all(len(d) == 16 for d in labels)
+    assert session._label(session.candles.index[-1]) == labels[-1]

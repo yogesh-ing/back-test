@@ -56,7 +56,10 @@ def test_forward_live_widgets_render():
         # same-clock Orders stamp fix (a80e689) added two on top of those.
         ("test_orders_tab.mjs", 23),
         # Portfolio Intelligence: alert widget + Risk Board intelligence sections.
-        ("test_alert_widget.mjs", 11),
+        # F7 moved the mount contract: a clear book renders no pill at all.
+        ("test_alert_widget.mjs", 12),
+        # F11: the browser half of the one label resolver.
+        ("test_labels.mjs", 9),
     ],
 )
 def test_live_order_management_components(harness, expected):
@@ -175,6 +178,31 @@ def test_backtest_chart_panes_behaviour():
         result.returncode == 0
     ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "7 tests passed" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_failed_backtest_clears_its_loader():
+    """BT-02: a run that failed must stop claiming it is still running.
+
+    ``runBacktest`` paints "Running backtest…" into ``#metricsCards`` before the
+    POST and only cleared it on the success path, so a data error left a spinner
+    directly under the sticky banner reporting the failure — the two opposite
+    states on screen at once, and the same untruthful-state class as F8. The
+    harness drives the real controller through both outcomes: the failure clears
+    the loader and keeps the banner, and the in-flight loader is still painted
+    for a run that answers, so the fix cannot delete the only progress signal.
+    """
+    result = subprocess.run(
+        ["node", str(_REPO_ROOT / "tests" / "js" / "test_backtest_failure_clears_loader.mjs")],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "2 tests passed" in result.stdout
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
@@ -419,3 +447,26 @@ def test_tune_this_prefill_behaviour():
         result.returncode == 0
     ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "28 tests passed" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_risk_page_escapes_every_server_string():
+    """F14: /risk renders from innerHTML, so a stored value must arrive as text.
+
+    The payloads here are strings an operator can type — a runner name, a halt
+    reason, an audit action, a limit — with markup in them. The static half of
+    the rule lives in ``tests/test_web_escaping.py``; this drives the real
+    component so escaping is proven at the render boundary, not only at the
+    source line.
+    """
+    result = subprocess.run(
+        ["node", str(_REPO_ROOT / "tests" / "js" / "test_risk_page_escaping.mjs")],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "9 tests passed" in result.stdout

@@ -513,6 +513,40 @@ def test_the_same_trade_from_two_sources_is_counted_once():
     assert "duplicate" in merged or "merged" in merged
 
 
+def test_the_excluded_record_scan_never_compares_trade_values(monkeypatch):
+    """`excluded` is an identity set difference, not a value-equality scan.
+
+    ``t not in selected`` compared ~20 Decimal fields per pair: measured on a
+    3,000-record ledger it cost 3,999,000 ``__eq__`` calls and 4.28s against 0
+    calls and 0.14s for the set version (QA mirror, 2026-11-03). Asserting the
+    call count keeps this honest without leaning on wall-clock budgets.
+    """
+    calls = {"n": 0}
+    original = TradeRecord.__eq__
+
+    def counting(self, other):
+        calls["n"] += 1
+        return original(self, other)
+
+    monkeypatch.setattr(TradeRecord, "__eq__", counting)
+    records = [
+        trade(
+            trade_id=f"bulk-{i}",
+            symbol=f"SYM{i}",
+            mode="paper" if i % 3 == 0 else "live",
+            gross_pnl=dec(i + 1),
+            exit_time=JUN_2,
+        )
+        for i in range(3000)
+    ]
+    report = ConsolidatedPnL(sources=[StaticSource(records)]).generate_report(
+        "2026-06-01", "2026-06-30", include_paper=False
+    )
+    assert report.trade_count == 2000
+    assert "1000 paper trade(s) excluded by request" in " ".join(report.data_notes)
+    assert calls["n"] == 0, f"consolidation compared {calls['n']:,} trade values"
+
+
 def test_a_dead_source_is_reported_but_does_not_sink_the_report():
     good = trade(gross_pnl=dec(1000), exit_time=datetime(2026, 6, 2, 15, 0))
     report = ConsolidatedPnL(

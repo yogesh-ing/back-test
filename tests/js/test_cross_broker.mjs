@@ -88,6 +88,7 @@ const sandbox = {
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
+vm.runInContext(load("src/backtest/web/static/js/components/labels.js"), sandbox);
 vm.runInContext(load("src/backtest/web/static/js/cross_broker.js"), sandbox);
 const XB = sandbox.window.CrossBrokerUI;
 

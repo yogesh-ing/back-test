@@ -57,7 +57,7 @@ function fmtDateRange(from, to) {
 function strategiesOptions(selected) {
     return strategies.map((s) => {
         const kindBadge = s.signal_kind === "option" ? " [Options]" : "";
-        return `<option value="${s.name}" ${s.name === selected ? "selected" : ""}>${s.name}${kindBadge}</option>`;
+        return `<option value="${s.name}" title="${s.name}" ${s.name === selected ? "selected" : ""}>${Labels.strategy(s.name)}${kindBadge}</option>`;
     }).join("");
 }
 function addSlot(prefill) {
@@ -148,7 +148,7 @@ function updateLabel(slot) {
     // generalization mode, the strategy elsewhere.
     slot.label = mode === "generalization"
         ? (slot.symbol || "no symbol")
-        : (slot.strategy || "no strategy");
+        : (slot.strategy ? Labels.strategy(slot.strategy) : "no strategy");
     const note = slot.card.querySelector(".slot-params-note");
     if (note) note.textContent = `${genStrategyName()} · ${sharedTimeframe()}`;
 }
@@ -429,8 +429,8 @@ async function openStoredCompare(compareId) {
         const slot = {
             id: kids[i].run_id,
             label: generalization
-                ? `${cfg.strategy || "?"} · ${cfg.symbol || "?"}`
-                : (cfg.strategy || kids[i].strategy_id || `slot ${i + 1}`),
+                ? `${Labels.strategy(cfg.strategy || "?")} · ${cfg.symbol || "?"}`
+                : Labels.strategy(cfg.strategy || kids[i].strategy_id || `slot ${i + 1}`),
             color: PALETTE[i % PALETTE.length],
             result: detail.payload,
             card: null,

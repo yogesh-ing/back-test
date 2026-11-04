@@ -1,0 +1,1041 @@
+# UI visual pass — 2026-11-03 (QA mirror, populated ledger)
+
+**Environment:** worktree `C:\learning\bt-qa-mirror`, branch `qa/environment` (`5f5cdf8` + `62a4a44`),
+serving `http://127.0.0.1:5001`, DB `forward_test_qa` / role `ft_qa`, seeded with 5 equity symbols'
+bars and a ledger cloned to exact parity with live (trades ≈3k, positions ≈1k, orders ≈2k, portfolios 66).
+Market state: NSE closed, all three brokers unauthenticated, 6 runners restored PAUSED, "Simulated fills" banner.
+**Method:** headless Chromium (Playwright 1.64 / chromium-1248), real viewports 1440×900 and 390×844,
+dark + light (`data-theme="light"`), all 14 pages, read-only (navigation + computed-style probes only;
+no clicks, no POSTs, no broker authentication).
+**Evidence (outside Git, do not commit):** `C:\learning\qa-mirror-scratch\ui\` —
+`shots/*_1440_dark.png`, `shots/*_390_dark.png`, `shots/*_1440_light.png`,
+`report_1440_dark.json`, `report_390_dark.json`, `report_light.json`, `probe_out.json`,
+drivers `pw_pass.js`, `pw_light.js`, `pw_probe.js`.
+
+Money amounts are deliberately omitted from this document per §2 of
+[UI-PENDING-TASKS.md](UI-PENDING-TASKS.md); read them from the local evidence files instead.
+
+## Clean results (no action)
+
+- **Zero JavaScript errors, zero failed requests, zero HTTP ≥ 400** across all 14 pages in both themes.
+  The 2026-10-02 walkthrough's `/reporting` 500 did not reproduce at page load.
+- No duplicate element IDs on any page.
+- No broken images; fonts load locally with `font-display: swap`.
+- Chart canvases reported as `0×0` are inside `[hidden]` panes (inactive tabs / awaiting-a-run empty
+  states), not broken layout. Retracted.
+
+---
+
+## Findings, in the pending-tasks issue-log format
+
+### F1 — the whole document scrolls horizontally at 390px on every page → §5 rule + UI-01/UI-17
+
+```
+Issue ID / task ID: UI-01 (global chrome), also violates §5 "the whole document should not scroll horizontally"
+Priority: P1 (the app is unreadable on a phone; no desktop trading workflow is blocked)
+Environment: observed on QA mirror, all 14 pages
+Page, theme, viewport: any route, dark + light, 390×844
+Expected: documentElement.scrollWidth === clientWidth; tables may scroll internally
+Actual: scrollWidth 626–651 vs viewport 390 on 14/14 pages
+Root cause: .app-topbar (workspace.css:39) is a non-wrapping flex row whose right cluster
+  (#halt-pill, the search trigger, the data + market + freshness chips, #broker-status 176px,
+  #theme-toggle) has a min-content width of ~600px. The ≤560px block (workspace.css:601-619)
+  hides only .command-open and shrinks gaps; it never removes or wraps the chips or the broker strip.
+  Offenders measured unclipped by any scroll ancestor: #halt-pill right=412, .broker-strip right=567,
+  .broker-strip-item ×3, #broker-status right=593, #theme-toggle right=627.
+Evidence: shots/<page>_390_dark.png (14 files)
+Classification: UI
+Files: src/backtest/web/static/css/workspace.css:39, :601-619; templates/base.html (topbar markup)
+```
+
+**Fix shape:** at ≤560px collapse the topbar to two rows (`flex-wrap: wrap` on `.app-topbar`,
+`order` the search out), move `.broker-strip` into the existing broker popover only, and let the
+market/freshness chips truncate with `min-width: 0` + `text-overflow: ellipsis`.
+**Acceptance:** the existing probe (`pw_pass.js 390 844`) reports `ow: 0` for all 14 routes.
+
+Status: DONE — `ow: 0` on 14/14 routes (was 626–651), desktop 1440 pass unchanged (0→0, clip 0→0).
+What actually shipped, and where it differs from the sketch:
+- The bar wraps to two rows (location, then the control cluster at `flex-basis: 100%`) and is
+  **static** at ≤560px instead of sticky: a 91px wrapped bar pinned above `.risk-strip` would have
+  covered it, because `.risk-strip` sticks at `top: var(--topbar-height)` (58px). The survival layer
+  is the thing that should stay on screen on a phone, so `--topbar-height` no longer reserves space
+  there and `.risk-strip { top: 0 }`.
+- `.broker-strip-item::after` (the per-broker names) is hidden; the dots stay and the Broker Board
+  the same button opens carries the names — no information is lost, ~150px is.
+- The chips truncate with `min-width: 0` + ellipsis, and the shrink is **prioritised**: the market
+  chip is `flex-shrink: 0` (capped at 160px) so session state outranks staleness; the freshness chip
+  absorbs the squeeze. Nothing is hidden by best-case framing — the stale count still leads the label.
+- Two non-topbar offenders surfaced once /reporting actually rendered (F2 was masking them): the
+  server-built report tables. Fixed with one rule — `.reporting-page > div[id^="rp-"] { overflow-x: auto }`
+  — so every report block scrolls internally rather than widening the document.
+Files: src/backtest/web/static/css/workspace.css:39, :465, :601-620 (≤560px block)
+
+### F2 — `/reporting` consolidated P&L does not return; UI shows only "Loading…" → UI-16
+
+```
+Issue ID / task ID: UI-16
+Priority: P0 (the page is unusable; on a ledger this size it holds a server worker for minutes)
+Environment: QA mirror (2,951 records / 2,022 selected); reproduced live on :5000
+Actual: 271,295 ms and 360,937 ms for one consolidated report; >60 s live. Payload ≈1.8 MB because
+  include_trades defaults to True (api/reporting.py:128).
+Root cause (measured 2026-11-03): TWO sites, and the first profile found only the cheap one.
+  (a) consolidator.py:430 `excluded = [t for t in all_records if t not in selected]` — `in` over a
+      list of dataclasses compares ~20 Decimal fields per pair. On the same 3,000-record fixture:
+      3,999,000 __eq__ calls and 4.28s standalone vs 0 calls and 0.14s with an identity set.
+  (b) sources.py:250 `_broker_from_runner_name(self._manager, …)` called **per DB row**, and the
+      helper ran `manager.list_instances()` — which snapshots every runner with `get_state()` under
+      the manager lock. Standalone (manager=None) skips it entirely, which is why the standalone
+      profile could never reproduce the hang. On the mirror: 1,645 rows × 16 runners = 84.4s; the
+      full FY window (2,951 rows) = 157.8s. The two timings scale with row count, not period width.
+UI symptom: reporting.js:382-399 sets message("Loading…") and never distinguishes slow from stuck;
+  five report blocks stay empty meanwhile.
+Classification: backend-performance + UI feedback
+Status: FIXED in this worktree, both sites.
+  (a) identity set at consolidator.py:430-431, guarded by
+      tests/test_reporting_core.py::test_the_excluded_record_scan_never_compares_trade_values
+      (asserts zero __eq__ calls, so it cannot pass on the old code).
+  (b) the runner→broker labels are resolved once per fetch by `_runner_broker_map()` (sources.py),
+      and `_broker_from_runner_name()` is now a dict lookup over that map. Guarded by
+      tests/test_reporting_sources.py::test_the_runner_lookup_happens_once_per_fetch_not_once_per_row
+      (counts `list_instances()` calls; cannot pass on the old code).
+  Measured on the wire after a mirror restart: 157,835 ms → **1,173 ms cold / 845 ms warm** for the
+  same FY report (2,710 trades, identical payload). Reporting suites green: 64 passed
+  (test_reporting_sources + test_reporting_core), full UI batch 134 passed.
+  Not yet committed.
+Decision recorded: include_trades stays default True. The 1.8 MB payload is the per-trade ledger the
+  page renders; making it opt-out would need a UI toggle, which is a product decision, not a fix.
+Files: src/backtest/reporting/consolidator.py:430-431; src/backtest/reporting/sources.py:145-165,
+  236-252, 557-594; src/backtest/api/reporting.py:117-131;
+  src/backtest/web/static/js/reporting.js:382-399
+```
+
+**Remaining work in this slice:** none — the elapsed-time loading state landed with (a).
+**Acceptance:** met — report completes in 1.2 s end-to-end on the QA ledger after the mirror restart
+(was 157.8 s), and the two regression tests fail on the pre-fix code.
+
+### F3 — "Feed active · 0 running · N ticks" while no broker is connected → UI-01
+
+```
+Issue ID / task ID: UI-01
+Priority: P0 (a false "active" claim about the feed is exactly the "unknown never looks connected" rule)
+Environment: QA mirror and live :5000, identical digits
+Actual: risk strip reads "Feed active · 0 running · 6145 ticks" with capability.broker_connected=false
+  and all three brokers unauthenticated, market closed.
+Root cause: static/js/components/risk_strip.js:113 keys liveness off p.tick, which is the persisted
+  tick_index (forward/portfolio_manager.py:136-137, saved :2585-2586, restored :2797-2798,
+  exposed :3484-3485) — a durable counter, not feed liveness.
+Classification: UI (display of an existing truthful field)
+Status: FIXED in this worktree — liveness now comes from `capability.broker_connected` (server truth,
+  already on the payload: portfolio_manager.py:3368-3371 → /api/portfolio/summary), the counter is
+  labelled "ticks this session", and a missing capability block fails closed to "No broker feed".
+  Market-closed + connected reads "Feed paused (market closed)".
+  Guarded by tests/js/test_risk_strip_feed_state.mjs (5 cases, renders the real component in a VM).
+  Verified on the wire: the mirror's live summary returns `broker_connected: false, tick: 6145,
+  running: 0`, and the strip now reads "No broker feed · 0 running · 6145 ticks this session".
+Files: src/backtest/web/static/js/components/risk_strip.js:110-133
+```
+
+**Fix shape:** gate the phrase on a liveness field the payload already carries (last-tick age and/or
+`capability.broker_connected`), and label the counter as a session total, e.g.
+"Feed idle · 0 running · 6,145 ticks this session".
+**Acceptance:** `tests/js/test_risk_strip*.mjs` asserts idle when the feed is stale/disconnected;
+verified on both :5001 (idle) and a market-open observation (active).
+
+### F4 — Backtest rail: results content is laid out in the 308px column, leaving 822px empty → UI-10
+
+```
+Issue ID / task ID: UI-10
+Priority: P1 (the flagship research page reads as broken)
+Environment: QA mirror, dark + light, 1440×900
+Actual: .backtest-grid measures 308px + 822px (workspace.css:262). The right column holds only the
+  About card (height ≈101px) while the left column is ≈1,733px tall: the "Performance workspace"
+  card, the equity empty-state and the "A more deliberate research process" guide all auto-place
+  into column 1. Measured: .research-canvas 308×693 (overflow:hidden), .research-steps grid columns
+  70px/70px/70px, .preview-metrics 4 columns ≈55px each.
+  Consequence: one-word-per-line wrapping ("Define / the / idea"), KPI labels wrapping to three lines,
+  and the equity chart empty state squeezed into a 308px gutter.
+Root cause: workspace.css:307-308 assigns `grid-column: 2` to `.strategy-card` and `.results-panel`
+  but not to `.research-canvas` / `.research-guide`, which are also results-column content.
+Classification: UI
+Files: src/backtest/web/static/css/workspace.css:262, :296, :307-308; templates/backtest.html:16, :157
+```
+
+**Fix shape:** place `.research-canvas` and `.research-guide` in column 2 (or restructure the rail so
+only the config panel is in column 1). Re-check the ≤1190px and ≤900px breakpoints afterwards.
+**Acceptance:** at 1440px, `.research-steps` columns ≥200px, `.preview-metrics` values render on one
+line, and no left-column card is narrower than its content requires; screenshot diff both themes.
+
+Status: DONE. Both cards are inside `#emptyState`, so the placement belongs on that section, not on
+the two inner cards: `.backtest-grid > .backtest-empty { grid-column: 2 }` (workspace.css:309).
+Measured at 1440×900 and 1440×1080 — identical: `.backtest-empty` 308×… → **822×820** (right=1408),
+`.research-step` widths **241px** each (was 70px), all four `.preview-metric-value` rows **1 line**.
+`shots/backtest_empty_s4.png` shows the Performance workspace and the research guide filling the
+results column. The ≤780px single-column case gets `.backtest-grid > * { grid-column: auto }`, because
+a forced column 2 in a one-column template would spawn an implicit second column.
+
+### F5 — the run-configuration form is half-hidden behind an unaffordanced inner scroll → UI-10
+
+```
+Issue ID / task ID: UI-10
+Priority: P1
+Actual: .backtest-config (workspace.css:263) is sticky with max-height calc(100dvh - 280px) and
+  overflow-y:auto; measured clientHeight 618 vs scrollHeight 1236 — i.e. the timeframe, date range,
+  capital and the whole Strategy Params fieldset are below an inner fold. `.config-actions` is sticky
+  at the bottom, so the first screen ends at "Timeframe" + a big Run button, which reads as a complete
+  form. scrollbar-width: thin is the only affordance.
+Classification: UI
+Files: src/backtest/web/static/css/workspace.css:263, :268
+```
+
+**Fix shape:** once F4 frees the right column, let the config rail grow with content (drop the
+`max-height` in favour of a taller viewport-aware cap, or move the date/capital/params sections into
+the results column as a second step). If an inner scroll must stay, add a visible gradient/edge cue.
+**Acceptance:** every required field is reachable without discovering a hidden scroller, at 900px and
+1080px viewport heights, both themes.
+
+Status: DONE — `.backtest-config` lost `max-height: calc(100dvh - 280px)` and `overflow-y: auto`
+(workspace.css:263); the rail is now as tall as its content and the page scroll reaches it. Measured
+at 1440×900 and 1440×1080: `clientHeight 1236 / scrollHeight 1236` → **no inner scroller** (was
+618/1236), deepest field bottom 1595px, rail bottom 1759px, document 2692px — every field, the
+Strategy Params fieldset and "Fast preview" included, is on the page flow.
+`.config-actions` stopped being `position: sticky; bottom: -20px`: inside a non-scrolling rail that
+floats the Run button over a half-read form, which is the same misreading F5 reported. It now sits at
+the end of the form. The ≤780px overrides for both rules became dead and were removed rather than
+left as no-ops.
+
+### F6 — `/diary` truncates money values and hides table columns → UI-03, UI-02
+
+```
+Issue ID / task ID: UI-03 (financial values), UI-02 (table fit)
+Priority: P1
+Actual:
+  (a) The "EXTREMES & STREAK" KPI renders "+<best> / −<worst…">" with the second number cut off by an
+      ellipsis. Cause: .diary-kpi-value sets white-space:nowrap; overflow:hidden; text-overflow:ellipsis
+      (static/css/diary.css:212-221) on an 18px mono value; measured 15px of loss.
+  (b) .diary-tree-table measures 1202px inside a 1122px overflow-x:auto wrapper: the last column(s)
+      (R-multiple) sit off-screen with no scroll cue, and the header row is visibly cut mid-glyph.
+Classification: UI
+Files: src/backtest/web/static/css/diary.css:212-221; templates/diary.html:127 (#dkpi-extremes)
+```
+
+**Fix shape:** never ellipsize a number — let the extremes KPI wrap to two lines or drop to a
+`font-size` step-down; give the KPI grid `min-width: 0` and let the pair stack. For the table, add a
+column-priority collapse (hide the least important column first) or a persistent scroll shadow.
+**Acceptance:** a populated QA ledger shows both extremes in full; the R-multiple column is reachable
+with a visible affordance; `tests/test_workspace_design.py` + a CSS assertion that `.diary-kpi-value`
+has no `text-overflow: ellipsis`.
+
+**Status: DONE (S6, 2026-11-03).**
+- (a) `.diary-kpi-value` (diary.css:212) lost `nowrap + overflow:hidden + text-overflow:ellipsis`;
+  it now wraps (`white-space: normal; overflow-wrap: anywhere`). Measured on the populated ledger:
+  `+₹17,630.76 / −₹62,567.76` was losing **15px at 1440** → **0px lost at 1440 / 1024 / 768 / 390**,
+  two lines at 1440, one line below.
+- (b) Two parts. The unbreakable identifier in the name column was what pushed the tree table to
+  1,202px, so the name column now wraps with a **200px floor** (without the floor it collapsed to
+  ~40px at 1024 and read as a vertical ribbon — caught on screenshot, not in the first measurement)
+  and the tree table's cell padding went 10px → 7px. **1440: 1122px content in a 1122px box, all nine
+  columns on screen, nothing hidden.** Below that the table still overflows, and it now says so:
+  `markScrollCues()` in diary.js inserts a `.diary-scroll-cue` line above the wrap naming the columns
+  still out of view, and gives the wrap `tabindex=0` + `role=region` so ← → reaches them. The cue
+  clears itself when scrolled to the end, skips tables in hidden tabs, and is reused across renders.
+  Measured: 1024 → "Commission, Net P&L, Running MTM out of view…"; 768 → same; 390 → seven columns
+  named; 1440 → cue empty, tabindex removed.
+- Tests: `tests/test_workspace_design.py::test_diary_never_ellipsizes_a_money_value` and
+  `::test_diary_table_columns_stay_reachable` (CSS contracts, the precedent at :174), plus
+  `tests/js/test_diary_scroll_cue.mjs` (4 cases: names the hidden columns and makes the box focusable;
+  clears at the end of the scroll; never measures a hidden tab; one cue element, not one per render).
+  The stub keeps `tabIndex` and the `tabindex` attribute as one thing so the "focus stop goes away"
+  assertion cannot pass for the wrong reason.
+- Evidence: `shots/f6_kpi_1440.png` (both extremes in full), `shots/f6_cue_1024.png` (cue line above
+  the table, labels legible), `shots/f6_diary_{1440,1024,768,390}.png`.
+- **New finding while measuring this:** the topbar's broker strip overflows the *document* at
+  1024px and 768px on every page (90–135px of horizontal page scroll; offenders
+  `.broker-status`, `.broker-strip`, `.theme-toggle`). F1's fix is scoped to ≤560px, so this band was
+  never in the matrix — recorded as **F13** below.
+
+### F7 — the alert widget floats over page content → UI-17 — DONE 2026-11-04
+
+```
+Issue ID / task ID: UI-17
+Priority: P2
+Actual: .alert-widget is position:fixed; right:16px; bottom:16px; z-index:150 (static/css/app.css:1227).
+  In the 900px viewport it lands on top of whatever is there: it covers the last calendar row on
+  /diary, the "0 brokers" chip on /analytics, and sits in dead space on / and /risk. Observed with
+  data-state="minimized" and no alerts, i.e. it costs screen space while saying nothing.
+Classification: UI
+Files: src/backtest/web/static/css/app.css:1227-1228; templates/base.html:200;
+  static/js/components/alert_widget.js
+```
+
+**Fix shape:** when there are no alerts, render nothing (or dock it into the topbar next to the market
+chip); when expanded, use a drawer/panel that reserves layout instead of overlaying.
+**Acceptance:** no page element is covered at 1440×900 or 390×844 with zero alerts; with one alert the
+widget does not obscure a table, KPI or button.
+
+**Status: DONE (S10, 2026-11-04).**
+- `render()` now owns the mount. `const quiet = !state.expanded && !state.counts.total && !state.error`
+  → `root.hidden = quiet`, and `body.has-alert-widget` is toggled on that same condition instead of
+  being added once in `init()`. A clear book with a healthy feed leaves the corner to the page — the
+  widget has nothing to say, so it takes nothing.
+- When it *is* on screen the page keeps room for it: `body.has-alert-widget .app-workspace
+  { padding-bottom: 56px }` in `app.css`, riding the same class as the existing toast lift. The pill
+  still floats (it is an alert affordance, not a panel), but nothing beneath it is unreachable.
+- A dead feed is not an empty feed. `renderMinimized(counts, error)` renders an `aw-pill-warning`
+  reading "Alerts unavailable" (reason in the `title`, escaped) when the poll failed with zero counts,
+  rather than hiding the widget and implying clarity — F8's rule applied to this pill.
+- The "No alerts" pill and both its CSS rules (`.aw-pill-clear` in `app.css` and `workspace.css`) were
+  deleted; nothing renders the empty state as a clickable chip any more.
+- Ratchets: `tests/js/test_alert_widget.mjs` 11 → 12 tests (the first test now asserts
+  `renderMinimized({total:0}, null) === ""` and the dead-feed wording; new mount test drives
+  `apply()` at versions 40/41/42 and asserts `hidden`, empty `innerHTML`, and
+  `has-alert-widget` flipping on then back off). `tests/test_workspace_design.py` gained
+  `test_the_alert_widget_only_spends_space_when_it_says_something` — parses the `body.has-alert-widget
+  .app-workspace` block, requires `padding-bottom ≥ 48px`, requires the toast rule on the same class,
+  and forbids `.aw-pill-clear` in either stylesheet or the component. Both fail on the pre-fix tree
+  (restored with `git show HEAD:` — mount test got a visible widget at v40, design test found no band).
+- Measured live on the mirror (:5001), with alert states produced by in-memory `AlertWidget.apply()`
+  probes inside a single evaluate — nothing was written to the DB and the next real poll reverted the
+  widget, so the server stayed at zero alerts.
+  - 1440×900, zero alerts: `hidden true / bodyClass false / padding-bottom 0px / toast bottom 24px /
+    overlaps []`. Before: an 85×31 pill sat over the calendar and covered 13% of a `.diary-week-cell`.
+  - 1440×900, one alert, scrolled to the bottom: pill 111×35 at (1308, 849), `padding-bottom 56px`,
+    overlaps `[]` against tables, KPI cards and buttons.
+  - 390×844: zero → hidden with no body class; one alert → pill at (259, 793), clear; failed feed →
+    126×31 "Alerts unavailable", clear of all content.
+- **Deliberate consequence:** with a clear book there is no clickable affordance in the corner, so the
+  expanded panel's own empty state is only reachable by an operator who left it expanded
+  (`localStorage["pi.alertWidget.expanded"]`). That is the trade the minimal-UI rule asks for — an
+  alert widget should not need a resting place.
+
+### F8 — `/analytics` presents loading and zero states as measurements → UI-15
+
+```
+Issue ID / task ID: UI-15
+Priority: P1 (UI-01's "unknown must not look like zero" applied to analytics)
+Actual (12s after load on a mirror whose overview takes 7.1s):
+  (a) "Running Strategies" table still says "Loading strategies…" (templates/analytics.html:255) with
+      no error path — a slow read is indistinguishable from a dead one.
+  (b) KPI tiles show an em-dash value and an em-dash sub-value; "0 Active Strategies" (:44) and
+      "0 brokers" (:82) are rendered as facts.
+  (c) "Portfolio Equity Curve" is a heading over a ≈200px empty void — the canvas is hidden and there
+      is no empty state, unlike Backtest's designed `.empty-chart`.
+Classification: UI
+Files: src/backtest/web/templates/analytics.html:44, :82, :255; static/js/analytics.js
+```
+
+**Fix shape:** skeleton/"fetching" chips while in flight, an explicit "unavailable" state on failure,
+and reuse the `.empty-chart` empty state for the equity curve.
+**Acceptance:** with the overview deliberately slowed, the page reads "loading", then numbers; with
+zero strategies it says "no strategies deployed", not "0".
+
+**Status: DONE (S6 tail, 2026-11-03).**
+- Measured first (`pw_f8.js`, scratch, 1440×900; the mirror's overview read takes 2.9s): at 500ms and
+  at 2s the pills read "0 Active Strategies" / "0 brokers", the trade sub read "0 trades", the table
+  read "Loading strategies…", and the equity heading sat over a 245px void holding a blank 300×150
+  canvas with no empty state. With the overview aborted, every one of those strings stayed forever
+  and only a top banner said anything. With a zero-card payload the pill read "0 / 0 Active
+  Strategies". All three confirmed as facts on the wire before touching code.
+- One vocabulary, three states: `data-state="fetching|ready|empty|unavailable"` on every
+  placeholder, styled by `.state-chip` / `.state-note` in workspace.css (info-blue with a pulsing dot
+  while fetching, danger red when unavailable, grey when genuinely empty). The template ships all ten
+  placeholders fetching, so the first paint cannot state a number nobody has measured.
+- `analytics.js`: `markOverviewPending()` runs before the fetch; both failure paths call
+  `markOverviewUnavailable()`; `renderOverviewMetrics` writes ready/empty ("No strategies deployed"
+  when `total_runners` is 0); `renderPortfolioEquityChart` builds a chart only when there is at least
+  one finite equity point, otherwise `showEquityPlaceholder()` reuses Backtest's `.empty-chart`
+  treatment (sized to the 220px section by a `.chart-section .empty-chart` rule) with a reason per
+  state — fetching / unavailable / "no equity points in this period".
+- `cross_broker.js`: `markXb()` gives the cross-broker card the same three states, including "No
+  brokers in scope" when `broker_count` is 0.
+- Found while fixing: `showError()` mounted the banner in `.page-content`, a selector that has never
+  existed in this app, so it fell back to `<body>` — measured banner x=0..1440 with the fixed sidebar
+  covering 0..224, i.e. the first words of the sentence were exactly the unreadable part. It now
+  mounts in `#main-content` (measured x=256, w=1152).
+- Two more locale-less numbers on this page, caught by the F9 sweep: the overview trade sub and the
+  comparison table's Trades column now go through `Money.count` ("1,800 trades (784W / 842L)").
+- Tests: `tests/js/test_analytics_states.mjs` (4 — failed read, in-flight read, empty book, arrived
+  read; each asserts the placeholder text AND its data-state) and
+  `tests/test_analytics_state_contract.py` (6 — the served HTML ships fetching with no zero-as-fact
+  string, the `.empty-chart`/state-chip vocabulary has CSS rules, both JS files walk the three states).
+- Wire evidence: `pw_f8.js` in sample/fail/zero × dark/light, screenshots
+  `shots/f8_*_{dark,light}_1440.png` plus `*_inflight_*`. Settled sample: pills `ready`, chart drawn,
+  placeholder hidden. Fail: every note "unavailable", table row "Could not read the strategy table —
+  Failed to fetch.", equity box "Equity curve unavailable … this is not a flat portfolio". Zero:
+  "No strategies deployed" + the empty-state card, equity box "No equity points in this period".
+- Deviation from the fix shape: no skeleton shimmer — the fetching state is a labelled chip with a
+  pulsing dot (the house `.data-freshness-chip` vocabulary), because a grey block would hide *which*
+  number is still missing.
+- Gate: `pytest tests/test_analytics_state_contract.py tests/test_number_formatting.py
+  tests/test_workspace_design.py tests/test_reporting_core.py tests/test_reporting_sources.py
+  tests/test_timekeeping_policy.py` → 128 passed; every `tests/js/test_*.mjs` passes except the two
+  documented non-tests/pre-existing entries (`render_option_views.mjs` is a CLI tool needing args;
+  `test_mtm_staleness.mjs` fails at HEAD on portfolio.js, untouched by this slice).
+
+### F9 — two money-grouping systems on one page → UI-03
+
+```
+Issue ID / task ID: UI-03
+Priority: P1
+Actual: /portfolio shows the same equity as "<lakh-grouped>" in the PAPER bucket card
+  (.bucket-equity, templates/portfolio.html) and "<western-grouped>" in the Paper Sandbox summary
+  table; allocated capital likewise. The risk strip uses lakh grouping. Both are on screen at once.
+Root cause: mixed formatters — 13 Jinja sites use "{:,.0f}" (e.g. templates/portfolio.html:38, :40,
+  :41, :42, :69) which is locale-less → western grouping, while JS uses toLocaleString("en-IN").
+  31 JS sites call a bare toLocaleString() and inherit the browser locale.
+Classification: UI
+Files: templates/portfolio.html:38-69 and the other Jinja "{:,…}" sites; the bare toLocaleString()
+  call sites across static/js/
+```
+
+**Fix shape:** one house formatter. Add a Jinja filter (`inr(...)`) backed by the same lakh-grouping
+rule as the JS helper, convert the 13 template sites and the 31 bare JS calls, and forbid the pattern
+with a test.
+**Acceptance:** `tests/test_workspace_design.py` (or a new test) greps the web templates and JS for
+`"{:,` / `toLocaleString()` with no locale and fails on any hit; screenshots of /portfolio, /diary,
+/risk show one grouping system.
+
+**Status: DONE (S5, 2026-11-03).**
+- Server half: `src/backtest/web/formatting.py` (new) + two Jinja filters registered in `create_app`.
+  **Deviation from the fix shape:** the filters are `money` and `count`, not `inr` — the currency is
+  configurable (`--currency` / `BACKTEST_CURRENCY`), so naming a filter after one rupee would lie.
+  `money` reads the same `CURRENCY_SYMBOL`/`CURRENCY_LOCALE` config the `<body data-currency-*>`
+  attributes come from, so a non-IN deployment changes both halves at once.
+- All 16 locale-less format calls in the templates converted (13 lines: `portfolio.html` 8,
+  `portfolio_live.html` 4, `portfolio_paper.html` 4).
+- Client half: `Money.num()` and `Money.count()` added to `components/currency.js`; 35 locale-less JS
+  calls routed through them (analytics 11, optimize_run 8, data_manager 5, optimize_setup 4,
+  optimize_common 3, symbol_picker 1, portfolio_intelligence 1 date, plus the two `$`-hardcoded
+  fallbacks in metrics_cards/trade_table now name `en-IN`).
+- Ratchet: `tests/test_number_formatting.py` — 2 regex sweeps (templates for `"{:,`, JS for
+  `.toLocaleString()`/`(undefined`) with a **frozen empty allowlist**, plus unit tests for the
+  grouping itself. `tests/js/test_currency_count.mjs` pins the JS half to the same rule.
+- Proof the ratchet bites: at `HEAD` the same regexes match 13 template lines and 35 JS calls; on
+  this slice's tree they match 0 and 0.
+- Wire evidence: `node pw_money.js` (scratch) walks every text node on 10 pages and compares each
+  `₹` figure against `Intl.NumberFormat("en-IN")` — **817 figures checked, 0 wrong** across
+  /portfolio, /portfolio/paper, /portfolio/live, /diary, /risk, /analytics, /reporting, /forward, /,
+  /settings. Screenshots: `shots/money_*_{dark,light}.png` (the paper command center reads
+  ₹22,00,000 in the card and ₹10,00,000 in the server-rendered Alloc column, while the risk strip
+  beside it reads ₹4,683.28 / ₹2,50,000.00 — one system, both halves).
+- Side effect worth knowing: `tests/js/test_data_manager_labels.mjs`, `test_symbol_picker.mjs`,
+  `test_deflated_sharpe.mjs` and `test_attestation_box.mjs` had to be taught about `Money` — the
+  first two now load `currency.js` into their VM (the pattern `test_metrics_cards.mjs` already used),
+  the last two stub `OptCommon` by hand and gained `fmtCount`. The components themselves stay
+  unguarded because `base.html` loads `currency.js` before every script.
+- Gate: the slice regression command above → 9 failures, exactly the documented known-bad set
+  (8 live-arming + 1 stale count), 96 passed.
+
+### F10 — strategy descriptions render merged words → UI-10, UI-11, UI-12
+
+```
+Issue ID / task ID: UI-10 (About panel), also /compare and /optimize
+Priority: P2 (copy defect, but it is on the flagship card and reads as a broken build)
+Actual: "…below the lower Bollinger band on theassumption the stretch snaps back toward the mean."
+Root cause: ~80 implicit string-concatenation literals across 12 strategy modules are missing their
+  trailing space, e.g. src/backtest/strategies/bollinger_reversion.py:29-34 ('… band on the' followed
+  by 'assumption …'). The backend string is the defect; the UI only displays it.
+Classification: backend-data (copy) surfaced in UI
+Files: src/backtest/strategies/*.py (12 files, ~80 sites)
+```
+
+**Fix shape:** sweep the multi-line description literals for a missing trailing space (or join with
+explicit `" "`). Add a test that no strategy `description` contains a lowercase-lowercase run without
+a space.
+**Acceptance:** `/backtest`, `/compare`, `/optimize` About panels render clean prose; the new test
+passes for every registered strategy.
+
+**Status: DONE (S7 head, 2026-11-03).**
+- The finding's count was low. Tokenizing every strategy module for *adjacent STRING tokens* (skipping
+  NL/COMMENT/INDENT/DEDENT, so only true implicit concatenations pair) found **188 fused joins across
+  28 modules**: 77 in the 12 built-ins under `src/backtest/strategies/`, and 111 more in the 16-file
+  plugin pack under `plugins/strategies/`, which the finding never looked at because those strategies
+  register through `discover_plugins()` at app start rather than through `strategy.registry.get_all()`
+  in a bare interpreter. Both dirs are swept; `docs/archive/strategy-snapshot-2026-10-15/` is an
+  archive and stays as it is.
+- The sweep is a script, not a hand edit: for each offending pair it inserts one space before the
+  closing quote of the first literal, asserting the character at that column really is a quote. Diffs
+  are exactly 77/77 and 111/111 lines — one space per line, nothing else moved. Rescan of both dirs: 0.
+- Ratchet: `tests/test_strategy_prose.py` (3 tests). The source half tokenizes both strategy dirs and
+  fails on any adjacent-literal pair whose join fuses a lowercase word into the next one — the defect
+  at the place it is born, since Python folds the literals at compile time and the fused word never
+  appears in the source text. Red-green proven against `git show HEAD:` blobs (bollinger_reversion 7,
+  supertrend_equity 8, swing_hourly_supertrend 7 joins). Two details that cost a pass each: the regex
+  must end `\Z` not `$` (`$` also matches before a trailing newline, which produced phantom hits in
+  `db/config.py` and `pine/codegen.py`), and quote detection must strip `r/b/f/u` prefixes before
+  testing for a triple quote (a literal containing `"""` inside single quotes fooled it).
+- The runtime half calls `discover_plugins()` first, so the artifact checks (no double space, no space
+  before punctuation, no padding) cover all 196 registered prose strings — 84 built-in, 112 plugin —
+  and the test fails loudly if the plugin pack ever stops registering.
+- Wire evidence: `pw_f10.js` (scratch) iterates all 17 strategies in the `/backtest` select, expands
+  `#strategyCardSections`, and reads `#strategyCard`; it also reads `/compare`, `/optimize` and the
+  61 KB `/api/strategies` payload. Its word list is not hand-sampled — it is all **149 distinct fused
+  tokens** derived from the HEAD blobs (tail word + head word of every offending join), none of which
+  is a real English word, so a hit is always the defect. Result: `fused: []` on all four surfaces,
+  with the corrected phrases present ("band on the assumption", "trend flag is up", "long only above
+  the regime"). Screenshots `shots/f10_{bollinger_reversion,supertrend_equity}_1440.png`.
+- Deviation from the fix shape: no explicit `" "` joins were introduced — the trailing space stays
+  inside the first literal, so the diff is one character per site instead of a rewrap of 188 lines.
+- Gate: the documented slice regression command plus the two prose/description suites → **9 failed,
+  107 passed**, the 9 being exactly the known-bad baseline (8 live-arming + 1 stale harness count).
+  All 44 `tests/js/test_*.mjs` pass except the pre-existing `test_mtm_staleness.mjs`.
+  `tests/test_phase2_rewrites.py` (62) confirms nothing asserts on the pre-fix description text.
+
+### F11 — raw identifiers leak into labels → UI-02, UI-14, UI-06
+
+```
+Issue ID / task ID: UI-02 (run cards), UI-14 (Engine playground), UI-06 (risk rulebook)
+Priority: P2
+Actual: strategy keys and segment codes are shown verbatim where a human label exists:
+  "sma_crossover" / "bollinger_reversion" / "rsi_reversion" / "mysupertrendv1" on the Recent Runs
+  cards; "Linked segment: equity_intraday" on /backtest; "CE_instant_buy" and "options_index" on
+  /forward; "bear_put_spread, bull_call_spread, long_call, …" and "Source: config/risk_limits.yaml"
+  on /risk; "strangle_wing_points", "hf_equity_scalp", "banknifty_ema_momentum" as row labels on /diary.
+Classification: UI
+Files: static/js/backtest.js (recent-run cards), templates/forward.html, templates/risk.html,
+  static/js/diary.js — all should go through the existing display-name/label maps
+```
+
+**Fix shape:** one label resolver (strategy registry already carries display names — the strategy
+dropdown on /backtest shows "Bollinger reversion") used by every surface that currently prints the key;
+segment codes mapped to words; keep the raw key available as a tooltip/`title` for operators.
+**Acceptance:** no snake_case token in visible page text on the 14 routes (the content probe in
+`pw_pass.js` already reports these; add it as an assertion).
+
+**Status: DONE (S7, 2026-11-03).**
+
+- One resolver, two halves — the F9 shape again. `static/js/components/labels.js` (`Labels.humanise /
+  .strategy / .segment / .structure / .structureShort / .warm`) resolves for the browser;
+  `format_label()` in `web/formatting.py`, registered as the `label` Jinja filter, resolves for the two
+  server-rendered portfolio tables. Both carry the same ACRONYMS/PROPER vocabulary, and
+  `tests/test_label_resolver.py` fails if they drift — a template and a page script cannot print the
+  same strategy two ways.
+- Canonical vocabularies reused, not reinvented: `Labels.structure` reads `OptionConfig.STRUCTURES`
+  (which mirrors `options_bridge.py:200`), `Labels.segment` reads `/api/segments`' `display_name`
+  (cached by `warm()`) with `humanise()` only as the pre-warm fallback. `structureShort()` is the
+  compact variant — the label minus its parenthetical gloss — because "Direction-aware (bull → call
+  spread, bear → put spread)" is right in a picker and unreadable in a table row. It replaced a second
+  resolver that had grown inside `components/option_view.js`.
+- Deliberately **not** resolved, because the identifier *is* the name: runner and pool names
+  (`QA13_sma_TCS_15min`, `NIFTY_50`, `ema_pullback·NIFTY50·15min`), broker-profile ids and
+  commission-model codes on /settings (`td_ameritrade`, `india_tiered`, `per_share`), and file paths.
+  Rewriting a runner name would make two different runners read the same. Every labelled site keeps
+  the raw key in a `title`.
+- Deviation from the acceptance wording: the assertion is **not** a blanket "no snake_case token". That
+  rule would flag operator-chosen runner names, which must survive. The ratchet (`pw_f11.js`) instead
+  derives its governed vocabulary from the server itself — 37 keys from `/api/strategies`,
+  `/api/segments` and `/api/portfolio/risk/limits` — and only calls a token a defect when it is one of
+  those **and** it stands alone in its text node. A key embedded in a longer identifier is an
+  operator's composite name and is allowed by construction, so that class can never be flagged by
+  accident. /settings is exempted wholesale with the reason written into the report.
+- **The coverage hole that mattered.** The first ratchet reported `defects: {}` across the 14 routes
+  while 24 raw keys were on screen. Tab panels are `display:none` until clicked, so the visibility
+  test skipped every one of them — the Playbooks tab was printing `bull_call_spread` the whole time.
+  The ratchet now walks `button.tab[data-tab]` on each route: **48 views** (14 routes + 34 tabs), which
+  found the 24. Anything in a modal, drawer or widget that no fixture opens is still invisible to it —
+  see the static ratchet below.
+- The 24 fell into three shapes:
+  - **A labelled table cell** (4 hits) — `components/portfolio_intelligence.js` printed `r.strategy`
+    and `f.strategy` raw in the greeks breakdown and the VIX regime-fit table, both inside the
+    portfolio's Risk & intelligence tab. Now `Labels.strategy(...)` with the key in a `title`.
+  - **A transcript** (20 hits) — the activity log (`#audit-log`) and the /risk audit timeline
+    (`#audit-tbody`) print stored audit records. These are exempt, but not by a route rule: both
+    containers now carry `data-raw-key`, the marker the scanner already honoured, with the reason in a
+    comment beside it. Narrow by construction and visible to whoever edits the container.
+  - **A raw JSON blob** — the audit timeline's Details column read `e.reason || e.details`, but the
+    payload key is `detail` (singular, present on every record), so every row fell through to
+    `JSON.stringify(e).slice(0,120)` and the column showed `{"action":"SPAWN QA13_…` instead of
+    `strategy=ema_pullback capital=500000.0`. Field name fixed; the JSON dump is now a `title` on an
+    em-dash rather than cell text, so nothing is lost but nothing is printed unreadable.
+- **Three more the wire ratchet cannot see at all** — found by the static half, and the reason it
+  exists. `components/alert_widget.js` (4 sites: the alert attribution table and both subscription
+  lists), `components/risk_board.js:290` (closed-trades Strategy column) and
+  `components/orders_tab.js:221` (the segment sub-line) all rendered governed keys raw. No QA fixture
+  opened the alert widget, the risk board's closed-trades table was empty, and no order carried a
+  segment — so all three passed a clean wire scan. `tests/test_label_resolver.py` now fails on any
+  line under `static/js` that interpolates a governed key into `${…}`, `innerHTML`, `textContent` or
+  `esc(…)` in a file that never mentions `Labels`. Line-level on purpose: `tune_this.js` reads
+  `cfg.strategy` into a prefill payload and must stay free to do so.
+- Red proofs, because a green ratchet that has never been red proves nothing:
+  - `f11_selftest.js` drives the **same** exported `SCAN`/`judge`/`fetchGoverned` the ratchet uses (a
+    red-proof against a copy of the rule proves nothing) over 6 injected fixtures on /risk:
+    governed+standalone → defect, embedded composite name → allowed, unknown token → allowed, inside
+    `<code>` → skipped, /settings → exempt. 6/6.
+  - Both static ratchets were reverted at one site each and re-run: they failed with
+    `risk_board.js:290` and `portfolio_paper.html:25` named, then went green on restore.
+- Wire evidence: `pw_f11_shots.js` clicks into the three hidden tabs and reads the cells —
+  Playbooks `Bull call spread / Bear put spread` (title `bull_call_spread / bear_put_spread`),
+  portfolio Risk tab `EMA pullback` / `HF equity scalp` / `SMA crossover` with raw titles, /risk audit
+  Details `strategy=ema_pullback capital=500000.0`. Screenshots
+  `shots/f11_{playbooks,portfolio_risk_tab,risk_audit_details}_1440.png`.
+- Gate: the documented slice command plus `test_label_resolver.py` (8), `test_number_formatting.py`,
+  `test_strategy_prose.py` → **9 failed, 110 passed**, the 9 being exactly the known-bad baseline
+  (8 live-arming + the stale `test_orders_tab.mjs` count). JS: **44 passed, 1 failed**, the failure
+  being the pre-existing `test_mtm_staleness.mjs` (its 4 unit tests pass; it fails on the portfolio.js
+  SSE assertion, unchanged). Five harnesses gained the labels.js dependency
+  (`test_option_view`, `render_option_views`, `test_mtm_staleness`, `test_alert_widget`,
+  `test_alert_widget_relogin`, `test_orders_tab`); `test_option_view` also had one expectation
+  corrected — `structureLabel("exotic_thing")` was asserted as `"exotic thing"`, the old
+  underscores-to-spaces guess, and is now `"Exotic thing"`, because a key outside the vocabulary still
+  gets the house casing.
+- **New finding spun out (F14, below):** `components/risk_page.js` has 22 `innerHTML` assignments and
+  zero escaping — no `esc()` helper exists in the file at all. `cur.halt_reason` goes straight into
+  the circuit-breaker banner and `e.message` into two error cards. Found while fixing the Details
+  column in the same file; left alone because a partial fix in one row of a wholly unescaped file buys
+  false confidence. Needs its own pass.
+
+### F12 — small consistency items (batch) → UI-03, UI-06, UI-15 — DONE 2026-11-04
+
+```
+Priority: P2
+- "1 trades" on Recent Runs cards: static/js/backtest.js:369 renders `${r.total_trades ?? 0} trades`
+  while static/js/diary.js:411 already pluralises correctly — reuse that helper.
+- Emoji glyphs used as section/tab/button icons on /risk and /analytics (⚙️ 📜 📊 📈 🔴 💾  🏦  🚨)
+  while the rest of the app uses the `icon()` SVG macro. The 🟢/ status dots elsewhere are a
+  deliberate aria-hidden convention — leave those. Replace only the emoji used as icons.
+- "What is held right now, with the manual controls. nothing held" — sentence starts lowercase after a
+  full stop (portfolio centre template).
+- Commission-as-%-of-gross exceeds 100% and reads like a bug ("/diary" shows e.g. (1494%) when gross is
+  tiny): cap the display or switch to "cost > gross" wording.
+- #bucket-positions-paper renders an empty numeric input with no placeholder while LIVE shows 5 —
+  an unset limit must read "not set", not blank.
+- "certification-grade" badge on the QA mirror overstates a 5-symbol cache; the badge should reflect
+  the actual certified universe.
+```
+
+**Status: DONE (S7, 2026-11-04).** All six, each at the site that renders it.
+
+1. **"1 trades"** — `backtest.js` Recent Runs tile and the CSV toast, `optimize_run.js` best-score
+   line, and two `diary.js` strings (`${data.trade_count} closed trades`, the "Load all N trades"
+   button) now decide the plural from the number, the way `diary.js` already did for sessions. No new
+   helper: the app has no shared pluraliser and four sites did not justify inventing one.
+2. **Emoji as icons** — `risk.html` (4 tabs, Live Mode, 2 Save buttons) and `analytics.html`
+   (15 heading/button/modal-title sites) now go through `{{ icon() }}`. Six paths were missing from
+   the vocabulary and added to `_macros.html`: `globe`, `bank`, `compass`, `target`, `bolt`, `bulb`.
+   🔴 Live Mode became `icon('alert')` + a title, because `_macros.html` opens with *"Never infer
+   execution mode from a color"* and a red dot was exactly that.
+   **Left alone, deliberately:** the semantic markers `🟢 Excellent / 🟡 Warning / 🔴 Alert / 
+   Insufficient sample` (analytics.js ratings), `✅/❌` trade results, `⏳` open, `⛔` halted, `⚠️`
+   warning lines, `📅` day heads, and the base-chrome broker dots (`⚪ Dhan`, `🔐`, `🔗`, `✕`). Those
+   carry state or live in the shared topbar, which this finding does not own. The sweep is therefore
+   page-scoped, not app-wide.
+3. **"nothing held"** — `portfolio.js:581` → `"Nothing held"`. It sits after the template's own
+   sentence ("…with the manual controls."), so a lowercase start read as a broken sentence.
+4. **Commission drag past 100%** — both sinks cap: the KPI sub names cost and gross in words instead
+   of a ratio, the attribution cell says `(cost > gross)` with a `title` explaining why there is no
+   percentage. Below 100 the old rendering is untouched.
+5. **Unset bucket limit** — the input carries `placeholder="not set"` + a title, and the plain-text
+   span beside it (which was empty) now reads "not set". `risk_board.js` already rendered `∞` for the
+   same concept and is unchanged.
+6. **Certification badge** — `certifiable` is a *source-class* property, so the badge now says
+   "certification-grade **source**" and its title bounds the claim: *"does not certify which symbols
+   or dates this run loaded"*. Naming the actual universe would need a coverage fetch on every page
+   that mounts the gate; the honest wording was the cheaper, true fix. `docs/UI-WALKTHROUGH-AND-QA-
+   2026-10-02.md:66` still quotes the old string — that file is a dated record, not a spec.
+
+**Ratchets** — `tests/test_web_copy_consistency.py` (new, 7 tests): the plural rule scans the three
+files this slice touched and flags a `} trades` / `+ ' trades'` rendering with no `=== 1 ?` decision
+(with a self-check test proving the scanner catches the pre-fix line and forgives the fixed one); a
+pictograph-range scan of `risk.html` + `analytics.html` that must find zero and must find `icon(`; an
+`icon()`-name resolver, because the macro silently falls back to `activity` for an unknown name; the
+blank-value-input-needs-placeholder rule over `risk_page.js`; the drag-cap wording; the badge
+wording. Five governing rules are red on the pre-fix tree (`git show HEAD:` — verified before
+restoring). `tests/js/test_risk_page_escaping.mjs` 8 → 9 (new: an unset limit renders
+`value="" placeholder="not set"` and the span text); `tests/js/test_data_source_gate.mjs` stays at 16
+with two assertions added to the badge test.
+
+**Live check** — templates are compiled by the running server, so this needed a restart of the QA
+mirror (:5001 only; :5000 untouched). CSS/JS are served from disk and needed none.
+- `/risk` 1440×900: four tabs render `svg.ui-icon` at 13px inside unchanged 41px tab boxes; zero
+  pictographs in the page's own markup; LIVE bucket `value="5"` (placeholder inert), PAPER bucket
+  `value="" placeholder="not set"` with the span reading "not set" — the exact PAPER/LIVE pair the
+  finding described, from the real DB.
+- `/analytics` 1440×900: `h2` Cross-Broker, both `summary` section heads, three action buttons, the
+  alerts `h3`, Strategy Description, Statistical Insights, both detail links and all three modal
+  titles are SVG; `docW 1435 / iw 1440`; 0 console errors.
+- `/diary`: scope line reads `(73 closed trades across 1 active IST session)`; two attribution rows
+  that previously showed the ratio now read `(cost > gross)` — "HF equity scalp1", whose cost against
+  a small negative gross is the finding's own ≈1494% example, and "One min scalp1" at ≈261%. Amounts
+  omitted per §2; neighbouring rows keep `(0%) (4%) (17%) (73%)`.
+- `/backtest`: 12 Recent Runs tiles read `1 trade`, `0 trades`, `2 trades`, `10 trades`, `91 trades` —
+  no `^1 trades$` remains. Gate line: `Data source: Real Data (PostgreSQL) · certification-grade
+  source` with the bounding title.
+- `/portfolio`: `#pos-summary` = "Nothing held".
+
+### F13 — the topbar scrolls the whole document sideways at tablet widths → UI-01, UI-17
+
+```
+Issue ID / task ID: UI-01 (chrome), UI-17 (global rule: no horizontal page scroll)
+Priority: P1 (same defect class as F1, found while measuring F6 on 2026-11-03)
+Actual: horizontal document scroll at 1024px and 768px on every page — 90px on /settings, 122px on
+  /risk, 135px on /diary. Offenders: .broker-status, .broker-strip, .broker-strip-item, .theme-toggle.
+Root cause: F1's fix is scoped to @media (max-width: 560px). Between 561 and ~1100px the topbar keeps
+  its single-row flex with the full broker strip, so the row is wider than the viewport and the page
+  scrolls instead of the chrome shrinking.
+Classification: UI
+Files: static/css/workspace.css (.app-topbar / .broker-strip breakpoint band)
+```
+
+**Fix shape:** extend the F1 treatment up to the width where the row actually stops fitting — let the
+strip wrap or collapse to dots, keep every broker's state visible (a dot still says connected/not).
+**Acceptance:** `document.scrollWidth === innerWidth` at 1024 and 768 on all 14 routes (the pw_pass.js
+geometry probe already computes this; add the two widths to its matrix).
+
+**Status: DONE (S8, 2026-11-04).**
+- New band in `workspace.css` at `@media (max-width: 1100px)`: `.topbar-controls` wraps, and the words
+  give before the page does — `.command-open`, `.broker-strip-item::after`, `.market-status-text` and
+  `.freshness-text` drop to `display: none`, and the two chips lose their `min-width`. Each broker's
+  dot stays on screen (connected/not is still readable); the Broker Board the button opens carries the
+  names, and the status chip's `title` carries the reason.
+- Measured on the mirror with a completed run on screen (results change the topbar's content):
+  390×844 `docW 386 / overflow false / unclipped offenders []` (was 450 with 8 offenders);
+  820×900 `docW 815 / overflow false / topbar 815 of 815` (was 922 with a 923px topbar);
+  1000×900 `docW 995 / overflow false`; 1280×900 and 1440×900 unchanged and still non-overflowing,
+  with the labels visible again (`commandOpen flex`, `marketStatusText block`).
+- Gate: `tests/test_workspace_design.py` → 28 passed, including the new band ratchet
+  `test_topbar_cannot_drag_the_document_sideways_above_the_mobile_band`, which parses the 1100px block's
+  rules and requires all four `display: none` selectors plus `flex-wrap: wrap`. It fails on the pre-fix
+  tree (no such band existed).
+
+### F14 — risk_page.js interpolates server strings into innerHTML with no escaper (found during F11) — DONE 2026-11-04
+
+```
+Issue ID / task ID: none — new, found 2026-11-03 while fixing the audit Details column (F11)
+Priority: P2 (single-operator local app, so exploitation needs an operator-controlled string to
+  already be in the DB; but a runner name is exactly that, and it is set from a form)
+Actual: static/js/components/risk_page.js has 22 innerHTML assignments and zero escaping — the file
+  defines no esc()/escapeHtml() helper at all. Server-derived strings go straight into markup:
+  `cur.halt_reason` and `cur.halt_mode` into the circuit-breaker banner (:161), `e.message` into two
+  error cards (:62, :77), and the audit timeline's action/detail/runner cells (:347-353). A runner
+  named `<img src=x onerror=…>` would be stored by the spawn form and replayed into the audit table.
+Classification: robustness/security, not visual — nothing looks wrong today, which is why the pixel
+  pass did not see it
+Files: static/js/components/risk_page.js
+```
+
+**Fix shape:** one `esc()` helper in the file (or import the house one) applied at every interpolation
+of a server string; the audit row edited for F11 is a start, not a fix.
+**Acceptance:** no `innerHTML` assignment in risk_page.js interpolates a value that did not pass
+through `esc()` or a numeric formatter — assertable statically the way `test_label_resolver.py`
+asserts the label rule. Deliberately **not** folded into F11: escaping one row of a wholly unescaped
+file buys false confidence, and the two rules would then fail together for unrelated reasons.
+
+**Fix (2026-11-04):** the house escaper is now in the file ([risk_page.js:19](../src/backtest/web/static/js/components/risk_page.js))
+and all 22 `innerHTML` sinks route stored values through it — halt reason and mode in the breaker
+banner, the gauge `value`/`sub`, both broker/segment card builders, the warnings banners, the
+exposure tables and their concentration lines, every audit cell (including the `title` fallback that
+holds `JSON.stringify(record)`), the trades rows, the rulebook's entitlement row, and the config
+form's stored limits, which are echoed straight into `value="…"` attributes.
+
+Two of those are worth naming. `<strong>${mode.toUpperCase()}</strong>` in the bucket form uppercases
+a *stored key* — it is now `esc(m.toUpperCase())`, so the display still reads `LIVE`/`PAPER` and a
+key with markup in it stays text. And the F11 `Reset & Resume` button wrote a raw `&` into an
+attribute-free position; it is `&amp;` now, which parses back to the same character.
+
+Numeric-only interpolations (pagination counts, `toFixed`, class ternaries whose two branches are
+literals) are deliberately **not** wrapped — they carry no string from the wire, and escaping them
+would imply the rule covers things it does not.
+
+**Ratchet (two halves):**
+- `tests/test_web_escaping.py` — the static rule, in the `test_label_resolver.py` shape: a governed
+  vocabulary (`halt_reason`, `action`, `symbol`, `runner_name`, `value`, …), any `${ … }` that sits
+  in markup on a line that opens a tag, must reach it through `esc()`/`fmtMoney`/`fmtSigned`/
+  `Labels.*` or be a literal-branch ternary. Third test proves the scan can fail (a raw field is
+  caught, an escaped/formatter-guarded/literal-ternary one is not) so the rule is not decoration.
+- `tests/js/test_risk_page_escaping.mjs` (8 tests, wrapped by `tests/test_web_components.py`) — the
+  real component in a stub DOM whose `innerHTML` setter records every write, driven with hostile
+  payloads (`breach <img src=x onerror=alert(1)>`, `flattening"><script>alert(2)</script>`,
+  `reason="x"><img …>` in an audit detail, a `<b>`-wrapped structure key). Asserts each arrives as
+  `&lt;…&gt;`, that no `onerror=` attribute and no raw probe survives anywhere, that the *attribute*
+  cases stay inside their quotes, and — the other direction — that the chrome survives: gauge labels,
+  card classes, `Reset &amp; Resume`, and a plain halt reason still reading plain.
+
+Red on the pre-fix file: 7/8 harness tests fail and both static rules list ~20 raw sites (verified by
+swapping `git show HEAD:` over the file and restoring; md5-checked after). Green now, 34 passed across
+`test_web_components.py`, `test_web_escaping.py`, `test_label_resolver.py`.
+
+**Live check (QA mirror :5001, static file — no restart needed):** /risk renders 6 gauges with the
+same labels and values, 2 broker cards, bucket blocks `LIVE`/`PAPER` with their inputs populated
+(`bucket-value-live=10000.0000`, `bucket-positions-live=5`), the correlation group card, the rulebook
+rows, 6 audit rows with intact timestamps/scope/action/reason/runner-id cells, and 36 KB of grouped
+trades (`📅 2026-11-02 — 73 trades`, `title="NIFTY short_straddle"` → `NIFTY Short straddle`). Zero
+console errors. Nothing on this page stores or reads a hostile value today — the fix closes the path,
+the harness proves it with payloads the QA DB never contains.
+
+---
+
+## /backtest functional pass (2026-11-04) — BT findings
+
+This pass validated *behaviour*, not strategy quality: how the page handles a run, a refusal, a stored
+result, and a narrow viewport. The QA cache is small (217 symbols, limited history) and that is an
+accepted condition, not a finding — no run below is being certified or tuned.
+
+**Verified working** (re-measured on the mirror, no action needed): the two guards (no symbol / no
+dates) refuse client-side without a POST; a daily run returns in ~1 s and an intraday run in ~11 s with
+the button disabled and `aria-busy` set for the whole period; all three chart tabs render from the
+wrapped payloads; a missing metric prints NOTHING rather than a confident 0.00; `quick_screen`
+self-flags red in the provenance badges; a data error is a persistent banner naming the dates and
+timeframes the instrument *does* hold, with the `[req …]` id; a stored run reads back with zero POSTs,
+the caption "stored run …, source db", and the form pre-filled; the `NOT STORED` badge logic and the
+Recent Runs ledger (`total_trades`) are consistent. F3 and S5 hold here — "No broker feed", ₹ en-IN
+grouping, and "Bollinger reversion" rather than the registry key.
+
+### BT-01 — trade stamps render UTC, not exchange time
+
+```
+Issue ID / task ID: BT-01
+Priority: P1 (correctness of the number a reader trusts, on the money page)
+Actual: a trade ledger entry is stamped in UTC while the chart, the run window and the storage layer all
+  speak exchange time. On a 1hour run the session visibly starts at 08:30 IST instead of 09:15.
+Root cause: two layers, and the display layer is the smaller one.
+  1. `_fmt()` in src/backtest/engine/trades.py:168 drops the time only when hour/minute/second are all
+     zero, so an aware-UTC timestamp prints its UTC clock face.
+  2. `src/backtest/data/db_source.py` bulk path converts to Asia/Kolkata and then strips the zone
+     (line 206), but `get_candles()` (~line 298) only calls `pd.to_datetime` — so single-symbol loads
+     hand the engine naive UTC. The repo's own gate, scripts/diagnose_timeframe_alignment.py, says the
+  same thing: storage is UTC, resampling does not convert, and resampled-1day vs native-1day MISMATCH.
+Classification: data/clock, surfaced in the UI
+Files: src/backtest/engine/trades.py, src/backtest/data/db_source.py
+```
+
+**Status: DONE (2026-11-04).** Fixed at layer 2, the loader, because layer 1 alone is the read-side
+compensation this repo forbids. `to_exchange_wall_clock()` (src/backtest/data/db_source.py:67) converts
+an aware index to Asia/Kolkata and drops the zone, and BOTH read paths now call it — the bulk path
+(line 229) already did the conversion inline, `get_candles()` (line 328) did not, and that asymmetry *was*
+the bug: two callers of the same source got two different clocks. A naive series is returned untouched,
+which is what every SQLite-backed test (and `tests/data/test_window_bounds.py::two_utc_days`) relies on.
+
+The blast radius was mapped before editing, and one path genuinely broke: `forward/engine.py` hands each
+replay bar to the real `DataValidator`, whose contract is "naive means UTC" (it compares against
+`datetime.now(timezone.utc)`) — a naive 09:15 relabelled as UTC is 5h15m in the future, and a future bar is
+dropped in silence, emptying the replay. It now goes through the declared door,
+`from_market_clock(idx)` (src/backtest/forward/engine.py:1961), so the replay path keeps byte-for-byte the
+shape it had before the fix. The validator itself was left alone: its docstring documents UTC because that
+is what the live mStock hand-off gives it.
+
+Gate `scripts/diagnose_timeframe_alignment.py` (RELIANCE), before → after: storage reads "naive UTC" →
+"naive IST (session starts ~09:15)"; `1hour` 08:30 grid → `09:00,10:00,…`; `4hour` 1271 bars riddled with
+stub buckets → 848 bars, exactly 2 per session on the `08:00/12:00` grid. Daily and weekly look identical
+either way — the UTC day boundary sits outside the session — which is why this survived months: a daily
+backtest could never show it.
+
+Live on the mirror (:5001 restarted, Python changed), `sma_crossover` on RELIANCE 1min Sep-2026: the trade
+ledger reads `2026-09-02 09:45 → 10:51` (was 03:45 for a trade at the open), the first bar is 09:15 and the
+last 15:28, and the rendered DOM table agrees. `1hour` → 91 bars on the 09:00 grid; `4hour` → 26 bars
+(2 per session × 13), down from the 39 the stub buckets produced.
+
+Ratchets: `tests/data/test_db_source_clock.py` (8 tests — helper, naive passthrough, both read paths
+stamping one session identically, and the hour/4-hour bucket grids; 5 of them fail on the pre-fix tree),
+plus `tests/test_forward_engine.py::test_a_replay_of_the_current_session_is_not_emptied_by_the_clock`,
+which fails with "Backtest replay finished: 0 loops" if `from_market_clock` is dropped.
+
+Two things deliberately left open, neither a clock bug:
+- **BT-05 (fixed the same day, 2026-11-04):** `_fmt()`/`_fmt_dt()` printed date-only only for a midnight
+  stamp, so a `1day` ledger row now read `2026-09-01 09:15` — truthful (daily bars are anchored to the
+  session open by `bar_timestamp`) but noisy where the reader thinks in days. It read `03:45` before, so
+  this was not a regression; see the BT-05 section.
+- Stored ledger rows written before this fix keep their UTC stamps. `PAYLOAD_VERSION` did not change (the
+  shape is the same, only the clock), so an old run still reads back — with its old, frozen stamps. The
+  ledger is an immutable record of what one build produced (`code_fingerprint`), so the repair belongs in
+  a new run, not in rewriting history.
+
+### BT-05 — a day-granular run labelled its bars with a clock face
+
+```
+Issue ID / task ID: BT-05 (surfaced by the BT-01 fix, which moved the clock face from 03:45 to 09:15)
+Priority: P3 (presentation of a correct number, on every daily run)
+Actual: a 1day trade row read "2026-09-01 09:15" and the equity axis said the same. The reader asked for
+  a daily backtest; the time carries no information about the day it sits inside.
+Root cause: the label rule was "is this stamp midnight?", which only fires for synthetic frames anchored
+  at 00:00. A stored coarse bar is anchored to the 09:15 session open (data/base.py:bar_timestamp), so it
+  always took the datetime branch. The same heuristic was also written out three times — engine/trades.py,
+  adapters/backtest_adapter.py and api/forward.py — which is how BT-01 happened in the first place.
+Classification: display/data contract
+Files: src/backtest/engine/trades.py, src/backtest/adapters/backtest_adapter.py, src/backtest/api/forward.py
+```
+
+**Status: DONE (2026-11-04).** Granularity is decided by the bars, once:
+`index_is_day_granular()` (src/backtest/engine/trades.py:175) calls a frame day-granular when the median
+spacing between stamps is ≥ 20h, and `fmt_bar(ts, day_granular=…)` is the only label function left. The
+trade walk computes it from its own index; the adapter computes it once per payload, so the equity axis,
+the drawdown series, the candle markers and the trade rows cannot disagree; `ForwardSession` dropped its
+third copy and shares the decision, because its revealed-prefix filter compares these strings against each
+other. A daily run with weekend gaps still measures one day at the median, and `1hour`/`4hour` stay on the
+clock face — spacing, not a magic time, is the rule.
+
+Live on the mirror (:5001 restarted), RELIANCE Sep-2026: `1day` → equity/candle labels `2026-09-01`,
+`2026-09-02`, trade rows `2026-08-14 → 2026-08-18`, `worst_dd_date 2026-09-10`; `1hour` → `2026-09-02
+09:00, 10:00` with trade `2026-09-23 09:00 → 2026-09-24 12:00`. No `PAYLOAD_VERSION` bump: the keys and
+types are unchanged, only the string a bar renders as, so old rows still read back (with their old labels).
+
+Ratchets: `tests/test_engine_trades.py` (spacing rule + daily/intraday label pair),
+`tests/test_backtest_adapter.py` (whole payload agrees) and
+`tests/test_api_forward.py::test_a_day_granular_replay_stamps_agree_with_its_candle_rows` — 5 new tests,
+2 of them red with the `day_granular` branch removed. 76 green in those three files, 277 across
+engine/reporting/diary/metrics, 161 across analytics/ledger/web-components.
+
+
+### BT-06 — section 3 of the timeframe gate still reports a volume MISMATCH (OPEN, not a clock bug)
+
+```
+Issue ID / task ID: BT-06
+Priority: P3 (data content, found while proving BT-01)
+Actual: scripts/diagnose_timeframe_alignment.py section 3 compares resampled-1day against the native 1day
+  rows for RELIANCE and still reports MISMATCH after the clock fix.
+Root cause: not the clock. OHLC is identical and there are no duplicate minute rows, but the sum of the
+  session's 1min volume is roughly 2x the volume stored on the native 1day row — one source tag, so this
+  is a disagreement about what "volume" means between the two ingest paths, not double-counted bars.
+Classification: data/fetch
+Files: the 1day writer and the mStock export, upstream of this repo's loader
+```
+
+Present before BT-01 (measured on the pre-fix tree), so it is recorded separately rather than folded into
+that fix. Out of scope for the /backtest behavioural pass: no run here is being certified, and a volume
+definition question belongs to whoever owns the fetch path.
+
+Carried into §7 of [UI-PENDING-TASKS.md](UI-PENDING-TASKS.md) as the one open finding from this pass, so
+it stays on the ledger with an owner needed on the fetch path instead of ending here.
+
+### BT-02 — a failed run left its own "Running backtest…" spinner on screen
+
+```
+Issue ID / task ID: BT-02 (same family as F8: a state that describes what is not happening)
+Priority: P1
+Actual: runBacktest() paints showLoader("metricsCards", "Running backtest…") and only clears it on the
+  success path. A failure therefore rendered a spinner directly beneath the banner saying the run
+  failed — two mutually contradictory states on one screen.
+Root cause: hideLoader() was called in renderResults(), which the catch block never reaches.
+Classification: UI state
+Files: static/js/backtest.js (runBacktest catch block)
+```
+
+**Status: DONE (2026-11-04).** `hideLoader("metricsCards")` added to the catch block. Harness
+`tests/js/test_backtest_failure_clears_loader.mjs` (2 tests) boots the real `backtest.js` in a `node:vm`
+sandbox with a stub DOM and fetch: the failing run must clear the loader, show the banner, hide results,
+re-enable the button and drop `aria-busy`; the succeeding run must paint the loader exactly once and
+clear it. Wrapped by `tests/test_web_components.py::test_failed_backtest_clears_its_loader`. Re-measured
+live on the mirror (ABB, 2019 dates → 400): `loaderInMetricsCards false`, `metricsCardsHtmlLen 0`,
+`runErrorHidden false`, `resultsHidden true`, `btnDisabled false`, `btnAriaBusy null`.
+
+### BT-04 — at 390px the trade table and the readiness panel forced a sideways page
+
+```
+Issue ID / task ID: BT-04 (F13's rule, one layer down: a component that sets a hard content floor)
+Priority: P2
+Actual: with results on screen at 390×844 the document was 450px wide with 8 unclipped offenders.
+Root cause: `#tradeTable { min-width: 570px }` — a floor below the desktop viewport but above a phone,
+  so the table widened the page instead of taking the scroll its own `#tradeTable-wrap` already
+  provides; and `.cmp-ready-grid`'s `minmax(300px, 1fr)` track, where the 300px is a hard minimum.
+Classification: UI
+Files: static/css/workspace.css, static/css/app.css
+```
+
+**Status: DONE (2026-11-04).** The table is `width: 100%` and its wrapper keeps the scroll; the panel's
+track floor became `minmax(min(300px, 100%), 1fr)`, which preserves two columns at 1440 (measured
+`381.8px 381.8px`) but does not shrink the 300px floor inside a percentage-resolved track, so below 560px
+each check now stacks deterministically. Ratchet:
+`tests/test_workspace_design.py::test_a_component_grid_may_never_set_a_hard_content_floor`. Re-measured
+at 390×844 with a completed run on screen: `docW 386, overflow false, unclipped offenders []`.
+
+### Retracted during the /backtest pass (all four were my probes, not defects)
+
+- `-₹90,759.30` in a paise column is `Money.signed` behaving correctly, not a scale bug.
+- `recentRunTiles: 0` and `trades=None` were wrong selectors in my own probe — tiles carry `data-idx`,
+  ledger rows carry `total_trades`.
+- `trade_table.js:63`'s hard-coded `$` is the no-`Money` fallback path; the browser renders ₹.
+- Console 400s during these runs were the intentional bad-dates probes.
+
+---
+
+## Suggested order of work
+
+| Slice | Contents | Why here |
+| --- | --- | --- |
+| S1 | F2 (consolidator O(n²) + `include_trades` default + loading UX) — **DONE 2026-11-03** | P0, one-line algorithmic fix, unblocks UI-16 |
+| S2 | F3 (truthful feed state) — **DONE 2026-11-03** | P0, one component, covered by an existing JS harness |
+| S3 | F1 (topbar at ≤560px) — **DONE 2026-11-03** | One CSS block, fixes 14 pages at once |
+| S4 | F4 + F5 (backtest rail + config fold) — **DONE 2026-11-03** | Same two columns, must be designed together |
+| S5 | F9 (one money formatter + ratchet test) — **DONE 2026-11-03** | Touches many files; land before other template edits |
+| S6 | F6 (diary truncation) **DONE 2026-11-03** + F8 (analytics states) **DONE 2026-11-03** | Per-page, independent |
+| S7 | F10 (description spacing sweep) **DONE 2026-11-03** + F11 (label resolver) **DONE 2026-11-03** + F12 (consistency batch) **DONE 2026-11-04** | Copy/consistency batch |
+| S8 | F13 (topbar at 561–1100px) **DONE 2026-11-04** + BT-02/BT-04 (backtest-page pass) + BT-01 (loader clock) **DONE 2026-11-04** + BT-05 (bar labels) **DONE 2026-11-04** | Same rule as S3, wrong breakpoint band |
+| S9 | F14 (risk_page.js escaping) — found during S7 — **DONE 2026-11-04** | One file, no visual change; needs its own static rule so it cannot be half-done |
+| S10 | F7 (alert widget overlays content) — **DONE 2026-11-04** | One component plus the band rule it owns; the clear-book case is the fix, so it needs a mount test |
+
+Regression command for every slice (from [UI-REDESIGN-PLAN.md](UI-REDESIGN-PLAN.md):217-227), run in
+this isolated mirror, never against :5000:
+
+```
+PYTHONPATH=src python -m pytest tests/test_workspace_design.py tests/test_web_components.py \
+  tests/test_broker_ui.py tests/test_web_taxonomy.py tests/test_portfolio_ui_views.py \
+  tests/test_reporting_ui.py tests/test_options_spawn_ui.py \
+  tests/test_number_formatting.py tests/test_label_resolver.py tests/test_strategy_prose.py \
+  tests/test_web_escaping.py tests/test_web_copy_consistency.py -q
+for test in tests/js/test_*.mjs; do node "$test" || exit 1; done
+```
+
+The last five pytest files are the ratchets this pass added (S5 money, S7 label resolver, S7 prose
+spacing, S9 escaping, S7 copy consistency); they are in the slice command, not a separate run, so a
+later slice cannot regress them without the gate going red.
+
+Known failures on this mirror that are **not** regressions (verified against a clean HEAD worktree,
+2026-11-03; re-confirmed 2026-11-04): 8 in `test_portfolio_ui_views.py` — every one arms a live runner
+and dies in `assert_live_arming_allowed()` (segments_store.py:335), which the mirror's own DB state
+deliberately trips. `test_web_components.py` is green on its own (23 passed, one per harness — the
+`test_orders_tab.mjs` count was synced to 23 by a1d0de8).
+`tests/js/test_mtm_staleness.mjs` fails on its `portfolio.js` SSE assertion — its four `option_view.js`
+unit tests pass, including after F11 made `option_view.js` depend on `labels.js`, and none of the files
+it loads were touched by this pass. It is not wrapped by pytest, so the slice gate stays green.
+23 failures across `tests/forward/` + `tests/optimization/` (`test_bucket_risk`, `test_capital_ledger_identity`,
+`test_live_engine`, `test_net_pnl_contract`, `test_phase4_straddles_and_live_adapter`) are the same list
+with the BT-01 diff reverted in place — every one of them arms live and is refused by the global
+kill-switch in Cost & Risk Settings, which the QA DB keeps OFF on purpose. The 7 setup ERRORs in
+`tests/test_real_reliance_september.py` are Windows-only: its `ingested` fixture runs the ingest CLI in a
+subprocess with `env={"PATH": "/usr/bin:/bin"}`, so the child dies at `import asyncio` → `_overlapped`
+(`OSError: [WinError 10106]`) before any repo code loads — reproduced with that env alone.
+
+Static edits (CSS/JS) are served from disk, but **Python and template edits need a mirror restart** —
+the reporting fix measured 157.8 s until PID 21136 was replaced, and F11's `data-raw-key` markers only
+took effect after one. Launch (see QA-MIRROR.md):
+
+```bash
+cd /c/learning/bt-qa-mirror
+PYTHONPATH=src "C:/Users/Nirvika/AppData/Local/Programs/Python/Python311/python.exe" \
+  -u -m backtest.web.app > server_5001.log 2>&1 &
+```
+
+System Python, not `.venv`: only Python311 has `twisted`, and the mirror still loads the mStock feed
+module at import. Confirm the boot line reads `serving 183 routes on http://127.0.0.1:5001` before
+trusting a probe — a stale listener on :5001 answers with the old build.
+
+Visual re-test harness (re-runs the whole matrix, ~2 min per pass):
+
+```
+cd /c/learning/qa-mirror-scratch/ui
+node pw_pass.js 1440 900 dark 1440_dark      # geometry + contrast + console, 14 pages
+node pw_pass.js 390 844 dark 390_dark        # responsive
+node pw_light.js                              # light theme, 8 key pages
+node pw_probe.js                              # targeted root-cause probes
+node pw_money.js                              # F9: every ₹ figure vs Intl en-IN, 10 pages
+node pw_f8.js sample|fail|zero [dark|light]   # F8: analytics fetching/unavailable/empty states
+node pw_f10.js                                # F10: all 17 About cards vs 149 HEAD-derived fused tokens
+node pw_f11.js                                # F11: 37 server-derived keys vs 48 views (14 routes + 34 tabs)
+node f11_selftest.js                          # F11 red-proof: 6 fixtures drive the ratchet's own SCAN/judge
+node pw_f11_shots.js                          # F11 evidence: the 3 tab panels that hid the leaks
+```
+
+`scripts/check_workspace_ui.py` is **not** usable from this agent session: it opens settings and
+confirmation dialogs, and §1 of the pending-tasks doc forbids pointing it at an actively trading
+instance. The QA mirror is live-disabled, but dialog-opening runs are a deliberate action to take
+only after the read-only slices land.
+
+## Retracted during this pass (do not chase)
+
+- "1.23 contrast" on primary buttons (`Run backtest`, `Save Global Config`, …): the probe composites
+  ancestor `background-color` and misses fills painted by a gradient/pseudo-element. Measured in-page
+  the button is `rgb(89,217,187)` on `rgb(9,42,35)` — passes.
+- `empty_buttons: 1` on every page: that is the hidden sidebar backdrop carrying an `aria-label`
+  (`templates/base.html:52`).
+- "Skip to workspace" low contrast: an off-screen skip link.
+- Font-preload warnings seen earlier were artifacts of the hidden in-app Browser surface, not the page.
+- `0×0` canvases: inside `[hidden]` panes.
+- 🟢 / ⚪ status dots: deliberate, `aria-hidden`, house convention.

@@ -12,14 +12,23 @@
  * test this file directly with no DOM.
  *
  * Depends on components/option_config.js for the structure vocabulary — one
- * source of truth for structure ids and labels.
+ * source of truth for structure ids and labels — and on components/labels.js
+ * to turn a structure id into that vocabulary's label.
  */
 const OptionView = (function () {
   "use strict";
 
-  const Config = (typeof OptionConfig !== "undefined") ? OptionConfig
-    : (typeof window !== "undefined" && window.OptionConfig) || null;
-  if (!Config) throw new Error("option_view.js requires option_config.js");
+  // option_config.js must load first: Labels.structure resolves a structure id
+  // against its STRUCTURES vocabulary, and without it every id would degrade to
+  // a guess. labels.js carries the resolver itself, so this file has no second
+  // copy of the vocabulary or the casing rules.
+  if (typeof OptionConfig === "undefined"
+      && !(typeof window !== "undefined" && window.OptionConfig)) {
+    throw new Error("option_view.js requires option_config.js");
+  }
+  const House = (typeof Labels !== "undefined") ? Labels
+    : (typeof window !== "undefined" && window.Labels) || null;
+  if (!House) throw new Error("option_view.js requires components/labels.js");
 
   // Plain-language exit reasons (mirrors options/exit_policy.py + expiry.py).
   const EXIT_LABELS = {
@@ -87,9 +96,7 @@ const OptionView = (function () {
   }
 
   function structureLabel(type) {
-    const found = Config.STRUCTURES.find((s) => s.id === type);
-    if (found) return found.label.split(" (")[0];
-    return String(type || "structure").replace(/_/g, " ");
+    return House.structureShort(type || "structure");
   }
 
   /** The option-type side of a structure: "CE", "PE" or "CE/PE" for mixed. */

@@ -675,3 +675,90 @@ def test_forward_engine_fills_at_next_open_not_signal_bar():
         # exit anchored at bar t5's OPEN (95), NOT bar t4's close (90)
         assert sells[0].average_fill_price == Decimal("95")
         assert sells[0].average_fill_price != Decimal("90")
+
+
+class SessionClockSource:
+    """The last twelve minutes, stamped the way ``get_candles`` now returns them.
+
+    Finding BT-01 moved the loader onto the exchange wall clock: a stored bar
+    frame arrives **naive, in IST**. ``MockDataSource`` above stamps aware UTC
+    bars, which is why twelve years of replay tests never met the validator's
+    door — and the validator documents a naive stamp as UTC, which is right for
+    the live hand-offs it was written against and wrong for a bar frame.
+    """
+
+    def __init__(self, bars: int = 12):
+        from datetime import timedelta
+
+        from backtest.timekeeping import now_exchange
+
+        last = (now_exchange() - timedelta(minutes=1)).replace(second=0, microsecond=0)
+        index = pd.date_range(end=last.replace(tzinfo=None), periods=bars, freq="min")
+        close = 100.0 + np.arange(bars, dtype=float)
+        self._df = pd.DataFrame(
+            {
+                "open": close,
+                "high": close + 0.5,
+                "low": close - 0.5,
+                "close": close,
+                "volume": 1_000_000,
+            },
+            index=index,
+        )
+
+    def get_candles(self, symbol, start, end, interval="day"):
+        return self._df.copy()
+
+
+def test_a_replay_of_the_current_session_is_not_emptied_by_the_clock():
+    """A naive IST bar relabelled UTC is 5h30m in the future → dropped, silently.
+
+    That is the regression BT-01 would have caused on its own: ``validate()``
+    fails, the loop ``continue``s, and a replay of today processes zero bars
+    while reporting success. The replay path therefore reads every bar through
+    the declared door and hands the validator an aware instant — the same shape
+    it received from the loader before the fix.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bars = 12
+        engine = ForwardTestingEngine(
+            config_dict={
+                "portfolio": {"name": "ReplayClock"},
+                "strategy": {"name": "dummy_test"},
+                "data": {
+                    "symbols": ["INFY"],
+                    "provider": "mock",
+                    "start_date": "2026-11-03",
+                    "end_date": "2026-11-04",
+                    "timeframe": "1min",
+                },
+                "system": {
+                    "state_file": str(Path(tmpdir) / "state.json"),
+                    "loop_interval_seconds": 0,
+                    "backtest_mode": True,
+                    "save_state_interval_minutes": 0,
+                },
+            },
+            portfolio=Portfolio(name="ReplayClock", initial_capital=100000),
+            strategy=DummyStrategy(threshold=100),
+            data_source=SessionClockSource(bars=bars),
+        )
+        engine.initialize_system()
+        engine.adapter.min_bars = 1
+        assert type(engine.validator).__name__ == "DataValidator", (
+            "this test is only meaningful against the validator that owns the "
+            "future-timestamp check; a mock validator passes everything and proves nothing"
+        )
+        # Prices rise one rupee a bar by construction; the gap/spike guards are
+        # about the series, not the clock, and this test pins the clock.
+        engine.validator.config.gap_detection_enabled = False
+        engine.validator.config.spike_detection_enabled = False
+
+        engine._running = True
+        engine._run_backtest_mode()
+
+        assert engine._loop_count == bars, (
+            f"replay dropped {bars - engine._loop_count}/{bars} bars as "
+            "future-dated — the bar clock was not read through the declared door"
+        )
+        assert engine._processed_bars["INFY"] == bars

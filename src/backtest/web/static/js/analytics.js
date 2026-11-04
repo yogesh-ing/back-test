@@ -30,7 +30,10 @@
             banner.style.cssText = 'margin: 10px 0; padding: 10px 14px; border-radius: 6px; ' +
                 'background: rgba(224,147,143,0.12); color: var(--danger); border: 1px solid rgba(224,147,143,0.4); ' +
                 'display: flex; justify-content: space-between; align-items: center; gap: 12px;';
-            const host = document.querySelector('.page-content') || document.body;
+            // `.page-content` never existed in this app, so the banner fell back
+            // to <body> and its first 224px hid under the fixed sidebar — the
+            // start of the sentence was exactly the part nobody could read.
+            const host = document.getElementById('main-content') || document.body;
             host.insertBefore(banner, host.firstChild);
         }
         banner.innerHTML = '<span>⚠️ ' + esc(message) + '</span>' +
@@ -43,6 +46,87 @@
     function clearError() {
         const banner = document.getElementById('analyticsErrorBanner');
         if (banner) banner.style.display = 'none';
+    }
+
+    // A read can be fetching, failed, or arrived. The pane used to print
+    // "0 Active Strategies", "0 trades" and an em-dash before the fetch
+    // resolved, so a slow overview was indistinguishable from a dead one and
+    // both looked like measurements of a flat portfolio. Every placeholder
+    // below states which of the three it is.
+    const OVERVIEW_VALUES = ['overviewTotalReturn', 'overviewSharpe', 'overviewWinRate', 'overviewMaxDd'];
+    const OVERVIEW_NOTES = ['overviewTotalPnl', 'overviewSharpeRating', 'overviewTradeCount', 'overviewMaxDdAmt'];
+    const DASH = '—';
+
+    function markPending(node, text) {
+        if (!node) return;
+        node.dataset.state = 'fetching';
+        if (text != null) node.textContent = text;
+    }
+
+    function markUnavailable(node, text) {
+        if (!node) return;
+        node.dataset.state = 'unavailable';
+        if (text != null) node.textContent = text;
+    }
+
+    function markOverviewPending() {
+        markPending(document.getElementById('activeRunnersPill'), 'Fetching…');
+        OVERVIEW_VALUES.forEach((id) => markPending(document.getElementById(id), DASH));
+        OVERVIEW_NOTES.forEach((id) => markPending(document.getElementById(id), 'fetching…'));
+
+        const tbody = document.getElementById('strategyTableBody');
+        if (tbody) {
+            tbody.innerHTML = '<tr><td colspan="9" class="muted state-note" data-state="fetching" '
+                + 'style="padding: 16px;">Fetching strategy performance…</td></tr>';
+        }
+        const empty = document.getElementById('noStrategiesEmpty');
+        if (empty) empty.style.display = 'none';
+
+        const alerts = document.getElementById('overviewAlertsList');
+        if (alerts) {
+            alerts.innerHTML = '<div class="muted small state-note" data-state="fetching">Fetching alerts…</div>';
+        }
+        showEquityPlaceholder('fetching', 'Fetching the equity curve…',
+            'Portfolio equity is drawn from the strategies below; it appears here as soon as the read finishes.');
+    }
+
+    function markOverviewUnavailable(detail) {
+        markUnavailable(document.getElementById('activeRunnersPill'), 'Unavailable');
+        OVERVIEW_VALUES.forEach((id) => markUnavailable(document.getElementById(id), DASH));
+        OVERVIEW_NOTES.forEach((id) => markUnavailable(document.getElementById(id), 'unavailable'));
+
+        const tbody = document.getElementById('strategyTableBody');
+        if (tbody) {
+            tbody.innerHTML = `<tr><td colspan="9" class="state-note" data-state="unavailable" `
+                + `style="padding: 16px;">Could not read the strategy table${detail ? ` — ${esc(detail)}` : ''}.</td></tr>`;
+        }
+        const empty = document.getElementById('noStrategiesEmpty');
+        if (empty) empty.style.display = 'none';
+
+        const alerts = document.getElementById('overviewAlertsList');
+        if (alerts) {
+            alerts.innerHTML = '<div class="small state-note" data-state="unavailable">Alerts unavailable — the overview read failed.</div>';
+        }
+        showEquityPlaceholder('unavailable', 'Equity curve unavailable',
+            'The overview read failed, so there is nothing to plot. This is not a flat portfolio — retry once the server answers.');
+    }
+
+    /** The 220px chart box: either a real chart, or this placeholder saying why not. */
+    function showEquityPlaceholder(state, title, body) {
+        const canvas = document.getElementById('portfolioEquityChart');
+        const box = document.getElementById('portfolioEquityEmpty');
+        if (portfolioEquityChart) {
+            portfolioEquityChart.destroy();
+            portfolioEquityChart = null;
+        }
+        if (canvas) canvas.hidden = true;
+        if (!box) return;
+        box.dataset.state = state;
+        box.hidden = false;
+        const titleEl = document.getElementById('portfolioEquityEmptyTitle');
+        const bodyEl = document.getElementById('portfolioEquityEmptyBody');
+        if (titleEl) titleEl.textContent = title;
+        if (bodyEl) bodyEl.textContent = body;
     }
 
     // State
@@ -181,6 +265,7 @@
     // -------------------------------------------------------------------------
 
     async function loadOverview() {
+        markOverviewPending();
         try {
             const modeParam = currentMode !== 'all' ? `&mode=${encodeURIComponent(currentMode)}` : '';
             const res = await fetch(`/api/analytics/overview?period=${currentPeriod}${modeParam}`);
@@ -188,6 +273,7 @@
 
             if (!data.success) {
                 console.error('Failed to load analytics overview:', data.error);
+                markOverviewUnavailable(data.error);
                 showError(`Analytics overview failed: ${data.error || 'unknown error'}`);
                 return;
             }
@@ -200,6 +286,7 @@
             renderOverviewAlerts(data.alerts);
         } catch (err) {
             console.error('Error fetching analytics overview:', err);
+            markOverviewUnavailable(err && err.message);
             showError('Could not reach the analytics API — is the server up?');
         }
     }
@@ -207,41 +294,65 @@
     function renderOverviewMetrics(pm, activeCount, totalCount) {
         const activePill = document.getElementById('activeRunnersPill');
         if (activePill) {
-            activePill.textContent = `${activeCount} / ${totalCount} Active Strategies`;
+            const deployed = Number(totalCount) > 0;
+            activePill.dataset.state = deployed ? 'ready' : 'empty';
+            activePill.textContent = deployed
+                ? `${activeCount} / ${totalCount} Active Strategies`
+                : 'No strategies deployed';
         }
 
-        const totalRetEl = document.getElementById('overviewTotalReturn');
-        const totalPnlEl = document.getElementById('overviewTotalPnl');
-        if (totalRetEl && pm) {
+        const arrived = (id, text) => {
+            const node = document.getElementById(id);
+            if (!node) return null;
+            node.dataset.state = 'ready';
+            if (text != null) node.textContent = text;
+            return node;
+        };
+
+        if (!pm) {
+            OVERVIEW_VALUES.forEach((id) => arrived(id, DASH));
+            OVERVIEW_NOTES.forEach((id) => {
+                const node = document.getElementById(id);
+                if (!node) return;
+                node.dataset.state = 'empty';
+                node.textContent = 'no trades in this period';
+            });
+            return;
+        }
+
+        const totalRetEl = arrived('overviewTotalReturn');
+        const totalPnlEl = arrived('overviewTotalPnl', Money.format(pm.total_pnl, 0));
+        if (totalRetEl) {
             const retSign = pm.total_return_pct >= 0 ? '+' : '';
             totalRetEl.textContent = `${retSign}${pm.total_return_pct}%`;
             totalRetEl.style.color = pm.total_return_pct >= 0 ? 'var(--success)' : 'var(--danger)';
-            totalPnlEl.textContent = `₹${pm.total_pnl.toLocaleString()}`;
         }
 
-        const sharpeEl = document.getElementById('overviewSharpe');
-        const sharpeRatingEl = document.getElementById('overviewSharpeRating');
-        if (sharpeEl && pm) {
+        const sharpeEl = arrived('overviewSharpe');
+        const sharpeRatingEl = arrived('overviewSharpeRating');
+        if (sharpeEl) {
             sharpeEl.textContent = pm.sharpe_ratio.toFixed(2);
             let rating = '🔴 Poor';
             if (pm.sharpe_ratio >= 1.5) rating = '🟢 Excellent';
             else if (pm.sharpe_ratio >= 1.0) rating = '🟡 Good';
-            sharpeRatingEl.textContent = rating;
+            if (sharpeRatingEl) sharpeRatingEl.textContent = rating;
         }
 
-        const winRateEl = document.getElementById('overviewWinRate');
-        const tradeCountEl = document.getElementById('overviewTradeCount');
-        if (winRateEl && pm) {
+        const winRateEl = arrived('overviewWinRate');
+        const tradeCountEl = arrived('overviewTradeCount');
+        if (winRateEl) {
             winRateEl.textContent = `${pm.win_rate}%`;
-            tradeCountEl.textContent = `${pm.total_trades} trades (${pm.winning_trades}W / ${pm.losing_trades}L)`;
+            if (tradeCountEl) {
+                tradeCountEl.textContent = `${Money.count(pm.total_trades)} trades `
+                    + `(${Money.count(pm.winning_trades)}W / ${Money.count(pm.losing_trades)}L)`;
+            }
         }
 
-        const maxDdEl = document.getElementById('overviewMaxDd');
-        const maxDdAmtEl = document.getElementById('overviewMaxDdAmt');
-        if (maxDdEl && pm) {
+        const maxDdEl = arrived('overviewMaxDd');
+        arrived('overviewMaxDdAmt', Money.format(pm.max_drawdown_amount, 0));
+        if (maxDdEl) {
             maxDdEl.textContent = `-${pm.max_drawdown_pct}%`;
             maxDdEl.style.color = pm.max_drawdown_pct > 15 ? 'var(--danger)' : 'var(--text)';
-            maxDdAmtEl.textContent = `₹${pm.max_drawdown_amount.toLocaleString()}`;
         }
     }
 
@@ -249,9 +360,19 @@
         const canvas = document.getElementById('portfolioEquityChart');
         if (!canvas) return;
 
+        const points = (curve || []).filter((p) => p && Number.isFinite(Number(p.equity)));
+        if (!points.length) {
+            showEquityPlaceholder('empty', 'No equity points in this period',
+                'Nothing closed in the selected window, so there is no curve to draw. Widen the period, or deploy a strategy in Portfolio.');
+            return;
+        }
+
         if (portfolioEquityChart) {
             portfolioEquityChart.destroy();
         }
+        const box = document.getElementById('portfolioEquityEmpty');
+        if (box) box.hidden = true;
+        canvas.hidden = false;
 
         const labels = (curve || []).map(p => p.date);
         const dataEquity = (curve || []).map(p => p.equity);
@@ -296,7 +417,7 @@
                         position: 'left',
                         title: { display: true, text: 'Equity (₹)' },
                         ticks: {
-                            callback: val => '₹' + Number(val).toLocaleString()
+                            callback: val => Money.format(val, 0)
                         }
                     },
                     y1: {
@@ -368,14 +489,14 @@
             tr.innerHTML = `
                 <td>
                     <strong>${esc(card.name)}</strong>${paused ? ' <span class="badge muted" style="font-size:0.65rem; padding:1px 6px; border-radius:8px;">PAUSED</span>' : ''}
-                    <div class="small muted">${esc(card.strategy_name)} · ${esc(card.mode.toUpperCase())} · ${esc(card.symbols.join(', '))}</div>
+                    <div class="small muted" title="${esc(card.strategy_name)}">${esc(Labels.strategy(card.strategy_name))} · ${esc(card.mode.toUpperCase())} · ${esc(card.symbols.join(', '))}</div>
                 </td>
                 <td class="num" style="color: ${retColor}; font-weight:600;">${retSign}${m.total_return_pct}%</td>
                 <td class="num">${m.sharpe_ratio.toFixed(2)}</td>
                 <td class="num" style="color: ${ddColor}; font-weight:600;">-${m.max_drawdown_pct}%</td>
                 <td class="num">${m.win_rate}%</td>
-                <td class="num">${m.total_trades}</td>
-                <td class="num" style="color: ${m.total_pnl >= 0 ? 'var(--success)' : 'var(--danger)'};">${m.total_pnl >= 0 ? '+' : '-'}₹${Math.abs(Math.round(m.total_pnl)).toLocaleString('en-IN')}</td>
+                <td class="num">${Money.count(m.total_trades)}</td>
+                <td class="num" style="color: ${m.total_pnl >= 0 ? 'var(--success)' : 'var(--danger)'};">${Money.signed(m.total_pnl, 0)}</td>
                 <td><span style="color: ${healthColor};">${esc(health.badge)}</span></td>
                 <td style="width: 110px;"><canvas class="strategy-trend-canvas" height="34" style="width: 100%;"></canvas></td>
             `;
@@ -432,7 +553,7 @@
             item.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: var(--surface-2); border-radius: 6px;';
             item.innerHTML = `
                 <div>
-                    <span>${icon}</span> <strong>${esc(a.strategy)}</strong>: ${esc(a.message)}
+                    <span>${icon}</span> <strong title="${esc(a.strategy)}">${esc(Labels.strategy(a.strategy))}</strong>: ${esc(a.message)}
                 </div>
                 <button class="btn btn-ghost btn-small" style="font-size: 0.75rem;" type="button">Drill Down</button>
             `;
@@ -488,7 +609,7 @@
             titleEl.textContent = data.name;
         }
         if (subEl) {
-            subEl.textContent = `Mode: ${data.mode.toUpperCase()} · Timeframe: ${data.timeframe || '1H'} · Symbols: ${data.symbols.join(', ')} · Capital: ₹${data.allocated_capital.toLocaleString()}`;
+            subEl.textContent = `Mode: ${data.mode.toUpperCase()} · Timeframe: ${data.timeframe || '1H'} · Symbols: ${data.symbols.join(', ')} · Capital: ${Money.format(data.allocated_capital, 0)}`;
         }
         if (backtestLink) {
             backtestLink.href = `/compare?strategy=${encodeURIComponent(data.strategy_name)}`;
@@ -531,7 +652,7 @@
         }
 
         body.innerHTML = `
-            <p style="margin: 0 0 6px;"><em class="muted">No description yet for <strong>${esc(data.strategy_name)}</strong> — pending the description backfill.</em></p>
+            <p style="margin: 0 0 6px;"><em class="muted">No description yet for <strong title="${esc(data.strategy_name)}">${esc(Labels.strategy(data.strategy_name))}</strong> — pending the description backfill.</em></p>
             <p class="muted" style="margin: 0;">A complete entry will explain: <strong>how the strategy works</strong> (entry logic and signal),
             <strong>how it takes profit</strong> (targets and exit policy), <strong>how it stops losses</strong> (stop placement, trailing behaviour),
             and <strong>where it fits</strong> (favourable and unfavourable market regimes).</p>
@@ -546,7 +667,7 @@
             const retSign = m.total_return_pct >= 0 ? '+' : '';
             retEl.textContent = `${retSign}${m.total_return_pct}%`;
             retEl.style.color = m.total_return_pct >= 0 ? 'var(--success)' : 'var(--danger)';
-            pnlEl.textContent = `₹${m.total_pnl.toLocaleString()}`;
+            pnlEl.textContent = Money.format(m.total_pnl, 0);
         }
 
         const sharpeEl = document.getElementById('detailSharpe');
@@ -587,7 +708,7 @@
         const maxDdAmtEl = document.getElementById('detailMaxDdAmt');
         if (maxDdEl && m) {
             maxDdEl.textContent = `-${m.max_drawdown_pct}%`;
-            maxDdAmtEl.textContent = `₹${m.max_drawdown_amount.toLocaleString()}`;
+            maxDdAmtEl.textContent = Money.format(m.max_drawdown_amount, 0);
         }
 
         const streakEl = document.getElementById('detailStreak');
@@ -649,7 +770,7 @@
                     y: {
                         position: 'left',
                         title: { display: true, text: 'Equity (₹)' },
-                        ticks: { callback: val => '₹' + Number(val).toLocaleString() }
+                        ticks: { callback: val => Money.format(val, 0) }
                     },
                     y1: {
                         position: 'right',
@@ -743,7 +864,7 @@
                 <td><strong>${esc(m.month)}</strong></td>
                 <td class="text-right">${m.trades}</td>
                 <td class="text-right">${m.win_rate}%</td>
-                <td class="text-right" style="color: ${pnlColor}; font-weight: 600;">${pnlSign}₹${m.pnl.toLocaleString()}</td>
+                <td class="text-right" style="color: ${pnlColor}; font-weight: 600;">${Money.signed(m.pnl, 0)}</td>
                 <td class="text-right" style="color: ${pnlColor};">${pnlSign}${m.return_pct}%</td>
                 <td class="text-right">-${m.max_drawdown_pct}%</td>
                 <td class="text-right">${m.sharpe_ratio == null ? '—' : m.sharpe_ratio.toFixed(2)}</td>
@@ -836,9 +957,9 @@
                 <td><strong>${esc(t.symbol || '—')}</strong>${clsBadge}</td>
                 <td><span class="small">${esc(t.side || 'LONG')}</span></td>
                 <td class="text-right">${esc(qtyLabel)}</td>
-                <td class="text-right">₹${Number(t.entry_price || 0).toLocaleString()}</td>
-                <td class="text-right">₹${Number(t.exit_price || 0).toLocaleString()}</td>
-                <td class="text-right" style="color: ${pnlColor}; font-weight: 600;">${pnlSign}₹${pnl.toLocaleString()}</td>
+                <td class="text-right">${Money.format(t.entry_price, 2)}</td>
+                <td class="text-right">${Money.format(t.exit_price, 2)}</td>
+                <td class="text-right" style="color: ${pnlColor}; font-weight: 600;">${Money.signed(pnl, 2)}</td>
                 <td>${badge}</td>
             `;
             tbody.appendChild(tr);

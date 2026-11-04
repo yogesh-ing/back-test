@@ -37,10 +37,10 @@
 
   <!-- Tabs for sub-sections -->
   <div class="tabs" style="margin-top:20px;">
-    <button class="tab active" data-tab="config" type="button">⚙️ Risk Configuration</button>
-    <button class="tab" data-tab="audit" type="button">📜 Audit Timeline</button>
-    <button class="tab" data-tab="exposure" type="button">📊 Exposure Analysis</button>
-    <button class="tab" data-tab="trades" type="button">📈 Trade History & Analytics</button>
+    <button class="tab active" data-tab="config" type="button">{{ icon('settings', 13) }} Risk Configuration</button>
+    <button class="tab" data-tab="audit" type="button">{{ icon('paper', 13) }} Audit Timeline</button>
+    <button class="tab" data-tab="exposure" type="button">{{ icon('chart', 13) }} Exposure Analysis</button>
+    <button class="tab" data-tab="trades" type="button">{{ icon('activity', 13) }} Trade History & Analytics</button>
   </div>
 
   <!-- Config Tab -->
@@ -52,7 +52,7 @@
           <button class="btn btn-ghost btn-small" data-preset="conservative" type="button">Conservative</button>
           <button class="btn btn-ghost btn-small" data-preset="balanced" type="button">Balanced</button>
           <button class="btn btn-ghost btn-small" data-preset="aggressive" type="button">Aggressive</button>
-          <button class="btn btn-ghost btn-small" id="btn-live-mode" type="button">🔴 Live Mode</button>
+          <button class="btn btn-ghost btn-small" id="btn-live-mode" type="button" title="Apply the live preset — this arms real orders">{{ icon('alert', 13) }} Live Mode</button>
         </div>
       </div>
 
@@ -61,7 +61,7 @@
           <h4 style="margin-bottom:8px;">Global Limits (Supervisor)</h4>
           <div id="risk-global-config-form"></div>
           <div style="margin-top:12px;">
-            <button id="btn-save-global" class="btn btn-primary btn-small" type="button">💾 Save Global Config</button>
+            <button id="btn-save-global" class="btn btn-primary btn-small" type="button">{{ icon('save', 14) }} Save Global Config</button>
             <span id="risk-save-msg" class="muted" style="margin-left:8px;"></span>
           </div>
         </div>
@@ -69,7 +69,7 @@
           <h4 style="margin-bottom:8px;">Per-Bucket Overrides</h4>
           <div id="risk-bucket-config-form"></div>
           <div style="margin-top:12px;">
-            <button id="btn-save-buckets" class="btn btn-primary btn-small" type="button">💾 Save Bucket Overrides</button>
+            <button id="btn-save-buckets" class="btn btn-primary btn-small" type="button">{{ icon('save', 14) }} Save Bucket Overrides</button>
           </div>
         </div>
       </div>
@@ -108,7 +108,10 @@
       <div class="table-scroll" style="max-height:500px; overflow-y:auto;">
         <table class="audit-table">
           <thead><tr><th>Time</th><th>Scope</th><th>Action</th><th>Details</th><th>Runner</th></tr></thead>
-          <tbody id="audit-tbody"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
+          {# data-raw-key: a transcript of the stored audit records — the Details #}
+          {# column prints the value that was written, so the label resolver must #}
+          {# not rewrite it (finding F11). #}
+          <tbody id="audit-tbody" data-raw-key><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
         </table>
       </div>
       <div class="pagination" id="audit-pagination" style="margin-top:12px;"></div>

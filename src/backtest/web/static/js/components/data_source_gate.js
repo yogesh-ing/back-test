@@ -37,9 +37,12 @@
         if (!status) { el.innerHTML = ""; return null; }
 
         if (status.allowed) {
+            // The claim is about the SOURCE CLASS, never about the run: a
+            // certification-grade source still only answers for the symbols and
+            // dates the cache actually holds, so the badge says which (F12).
             const cert = status.certifiable
-                ? '<span class="pos">certification-grade</span>'
-                : '<span class="muted">not certification-grade</span>';
+                ? '<span class="pos" title="Source class is allowed for certification. It does not certify which symbols or dates this run loaded.">certification-grade source</span>'
+                : '<span class="muted" title="This source class cannot support a certification run.">not certification-grade</span>';
             // A fallback is stated in one quiet line under the badge —
             // provenance the operator can see, without alarm styling.
             const fallback = status.fell_back

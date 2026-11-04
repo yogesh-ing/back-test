@@ -52,28 +52,28 @@ class StrangleWingPoints(StructureStrategy):
     description_sections = {
         "overview": (
             "Sells an out-of-the-money call and put the same number of index points away from"
-            "ATM on the nearest expiry. Built to test premium-selling plumbing at a wing the"
+            "ATM on the nearest expiry. Built to test premium-selling plumbing at a wing the "
             "operator can state in points."
         ),
         "regime": (
-            "Wants a quiet market. Realised moves larger than the wing run through a short leg"
+            "Wants a quiet market. Realised moves larger than the wing run through a short leg "
             "and losses accelerate; the declared stop is the only thing limiting the book."
         ),
         "entry": (
-            "Unconditional: the opening intent fires on the first bar after deploy with no"
+            "Unconditional: the opening intent fires on the first bar after deploy with no "
             "signal or confirmation."
         ),
         "construction": (
-            "Two legs, one lot each: sold call above spot, sold put below spot, both"
-            "wing_points from ATM, same nearest expiry. NIFTY strikes step 50 points, so 300 is"
+            "Two legs, one lot each: sold call above spot, sold put below spot, both "
+            "wing_points from ATM, same nearest expiry. NIFTY strikes step 50 points, so 300 is "
             "exactly six strikes either side."
         ),
         "exits_risk": (
-            "Declared bracket: 2000 points adverse stops the book, 1000 points favourable takes"
+            "Declared bracket: 2000 points adverse stops the book, 1000 points favourable takes "
             "it. Both sit outside the round-trip fee floor so a target is a real net win."
-            "A gap straight through the stop is worse than the stop, and the structure is"
+            "A gap straight through the stop is worse than the stop, and the structure is "
             "paper-entitled only."
-            "Carry is positional: the book is NOT squared off at 15:10 and rides overnight to"
+            "Carry is positional: the book is NOT squared off at 15:10 and rides overnight to "
             "the expiry it sold, where the expiry rules settle it."
         ),
         "parameters": (

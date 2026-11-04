@@ -266,12 +266,14 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; fon
 
 /* Backtest: configuration at left, a purposeful results workspace at right. */
 .backtest-grid { grid-template-columns: 308px minmax(0, 1fr); gap: 22px; }
-.backtest-config { position: sticky; top: 126px; padding: 20px; max-height: calc(100dvh - 280px); min-height: 490px; overflow-y: auto; scrollbar-width: thin; }
+.backtest-config { position: sticky; top: 126px; padding: 20px; min-height: 490px; }
 .backtest-config .section-eyebrow { margin-bottom: 13px; }
 .backtest-config .card-title { margin-bottom: 16px; }
 .backtest-config .form-row { margin-bottom: 14px; }
 .backtest-config #dataSourceGate { margin-bottom: 20px; }
-.config-actions { position: sticky; bottom: -20px; background: var(--surface); border-top: 1px solid var(--border-soft); padding: 16px 20px; margin: 0 -20px -20px; z-index: 2; }
+/* The rail no longer scrolls internally, so the actions bar sits at the end of
+   the form instead of floating over a half-visible one (F5). */
+.config-actions { background: var(--surface); border-top: 1px solid var(--border-soft); padding: 16px 20px; margin: 0 -20px -20px; }
 .config-actions .btn { min-height: 40px; font-size: 11px; }
 .config-actions p { text-align: center; color: var(--faint); font-size: 9px; margin-top: 8px; }
 .backtest-empty { min-width: 0; }
@@ -293,6 +295,23 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; fon
 .empty-canvas-center h3 { font-size: 18px; letter-spacing: -.035em; margin-bottom: 10px; }
 .empty-canvas-center p { color: var(--muted); font-size: 11px; line-height: 1.9; max-width: 310px; }
 .empty-canvas-center .empty-instruction { display: flex; align-items: center; gap: 7px; color: var(--primary); margin-top: 20px; font-size: 10px; }
+/* The equity-curve empty state on /analytics sits inside a 220px chart section,
+   not the 327px research canvas the backtest page reserves for it. */
+.chart-section .empty-chart { height: 220px; margin: 0; }
+.chart-section .empty-chart .empty-canvas-center { padding: 12px; }
+.chart-section .empty-chart .empty-icon { width: 38px; height: 38px; margin-bottom: 10px; }
+.chart-section .empty-chart .empty-canvas-center h3 { font-size: 14px; margin-bottom: 6px; }
+.chart-section .empty-chart .empty-canvas-center p { line-height: 1.7; }
+.chart-section .empty-chart .empty-canvas-center .empty-instruction { margin-top: 12px; }
+/* A value that has not arrived must not read as a measurement: these carry the
+   in-flight / failed / genuinely-empty status of the numbers beside them. */
+.state-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 0.8rem; background: var(--surface-2); }
+.state-chip[data-state="fetching"] { background: var(--info-tint); border: 1px solid var(--info-shade); color: var(--info); }
+.state-chip[data-state="fetching"]::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--info); animation: market-dot-pulse 1.5s ease-in-out infinite; }
+.state-chip[data-state="unavailable"] { background: rgba(239, 68, 68, .12); border: 1px solid rgba(239, 68, 68, .35); color: var(--danger); }
+.state-chip[data-state="empty"] { background: rgba(107, 114, 128, .15); border: 1px solid rgba(107, 114, 128, .35); color: var(--muted); }
+.state-note[data-state="fetching"] { color: var(--info); }
+.state-note[data-state="unavailable"] { color: var(--danger); }
 .research-canvas-foot { display: flex; align-items: center; gap: 7px; padding: 0 24px 20px; font-size: 9px; color: var(--muted); }
 .research-canvas-foot .ui-icon { color: var(--faint); }
 .research-guide { padding: 22px 24px; margin-top: 20px; }
@@ -312,6 +331,9 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; fon
    performance metrics, populated when a strategy is selected. */
 .backtest-grid > .strategy-card { grid-column: 2; align-self: start; }
 .backtest-grid > .results-panel { grid-column: 2; }
+/* The empty state is results-column content too — left to auto-place it landed in
+   the 308px rail, wrapping one word per line (F4). */
+.backtest-grid > .backtest-empty { grid-column: 2; }
 .strategy-card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .strategy-card-head h3 { font-size: 13px; margin: 0; }
 .strategy-card-overview { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 8px 0 0; }
@@ -329,7 +351,10 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; fon
 .diagnostics-heading p { color: var(--muted); font-size: 10px; }
 #tradeTable-wrap { overflow-x: auto; }
 #tradeTable th:nth-child(n+4):nth-child(-n+6), #tradeTable td:nth-child(n+4):nth-child(-n+6) { text-align: right; font-family: var(--font-mono); }
-#tradeTable { min-width: 570px; }
+/* No min-width floor: 570px was below the viewport at 1440 but a hard content
+   minimum at 390, so the table forced a sideways page instead of taking the
+   scroll its wrapper already provides (BT-04). */
+#tradeTable { width: 100%; }
 
 /* Re-openable runs retain the actual cached result, not demonstration data. */
 .recent-runs { margin-bottom: 22px; }
@@ -441,7 +466,6 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; fon
 .bucket-card.bucket-card-risk-danger { border-color: var(--danger-shade); }
 .bucket-card.bucket-card-risk-warning { border-color: var(--warning-shade); }
 .aw-pill { font-family: var(--font-sans); font-size: 10px; padding: 7px 11px; min-height: 30px; border-radius: 7px; box-shadow: var(--shadow); gap: 6px; }
-.aw-pill-clear { opacity: 1; }
 .aw-pill .ui-icon { width: 13px; height: 13px; }
 .aw-count { font-family: var(--font-mono); font-size: 11px; }
 .aw-panel { border-radius: 12px; font-size: 11px; box-shadow: var(--shadow-modal); }
@@ -468,6 +492,9 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; fon
 .reporting-check { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10px; min-height: 39px; }
 .reporting-exports { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
 .reporting-exports > label { margin-left: auto; }
+/* Report blocks are server-built tables; on a narrow screen they scroll inside
+   their own block rather than widening the document. */
+.reporting-page > div[id^="rp-"] { max-width: 100%; overflow-x: auto; }
 .settings-page [data-grid] { grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)) !important; margin-top: 16px; }
 .settings-card { background: var(--surface); }
 .settings-empty { grid-column: 1 / -1; font-size: 11px; padding: 24px; }
@@ -589,8 +616,9 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; fon
     .page-header { align-items: flex-start; gap: 16px; flex-direction: column; margin-bottom: 24px; }
     .page-header-actions { flex-shrink: 1; }
     .page-grid, .backtest-grid { grid-template-columns: minmax(0, 1fr); gap: 20px; }
-    .backtest-config { position: static; max-height: none; min-height: 0; overflow: visible; }
-    .config-actions { position: static; }
+    /* One column: the results-column placements must not spawn an implicit second. */
+    .backtest-grid > * { grid-column: auto; }
+    .backtest-config { position: static; min-height: 0; }
     .backtest-config .form-section { margin-top: 16px; padding-top: 16px; }
     .research-step { flex-direction: row; }
     .strategy-editor-grid, .analytics-detail-grid { grid-template-columns: minmax(0, 1fr); }
@@ -604,23 +632,56 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; fon
     .slots-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .reporting-exports > label { margin-left: 0; width: 100%; }
 }
+@media (max-width: 1100px) {
+    /* F13/S8: the same overflow S3 fixed at <=560px went on until ~1100px. The
+       right cluster's min-content width (~600px) exceeded the bar, so the entire
+       document scrolled sideways. Words give before the page does — the Broker
+       Board the button opens still carries the names, and the status chip's
+       title still carries the reason. */
+    .topbar-controls { flex-wrap: wrap; justify-content: flex-end; gap: 8px; min-width: 0; }
+    .command-open { display: none; }
+    .broker-strip { gap: 6px; }
+    .broker-strip-item::after { display: none; }
+    .market-status-text, .freshness-text { display: none; }
+    .market-status-chip, .data-freshness-chip { min-width: 0; padding: 2px 6px; }
+    .broker-status { min-width: 0; }
+}
 @media (max-width: 560px) {
     :root { --topbar-height: 58px; }
     .container { padding: 22px 16px 28px; }
-    .app-topbar { padding: 0 12px; gap: 7px; }
-    .topbar-location { gap: 3px; }
-    .breadcrumbs { font-size: 10px; gap: 5px; }
+    /* The right cluster's min-content width (~600px) overflowed the viewport and
+       put the whole document in horizontal scroll. Wrap onto stacked rows instead,
+       and let the risk strip (not a 120px-tall chrome bar) be the sticky layer. */
+    .app-topbar { position: static; flex-wrap: wrap; height: auto; min-height: 0; align-content: center; padding: 8px 12px; gap: 6px; }
+    .topbar-location { gap: 3px; min-width: 0; }
+    .breadcrumbs { font-size: 10px; gap: 5px; min-width: 0; overflow: hidden; }
     .breadcrumbs > span:first-child, .breadcrumbs > .ui-icon:first-of-type { display: none; }
     .breadcrumbs > span:last-child:not(:first-child) { display: none; }
-    .topbar-controls { gap: 5px; }
+    .topbar-controls { flex: 1 1 100%; flex-wrap: nowrap; justify-content: flex-end; gap: 5px; min-width: 0; }
     .command-open { display: none; }
-    .broker-status { padding: 5px 6px; }
-    .broker-login-banner { padding: 5px 6px; font-size: 9px; }
-    .broker-strip { gap: 7px; }
-    .broker-strip-item::after { font-size: 9px; }
-    .theme-toggle { width: 29px; padding-left: 3px; }
-    .halt-pill { font-size: 8px; padding: 4px 5px; }
-    .risk-strip { padding: 7px 16px; }
+    .broker-status { padding: 3px 6px; min-height: 24px; min-width: 0; }
+    /* Dots only; the Broker Board the button opens carries the names. */
+    .broker-strip { gap: 5px; }
+    .broker-strip-item::after { display: none; }
+    /* The re-login call-to-action shares the nowrap controls row, so it has to
+       give rather than push the document into horizontal scroll; the full reason
+       stays on the button's title. */
+    .broker-login-banner { min-width: 0; min-height: 24px; padding: 3px 6px; font-size: 9px; overflow: hidden; text-overflow: ellipsis; }
+    .market-status-chip, .data-freshness-chip { min-width: 0; overflow: hidden; font-size: 9px; padding: 2px 6px; letter-spacing: 0; }
+    /* Session state outranks staleness when the row has to give. */
+    .market-status-chip { flex-shrink: 0; max-width: 160px; }
+    .halt-pill, .broker-status, .theme-toggle { flex-shrink: 0; }
+    .market-status-text, .freshness-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .theme-toggle { width: 26px; min-height: 24px; padding-left: 3px; }
+    .halt-pill { font-size: 8px; padding: 3px 5px; min-height: 24px; }
+    .risk-strip { top: 0; padding: 7px 16px; }
+    /* BT-04: the readiness panel's 300px track floor is a percentage against a
+       width the track itself decides, so it stayed 300px and widened the page.
+       Below 560px, stack each check instead of guessing at a floor. */
+    .cmp-ready-grid { grid-template-columns: minmax(0, 1fr); }
+    .cmp-ready-row { grid-template-columns: 20px minmax(0, 1fr); }
+    .cmp-ready-value { grid-column: 2 / -1; text-align: left; max-width: none; }
+    .cmp-ready-detail { grid-column: 2 / -1; overflow-wrap: anywhere; }
     .risk-strip-collapsed { flex-direction: column; align-items: stretch; gap: 7px; }
     .risk-strip-left { gap: 12px; padding-bottom: 2px; }
     .risk-strip-right { justify-content: flex-end; }

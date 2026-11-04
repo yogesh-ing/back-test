@@ -38,7 +38,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 
 from backtest.data.base import CANONICAL_TIMEFRAMES
-from backtest.data.db_source import DbSource, _INTERVAL_TO_RULE
+from backtest.data.db_source import DbSource, _INTERVAL_TO_RULE, to_exchange_wall_clock
 from backtest.db.config import get_db_url
 
 #: NSE regular session, IST.
@@ -83,7 +83,12 @@ def _load_minutes(engine, symbol: str, timeframe: str) -> pd.DataFrame:
         df = pd.read_sql(sql, conn, params={"symbol": symbol, "timeframe": timeframe})
     if df.empty:
         return df
-    df["ts"] = pd.to_datetime(df["ts"])
+    # The same rule the read path applies (backtest.data.db_source). A
+    # ``timestamptz`` column comes back as aware UTC, and pandas bins an aware
+    # index on the UTC grid, so measuring without this conversion would report
+    # buckets production no longer produces — and would call a correct store
+    # "naive UTC", because 09:15 IST and 03:45Z are the same instant.
+    df["ts"] = to_exchange_wall_clock(pd.to_datetime(df["ts"]))
     return df.set_index("ts")
 
 

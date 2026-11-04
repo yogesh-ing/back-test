@@ -28,29 +28,29 @@ class PriceMove(EquityStrategy):
     )
     description_sections = {
         'overview': (
-            'Threshold momentum gauge: long after a sufficiently large points rise over a short'
+            'Threshold momentum gauge: long after a sufficiently large points rise over a short '
             'lookback, flat after a symmetric fall.'
         ),
         'regime': (
             'Works in fast, directional intraday moves where a burst predicts continuation.'
-            'Struggles in quiet or mean-reverting tape — the threshold is either never hit (no'
+            'Struggles in quiet or mean-reverting tape — the threshold is either never hit (no '
             'trades) or hit at the top of a spike that immediately fades.'
         ),
         'entry': (
-            'Enters long when the close has risen more than the threshold (in points) over the'
+            'Enters long when the close has risen more than the threshold (in points) over the '
             'lookback window.'
         ),
         'construction': (
-            'Single-instrument equity/index position, long only by default (shorting only where'
+            'Single-instrument equity/index position, long only by default (shorting only where '
             'the instrument/run allows it).'
         ),
         'exits_risk': (
-            'Exits when the move over the lookback window falls back through the negative'
-            'threshold. No fixed stop or target; worst case is the reversal between the entry bar'
+            'Exits when the move over the lookback window falls back through the negative '
+            'threshold. No fixed stop or target; worst case is the reversal between the entry bar '
             'and the exit signal.'
         ),
         'parameters': (
-            'threshold=100.0 points, lookback=5 bars. The threshold is in absolute points — scale'
+            'threshold=100.0 points, lookback=5 bars. The threshold is in absolute points — scale '
             "it to the instrument's price level."
         ),
     }

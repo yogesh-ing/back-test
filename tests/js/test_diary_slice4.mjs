@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+// diary.js prints strategy keys through the shared resolver (finding F11)
+globalThis.Labels = require('../../src/backtest/web/static/js/components/labels.js');
 const PnLDiary = require('../../src/backtest/web/static/js/diary.js');
 
 test('buildPayoffQuadrantSvg renders hyperbolic breakeven curve and interactive entity bubbles', () => {

@@ -218,7 +218,7 @@ const OrdersTab = (function () {
       "<td>" + esc(order.runner || String(order.instance_id || "").slice(0, 8)) + "</td>" +
       // Multi-broker Phase B: WHICH venue this order went to (audit trail).
       "<td>" + esc(order.broker || (order.mode === "live" ? "live" : "paper")) +
-        (order.segment ? '<div class="cell-sub">' + esc(order.segment) + "</div>" : "") + "</td>" +
+        (order.segment ? '<div class="cell-sub" title="' + esc(order.segment) + '">' + esc(Labels.segment(order.segment)) + "</div>" : "") + "</td>" +
       '<td class="cell-name">' + esc(order.symbol) + "</td>" +
       "<td>" + esc(order.side) + "</td>" +
       '<td class="num">' + num(order.quantity, 0) + "</td>" +

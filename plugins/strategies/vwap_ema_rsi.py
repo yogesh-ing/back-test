@@ -48,12 +48,12 @@ class VwapEmaRsi(DirectionalOptionStrategy):
     )
     description_sections = {
         'overview': (
-            'Intraday trend stack: VWAP sets the bias, an EMA 9/15 cross pulls the trigger, and'
+            'Intraday trend stack: VWAP sets the bias, an EMA 9/15 cross pulls the trigger, and '
             'an RSI 45-60 band filters entries to healthy pullback momentum.'
         ),
         'regime': (
             'Works on intraday trend days where price respects VWAP as support/resistance.'
-            'Struggles in balanced, VWAP-hugging ranges — crosses fire repeatedly with no'
+            'Struggles in balanced, VWAP-hugging ranges — crosses fire repeatedly with no '
             'follow-through and premium bleed accumulates.'
         ),
         'entry': (
@@ -61,14 +61,14 @@ class VwapEmaRsi(DirectionalOptionStrategy):
             'with RSI in band → long put. Outside the band or on the wrong side of VWAP: silence.'
         ),
         'construction': (
-            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put'
+            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put '
             "on the underlying's nearest eligible expiry — a defined-risk, single-leg structure."
             'Size is 1 lot by default (override 1-5 lots where the spawn form allows).'
         ),
         'exits_risk': (
-            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit'
-            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst'
-            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long'
+            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit '
+            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst '
+            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long '
             'option can never lose more than the premium paid.'
         ),
         'parameters': (

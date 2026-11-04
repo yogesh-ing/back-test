@@ -294,7 +294,7 @@ textarea.input { line-height: 1.7; }
     border-radius: var(--radius); padding: 14px 18px; margin-bottom: 16px;
 }
 @keyframes cb-pulse { 0%,100% { box-shadow: 0 0 0 0 var(--danger-shade);} 50% { box-shadow: 0 0 0 6px rgba(190,92,88,0);} }
-.cb-icon { font-size: 1.5rem; }
+.cb-icon { display: inline-flex; color: var(--danger); }
 .cb-body { flex: 1; display: flex; flex-direction: column; gap: 2px; }
 .cb-reason { color: var(--danger-text); font-size: .88rem; }
 .warning-banner {
@@ -1285,14 +1285,18 @@ textarea.input { line-height: 1.7; }
 /* Portfolio Intelligence — alert widget (every page)                  */
 /* ------------------------------------------------------------------ */
 .alert-widget { position: fixed; right: 16px; bottom: 16px; z-index: 150; font-size: .85rem; }
+/* F7: this pill floats, so the page keeps a bottom band clear while it does —
+   the last row can always be scrolled out from under it. The class is set by
+   the widget itself and only exists while the widget is on screen, so with no
+   alerts the band, the pill and the toast lift all go away together. */
 body.has-alert-widget .toast-stack { bottom: 76px; }
+body.has-alert-widget .app-workspace { padding-bottom: 56px; }
 .aw-pill {
     display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px;
     border-radius: 999px; border: 1px solid var(--border); background: var(--surface);
     color: var(--text); cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.35);
 }
 .aw-pill:hover { border-color: var(--primary); }
-.aw-pill-clear { color: var(--muted); opacity: .85; }
 .aw-pill-critical { border-color: var(--danger); box-shadow: 0 0 0 2px var(--danger-tint), 0 4px 14px rgba(0,0,0,.35); }
 .aw-pill-warning { border-color: var(--warning); }
 .aw-pill-info { border-color: var(--primary); }
@@ -1843,7 +1847,10 @@ select.input option.sym-no-data:disabled { cursor: not-allowed; }
 .cmp-ready-fail { color: var(--danger-text); }
 .cmp-ready-part { color: var(--warning-text); }
 
-.cmp-ready-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 2px 20px; }
+/* min(300px, 100%) — a bare 300px floor is a hard minimum the track may not
+   break, so below ~340px of content box the grid grew past the viewport and put
+   the whole document into horizontal scroll (BT-04, measured 390px). */
+.cmp-ready-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 2px 20px; }
 .cmp-ready-row {
     display: grid; grid-template-columns: 20px 1fr auto;
     align-items: baseline; gap: 8px;

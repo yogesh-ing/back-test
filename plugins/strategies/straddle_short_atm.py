@@ -33,27 +33,27 @@ class ShortStraddleAtm(StructureStrategy):
     )
     description_sections = {
         "overview": (
-            "Sells both ATM legs on the same nearest expiry. It is a volatility-selling"
-            "structure with no directional view, and the first end-to-end strategy name for"
+            "Sells both ATM legs on the same nearest expiry. It is a volatility-selling "
+            "structure with no directional view, and the first end-to-end strategy name for "
             "the short-straddle class the engine already supports."
         ),
         "regime": (
-            "Wants a range-bound session. Any move big enough to put one ATM leg deep in the"
+            "Wants a range-bound session. Any move big enough to put one ATM leg deep in the "
             "money loses on that leg faster than the other leg and the net credit recover."
         ),
         "entry": (
-            "Unconditional: the opening intent fires on the first bar after deploy with no"
+            "Unconditional: the opening intent fires on the first bar after deploy with no "
             "signal, filter or confirmation."
         ),
         "construction": (
-            "Two legs, one lot each: sold ATM call and sold ATM put, same expiry. Strike comes"
+            "Two legs, one lot each: sold ATM call and sold ATM put, same expiry. Strike comes "
             "from the live chain's nearest ATM, never from a hardcoded ladder."
         ),
         "exits_risk": (
-            "Declared bracket: 2000 points adverse stops the book, 1000 points favourable takes"
-            "it — both outside the round-trip fee floor so a target is a real net win. The true"
-            "worst case is unlimited; the stop is the only limit, and this structure is"
-            "paper-entitled only. Carry is positional: the book is not flattened at 15:10 and"
+            "Declared bracket: 2000 points adverse stops the book, 1000 points favourable takes "
+            "it — both outside the round-trip fee floor so a target is a real net win. The true "
+            "worst case is unlimited; the stop is the only limit, and this structure is "
+            "paper-entitled only. Carry is positional: the book is not flattened at 15:10 and "
             "holds overnight until its expiry."
         ),
         "parameters": "underlying=NIFTY.",

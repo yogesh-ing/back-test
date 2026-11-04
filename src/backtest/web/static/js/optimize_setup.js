@@ -84,7 +84,7 @@
         } catch (e) { state.strategies = []; }
         const sel = $('optStrategy');
         sel.innerHTML = state.strategies
-            .map((s) => `<option value="${C.escapeHtml(s.name)}">${C.escapeHtml(s.name)}${s.signal_kind === 'option' ? ' · options' : ''}</option>`)
+            .map((s) => `<option value="${C.escapeHtml(s.name)}" title="${C.escapeHtml(s.name)}">${C.escapeHtml(Labels.strategy(s.name))}${s.signal_kind === 'option' ? ' · options' : ''}</option>`)
             .join('');
         const wanted = root.dataset.selectedStrategy;
         if (wanted && state.strategies.some((s) => s.name === wanted)) sel.value = wanted;
@@ -296,7 +296,7 @@
             tr.querySelector('[data-count]').textContent = p.optimize ? (n || '!') : '—';
         });
         const k = state.params.filter((p) => p.optimize).length;
-        $('optParamCount').textContent = `${k} selected · ${C.totalCombinations(state.params).toLocaleString()} combinations`;
+        $('optParamCount').textContent = `${k} selected · ${C.fmtCount(C.totalCombinations(state.params))} combinations`;
     }
 
     // -------------------------------------------------------- constraints
@@ -445,7 +445,7 @@
                 <dt>Timeframe</dt><dd>${C.escapeHtml(a.timeframe || '—')}</dd>
                 <dt>Bars</dt><dd>${a.bars_count === null || a.bars_count === undefined
                     ? '<span class="muted">— (shown after the run)</span>'
-                    : a.bars_count.toLocaleString()}</dd>
+                    : C.fmtCount(a.bars_count)}</dd>
                 <dt>Range</dt><dd>${day(a.date_from)} → ${day(a.date_to)}</dd>
                 <dt>Fetched</dt><dd>${a.data_fetch_date ? day(a.data_fetch_date)
                     : (real ? '<span class="muted">unknown</span>' : 'n/a — generated')}</dd>
@@ -525,8 +525,8 @@
     }
 
     function renderEstimate(est, errors) {
-        $('estGrid').textContent = est ? est.grid_size.toLocaleString() : '—';
-        $('estEvals').textContent = est ? est.total_evaluations.toLocaleString() : '—';
+        $('estGrid').textContent = est ? C.fmtCount(est.grid_size) : '—';
+        $('estEvals').textContent = est ? C.fmtCount(est.total_evaluations) : '—';
         $('estTime').textContent = est ? `~${C.fmtDuration(est.estimated_seconds)}` : '—';
         $('estWorkers').textContent = est ? est.workers : '—';
         $('estWarnings').innerHTML = (est ? est.warnings : [])
@@ -620,7 +620,7 @@
             box.innerHTML = res.runs.map((r) => `
                 <a class="opt-history-row" href="/optimize/runs/${r.run_id}">
                     <div class="opt-history-main">
-                        <strong>${C.escapeHtml(r.strategy_id)}</strong>
+                        <strong title="${C.escapeHtml(r.strategy_id)}">${C.escapeHtml(Labels.strategy(r.strategy_id))}</strong>
                         <span class="muted small">${C.escapeHtml(r.method)} · ${C.escapeHtml(C.OBJECTIVE_LABELS[r.objective_function] || r.objective_function)}</span>
                     </div>
                     <div class="opt-history-meta">

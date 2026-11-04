@@ -88,6 +88,7 @@ def walk_trades(
     pos = position.reindex(index).fillna(0.0)
     eq = equity.reindex(index)
     px = close.reindex(index).ffill() if close is not None else None
+    day_granular = index_is_day_granular(index)
 
     trades: list[Trade] = []
     entry_i: int | None = None  # index of the first held bar of the open trade
@@ -100,8 +101,8 @@ def walk_trades(
         trades.append(
             Trade(
                 id=len(trades) + 1,
-                entry_date=_fmt(index[entry_i]),
-                exit_date=_fmt(index[exit_i]),
+                entry_date=fmt_bar(index[entry_i], day_granular=day_granular),
+                exit_date=fmt_bar(index[exit_i], day_granular=day_granular),
                 side="LONG" if entry_side > 0 else "SHORT",
                 entry=None if px is None else round(float(px.iloc[entry_i]), 6),
                 exit=None if px is None else round(float(px.iloc[exit_i]), 6),
@@ -165,9 +166,32 @@ def trade_stats(trades: Iterable[Trade]) -> dict[str, Any]:
     }
 
 
-def _fmt(ts: Any) -> str:
-    """Compact, locale-free timestamp (date only for daily bars)."""
+#: A bar this far (or further) from its neighbour stands for a whole trading
+#: day, so a date is the whole of its label; below it, the clock face is the
+#: information the reader came for.
+DAY_GRANULAR_SPACING = pd.Timedelta(hours=20)
+
+
+def index_is_day_granular(index: Any) -> bool:
+    """Whether each bar of ``index`` stands for one trading day or more.
+
+    Spacing decides, not a midnight test: a stored ``1day``/``1week`` bar is
+    anchored to the 09:15 IST session open (``data/base.py:bar_timestamp``), so
+    a daily run used to print ``2026-09-01 03:45`` and now prints
+    ``2026-09-01 09:15`` — a clock face that describes where the bar sits in
+    its own day, which a reader of a daily backtest has no use for (finding
+    BT-05). Synthetic frames anchored at midnight keep working either way.
+    """
+    stamps = pd.DatetimeIndex(index)
+    if len(stamps) < 2:
+        return False
+    deltas = stamps.to_series().sort_values().diff().dropna()
+    return not deltas.empty and bool(deltas.median() >= DAY_GRANULAR_SPACING)
+
+
+def fmt_bar(ts: Any, *, day_granular: bool) -> str:
+    """Compact, locale-free timestamp (date only for day-granular bars)."""
     t = pd.Timestamp(ts)
-    if t.hour == 0 and t.minute == 0 and t.second == 0:
+    if day_granular or (t.hour == 0 and t.minute == 0 and t.second == 0):
         return t.strftime("%Y-%m-%d")
     return t.strftime("%Y-%m-%d %H:%M")

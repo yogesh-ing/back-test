@@ -39,7 +39,7 @@ class MomentumBurst(DirectionalOptionStrategy):
     )
     description_sections = {
         'overview': (
-            'Burst continuation: a single bar that moves beyond a percent threshold fires a'
+            'Burst continuation: a single bar that moves beyond a percent threshold fires a '
             'same-direction options view (long call up, long put down).'
         ),
         'regime': (
@@ -48,23 +48,23 @@ class MomentumBurst(DirectionalOptionStrategy):
             'exactly where exhaustion reversals begin.'
         ),
         'entry': (
-            "Last bar's move beyond ±move_threshold_pct (over lookback_bars) with sufficient"
+            "Last bar's move beyond ±move_threshold_pct (over lookback_bars) with sufficient "
             'confidence; anything smaller is silence.'
         ),
         'construction': (
-            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put'
+            'Bullish view buys an at-the-money long call, bearish view an at-the-money long put '
             "on the underlying's nearest eligible expiry — a defined-risk, single-leg structure."
             'Size is 1 lot by default (override 1-5 lots where the spawn form allows).'
         ),
         'exits_risk': (
-            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit'
-            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst'
-            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long'
+            'Declared exit plan: hard stop at -50% of premium paid, target at +100%, and exit '
+            'when the directional signal flips. Entries are blocked inside 1 day of expiry. Worst '
+            'case on a trade is the stop level (gap risk on illiquid strikes aside); a long '
             'option can never lose more than the premium paid.'
         ),
         'parameters': (
-            'move_threshold_pct=0.3, lookback_bars=1, min_confidence=0.3, underlying=NIFTY. Size'
-            'defaults to 1 lot; quantity (and, where listed, exit levels) can be overridden at'
+            'move_threshold_pct=0.3, lookback_bars=1, min_confidence=0.3, underlying=NIFTY. Size '
+            'defaults to 1 lot; quantity (and, where listed, exit levels) can be overridden at '
             'spawn within the declared menu.'
         ),
     }

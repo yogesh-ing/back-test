@@ -65,25 +65,25 @@ class SwingHourlySupertrend(EquityStrategy):
     )
     description_sections = {
         'overview': (
-            'Hourly swing: Supertrend flips filtered by a 200-EMA regime line — long only above'
+            'Hourly swing: Supertrend flips filtered by a 200-EMA regime line — long only above '
             'the regime, with multi-day holds.'
         ),
         'regime': (
-            'Works in sustained hourly trends (multi-day directional legs). Struggles when price'
-            'chops around the 200-EMA: the regime filter toggles and Supertrend flips compound'
+            'Works in sustained hourly trends (multi-day directional legs). Struggles when price '
+            'chops around the 200-EMA: the regime filter toggles and Supertrend flips compound '
             'into serial small losses.'
         ),
         'entry': (
-            'Supertrend flips bullish while price is above the 200-EMA regime line; a bull flip'
+            'Supertrend flips bullish while price is above the 200-EMA regime line; a bull flip '
             'below the regime is ignored.'
         ),
         'construction': (
-            'Single-instrument equity position, long only, on 1-hour bars (needs 1-minute history'
+            'Single-instrument equity position, long only, on 1-hour bars (needs 1-minute history '
             'resampled up).'
         ),
         'exits_risk': (
-            'Exits on the bearish Supertrend flip. The band doubles as a trailing stop; worst'
-            'case is approximately the band distance at the flip, larger after volatile'
+            'Exits on the bearish Supertrend flip. The band doubles as a trailing stop; worst '
+            'case is approximately the band distance at the flip, larger after volatile '
             'expansions.'
         ),
         'parameters': (

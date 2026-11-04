@@ -282,8 +282,14 @@ same broker auth popup the nav chip uses (password → TOTP); the alert
 auto-resolves on verified re-login. Live on the next server restart. Polls
 `/api/alerts/active` every 10 s (30 s when the page is hidden) and re-renders
 only when the payload `version` changes; expanded state in
-`localStorage["pi.alertWidget.expanded"]`. Adds `body.has-alert-widget` so
-page content can keep clear of it. Pinned by `tests/js/test_alert_widget.mjs`.
+`localStorage["pi.alertWidget.expanded"]`. It renders only when it has
+something to say: with zero open alerts and a healthy feed it is `hidden` and
+adds no body class, so the page keeps the corner and toasts sit at the bottom.
+While it is on screen it adds `body.has-alert-widget`, which both lifts the
+toast stack and pads `.app-workspace` so the last row can be scrolled clear of
+the floating pill. A failed feed shows an "Alerts unavailable" pill rather than
+pretending the book is clear. Pinned by `tests/js/test_alert_widget.mjs` and
+`tests/test_workspace_design.py`.
 See `docs/ALERTS-GUIDE.md`.
 
 ### Global: Broker login banner (every page)

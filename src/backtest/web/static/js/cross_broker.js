@@ -122,6 +122,30 @@
 
     const el = (id) => document.getElementById(id);
 
+    // F8 — the card used to read "0 brokers" and em-dashes until the summary
+    // landed, and kept reading them after it failed. Every placeholder here says
+    // which of fetching / unavailable / arrived it is.
+    const XB_VALUES = ['crossBrokerTotalPnl', 'crossBrokerSharpe', 'crossBrokerMaxDd', 'crossBrokerTrades'];
+    const XB_NOTES = ['crossBrokerTotalPnlSub', 'crossBrokerSharpeSub', 'crossBrokerMaxDdSub', 'crossBrokerTradesSub'];
+
+    function markXb(state, noteText) {
+        const pill = el('crossBrokerScopePill');
+        if (pill) {
+            pill.dataset.state = state;
+            if (state !== 'ready') pill.textContent = state === 'fetching' ? 'Fetching…' : 'Unavailable';
+        }
+        XB_VALUES.forEach((id) => {
+            const node = el(id);
+            if (node) node.dataset.state = state;
+        });
+        XB_NOTES.forEach((id) => {
+            const node = el(id);
+            if (!node) return;
+            node.dataset.state = state;
+            if (state !== 'ready' && noteText != null) node.textContent = noteText;
+        });
+    }
+
     // ------------------------------------------------------------------
     // Networking
     // ------------------------------------------------------------------
@@ -159,6 +183,7 @@
     // ------------------------------------------------------------------
 
     function renderPortfolioTotals(payload) {
+        markXb('ready');
         const total = payload.portfolio_total || {};
         const pnlEl = el('crossBrokerTotalPnl');
         const pnlSub = el('crossBrokerTotalPnlSub');
@@ -202,8 +227,13 @@
 
         const pill = el('crossBrokerScopePill');
         if (pill) {
-            pill.textContent = `${total.broker_count || 0} broker${total.broker_count === 1 ? '' : 's'} · `
-                + `${total.strategy_count || 0} strateg${total.strategy_count === 1 ? 'y' : 'ies'}`;
+            const brokers = Number(total.broker_count || 0);
+            const strategies = Number(total.strategy_count || 0);
+            pill.dataset.state = brokers > 0 ? 'ready' : 'empty';
+            pill.textContent = brokers > 0
+                ? `${brokers} broker${brokers === 1 ? '' : 's'} · `
+                    + `${strategies} strateg${strategies === 1 ? 'y' : 'ies'}`
+                : 'No brokers in scope';
         }
 
         renderDataQuality(el('crossBrokerDataQuality'), payload.data_quality);
@@ -242,10 +272,10 @@
                 ? `${fmtNum(r.sharpe_ratio)} <span title="Best">🥇</span>` : fmtNum(r.sharpe_ratio);
             const slipCell = isNum(r.avg_slippage_bps) && rows.length > 1 && r.avg_slippage_bps === bestSlip
                 ? `${fmtBps(r.avg_slippage_bps)} <span title="Lowest">✅</span>` : fmtBps(r.avg_slippage_bps);
-            const segments = (r.segments || []).map((s) => `<div class="small">${esc(s)}</div>`).join('') || DASH;
+            const segments = (r.segments || []).map((s) => `<div class="small" title="${esc(s)}">${esc(Labels.segment(s))}</div>`).join('') || DASH;
             return `<tr>
                 <td><strong>${esc(r.display_name || labelFor(r.broker))}</strong>
-                    <div class="small muted">${esc((r.strategies || []).join(', '))}</div></td>
+                    <div class="small muted" title="${esc((r.strategies || []).join(', '))}">${esc((r.strategies || []).map((k) => Labels.strategy(k)).join(', '))}</div></td>
                 <td class="text-right" style="color:${pnlColor};">${fmtInr(r.net_pnl)}</td>
                 <td class="text-right">${fmtPct(r.pnl_pct)}</td>
                 <td class="text-right">${sharpeCell}</td>
@@ -303,6 +333,7 @@
     async function loadSummary(force) {
         if (state.loadedSummary && !force) return;
         const body = el('brokerTableBody');
+        markXb('fetching', 'fetching…');
         try {
             const data = await getJson(query(API.summary));
             state.summary = data;
@@ -316,6 +347,7 @@
             refreshBrokerOptions();
         } catch (err) {
             state.loadedSummary = false;
+            markXb('unavailable', 'unavailable');
             if (body) {
                 body.innerHTML = `<tr><td colspan="12" class="text-center" style="color:var(--danger);">`
                     + `${esc(err.message)}</td></tr>`;
@@ -665,7 +697,7 @@
             const names = new Set();
             rows.forEach((r) => (r.strategies || []).forEach((s) => names.add(s)));
             strategySelect.innerHTML = Array.from(names)
-                .map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+                .map((s) => `<option value="${esc(s)}" title="${esc(s)}">${esc(Labels.strategy(s))}</option>`).join('');
         }
     }
 

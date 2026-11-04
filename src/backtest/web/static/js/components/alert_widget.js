@@ -12,6 +12,9 @@
  *
  * Data: GET /api/alerts/active (polled; re-rendered only when the broker's
  * version changes), GET /api/alerts/<id>, POST /api/alerts/<id>/dismiss|review.
+ *
+ * It renders only when it has something to say: a clear book with a healthy
+ * feed leaves the corner to the page (F7).
  */
 (function () {
   "use strict";
@@ -71,12 +74,18 @@
 
   // ------------------------------------------------------------------ render
 
-  function renderMinimized(counts) {
+  function renderMinimized(counts, error) {
     const c = counts || {};
-    if (!c.total) {
-      return `<button class="aw-pill aw-pill-clear" type="button" data-aw="toggle"
-                title="No open portfolio alerts"><svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg> <span class="aw-pill-text">No alerts</span></button>`;
+    // A dead feed is not an empty feed: "No alerts" over a failed poll is the
+    // unknown dressed up as a zero (the F8 rule, applied to this pill).
+    if (error && !c.total) {
+      return `<button class="aw-pill aw-pill-warning" type="button" data-aw="toggle"
+                title="Alert feed unavailable: ${esc(error)}"><svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg> <span class="aw-pill-text">Alerts unavailable</span></button>`;
     }
+    // Nothing open and the feed is answering → the widget has nothing to say,
+    // so it takes nothing. (F7: it used to sit on the page as a grey pill and
+    // hold the bottom band clear for itself.)
+    if (!c.total) return "";
     const parts = ["critical", "warning", "info"]
       .filter((k) => c[k])
       .map((k) => `<span class="aw-sev aw-sev-${k}">${ICON[k]} ${c[k]}</span>`)
@@ -161,10 +170,17 @@
   function render() {
     const root = $("alert-widget");
     if (!root) return;
+    const quiet = !state.expanded && !state.counts.total && !state.error;
+    // F7: the widget floats, so it only exists when it has something to say —
+    // and the page keeps a bottom band clear for it while it does.
+    root.hidden = quiet;
     root.dataset.state = state.expanded ? "expanded" : "minimized";
     root.innerHTML = state.expanded
       ? renderExpanded(state.alerts, state.counts)
-      : renderMinimized(state.counts);
+      : renderMinimized(state.counts, state.error);
+    if (document.body && document.body.classList) {
+      document.body.classList.toggle("has-alert-widget", !quiet);
+    }
   }
 
   // ------------------------------------------------------------- detail modal
@@ -253,10 +269,10 @@
       ? `<tr><th>Runner</th><th>Strategy</th><th>Bucket</th><th class="num">${field === "delta" ? "Δ" : "Γ"}</th><th class="num">Share</th><th class="num">Pos</th></tr>`
       : `<tr><th>Runner</th><th>Strategy</th><th>Bucket</th><th>Note</th></tr>`;
     const rows = list.map((c) => hasMetric
-      ? `<tr><td>${esc(c.label)}</td><td>${esc(c.strategy)}</td><td>${esc(c.mode)}</td>
+      ? `<tr><td>${esc(c.label)}</td><td title="${esc(c.strategy)}">${esc(Labels.strategy(c.strategy))}</td><td>${esc(c.mode)}</td>
            <td class="num">${num(c[field], 1)}</td><td class="num">${c.share != null ? num(c.share * 100, 0) + "%" : "—"}</td>
            <td class="num">${esc(c.positions != null ? c.positions : "")}</td></tr>`
-      : `<tr><td>${esc(c.label)}</td><td>${esc(c.strategy)}</td><td>${esc(c.mode)}</td><td>${esc(c.fit || "")}</td></tr>`).join("");
+      : `<tr><td>${esc(c.label)}</td><td title="${esc(c.strategy)}">${esc(Labels.strategy(c.strategy))}</td><td>${esc(c.mode)}</td><td>${esc(c.fit || "")}</td></tr>`).join("");
     return `<table class="matrix-table pi-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
   }
 
@@ -269,11 +285,11 @@
       ? subs.map((s) => {
           const n = notified[s.subscriber_id];
           const status = n ? (n.ok ? "✅ notified" : `⚠️ callback failed: ${esc(n.error || "")}`) : "⏳ not notified (cooldown / subscribed later)";
-          return `<li>${esc(s.runner || s.subscriber_id)} <span class="muted">(${esc(s.strategy || "")})</span> — ${status}</li>`;
+          return `<li>${esc(s.runner || s.subscriber_id)} <span class="muted" title="${esc(s.strategy || "")}">(${esc(Labels.strategy(s.strategy || ""))})</span> — ${status}</li>`;
         }).join("")
       : `<li class="muted">No strategy subscribes to <code>${esc(a.alert_type)}</code>.</li>`;
     const notRows = notSubs.map((s) =>
-      `<li>${esc(s.runner || s.instance_id)} <span class="muted">(${esc(s.strategy || "")})</span> — contributes but is not subscribed</li>`).join("");
+      `<li>${esc(s.runner || s.instance_id)} <span class="muted" title="${esc(s.strategy || "")}">(${esc(Labels.strategy(s.strategy || ""))})</span> — contributes but is not subscribed</li>`).join("");
     return `<ul class="pi-list">${subRows}${notRows}</ul>
       <div class="muted pi-note">Subscribed strategies decide for themselves (pause entries, request an exit, or
       ignore) — see <code>docs/STRATEGY-ALERTS.md</code>.</div>`;
@@ -462,7 +478,6 @@
     const root = $("alert-widget");
     if (!root) return;
     try { state.expanded = localStorage.getItem(LS_EXPANDED) === "1"; } catch (_) { state.expanded = false; }
-    if (document.body && document.body.classList) document.body.classList.add("has-alert-widget");
     root.addEventListener("click", onClick);
     if (document.addEventListener) {
       document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetail(); });
