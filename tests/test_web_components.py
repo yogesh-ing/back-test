@@ -56,7 +56,8 @@ def test_forward_live_widgets_render():
         # same-clock Orders stamp fix (a80e689) added two on top of those.
         ("test_orders_tab.mjs", 23),
         # Portfolio Intelligence: alert widget + Risk Board intelligence sections.
-        ("test_alert_widget.mjs", 11),
+        # F7 moved the mount contract: a clear book renders no pill at all.
+        ("test_alert_widget.mjs", 12),
         # F11: the browser half of the one label resolver.
         ("test_labels.mjs", 9),
     ],

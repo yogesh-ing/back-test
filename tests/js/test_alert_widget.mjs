@@ -39,6 +39,11 @@ function makeEl(id) {
             add(c) { this._s.add(c); },
             remove(c) { this._s.delete(c); },
             contains(c) { return this._s.has(c); },
+            toggle(c, on) {
+                const want = on === undefined ? !this._s.has(c) : !!on;
+                if (want) this._s.add(c); else this._s.delete(c);
+                return want;
+            },
         },
         addEventListener(type, fn) { (handlers[type] = handlers[type] || []).push(fn); },
         fire(type, event) { (handlers[type] || []).forEach((fn) => fn(event || {})); },
@@ -155,10 +160,15 @@ sandbox.__ALERT_WIDGET_NO_AUTOINIT__ = true;
 vm.runInContext(load("src/backtest/web/static/js/components/alert_widget.js"), sandbox);
 const AW = sandbox.AlertWidget;
 
-test("minimized: no alerts reads as clear", () => {
-    const html = AW.renderMinimized({ total: 0 });
-    assert.match(html, /No alerts/);
-    assert.match(html, /aw-pill-clear/);
+test("minimized: zero alerts renders nothing; a dead feed says so", () => {
+    // F7 — the pill floats, so "No alerts" was screen space spent to say
+    // nothing. And an unavailable feed must not read as a clear book (F8's rule).
+    assert.equal(AW.renderMinimized({ total: 0 }, null), "");
+    const dead = AW.renderMinimized({ total: 0 }, "502");
+    assert.match(dead, /Alerts unavailable/);
+    assert.match(dead, /aw-pill-warning/);
+    assert.doesNotMatch(dead, /No alerts/);
+    assert.equal(AW.renderMinimized({ total: 0 }, "<b>x</b>").match(/<b>/g), null);
 });
 
 test("minimized: count + severity breakdown, colour of the worst", () => {
@@ -214,6 +224,28 @@ test("init polls /api/alerts/active and renders the count; toggle persists", asy
     assert.equal(storage["pi.alertWidget.expanded"], "1");
     assert.equal(elements["alert-widget"].dataset.state, "expanded");
     assert.match(elements["alert-widget"].innerHTML, /Portfolio Alerts \(2\)/);
+});
+
+test("nothing to say → off the page; something to say → on it, with the band reserved", () => {
+    // F7 acceptance, at the mount: the widget and the body class it owns
+    // appear and disappear together, because the class is what keeps the
+    // bottom band clear (app.css: body.has-alert-widget .app-workspace).
+    const body = sandbox.document.body;
+    AW.setExpanded(false);
+    AW.apply({ alerts: [], counts: { total: 0, critical: 0, warning: 0, info: 0 }, version: 40 });
+    assert.equal(elements["alert-widget"].hidden, true, "a clear book must not occupy the corner");
+    assert.equal(elements["alert-widget"].innerHTML, "");
+    assert.equal(body.classList.contains("has-alert-widget"), false);
+
+    // info severity: this test is about the mount, not about toasting — the
+    // toast contract has its own test below.
+    AW.apply({ alerts: [infoAlert], counts: { total: 1, critical: 0, warning: 0, info: 1 }, version: 41 });
+    assert.equal(elements["alert-widget"].hidden, false);
+    assert.match(elements["alert-widget"].innerHTML, /aw-count">1</);
+    assert.equal(body.classList.contains("has-alert-widget"), true, "the page must reserve the band");
+
+    AW.apply({ alerts: [], counts: { total: 0, critical: 0, warning: 0, info: 0 }, version: 42 });
+    assert.equal(body.classList.contains("has-alert-widget"), false, "and give it back");
 });
 
 test("first load does not toast open alerts; a new critical one does", async () => {

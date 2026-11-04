@@ -466,7 +466,6 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; fon
 .bucket-card.bucket-card-risk-danger { border-color: var(--danger-shade); }
 .bucket-card.bucket-card-risk-warning { border-color: var(--warning-shade); }
 .aw-pill { font-family: var(--font-sans); font-size: 10px; padding: 7px 11px; min-height: 30px; border-radius: 7px; box-shadow: var(--shadow); gap: 6px; }
-.aw-pill-clear { opacity: 1; }
 .aw-pill .ui-icon { width: 13px; height: 13px; }
 .aw-count { font-family: var(--font-mono); font-size: 11px; }
 .aw-panel { border-radius: 12px; font-size: 11px; box-shadow: var(--shadow-modal); }

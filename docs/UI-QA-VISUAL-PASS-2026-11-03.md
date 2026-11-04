@@ -253,7 +253,7 @@ has no `text-overflow: ellipsis`.
   `.broker-status`, `.broker-strip`, `.theme-toggle`). F1's fix is scoped to ≤560px, so this band was
   never in the matrix — recorded as **F13** below.
 
-### F7 — the alert widget floats over page content → UI-17
+### F7 — the alert widget floats over page content → UI-17 — DONE 2026-11-04
 
 ```
 Issue ID / task ID: UI-17
@@ -271,6 +271,41 @@ Files: src/backtest/web/static/css/app.css:1227-1228; templates/base.html:200;
 chip); when expanded, use a drawer/panel that reserves layout instead of overlaying.
 **Acceptance:** no page element is covered at 1440×900 or 390×844 with zero alerts; with one alert the
 widget does not obscure a table, KPI or button.
+
+**Status: DONE (S10, 2026-11-04).**
+- `render()` now owns the mount. `const quiet = !state.expanded && !state.counts.total && !state.error`
+  → `root.hidden = quiet`, and `body.has-alert-widget` is toggled on that same condition instead of
+  being added once in `init()`. A clear book with a healthy feed leaves the corner to the page — the
+  widget has nothing to say, so it takes nothing.
+- When it *is* on screen the page keeps room for it: `body.has-alert-widget .app-workspace
+  { padding-bottom: 56px }` in `app.css`, riding the same class as the existing toast lift. The pill
+  still floats (it is an alert affordance, not a panel), but nothing beneath it is unreachable.
+- A dead feed is not an empty feed. `renderMinimized(counts, error)` renders an `aw-pill-warning`
+  reading "Alerts unavailable" (reason in the `title`, escaped) when the poll failed with zero counts,
+  rather than hiding the widget and implying clarity — F8's rule applied to this pill.
+- The "No alerts" pill and both its CSS rules (`.aw-pill-clear` in `app.css` and `workspace.css`) were
+  deleted; nothing renders the empty state as a clickable chip any more.
+- Ratchets: `tests/js/test_alert_widget.mjs` 11 → 12 tests (the first test now asserts
+  `renderMinimized({total:0}, null) === ""` and the dead-feed wording; new mount test drives
+  `apply()` at versions 40/41/42 and asserts `hidden`, empty `innerHTML`, and
+  `has-alert-widget` flipping on then back off). `tests/test_workspace_design.py` gained
+  `test_the_alert_widget_only_spends_space_when_it_says_something` — parses the `body.has-alert-widget
+  .app-workspace` block, requires `padding-bottom ≥ 48px`, requires the toast rule on the same class,
+  and forbids `.aw-pill-clear` in either stylesheet or the component. Both fail on the pre-fix tree
+  (restored with `git show HEAD:` — mount test got a visible widget at v40, design test found no band).
+- Measured live on the mirror (:5001), with alert states produced by in-memory `AlertWidget.apply()`
+  probes inside a single evaluate — nothing was written to the DB and the next real poll reverted the
+  widget, so the server stayed at zero alerts.
+  - 1440×900, zero alerts: `hidden true / bodyClass false / padding-bottom 0px / toast bottom 24px /
+    overlaps []`. Before: an 85×31 pill sat over the calendar and covered 13% of a `.diary-week-cell`.
+  - 1440×900, one alert, scrolled to the bottom: pill 111×35 at (1308, 849), `padding-bottom 56px`,
+    overlaps `[]` against tables, KPI cards and buttons.
+  - 390×844: zero → hidden with no body class; one alert → pill at (259, 793), clear; failed feed →
+    126×31 "Alerts unavailable", clear of all content.
+- **Deliberate consequence:** with a clear book there is no clickable affordance in the corner, so the
+  expanded panel's own empty state is only reachable by an operator who left it expanded
+  (`localStorage["pi.alertWidget.expanded"]`). That is the trade the minimal-UI rule asks for — an
+  alert widget should not need a resting place.
 
 ### F8 — `/analytics` presents loading and zero states as measurements → UI-15
 
@@ -862,6 +897,7 @@ at 390×844 with a completed run on screen: `docW 386, overflow false, unclipped
 | S7 | F10 (description spacing sweep) **DONE 2026-11-03** + F11 (label resolver) **DONE 2026-11-03** + F12 | Copy/consistency batch |
 | S8 | F13 (topbar at 561–1100px) **DONE 2026-11-04** + BT-02/BT-04 (backtest-page pass) + BT-01 (loader clock) **DONE 2026-11-04** + BT-05 (bar labels) **DONE 2026-11-04** | Same rule as S3, wrong breakpoint band |
 | S9 | F14 (risk_page.js escaping) — found during S7 — **DONE 2026-11-04** | One file, no visual change; needs its own static rule so it cannot be half-done |
+| S10 | F7 (alert widget overlays content) — **DONE 2026-11-04** | One component plus the band rule it owns; the clear-book case is the fix, so it needs a mount test |
 
 Regression command for every slice (from [UI-REDESIGN-PLAN.md](UI-REDESIGN-PLAN.md):217-227), run in
 this isolated mirror, never against :5000:

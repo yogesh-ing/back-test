@@ -233,6 +233,31 @@ def test_a_component_grid_may_never_set_a_hard_content_floor():
     assert "min-width" not in table, "the trade table must not set a content floor"
 
 
+def test_the_alert_widget_only_spends_space_when_it_says_something():
+    """F7: the pill floats bottom-right on every page, so it earns its place or leaves.
+
+    With zero alerts it used to render a grey "No alerts" pill — it covered the
+    last diary week-row, held the toast stack 76px off the bottom, and told the
+    operator nothing. The component now renders nothing when the book is clear
+    and the feed is answering, and the body class both the toast lift and the
+    reserved band hang off is set by the widget itself, so the two rules have to
+    stay keyed to the same class and the band has to be as tall as the pill plus
+    its offset (31px + 16px).
+    """
+    app_css = (WEB / "static" / "css" / "app.css").read_text(encoding="utf-8")
+    band = re.search(r"body\.has-alert-widget \.app-workspace \{([^}]*)\}", app_css)
+    assert band, "nothing reserves a bottom band for the floating pill"
+    pad = re.search(r"padding-bottom:\s*(\d+)px", band.group(1))
+    assert pad and int(pad.group(1)) >= 48, "the band must clear the pill, or it still covers a row"
+    assert "body.has-alert-widget .toast-stack" in app_css, (
+        "the toast lift has to ride the same class or toasts sit under a widget that is not there")
+    workspace_css = (WEB / "static" / "css" / "workspace.css").read_text(encoding="utf-8")
+    for css in (app_css, workspace_css):
+        assert ".aw-pill-clear" not in css, "the quiet pill no longer renders; its rule is dead weight"
+    js = (WEB / "static" / "js" / "components" / "alert_widget.js").read_text(encoding="utf-8")
+    assert "aw-pill-clear" not in js, "the component must not emit a class no stylesheet answers to"
+
+
 def test_chrome_cannot_submit_a_trading_request():
     js = (WEB / "static" / "js" / "workspace.js").read_text()
     assert "fetch(" not in js

@@ -1240,14 +1240,18 @@ textarea.input { line-height: 1.7; }
 /* Portfolio Intelligence — alert widget (every page)                  */
 /* ------------------------------------------------------------------ */
 .alert-widget { position: fixed; right: 16px; bottom: 16px; z-index: 150; font-size: .85rem; }
+/* F7: this pill floats, so the page keeps a bottom band clear while it does —
+   the last row can always be scrolled out from under it. The class is set by
+   the widget itself and only exists while the widget is on screen, so with no
+   alerts the band, the pill and the toast lift all go away together. */
 body.has-alert-widget .toast-stack { bottom: 76px; }
+body.has-alert-widget .app-workspace { padding-bottom: 56px; }
 .aw-pill {
     display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px;
     border-radius: 999px; border: 1px solid var(--border); background: var(--surface);
     color: var(--text); cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.35);
 }
 .aw-pill:hover { border-color: var(--primary); }
-.aw-pill-clear { color: var(--muted); opacity: .85; }
 .aw-pill-critical { border-color: var(--danger); box-shadow: 0 0 0 2px var(--danger-tint), 0 4px 14px rgba(0,0,0,.35); }
 .aw-pill-warning { border-color: var(--warning); }
 .aw-pill-info { border-color: var(--primary); }
