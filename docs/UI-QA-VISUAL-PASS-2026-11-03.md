@@ -583,7 +583,7 @@ segment codes mapped to words; keep the raw key available as a tooltip/`title` f
   column in the same file; left alone because a partial fix in one row of a wholly unescaped file buys
   false confidence. Needs its own pass.
 
-### F12 — small consistency items (batch) → UI-03, UI-06, UI-15
+### F12 — small consistency items (batch) → UI-03, UI-06, UI-15 — DONE 2026-11-04
 
 ```
 Priority: P2
@@ -601,6 +601,65 @@ Priority: P2
 - "certification-grade" badge on the QA mirror overstates a 5-symbol cache; the badge should reflect
   the actual certified universe.
 ```
+
+**Status: DONE (S7, 2026-11-04).** All six, each at the site that renders it.
+
+1. **"1 trades"** — `backtest.js` Recent Runs tile and the CSV toast, `optimize_run.js` best-score
+   line, and two `diary.js` strings (`${data.trade_count} closed trades`, the "Load all N trades"
+   button) now decide the plural from the number, the way `diary.js` already did for sessions. No new
+   helper: the app has no shared pluraliser and four sites did not justify inventing one.
+2. **Emoji as icons** — `risk.html` (4 tabs, Live Mode, 2 Save buttons) and `analytics.html`
+   (15 heading/button/modal-title sites) now go through `{{ icon() }}`. Six paths were missing from
+   the vocabulary and added to `_macros.html`: `globe`, `bank`, `compass`, `target`, `bolt`, `bulb`.
+   🔴 Live Mode became `icon('alert')` + a title, because `_macros.html` opens with *"Never infer
+   execution mode from a color"* and a red dot was exactly that.
+   **Left alone, deliberately:** the semantic markers `🟢 Excellent / 🟡 Warning / 🔴 Alert / 
+   Insufficient sample` (analytics.js ratings), `✅/❌` trade results, `⏳` open, `⛔` halted, `⚠️`
+   warning lines, `📅` day heads, and the base-chrome broker dots (`⚪ Dhan`, `🔐`, `🔗`, `✕`). Those
+   carry state or live in the shared topbar, which this finding does not own. The sweep is therefore
+   page-scoped, not app-wide.
+3. **"nothing held"** — `portfolio.js:581` → `"Nothing held"`. It sits after the template's own
+   sentence ("…with the manual controls."), so a lowercase start read as a broken sentence.
+4. **Commission drag past 100%** — both sinks cap: the KPI sub names cost and gross in words instead
+   of a ratio, the attribution cell says `(cost > gross)` with a `title` explaining why there is no
+   percentage. Below 100 the old rendering is untouched.
+5. **Unset bucket limit** — the input carries `placeholder="not set"` + a title, and the plain-text
+   span beside it (which was empty) now reads "not set". `risk_board.js` already rendered `∞` for the
+   same concept and is unchanged.
+6. **Certification badge** — `certifiable` is a *source-class* property, so the badge now says
+   "certification-grade **source**" and its title bounds the claim: *"does not certify which symbols
+   or dates this run loaded"*. Naming the actual universe would need a coverage fetch on every page
+   that mounts the gate; the honest wording was the cheaper, true fix. `docs/UI-WALKTHROUGH-AND-QA-
+   2026-10-02.md:66` still quotes the old string — that file is a dated record, not a spec.
+
+**Ratchets** — `tests/test_web_copy_consistency.py` (new, 7 tests): the plural rule scans the three
+files this slice touched and flags a `} trades` / `+ ' trades'` rendering with no `=== 1 ?` decision
+(with a self-check test proving the scanner catches the pre-fix line and forgives the fixed one); a
+pictograph-range scan of `risk.html` + `analytics.html` that must find zero and must find `icon(`; an
+`icon()`-name resolver, because the macro silently falls back to `activity` for an unknown name; the
+blank-value-input-needs-placeholder rule over `risk_page.js`; the drag-cap wording; the badge
+wording. Five governing rules are red on the pre-fix tree (`git show HEAD:` — verified before
+restoring). `tests/js/test_risk_page_escaping.mjs` 8 → 9 (new: an unset limit renders
+`value="" placeholder="not set"` and the span text); `tests/js/test_data_source_gate.mjs` stays at 16
+with two assertions added to the badge test.
+
+**Live check** — templates are compiled by the running server, so this needed a restart of the QA
+mirror (:5001 only; :5000 untouched). CSS/JS are served from disk and needed none.
+- `/risk` 1440×900: four tabs render `svg.ui-icon` at 13px inside unchanged 41px tab boxes; zero
+  pictographs in the page's own markup; LIVE bucket `value="5"` (placeholder inert), PAPER bucket
+  `value="" placeholder="not set"` with the span reading "not set" — the exact PAPER/LIVE pair the
+  finding described, from the real DB.
+- `/analytics` 1440×900: `h2` Cross-Broker, both `summary` section heads, three action buttons, the
+  alerts `h3`, Strategy Description, Statistical Insights, both detail links and all three modal
+  titles are SVG; `docW 1435 / iw 1440`; 0 console errors.
+- `/diary`: scope line reads `(73 closed trades across 1 active IST session)`; two attribution rows
+  that previously showed the ratio now read `(cost > gross)` — "HF equity scalp1", whose cost against
+  a small negative gross is the finding's own ≈1494% example, and "One min scalp1" at ≈261%. Amounts
+  omitted per §2; neighbouring rows keep `(0%) (4%) (17%) (73%)`.
+- `/backtest`: 12 Recent Runs tiles read `1 trade`, `0 trades`, `2 trades`, `10 trades`, `91 trades` —
+  no `^1 trades$` remains. Gate line: `Data source: Real Data (PostgreSQL) · certification-grade
+  source` with the bounding title.
+- `/portfolio`: `#pos-summary` = "Nothing held".
 
 ### F13 — the topbar scrolls the whole document sideways at tablet widths → UI-01, UI-17
 
@@ -894,7 +953,7 @@ at 390×844 with a completed run on screen: `docW 386, overflow false, unclipped
 | S4 | F4 + F5 (backtest rail + config fold) — **DONE 2026-11-03** | Same two columns, must be designed together |
 | S5 | F9 (one money formatter + ratchet test) — **DONE 2026-11-03** | Touches many files; land before other template edits |
 | S6 | F6 (diary truncation) **DONE 2026-11-03** + F8 (analytics states) **DONE 2026-11-03** | Per-page, independent |
-| S7 | F10 (description spacing sweep) **DONE 2026-11-03** + F11 (label resolver) **DONE 2026-11-03** + F12 | Copy/consistency batch |
+| S7 | F10 (description spacing sweep) **DONE 2026-11-03** + F11 (label resolver) **DONE 2026-11-03** + F12 (consistency batch) **DONE 2026-11-04** | Copy/consistency batch |
 | S8 | F13 (topbar at 561–1100px) **DONE 2026-11-04** + BT-02/BT-04 (backtest-page pass) + BT-01 (loader clock) **DONE 2026-11-04** + BT-05 (bar labels) **DONE 2026-11-04** | Same rule as S3, wrong breakpoint band |
 | S9 | F14 (risk_page.js escaping) — found during S7 — **DONE 2026-11-04** | One file, no visual change; needs its own static rule so it cannot be half-done |
 | S10 | F7 (alert widget overlays content) — **DONE 2026-11-04** | One component plus the band rule it owns; the clear-book case is the fix, so it needs a mount test |
@@ -907,13 +966,13 @@ PYTHONPATH=src python -m pytest tests/test_workspace_design.py tests/test_web_co
   tests/test_broker_ui.py tests/test_web_taxonomy.py tests/test_portfolio_ui_views.py \
   tests/test_reporting_ui.py tests/test_options_spawn_ui.py \
   tests/test_number_formatting.py tests/test_label_resolver.py tests/test_strategy_prose.py \
-  tests/test_web_escaping.py -q
+  tests/test_web_escaping.py tests/test_web_copy_consistency.py -q
 for test in tests/js/test_*.mjs; do node "$test" || exit 1; done
 ```
 
-The last four pytest files are the ratchets this pass added (S5 money, S7 label resolver, S7 prose
-spacing, S9 escaping); they are in the slice command, not a separate run, so a later slice cannot
-regress them without the gate going red.
+The last five pytest files are the ratchets this pass added (S5 money, S7 label resolver, S7 prose
+spacing, S9 escaping, S7 copy consistency); they are in the slice command, not a separate run, so a
+later slice cannot regress them without the gate going red.
 
 Known failures on this mirror that are **not** regressions (verified against a clean HEAD worktree,
 2026-11-03; re-confirmed 2026-11-04): 8 in `test_portfolio_ui_views.py` — every one arms a live runner

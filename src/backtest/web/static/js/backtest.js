@@ -273,7 +273,7 @@ function exportCsv() {
             .map(csvCell).join(","));
     });
     downloadFile("backtest_trades.csv", lines.join("\n"), "text/csv");
-    showToast(`Exported ${trades.length} trades`, "success");
+    showToast(`Exported ${trades.length} trade${trades.length === 1 ? "" : "s"}`, "success");
 }
 
 function csvCell(v) {
@@ -353,6 +353,7 @@ function renderRecentRuns() {
             const ret = (r.total_return ?? 0) * 100;
             const wr = r.total_trades === 0 ? "—" : `${(r.win_rate ?? 0).toFixed(1)}%`;
             const dd = ((r.max_drawdown ?? 0) * 100).toFixed(1);
+            const nTrades = r.total_trades ?? 0;
             const status = r.series_status === "evicted"
                 ? `<span class="badge badge-subtle" title="Charts evicted by retention; metrics still stored">no chart</span>`
                 : r.series_status === "write_failed"
@@ -370,7 +371,7 @@ function renderRecentRuns() {
                 <div class="recent-tile-stats">
                     <span>WR ${wr}</span>
                     <span>DD ${dd}%</span>
-                    <span>${r.total_trades ?? 0} trades</span>
+                    <span>${nTrades} trade${nTrades === 1 ? "" : "s"}</span>
                     <span>Sharpe ${(r.sharpe ?? 0).toFixed(2)}</span>
                 </div>
             </div>`;

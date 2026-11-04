@@ -236,6 +236,19 @@ test("config form: bucket keys, group labels and stored limits escaped", async (
     assert.match(html, /&lt;b&gt;Bank&lt;\/b&gt;/);
     assert.match(html, /&lt;q&gt;10000&lt;\/q&gt;/);
     assert.ok(!html.includes('value="<w>5</w>'), "a stored limit broke out of its value attribute");
+    assert.match(html, /placeholder="not set"/);
+});
+
+test("an unset bucket limit reads \"not set\", not blank", async () => {
+    const cfg = PAYLOADS["/api/portfolio/risk/config"];
+    const stored = cfg.buckets;
+    cfg.buckets = { paper: { max_position_pct: 0.1, max_position_value: 10000 } };
+    const html = await capture(() => RP.loadConfig());
+    cfg.buckets = stored;
+    const row = html.split("\n").find((line) => line.includes('data-field="max_open_positions"'));
+    assert.ok(row, "the bucket form must render the open-positions limit");
+    assert.match(row, /value="" placeholder="not set"/, "an unset limit must not read as a blank box");
+    assert.match(row, /<span>not set<\/span>/, "the plain-text side of the field must say it too");
 });
 
 test("rulebook table: mode, structure and error text escaped", async () => {

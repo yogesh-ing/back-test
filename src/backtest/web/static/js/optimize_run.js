@@ -108,12 +108,13 @@
         $('progRate').textContent = p.rate_per_second ? `${p.rate_per_second} backtests/s` : '';
         if (p.best) {
             const m = p.best.metrics || {};
+            const nTrades = m.total_trades ?? 0;
             $('progBest').classList.remove('muted');
             $('progBest').innerHTML = `
                 <div class="opt-best-score">${C.fmtNum(p.best.score, 3)}</div>
                 <div class="opt-best-params">${C.escapeHtml(C.fmtParams(p.best.params))}</div>
                 <div class="small">Return ${C.fmtMetric('total_return', m.total_return)} · DD ${C.fmtMetric('max_drawdown', m.max_drawdown)}
-                    · ${m.total_trades ?? 0} trades · win ${C.fmtMetric('win_rate', m.win_rate)}</div>`;
+                    · ${nTrades} trade${nTrades === 1 ? '' : 's'} · win ${C.fmtMetric('win_rate', m.win_rate)}</div>`;
         }
         $('progRecent').innerHTML = (p.recent || []).map((r) => `
             <tr class="${r.constraints_met ? '' : 'opt-row-off'}">

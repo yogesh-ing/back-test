@@ -578,7 +578,7 @@
           withRules + " with a manual level · open P&L " +
           (pnls.reduce((a, b) => a + b, 0) >= 0 ? "" : "-") +
           fmtMoney(Math.abs(pnls.reduce((a, b) => a + b, 0))) + brokerStrip
-        : "nothing held";
+        : "Nothing held";
     }
     const footEl = $("pos-footnote");
     if (footEl) {

@@ -58,6 +58,10 @@ test("an allowed source renders one quiet line", () => {
     assert.equal(Gate.mount("g", { status: ALLOWED }), true);
     assert.match(el.innerHTML, /Real Data \(PostgreSQL\)/);
     assert.match(el.innerHTML, /certification-grade/);
+    // The badge answers for the source class only — a 5-symbol cache is not a
+    // certified universe, so the claim must name what it covers (F12).
+    assert.match(el.innerHTML, /certification-grade source</);
+    assert.match(el.innerHTML, /does not certify which symbols or dates/);
     assert.doesNotMatch(el.innerHTML, /disabled/);
 });
 

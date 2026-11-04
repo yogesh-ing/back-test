@@ -164,7 +164,7 @@
       if (cur.halted) {
         cbBanner.hidden = false;
         cbBanner.className = "cb-banner";
-        cbBanner.innerHTML = `<span class="cb-icon">🚨</span><div class="cb-body"><strong>CIRCUIT BREAKER HALTED</strong><span class="cb-reason">${esc(cur.halt_reason || "")} (${esc(cur.halt_mode || "")})</span></div><button class="btn btn-ghost" id="risk-reset-breaker" type="button">Reset &amp; Resume</button>`;
+        cbBanner.innerHTML = `<span class="cb-icon"><svg class="ui-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m12 3 10 18H2L12 3Z"/><path d="M12 9v5m0 3h.01"/></svg></span><div class="cb-body"><strong>CIRCUIT BREAKER HALTED</strong><span class="cb-reason">${esc(cur.halt_reason || "")} (${esc(cur.halt_mode || "")})</span></div><button class="btn btn-ghost" id="risk-reset-breaker" type="button">Reset &amp; Resume</button>`;
         cbBanner.querySelector("#risk-reset-breaker")?.addEventListener("click", async () => {
           try { await fetchJSON("/api/portfolio/control/reset_breaker", { method: "POST" }); loadRisk(); if (window.showToast) showToast("Breaker reset", "success"); } catch(e){ showToast(e.message,"error"); }
         });
@@ -225,7 +225,7 @@
           <strong>${esc(m.toUpperCase())}</strong>
           <div class="risk-config-row"><label for="slider-pos-${mode}">Max Position %</label><input data-bucket="${mode}" data-field="max_position_pct" type="range" min="1" max="100" step="1" value="${(lim.max_position_pct||0.1)*100}" class="risk-slider" id="slider-pos-${mode}"><span id="span-pos-${mode}">${pct(lim.max_position_pct||0.1)}</span></div>
           <div class="risk-config-row"><label for="bucket-value-${mode}">Max Position Value</label><input id="bucket-value-${mode}" data-bucket="${mode}" data-field="max_position_value" type="number" value="${esc(lim.max_position_value||10000)}" class="input" style="max-width:140px;"><span>${fmtMoney(lim.max_position_value||0)}</span></div>
-          <div class="risk-config-row"><label for="bucket-positions-${mode}">Max Open Positions</label><input id="bucket-positions-${mode}" data-bucket="${mode}" data-field="max_open_positions" type="number" min="1" max="100" value="${esc(lim.max_open_positions||'')}" class="input" style="max-width:100px;"><span></span></div>
+          <div class="risk-config-row"><label for="bucket-positions-${mode}">Max Open Positions</label><input id="bucket-positions-${mode}" data-bucket="${mode}" data-field="max_open_positions" type="number" min="1" max="100" value="${esc(lim.max_open_positions||'')}" placeholder="not set" title="Leave empty for no limit on open positions" class="input" style="max-width:100px;"><span>${lim.max_open_positions ? "" : "not set"}</span></div>
         </div>
       `}).join("");
       

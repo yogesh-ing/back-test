@@ -469,4 +469,4 @@ def test_risk_page_escapes_every_server_string():
     assert (
         result.returncode == 0
     ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    assert "8 tests passed" in result.stdout
+    assert "9 tests passed" in result.stdout

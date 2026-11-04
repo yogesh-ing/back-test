@@ -400,7 +400,7 @@
     var scopeCounts = document.getElementById('diary-scope-counts');
     if (scopeCounts) {
       scopeCounts.textContent =
-        '(' + (data.trade_count || 0) + ' closed trades across ' +
+        '(' + (data.trade_count || 0) + ' closed trade' + ((data.trade_count || 0) === 1 ? '' : 's') + ' across ' +
         (data.active_days || 0) + ' active IST session' + ((data.active_days === 1) ? '' : 's') +
         (state.strategy ? ' · Strategy: ' + Labels.strategy(state.strategy) : '') + ')';
     }
@@ -438,7 +438,13 @@
     var commSub = document.getElementById('dkpi-commission-sub');
     if (commSub) {
       if (data.commission_drag_pct != null) {
-        commSub.textContent = 'Drag: ' + Number(data.commission_drag_pct).toFixed(1) + '% of gross profit';
+        var drag = Number(data.commission_drag_pct);
+        // Past 100% the ratio stops carrying information — "Drag: 1494.0% of
+        // gross profit" reads like a broken number, so name the condition
+        // instead (finding F12).
+        commSub.textContent = drag > 100
+          ? 'Cost ' + fmtInrAbs(data.commission) + ' exceeds gross ' + fmtInrAbs(data.gross_pnl)
+          : 'Drag: ' + drag.toFixed(1) + '% of gross profit';
       } else if (Number(data.commission || 0) > 0) {
         commSub.textContent = 'Gross ≤ ₹0 · Cost compounds drawdown';
       } else {
@@ -735,7 +741,8 @@
       if (inst.trades_truncated) {
         html += '<div style="margin-top:6px;">' +
           '<button type="button" class="btn btn-ghost btn-small" data-load-full-instance="' +
-          escapeHtml(inst.instance_key) + '">Load all ' + inst.trade_count + ' trades for this instance</button>' +
+          escapeHtml(inst.instance_key) + '">Load all ' + inst.trade_count + ' trade' +
+          (inst.trade_count === 1 ? '' : 's') + ' for this instance</button>' +
           '</div>';
       }
     }
@@ -821,7 +828,10 @@
         '<td class="num ' + pnlToneClass(st.expectancy_net) + '">' + fmtInrSigned(st.expectancy_net) + '</td>' +
         '<td class="num ' + pnlToneClass(st.gross_pnl) + '">' + fmtInrSigned(st.gross_pnl) + '</td>' +
         '<td class="num">' + fmtInrAbs(st.commission) +
-        (st.commission_drag_pct != null ? ' <span class="muted" style="font-size:10px;">(' + Number(st.commission_drag_pct).toFixed(0) + '%)</span>' : '') +
+        (st.commission_drag_pct == null ? ''
+          : Number(st.commission_drag_pct) > 100
+            ? ' <span class="muted" style="font-size:10px;" title="Cost is larger than the gross this row earned, so the ratio is not a percentage of anything">(cost &gt; gross)</span>'
+            : ' <span class="muted" style="font-size:10px;">(' + Number(st.commission_drag_pct).toFixed(0) + '%)</span>') +
         '</td>' +
         '<td class="num">' +
         '<div class="diary-contrib-wrap">' +
