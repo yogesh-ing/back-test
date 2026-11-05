@@ -1387,6 +1387,29 @@ class RunnerConfig:
         self.instrument["type"] = inst_type
 
 
+def _engine_drift_note(strategy_bundle: Optional[Dict[str, Any]]) -> Optional[str]:
+    """One line on the engine commit this book was spawned onto vs the running one.
+
+    ``engine_git_sha`` is stamped into the spawn snapshot but excluded from
+    :func:`backtest.strategy.bundle.bundle_matches`, which hashes the four
+    strategy-side files only — so a change to the code the book *runs on* is
+    invisible to the drift flag while the book keeps trading under it.
+    ``None`` when either side is unknown: outside a git checkout, or for a
+    snapshot stamped before the field existed, there is nothing to compare and
+    inventing a match would be the same lie in the other direction.
+    """
+    try:
+        from backtest.strategy.bundle import engine_git_sha
+
+        stored = (strategy_bundle or {}).get("engine_git_sha")
+        current = engine_git_sha()
+        if not stored or not current or stored == current:
+            return None
+        return f"engine code changed since spawn ({str(stored)[:7]} -> {str(current)[:7]})"
+    except Exception:  # noqa: BLE001 — never fail get_state() on drift check
+        return None
+
+
 class StrategyRunner:
     """Isolated strategy execution worker (Layer 1 of the portfolio engine).
 
@@ -4798,10 +4821,27 @@ class StrategyRunner:
         return self.config.symbols[0]
 
     def config_drift_info(self) -> Dict[str, Any]:
-        """Detect frozen-spawn config/template drift without mutating live rules (Ticket D3)."""
+        """Detect frozen-spawn config/template drift without mutating live rules (Ticket D3).
+
+        ``config_drift`` is deliberately governed by the *template-side* reasons
+        alone — they are what ``respawn_runner`` actually fixes. The engine note
+        is reported alongside them for the operator's benefit, because the cure
+        for it is not free: the Respawn button calls ``remove_runner``
+        internally, and an option book's history exists only in the state file.
+        Making engine drift raise the amber pill would put that destructive
+        action on every row after every deploy.
+        """
         reasons: List[str] = []
         if bool(getattr(self, "strategy_code_changed", False)):
             reasons.append("strategy code changed since spawn")
+        # The bundle fingerprints four strategy-side files, so an engine change
+        # — bar clock, mark settlement, capital derived from the books — has
+        # never appeared here even though those are the edits that change what a
+        # running book does. The spawn snapshot carries ``engine_git_sha``;
+        # report the move the fingerprint cannot see (2026-11-05: prose
+        # whitespace flagged all seven books while six engine fixes landed
+        # under them unflagged).
+        engine_note = _engine_drift_note(self.config.strategy_bundle)
         if self.options_bridge is not None:
             try:
                 from backtest.strategy.registry import get_strategy
@@ -4835,9 +4875,13 @@ class StrategyRunner:
                                     reasons.append(msg)
             except Exception:  # noqa: BLE001 — never fail get_state() on drift check
                 pass
+        display = list(reasons)
+        if engine_note:
+            display.append(engine_note)
         return {
             "config_drift": bool(reasons),
-            "config_drift_reasons": reasons,
+            "config_drift_reasons": display,
+            "engine_code_changed_since_spawn": bool(engine_note),
         }
 
     def get_state(self) -> Dict[str, Any]:
@@ -4945,6 +4989,9 @@ class StrategyRunner:
                 "pause_reason": self.pause_reason,
                 "config_drift": drift["config_drift"],
                 "config_drift_reasons": drift["config_drift_reasons"],
+                "engine_code_changed_since_spawn": drift[
+                    "engine_code_changed_since_spawn"
+                ],
                 "can_respawn": open_total == 0,
                 "carry_policy": (options_summary or {}).get("carry_policy"),
                 "options": options_summary,

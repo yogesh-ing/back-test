@@ -33,6 +33,23 @@
   // ---------------------------------------------------------------- helpers
   const $ = (id) => document.getElementById(id);
 
+  /* Same escaper risk_page.js, backtest.js and compare.js carry: this file's
+     markup is ours, the strings interpolated into it come off the wire (a
+     halt reason, a strategy name) and land in innerHTML. */
+  const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (m) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]
+  ));
+
+  /* The runner row used to paint EVERY ``r.error`` red under the words
+     "risk halt" — including the two strategy-drift strings a whitespace-only
+     description edit raises, so the operator read a frozen-code notice as a
+     blown fuse. Those two are already told correctly, in amber, by
+     OptionView.configDriftBadgeHtml() rendered just above it; the red badge
+     stays for what actually is a halt. */
+  const CODE_DRIFT_ERRORS = ["STRATEGY_CODE_CHANGED", "CODE_UPDATED_WHILE_IN_TRADE"];
+  const isCodeDriftError = (e) =>
+    CODE_DRIFT_ERRORS.some((t) => String(e || "").includes(t));
+
   // Bucket scope (ticket P4.1): /portfolio/paper and /portfolio/live set
   // data-mode on #portfolio-page; the combined landing leaves it empty.
   const PAGE_MODE = $("portfolio-page") ? $("portfolio-page").dataset.mode || "" : "";
@@ -267,7 +284,13 @@
     }
     html += '<button class="row-btn row-btn-stop" data-act="stop" data-id="' + r.instance_id + '" title="Stop">⏹</button>';
     html += '<button class="row-btn" data-act="deep_dive" data-id="' + r.instance_id + '" title="Deep dive">🔍</button>';
-    html += '<button class="row-btn row-btn-danger" data-act="remove" data-id="' + r.instance_id + '" title="Remove instance (flattens its book, deletes the row)">🗑</button>';
+    /* Removal does NOT flatten: ``remove_runner`` calls ``runner.stop()``,
+       which releases the feed subscriptions and closes the broker socket and
+       leaves ``positions`` and any open option structure untouched. The book is
+       then dropped from the state file, so its history goes with it — the safe
+       order is flatten (or wait for the exit), confirm open_positions = 0,
+       then remove. The old copy promised the opposite. */
+    html += '<button class="row-btn row-btn-danger" data-act="remove" data-id="' + r.instance_id + '" title="Remove instance — does NOT flatten its open positions, and deletes the book&#39;s history (no undo)">🗑</button>';
     return html;
   }
 
@@ -355,7 +378,7 @@
           ' status-' + r.status.toLowerCase() + '">' +
         '<td>' + (i + 1) + '</td>' +
         '<td class="cell-name">' + kindBadge(r) + r.name +
-          '<div class="cell-sub" title="' + r.strategy_name + '">' + Labels.strategy(r.strategy_name) + " · " + r.timeframe + '</div></td>' +
+          '<div class="cell-sub" title="' + esc(r.strategy_name) + '">' + Labels.strategy(r.strategy_name) + " · " + r.timeframe + '</div></td>' +
         '<td>' + targetCell + '</td>' +
         '<td>' + instrument + '</td>' +
         '<td>' + badgeHtml(r.mode, r.source) + '</td>' +
@@ -374,7 +397,9 @@
             ? '<div class="cell-sub cell-error" title="Duplicates active runner ' +
               String(r.duplicate_of).slice(0, 8) + '">⚠ duplicate</div>'
             : "") +
-          (r.error ? '<div class="cell-sub cell-error" title="' + (r.error || "") + '">⚠ risk halt</div>' : "") +
+          (r.error && !isCodeDriftError(r.error)
+            ? '<div class="cell-sub cell-error" title="' + esc(r.error) + '">⚠ risk halt</div>'
+            : "") +
         '</td>' +
         '<td><div class="row-actions">' + rowActions(r) + "</div>" +
           (refreshMsg ? '<div class="cell-sub refresh-marks-result">' + refreshMsg + '</div>' : "") +
@@ -497,7 +522,7 @@
         (row.expiry ? " · exp " + expiryLabelOf(row.expiry) : "") +
         (row.bars_held ? " · " + row.bars_held + " bars" : "") +
         prevCloseNote + entered + "</div>"
-      : '<div class="cell-sub" title="' + (row.strategy_name || "") + '">' + Labels.strategy(row.strategy_name || "") + entered + "</div>";
+      : '<div class="cell-sub" title="' + esc(row.strategy_name || "") + '">' + Labels.strategy(row.strategy_name || "") + entered + "</div>";
     return (
       '<tr class="pos-row' + (row.stale ? " pos-row-stale" : "") +
         (row.mark_stale ? " stale-mark-row" : "") +
@@ -772,7 +797,7 @@
 
     // (c) Runner comparison table
     const rows = (snap.per_runner || []).map((r) =>
-      '<tr><td>' + r.name + '</td><td title="' + r.strategy + '">' + Labels.strategy(r.strategy) + '</td><td>' + r.target +
+      '<tr><td>' + r.name + '</td><td title="' + esc(r.strategy) + '">' + Labels.strategy(r.strategy) + '</td><td>' + r.target +
       '</td><td class="num">' + fmtMoney(r.equity) + '</td><td class="num ' + pnlClass(r.realized_pnl) + '">' + fmtSigned(r.realized_pnl) +
       '</td><td class="num ' + pnlClass(r.daily_pnl) + '">' + fmtSigned(r.daily_pnl) +
       '</td><td class="num">' + (r.win_rate == null ? "—" : (r.win_rate * 100).toFixed(1) + "%") +
@@ -1709,9 +1734,11 @@
           toast("Respawn refused: " + err.message, "error");
         }
       } else if (act === "remove") {
-        // Destructive: confirm first — removal flattens the book and
-        // deletes the instance; there is no undo.
-        if (!confirm("Remove this instance? Its open positions are flattened and the row is deleted (no undo).")) return;
+        // Destructive, and destructive in a way the operator cannot see
+        // afterwards: removal deletes the instance WITHOUT flattening it, so an
+        // open position keeps its entry and never gets an exit, and an option
+        // book's history (state file only — open legs have no DB row) is erased.
+        if (!confirm("Remove this instance?\n\nThis does NOT flatten its open positions — the book is deleted with them, and its trade history goes with it (no undo).\n\nTo close a trade first, use Flatten, then remove once open positions are 0.")) return;
         try {
           await api("/api/portfolio/runner/" + id, "DELETE");
           toast("Instance removed.", "success");

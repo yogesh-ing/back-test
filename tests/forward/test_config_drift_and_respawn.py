@@ -142,3 +142,75 @@ def test_config_drift_detected_and_flat_respawn_rolls_to_latest_template(
             )
     finally:
         mgr.shutdown()
+
+
+def _template_current_config(*, instance_id: str) -> RunnerConfig:
+    """An option runner frozen on the template's OWN expression: zero drift by construction."""
+    expr = get_strategy("straddle_short_atm").execution_spec().to_expression()
+    return RunnerConfig(
+        name="ShortStraddle·NIFTY·5min",
+        strategy_name="straddle_short_atm",
+        symbols=["NIFTY"],
+        timeframe="5min",
+        allocated_capital=300_000.0,
+        mode="paper",
+        source="synthetic",
+        instance_id=instance_id,
+        instrument={"type": "option", "expression": expr},
+    )
+
+
+def test_engine_code_drift_is_told_but_does_not_flag_the_pill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bundle hashes four strategy-side files, so the engine under a book was invisible.
+
+    2026-11-05: a whitespace-only description edit flagged all seven live books
+    ``strategy code changed`` while six engine fixes — including the bar-clock
+    seam that had blocked every entry on 04-Nov — landed under them unflagged.
+    The move is now a reason, but it deliberately does NOT set ``config_drift``:
+    the only cure is respawn, and ``respawn_runner`` calls ``remove_runner``,
+    which deletes an option book's history (state file only — open legs have no
+    DB row). Raising that pill on every row after every deploy would put a
+    history-destroying button in front of the operator as a matter of routine.
+    """
+    from backtest.strategy.bundle import engine_git_sha
+
+    monkeypatch.setenv("ALLOW_LIVE_ORDERS", "0")
+    monkeypatch.setenv("BACKTEST_DATA_PROFILE", "testing")
+    monkeypatch.setenv("FORWARD_TEST_DB_PROFILE", "testing")
+    monkeypatch.setenv("FORWARD_TEST_DB_URL", "sqlite:///:memory:")
+    reset_portfolio_manager(auto_start_feed=False)
+    create_app(source="synthetic", log_level="ERROR", TESTING=True)
+
+    mgr = get_portfolio_manager()
+    try:
+        moved = _template_current_config(instance_id="engine-moved-1")
+        moved.strategy_bundle = {"engine_git_sha": "0" * 40}
+        mgr.add_runner(moved)
+        state = mgr.get_runner("engine-moved-1").get_state()
+        assert state["engine_code_changed_since_spawn"] is True
+        notes = [r for r in state["config_drift_reasons"] if r.startswith("engine code")]
+        assert len(notes) == 1, state["config_drift_reasons"]
+        assert "0000000 ->" in notes[0], notes[0]
+        # Told, not flagged: nothing here asks for a respawn.
+        assert state["config_drift"] is False
+
+        current = _template_current_config(instance_id="engine-current-1")
+        current.strategy_bundle = {"engine_git_sha": engine_git_sha()}
+        mgr.add_runner(current)
+        clean = mgr.get_runner("engine-current-1").get_state()
+        assert clean["engine_code_changed_since_spawn"] is False
+        assert clean["config_drift_reasons"] == []
+
+        # An unstamped snapshot has nothing to compare — report no drift rather
+        # than inventing either a match or a move.
+        untracked = _template_current_config(instance_id="engine-unknown-1")
+        untracked.strategy_bundle = None
+        mgr.add_runner(untracked)
+        assert (
+            mgr.get_runner("engine-unknown-1").get_state()["engine_code_changed_since_spawn"]
+            is False
+        )
+    finally:
+        mgr.shutdown()
