@@ -294,7 +294,7 @@ const BrokerAuthUI = (() => {
                 hint.appendChild(btn);
                 const note = document.createElement("p");
                 note.className = "broker-auth-remember-hint";
-                note.textContent = "Sign in there, then come back to THIS tab and paste the authorization code below.";
+                note.innerHTML = "Sign in there, then <strong>just click Continue below</strong> — the code is captured automatically.";
                 hint.appendChild(note);
                 hint.style.display = "block";
             } else if (fields && fields.codeHint && name === "upstox") {
@@ -311,9 +311,18 @@ const BrokerAuthUI = (() => {
         const t = totpInput();
         if (!t) return;
         const code = t.value.trim();
-        if (!code) {
-            const name = currentBroker();
-            const fields = (name && BROKER_FIELDS[name]) || null;
+        const name = currentBroker();
+        const fields = (name && BROKER_FIELDS[name]) || null;
+        
+        console.log("[BROKER AUTH] handleTotp called");
+        console.log("[BROKER AUTH] broker:", name);
+        console.log("[BROKER AUTH] code from input:", code ? `"${code}" (length=${code.length})` : "(empty)");
+        console.log("[BROKER AUTH] pendingAuthUrl:", pendingAuthUrl);
+        
+        // For OAuth brokers (Upstox), allow empty code if it's already parked
+        // server-side from the callback redirect
+        if (!code && name !== "upstox") {
+            console.log("[BROKER AUTH] Empty code for non-OAuth broker, showing error");
             if (totpError()) {
                 totpError().textContent = (fields && fields.codeLabel)
                     ? `Paste the ${fields.codeLabel}`
@@ -327,17 +336,22 @@ const BrokerAuthUI = (() => {
 
         try {
             // Multi-broker Phase A: target the broker whose flow is pending.
+            console.log("[BROKER AUTH] Sending verify-totp request with code:", code ? `"${code.substring(0, 3)}..."` : "(empty - using parked)");
             const result = await postJSON("/api/broker/verify-totp", {
-                totp_code: code,
+                totp_code: code,  // can be empty for Upstox if callback parked it
                 broker: currentBroker(),
             });
+            console.log("[BROKER AUTH] verify-totp response:", result);
             if (result.success) {
+                console.log("[BROKER AUTH] Success! Refreshing auth status...");
                 await refreshAndShowAuth();
             } else {
+                console.log("[BROKER AUTH] Failed:", result.message);
                 if (totpError()) totpError().textContent = result.message || "Invalid TOTP code";
                 // backend keeps temp context — user can retry; field stays enabled
             }
         } catch (err) {
+            console.error("[BROKER AUTH] Error during verify-totp:", err);
             if (totpError()) totpError().textContent = "Connection error — please try again";
         } finally {
             setSpinner(totpBtn(), false);

@@ -175,7 +175,13 @@ def verify_totp() -> tuple:
     data = request.get_json(silent=True) or {}
     code = _string_field(data, "totp_code")
     broker_name = _string_field(data, "broker")
+    
+    # DEBUG: Log what we received
+    logger.info("[VERIFY-TOTP ENDPOINT] Received - code='%s' (len=%d), broker='%s'", 
+               code, len(code) if code else 0, broker_name)
+    
     if code is None:
+        logger.info("[VERIFY-TOTP ENDPOINT] Code is None, returning error")
         return (
             jsonify({"success": False, "message": "totp_code is required", "expires_at": ""}),
             400,
@@ -185,7 +191,9 @@ def verify_totp() -> tuple:
         from backtest.brokers.session_manager import UnknownBrokerError
 
         try:
+            logger.info("[VERIFY-TOTP ENDPOINT] Calling session_manager.verify_totp...")
             result = get_session_manager().verify_totp(code, broker_name=broker_name)
+            logger.info("[VERIFY-TOTP ENDPOINT] Result: %s", result)
         except UnknownBrokerError as exc:
             return jsonify({"success": False, "message": str(exc), "expires_at": ""}), 400
         verified = bool(result.get("success"))
@@ -475,11 +483,16 @@ def upstox_oauth_callback() -> Response:
         )
     code = (request.args.get("code") or "").strip()
     state = (request.args.get("state") or "").strip()
+    
+    # DEBUG: Log what we received from Upstox
+    logger.info("[UPSTOX CALLBACK] Received - code='%s' (len=%d), state='%s'", code, len(code), state)
+    
     try:
         from backtest.brokers.session_manager import get_session_manager
 
         broker = get_session_manager().get_broker("upstox")
         ok, message = broker.park_auth_code(code, state)
+        logger.info("[UPSTOX CALLBACK] park_auth_code result: ok=%s, message='%s'", ok, message)
     except Exception:  # noqa: BLE001 — a callback must render, never 500 with detail
         logger.exception("upstox oauth callback failed")
         ok, message = False, "Internal error while saving the code — check the server log"
