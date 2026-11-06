@@ -205,7 +205,7 @@ def client(monkeypatch):
     import backtest.brokers.session_manager as sm
 
     class _Fake:
-        def get_active_session_token(self):
+        def get_active_session_token(self, broker_name=None):
             return "x" * 32
 
     monkeypatch.setattr(sm, "get_session_manager", lambda: _Fake())
@@ -224,16 +224,57 @@ def test_bad_scope_is_rejected_with_400(client):
 def test_scope_is_plumbed_into_the_job(client, monkeypatch):
     captured = {}
 
-    def spy(token, timeframe, from_date, to_date, symbols, scope):
-        captured.update(scope=scope, symbols=symbols)
+    def spy(broker, token, timeframe, from_date, to_date, symbols, scope):
+        captured.update(broker=broker, scope=scope, symbols=symbols)
 
     monkeypatch.setattr(data_manager, "_run_fetch_job", spy)
-    r = client.post("/api/data/fetch", json={"timeframe": "1day", "scope": "index"})
+    r = client.post(
+        "/api/data/fetch", json={"broker": "upstox", "timeframe": "1day", "scope": "index"}
+    )
     assert r.status_code == 200
     assert r.get_json()["scope"] == "index"
+    assert captured["broker"] == "upstox"
     assert captured["scope"] == "index"
     # the fake job never runs, so clear the running flag for the next test
     data_manager._job["status"] = "idle"
+
+
+# ---------------------------------------------------------------------------
+# Broker-specific timeframe support (Upstox history, 2026-11-06)
+#
+# Measured against the live API: Upstox v2 serves 1minute/30minute/day/week
+# and answers HTTP 400 for 5minute, 15minute and 60minute — and every v3
+# ``unit:interval`` form. Validating all brokers against mStock's map let an
+# Upstox 5min job start, then lose every window to a guaranteed 400.
+# ---------------------------------------------------------------------------
+
+
+def test_upstox_rejects_a_timeframe_the_api_400s_on(client):
+    r = client.post(
+        "/api/data/fetch", json={"broker": "upstox", "timeframe": "5min"}
+    )
+    assert r.status_code == 400
+    err = r.get_json()["error"]
+    assert "upstox" in err.lower()
+    # the message names what IS available, not just what is wrong
+    assert "1min" in err and "1day" in err
+
+
+def test_mstock_still_serves_the_timeframes_upstox_lacks(client):
+    r = client.post(
+        "/api/data/fetch", json={"broker": "mstock", "timeframe": "5min"}
+    )
+    assert r.status_code == 200
+    data_manager._job["status"] = "idle"
+
+
+def test_upstox_fetcher_refuses_before_touching_the_network():
+    """The guard is the last-resort fence for callers that bypass the
+    endpoint — it must raise before the session lookup or any request."""
+    with pytest.raises(ValueError, match="no '5min' historical bars"):
+        data_manager._fetch_upstox_bars_chunked(
+            "RELIANCE", "2026-01-01", "2026-01-05", "NSE", "5min", 2
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +319,13 @@ def test_resolution_failure_lands_job_in_error_not_wedged_running(monkeypatch):
     monkeypatch.setattr(data_manager, "_load_instruments", boom)
     data_manager._job.update(status="idle", total=0, error=None, fetched=0)
     data_manager._run_fetch_job(
-        "x" * 32, "1day", "2024-01-01", "2024-02-01", None, "equity"
+        broker="mstock",
+        token="x" * 32,
+        timeframe="1day",
+        from_date="2024-01-01",
+        to_date="2024-02-01",
+        symbols=None,
+        scope="equity",
     )
     assert data_manager._job["status"] == "error"
     assert "could not be loaded" in (data_manager._job["error"] or "")
@@ -293,7 +340,13 @@ def test_unexpected_worker_crash_never_wedges_running(monkeypatch):
     monkeypatch.setattr(data_manager, "_run_fetch_job_inner", crash)
     data_manager._job.update(status="idle", total=0, error=None)
     data_manager._run_fetch_job(
-        "x" * 32, "1day", "2024-01-01", "2024-02-01", None, "equity"
+        broker="mstock",
+        token="x" * 32,
+        timeframe="1day",
+        from_date="2024-01-01",
+        to_date="2024-02-01",
+        symbols=None,
+        scope="equity",
     )
     assert data_manager._job["status"] == "error"
     assert "crashed" in (data_manager._job["error"] or "")

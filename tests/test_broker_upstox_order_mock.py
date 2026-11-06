@@ -10,7 +10,7 @@ symbol). **Never against a real account in CI — all HTTP is mocked.**
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -349,16 +349,64 @@ def test_calculate_margin_missing_amount_raises(broker, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+_MONTH_ABBR = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+               "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+
+_IST_OFFSET = timezone(timedelta(hours=5, minutes=30))
+
+
+def _chain_expiry() -> date:
+    """A live expiry for the fixtures — the parser drops expired rows, so a
+    hardcoded date would rot this suite the morning after it last passed."""
+    return date.today() + timedelta(days=30)
+
+
+def _epoch_ms(day: date) -> int:
+    """Upstox's master stamps expiry as epoch milliseconds at 23:59:59 IST."""
+    stamp = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=_IST_OFFSET)
+    return int(stamp.timestamp() * 1000)
+
+
+def _symbol(underlying: str, strike, side: str, expiry: date) -> str:
+    """The spaced NSE listing form: ``NIFTY 24500 CE 29 DEC 26``."""
+    return (f"{underlying} {strike:g} {side} {expiry.day:02d} "
+            f"{_MONTH_ABBR[expiry.month - 1]} {expiry.year % 100:02d}")
+
+
+_UNSET = object()
+_KEY_SEQ = [50978]
+
+
 def _option_row(**kw) -> dict[str, Any]:
+    """One instrument-master row in the shape Upstox actually sends.
+
+    Verified against the live master (129,634 rows, 2026-11-06): every F&O
+    option row carries ``underlying_symbol``, a spaced ``trading_symbol``, an
+    epoch-ms ``expiry`` int and numeric strike/lot — no row needs a symbol
+    decoded.
+    """
+    expiry = kw.pop("expiry_given", _chain_expiry())
+    underlying = kw.pop("underlying_symbol", "NIFTY")
+    strike = kw.pop("strike_price", _UNSET)
+    if strike is _UNSET:
+        strike = 24500
+    side = kw.pop("instrument_type", _UNSET)
+    if side is _UNSET:
+        side = "CE"
+    symbol = kw.pop("trading_symbol", None)
+    if symbol is None and expiry is not None and strike is not None and side in ("CE", "PE"):
+        symbol = _symbol(underlying, strike, side, expiry)
+    _KEY_SEQ[0] += 1
     row = {
-        "instrument_key": "NFO|NIFTY26OCT24500CE",
-        "exchange": "NFO",
-        "segment": "NFO",
-        "trading_symbol": "NIFTY26OCT24500CE",
-        "instrument_type": "CE",
-        "strike_price": 24500,
-        "expiry": "2026-10-29",
-        "lot_size": 75,
+        "trading_symbol": symbol,
+        "underlying_symbol": underlying,
+        "instrument_key": f"NSE_FO|{_KEY_SEQ[0]}",
+        "exchange": "NSE",
+        "segment": "NSE_FO",
+        "instrument_type": side,
+        "strike_price": float(strike) if strike is not None else None,
+        "expiry": _epoch_ms(expiry) if expiry is not None else None,
+        "lot_size": 65,
         "tick_size": 0.05,
     }
     row.update(kw)
@@ -368,35 +416,65 @@ def _option_row(**kw) -> dict[str, Any]:
 def test_get_option_chain_from_master_rows(broker, monkeypatch):
     import backtest.brokers.upstox as upstox_mod
 
+    expiry = _chain_expiry()
+    ce = _symbol("NIFTY", 24500, "CE", expiry)
+    pe = _symbol("NIFTY", 24600, "PE", expiry)
     rows = [
         _option_row(),
-        _option_row(
-            instrument_key="NFO|NIFTY26OCT24600PE",
-            trading_symbol="NIFTY26OCT24600PE",
-            instrument_type="PE",
-            strike_price=24600,
-        ),
-        # wrong underlying + non-option rows are skipped
-        _option_row(trading_symbol="BANKNIFTY26OCT52000CE", strike_price=52000),
-        _option_row(trading_symbol="RELIANCE", instrument_type="EQ"),
-        # unparseable row (no strike anywhere) is dropped, not guessed
-        _option_row(
-            instrument_key="NFO|NIFTY26OCTCE",
-            trading_symbol="NIFTY26OCTCE",
-            strike_price=None,
-            expiry=None,
-        ),
+        _option_row(strike_price=24600, instrument_type="PE"),
+        # a different underlying and a non-option row are skipped
+        _option_row(underlying_symbol="BANKNIFTY", strike_price=52000, lot_size=30),
+        _option_row(underlying_symbol="RELIANCE", trading_symbol="RELIANCE",
+                    instrument_type="EQ", strike_price=None),
+        # unparseable rows are dropped, not guessed
+        _option_row(strike_price=None, expiry_given=None),
+        _option_row(expiry_given=None),
     ]
     monkeypatch.setattr(upstox_mod, "_MASTER_ROWS_CACHE", rows)
     contracts = broker.get_option_chain("NIFTY")
-    assert {c.trading_symbol for c in contracts} == {"NIFTY26OCT24500CE", "NIFTY26OCT24600PE"}
+    assert {c.trading_symbol for c in contracts} == {ce, pe}
     for contract in contracts:
         assert contract.is_valid()
         assert contract.underlying == "NIFTY"
         assert contract.exchange == "NSE" and contract.segment == "NFO"
-        assert contract.expiry == date(2026, 10, 29)
-        assert contract.lot_size == 75
-        assert contract.instrument_token.startswith("NFO|")
+        assert contract.expiry == expiry
+        assert contract.lot_size == 65
+        assert contract.instrument_token.startswith("NSE_FO|")
+
+
+def test_get_option_chain_separates_underlyings_sharing_a_prefix(broker, monkeypatch):
+    """The live master lists NIFTY, NIFTYFPI and NIFTYNXT50 as distinct
+    underlyings. Matching on the symbol prefix handed a NIFTY book the other
+    two — wrong strikes and wrong lot sizes — so ``underlying_symbol`` decides.
+    """
+    import backtest.brokers.upstox as upstox_mod
+
+    monkeypatch.setattr(
+        upstox_mod, "_MASTER_ROWS_CACHE",
+        [
+            _option_row(),
+            _option_row(underlying_symbol="NIFTYFPI", strike_price=100),
+            _option_row(underlying_symbol="NIFTYNXT50", strike_price=1200),
+        ],
+    )
+    contracts = broker.get_option_chain("NIFTY")
+    assert [float(c.strike) for c in contracts] == [24500.0]
+
+
+def test_get_option_chain_reads_epoch_millisecond_expiry(broker, monkeypatch):
+    """Upstox sends ``1798568999000``, not a date string. Read on the IST
+    clock that is 29 Dec 2026; UTC would put it a day earlier for the rows
+    that expire after 18:30 IST."""
+    import backtest.brokers.upstox as upstox_mod
+
+    expiry = date(2026, 12, 29)
+    monkeypatch.setattr(
+        upstox_mod, "_MASTER_ROWS_CACHE",
+        [_option_row(expiry_given=expiry)],
+    )
+    contracts = broker.get_option_chain("NIFTY")
+    assert len(contracts) == 1
+    assert contracts[0].expiry == expiry
 
 
 def test_get_option_chain_empty_master_returns_empty(broker, monkeypatch):
@@ -404,6 +482,31 @@ def test_get_option_chain_empty_master_returns_empty(broker, monkeypatch):
 
     monkeypatch.setattr(upstox_mod, "_MASTER_ROWS_CACHE", [])
     assert broker.get_option_chain("NIFTY") == []
+
+
+def test_plain_symbol_resolves_to_nse_not_bse(monkeypatch):
+    """The live master lists RELIANCE twice — ``BSE_EQ`` first, then
+    ``NSE_EQ`` — with the same ISIN. Row order used to decide, so RELIANCE
+    resolved to BSE and the fetcher pulled another exchange's bars while the
+    cache holds NSE. NSE must win regardless of order.
+    """
+    import backtest.brokers.upstox as upstox_mod
+
+    monkeypatch.delenv("UPSTOX_INSTRUMENT_KEYS", raising=False)
+    monkeypatch.setattr(upstox_mod, "_INSTRUMENT_KEY_CACHE", None)
+    monkeypatch.setattr(
+        upstox_mod, "_MASTER_ROWS_CACHE",
+        [
+            {"trading_symbol": "RELIANCE", "exchange": "BSE", "segment": "BSE_EQ",
+             "instrument_key": "BSE_EQ|INE002A01018"},
+            {"trading_symbol": "RELIANCE", "exchange": "NSE", "segment": "NSE_EQ",
+             "instrument_key": "NSE_EQ|INE002A01018"},
+        ],
+    )
+    assert upstox_mod.resolve_instrument_key("RELIANCE") == "NSE_EQ|INE002A01018"
+    # the composite forms stay available for an explicit choice
+    assert upstox_mod.resolve_instrument_key("BSE:RELIANCE") == "BSE_EQ|INE002A01018"
+    monkeypatch.setattr(upstox_mod, "_INSTRUMENT_KEY_CACHE", None)
 
 
 def test_get_option_quote_maps_depth(broker, monkeypatch):

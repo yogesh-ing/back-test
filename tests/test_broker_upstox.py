@@ -125,12 +125,45 @@ def test_verify_totp_without_login_rejected(broker: UpstoxBroker) -> None:
     assert "Log in" in result["message"]
 
 
-def test_verify_totp_six_digit_totp_rejected(broker: UpstoxBroker) -> None:
-    """Upstox has no TOTP endpoint — a 6-digit code is never valid here."""
+def test_verify_totp_forwards_any_non_empty_code(
+    broker: UpstoxBroker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upstox answers the code question — the app only rejects silence.
+
+    The manual-paste shape check was removed on purpose: it turned Upstox's
+    own verdict into a client-side typing error, and any code shorter than
+    the pattern could not be tried at all.
+    """
     broker.login("api-key-123456", "api-secret-123456")
+    captured: dict[str, Any] = {}
+
+    def _fake_post(
+        url: str, data: dict | None = None, headers: dict | None = None, **kw: Any
+    ) -> Any:
+        captured["data"] = data
+        return _err_response(401, None)
+
+    monkeypatch.setattr("backtest.brokers.upstox.requests.post", _fake_post)
     result = broker.verify_totp("123456")
+
+    assert captured["data"]["code"] == "123456"  # reached the exchange
+    assert result["success"] is False  # Upstox's rejection governs
+
+
+def test_verify_totp_blank_code_never_reaches_the_network(
+    broker: UpstoxBroker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broker.login("api-key-123456", "api-secret-123456")
+    calls: list[Any] = []
+    monkeypatch.setattr(
+        "backtest.brokers.upstox.requests.post",
+        lambda url, **kw: calls.append(url) or _ok_response({}),
+    )
+    result = broker.verify_totp("   ")
+
     assert result["success"] is False
     assert "authorization code" in result["message"]
+    assert calls == []
 
 
 def test_verify_totp_success_stores_token_and_clears_secret(
@@ -235,11 +268,17 @@ def test_park_auth_code_happy_path_parks_then_consumes(
     assert f"state={state}" in login["auth_url"]
 
 
-def test_park_auth_code_bad_shape_rejected(broker: UpstoxBroker) -> None:
+def test_park_auth_code_parks_anything_upstox_sent(broker: UpstoxBroker) -> None:
+    """State-matched codes are parked as-is; only an empty code is refused."""
     broker.login("api-key-123456", "api-secret-123456")
     state = broker._temp_auth_context["state"]  # type: ignore[index]
     ok, _ = broker.park_auth_code("short", state)
+    assert ok is True
+    assert broker._parked_auth_code == "short"
+
+    ok, message = broker.park_auth_code("   ", state)
     assert ok is False
+    assert "No authorization code" in message
 
 
 # ---------------------------------------------------------------------------

@@ -50,7 +50,6 @@ import gzip
 import json
 import logging
 import os
-import re
 import secrets
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -141,22 +140,15 @@ DEFAULT_SESSION_TTL_MINUTES = 1440.0
 # PRD session state machine: "expiring_soon" inside the last 30 minutes.
 EXPIRING_SOON_WINDOW_MINUTES = 30.0
 
-_AUTH_CODE_PATTERN = re.compile(r"^[A-Za-z0-9._~+/=-]{4,}$")
 _MAX_MESSAGE_LEN = 200
 
-#: NSE compact option symbol — ``NIFTY26OCT24500CE``: YY + MON + strike +
-#: side (the NSE convention every Indian broker reuses, incl. Upstox).
-_OPTION_SYMBOL_RE = re.compile(
-    r"^(NIFTY|BANKNIFTY)(\d{2})([A-Z]{3})(\d+)(CE|PE)$"
-)
-
-_MONTHS = {
-    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
-    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-}
-
-#: Asia/Kolkata — the wall clock Upstox cuts sessions on.
+#: The wall clock Upstox cuts sessions on.
 _IST = timezone(timedelta(hours=5, minutes=30))
+
+#: An epoch this small is a day count or a strike, not a timestamp
+#: (1e9 s is Sep 2001). Anything at or above it is seconds; a value four
+#: orders larger is Upstox's milliseconds.
+_MIN_EPOCH_SECONDS = 1_000_000_000
 
 
 class UpstoxAuthError(Exception):
@@ -203,6 +195,20 @@ def _load_master_rows(timeout: float = 30.0) -> list[dict]:
     return rows
 
 
+#: Plain-symbol resolution priority. The master lists the same ISIN under
+#: both ``BSE_EQ`` and ``NSE_EQ``, so "first row wins" let BSE answer
+#: ``RELIANCE`` and the fetcher then pulled the wrong exchange's bars. This
+#: app trades NSE, so NSE ranks first; ``EXCHANGE:SYMBOL`` stays unambiguous.
+_SEGMENT_PRIORITY = ("NSE_EQ", "NSE_INDEX", "NSE_FO", "BSE_EQ", "BSE_INDEX")
+
+
+def _segment_rank(segment: str) -> int:
+    try:
+        return _SEGMENT_PRIORITY.index(segment)
+    except ValueError:
+        return len(_SEGMENT_PRIORITY)
+
+
 def _load_instrument_keys(timeout: float = 30.0) -> dict[str, str]:
     """``{TRADING_SYMBOL: instrument_key}`` plus composite ``EXCHANGE:SYMBOL``.
 
@@ -214,19 +220,21 @@ def _load_instrument_keys(timeout: float = 30.0) -> dict[str, str]:
     if _INSTRUMENT_KEY_CACHE is not None:
         return _INSTRUMENT_KEY_CACHE
     mapping: dict[str, str] = {}
+    best_rank: dict[str, int] = {}
     for row in _load_master_rows(timeout):
         key = str(row.get("instrument_key") or row.get("trading_token") or "").strip()
         symbol = str(
             row.get("trading_symbol") or row.get("tradingsymbol") or row.get("symbol") or ""
         ).strip().upper()
         exchange = str(row.get("exchange") or "").strip().upper()
+        segment = str(row.get("segment") or "").strip().upper()
         if not key or not symbol:
             continue
-        # Plain symbol first-wins (NSE equity / index rows win over the
-        # rest); the EXCHANGE:SYMBOL composite is always unambiguous.
-        mapping.setdefault(symbol, key)
-        if exchange:
-            mapping.setdefault(f"{exchange}:{symbol}", key)
+        rank = _segment_rank(segment)
+        if symbol not in mapping or rank < best_rank[symbol]:
+            mapping[symbol] = key
+            best_rank[symbol] = rank
+        mapping.setdefault(f"{exchange}:{symbol}", key)
     _INSTRUMENT_KEY_CACHE = mapping
     return mapping
 
@@ -308,38 +316,41 @@ def _to_decimal(value: Any) -> Decimal | None:
 
 
 def _parse_expiry(raw: Any) -> date | None:
-    """Parse an instrument-master expiry (``2026-10-30`` / ``30-10-2026`` /
-    ``30 Oct 2026`` styles) — ``None`` when unparseable (never guessed)."""
+    """Parse an instrument-master expiry — ``None`` when unparseable.
+
+    The live master stamps expiry as **epoch milliseconds** in IST
+    (``1798568999000`` = 29 Dec 2026 23:59:59 +05:30); a date is read off
+    that wall clock, so the IST offset is part of the value, not a hint.
+    Text forms are still accepted for hand-built fixtures and older dumps.
+    """
     if raw in (None, ""):
         return None
+    if isinstance(raw, datetime):
+        stamp = raw if raw.tzinfo is not None else raw.replace(tzinfo=_IST)
+        return stamp.astimezone(_IST).date()
+    if isinstance(raw, date):
+        return raw
     text = str(raw).strip()
+    if text.lstrip("-").isdigit():
+        try:
+            seconds = float(text)
+        except ValueError:
+            return None
+        if abs(seconds) >= 1000 * _MIN_EPOCH_SECONDS:
+            seconds /= 1000.0
+        if abs(seconds) >= _MIN_EPOCH_SECONDS:
+            try:
+                return datetime.fromtimestamp(seconds, _IST).date()
+            except (OverflowError, OSError, ValueError):
+                return None
     for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d", "%d-%b-%Y", "%d-%b-%y", "%d %b %Y"):
         try:
             return datetime.strptime(text[:15].strip(), fmt).date()
         except ValueError:
             continue
     try:
-        parsed = date.fromisoformat(text[:10])
-        return parsed
+        return date.fromisoformat(text[:10])
     except ValueError:
-        return None
-
-
-def _expiry_from_symbol(match: re.Match) -> date | None:
-    """Expiry from a compact NSE option symbol (YY + MON, month-end).
-
-    Fallback for master rows without a real ``expiry`` field — the same
-    approximation MStockBroker uses. Returns ``None`` when the result would
-    be in the past (an expired contract is dropped, never dated into the
-    future).
-    """
-    try:
-        year = 2000 + int(match.group(2))
-        month = _MONTHS[match.group(3)]
-        last_day = (date(year, month, 28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-        expiry = last_day
-        return expiry if expiry >= date.today() else None
-    except (ValueError, KeyError):
         return None
 
 
@@ -462,7 +473,7 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
         moment the exchange succeeds (or fails permanently).
         """
         typed = (totp_code or "").strip()
-        
+
         if self._temp_auth_context is None:
             return {
                 "success": False,
@@ -471,7 +482,7 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
             }
 
         code = self._parked_auth_code or typed
-        
+
         if not code:
             return {
                 "success": False,
@@ -722,11 +733,13 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
     def get_option_chain(self, underlying: str) -> list[Any]:
         """All valid option contracts for ``underlying`` (instrument master).
 
-        Filters the Upstox instrument master to index-option rows of the
-        given underlying (``"NIFTY"`` / ``"BANKNIFTY"`` — the V1 set), then
-        parses each row into an :class:`OptionContract`. Unparseable rows are
-        skipped, never guessed. The master itself is a public asset, so no
-        session is required for this call (quotes are session-gated).
+        Filters the Upstox instrument master to option rows whose
+        ``underlying_symbol`` (the field that says what each contract settles
+        on) is ``underlying``, then parses each into an
+        :class:`OptionContract`. Rows that predate the field fall back to a
+        symbol prefix. Unparseable rows are skipped, never guessed. The master
+        itself is a public asset, so no session is required for this call
+        (quotes are session-gated).
         """
         from backtest.instruments.option import OptionContract
 
@@ -743,10 +756,16 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
             symbol = str(
                 row.get("trading_symbol") or row.get("tradingsymbol") or row.get("symbol") or ""
             ).strip().upper()
-            if not symbol.startswith(name):
+            if not symbol:
+                continue
+            master_underlying = str(row.get("underlying_symbol") or "").strip().upper()
+            if master_underlying:
+                if master_underlying != name:
+                    continue
+            elif not symbol.startswith(name):
                 continue
             opt_type = str(row.get("instrument_type") or "").strip().upper()
-            if opt_type not in ("CE", "PE") and not _OPTION_SYMBOL_RE.fullmatch(symbol):
+            if opt_type not in ("CE", "PE"):
                 continue
             contract = self._parse_option_contract(row, name, symbol)
             if isinstance(contract, OptionContract) and contract.is_valid():
@@ -805,10 +824,10 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
     ) -> Any | None:
         """Parse one instrument-master row into an OptionContract (or ``None``).
 
-        Structured master fields win (``strike_price`` / ``expiry`` /
-        ``lot_size``); the compact ``NIFTY26OCT24500CE`` symbol pattern is the
-        fallback for rows that omit them. Never guesses: an unparseable row is
-        dropped.
+        Every live master row carries ``strike_price`` / ``expiry`` /
+        ``lot_size`` / ``instrument_type`` as structured fields, so there is
+        nothing to decode out of a symbol. Never guesses: an unparseable row
+        is dropped.
         """
         try:
             from datetime import date as _date
@@ -816,22 +835,15 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
             from backtest.instruments.base import ExerciseType, SettlementType
             from backtest.instruments.option import OptionContract
 
-            match = _OPTION_SYMBOL_RE.fullmatch(symbol)
             strike = _to_decimal(row.get("strike_price"))
-            if strike is None and match:
-                strike = Decimal(match.group(4))
             if strike is None or strike <= 0:
                 return None
 
             expiry = _parse_expiry(row.get("expiry"))
-            if expiry is None and match:
-                expiry = _expiry_from_symbol(match)
             if expiry is None or expiry < _date.today():
                 return None
 
             opt_type = str(row.get("instrument_type") or "").strip().upper()
-            if opt_type not in ("CE", "PE"):
-                opt_type = match.group(5) if match else ""
             if opt_type not in ("CE", "PE"):
                 return None
 
@@ -1169,11 +1181,6 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
             payload: Any = resp.json()
         except ValueError:
             payload = None
-
-        # DEBUG: Print the raw response for troubleshooting
-        import sys
-        print(f"[UPSTOX TOKEN EXCHANGE] HTTP {resp.status_code}", file=sys.stderr, flush=True)
-        print(f"[UPSTOX TOKEN EXCHANGE] Response: {str(payload)[:500] if payload else '(not JSON)'}", file=sys.stderr, flush=True)
 
         if not resp.ok:
             default = (

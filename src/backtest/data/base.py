@@ -27,6 +27,21 @@ MSTOCK_INTERVAL_MAP = {
     "1week": "week",
 }
 
+#: Canonical timeframe -> Upstox v2 historical-candle interval. These five are
+#: the whole set that returns bars: ``5minute``, ``15minute`` and ``60minute``
+#: are all rejected with HTTP 400, and every v3 ``unit:interval`` form 400s too
+#: (measured live 2026-11-06). A timeframe missing here has no Upstox bar at any
+#: depth — resampling ``1min`` would be new behaviour, not a translation, so the
+#: fetcher must refuse instead of silently asking for a name the API 400s. Only
+#: canonical names appear as keys — Upstox's ``month`` has no canonical
+#: timeframe to translate from.
+UPSTOX_HISTORICAL_INTERVAL_MAP = {
+    "1min": "1minute",
+    "30min": "30minute",
+    "1day": "day",
+    "1week": "week",
+}
+
 #: NSE equity session length in minutes (09:15–15:30).
 TRADING_MINUTES_PER_DAY = 375
 

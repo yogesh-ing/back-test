@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Data Manager API endpoints.
 
 Endpoints for fetching historical market data from mStock and storing in PostgreSQL.
@@ -13,12 +11,9 @@ Runs fetch jobs as background threads with progress tracking.
                                (PRD backTest-enhance §1.3) — the one endpoint
                                the Backtest, Compare and Optimize symbol
                                pickers read.
-
-*** VERSION: from_date/to_date support added 2026-10-18 ***
 """
-import logging
-_log = logging.getLogger(__name__)
-_log.warning("=== DATA_MANAGER MODULE LOADED - from_date/to_date version ===")
+
+from __future__ import annotations
 
 import math
 import os
@@ -32,7 +27,12 @@ import requests
 from flask import Blueprint, jsonify, request
 from sqlalchemy import create_engine, text
 
-from backtest.data.base import CANONICAL_TIMEFRAMES, MSTOCK_INTERVAL_MAP, bar_timestamp
+from backtest.data.base import (
+    CANONICAL_TIMEFRAMES,
+    MSTOCK_INTERVAL_MAP,
+    UPSTOX_HISTORICAL_INTERVAL_MAP,
+    bar_timestamp,
+)
 from backtest.data.coverage import (
     INDEX_UNIVERSE,
     INSTRUMENT_TYPES,
@@ -277,8 +277,9 @@ def fetch_clear() -> tuple:
 def fetch_start() -> tuple:
     """Start a background fetch job.
 
-    Body: { broker?: 'mstock'|'upstox'|'dhan', symbols?: string[], scope?: 'equity,index'|'equity'|'index',
-            timeframe?: string, from_date?: string, to_date?: string }
+    Body: { broker?: 'mstock'|'upstox'|'dhan', symbols?: string[],
+            scope?: 'equity,index'|'equity'|'index', timeframe?: string,
+            from_date?: string, to_date?: string }
 
     ``symbols`` wins when present. With nothing ticked, ``scope`` selects
     the curated universe to fetch (:data:`FETCH_SCOPES`) — the Data tab
@@ -309,13 +310,16 @@ def fetch_start() -> tuple:
             400,
         )
 
-    if timeframe not in _MSTOCK_INTERVAL_MAP:
+    interval_map = (
+        UPSTOX_HISTORICAL_INTERVAL_MAP if broker == "upstox" else _MSTOCK_INTERVAL_MAP
+    )
+    if timeframe not in interval_map:
         return (
             jsonify(
                 {
                     "error": (
-                        f"Unsupported timeframe: {timeframe}. "
-                        f"Use: {list(_MSTOCK_INTERVAL_MAP.keys())}"
+                        f"Unsupported timeframe for {broker}: {timeframe}. "
+                        f"Use: {sorted(interval_map)}"
                     )
                 }
             ),
@@ -1041,11 +1045,7 @@ def _run_fetch_job_inner(
                 continue
 
             inserted = _persist_bars(engine, bars, symbol, inst_exchange, timeframe)
-            
-            # Update coverage summary table (incremental, <10ms per symbol)
-            if inserted > 0:
-                _update_coverage_summary(engine, symbol, timeframe, bars)
-            
+
             log.info(
                 "[data] %s: %d bars fetched, %d inserted (%d/%d done)",
                 symbol,
@@ -1394,79 +1394,23 @@ def _probe_covered_days(
 ) -> dict[str, set]:
     """One query for the WHOLE job: which days already hold enough bars.
 
-    Uses data_coverage_summary table (<100ms) instead of scanning 46M rows
-    in market_data_cache (14+ seconds). Falls back to old scan if summary
-    table doesn't exist.
-
     Returns ``{}`` on ANY error — every symbol then gets a full fetch rather
     than being wrongly skipped because a probe failed.
+
+    Scans ``market_data_cache`` directly. The ``data_coverage_summary``
+    shortcut this replaced is stale on the live books (its last write is
+    2026-10-18), and a probe that lies makes the fetcher skip days that hold
+    no bars.
     """
     if not symbols:
         return {}
-    
-    # Try fast path: summary table
-    try:
-        covered = _probe_from_summary(engine, symbols, timeframe, from_date, to_date)
-        if covered is not None:
-            return covered
-        # Summary table query returned None → table missing, fall through to slow path
-    except Exception as exc:
-        log.warning(
-            "[data] coverage summary query failed: %s — falling back to full scan",
-            exc,
-        )
-    
-    # Fallback: old slow scan (for backwards compatibility)
     return _probe_from_market_data_cache(engine, symbols, timeframe, from_date, to_date)
-
-
-def _probe_from_summary(
-    engine, symbols: list[str], timeframe: str, from_date: str, to_date: str
-) -> dict[str, set] | None:
-    """Fast coverage check using data_coverage_summary table.
-    
-    Returns None if table doesn't exist (caller should fall back to slow scan).
-    """
-    threshold = _coverage_threshold(timeframe)
-    bind = {f"s{i}": s for i, s in enumerate(dict.fromkeys(symbols))}
-    in_clause = ", ".join(f":{k}" for k in bind)
-    covered: dict[str, set] = {}
-    
-    sql = text(
-        "SELECT symbol, from_date, to_date, bar_count "
-        "FROM data_coverage_summary "
-        f"WHERE timeframe = :timeframe AND symbol IN ({in_clause}) "
-        f"AND from_date >= :from_date AND to_date <= :to_date"
-    )
-    
-    with engine.connect() as conn:
-        rows = conn.execute(
-            sql,
-            {
-                **bind,
-                "timeframe": timeframe,
-                "from_date": from_date,
-                "to_date": to_date,
-            },
-        ).all()
-    
-    for symbol, from_d, to_d, bar_count in rows:
-        if bar_count >= threshold:
-            # Mark all dates in range as covered
-            covered_set = set()
-            current = from_d
-            while current <= to_d:
-                covered_set.add(current)
-                current += timedelta(days=1)
-            covered.setdefault(str(symbol).strip().upper(), set()).update(covered_set)
-    
-    return covered
 
 
 def _probe_from_market_data_cache(
     engine, symbols: list[str], timeframe: str, from_date: str, to_date: str
 ) -> dict[str, set]:
-    """Legacy slow scan of market_data_cache (fallback only)."""
+    """Scan market_data_cache for the days that already hold enough bars."""
     threshold = _coverage_threshold(timeframe)
     bind = {f"s{i}": s for i, s in enumerate(dict.fromkeys(symbols))}
     in_clause = ", ".join(f":{k}" for k in bind)
@@ -1800,14 +1744,7 @@ def get_data_freshness() -> dict:
 @data_bp.route("/api/data/freshness", methods=["GET"])
 def api_data_freshness():
     """JSON the topbar chip re-renders from (initially it is server-rendered)."""
-    result = get_data_freshness()
-    # DEBUG: log the payload
-    import logging
-    log = logging.getLogger(__name__)
-    log.info(f"[DEBUG] freshness payload keys: {list(result.get('per_timeframe', {}).keys())}")
-    if '1min' in result.get('per_timeframe', {}):
-        log.info(f"[DEBUG] 1min payload: {result['per_timeframe']['1min']}")
-    return jsonify(result)
+    return jsonify(get_data_freshness())
 
 
 def _fetch_bars_chunked(
@@ -1990,11 +1927,13 @@ def _fetch_upstox_bars_chunked(
     GET /v2/historical-candle/{instrument_key}/{interval}/{to_date}/{from_date}
 
     Args:
-        instrument_token: Trading symbol or Upstox instrument key (e.g., RELIANCE or NSE_EQ|INE002A01018)
+        instrument_token: Trading symbol or Upstox instrument key
+            (e.g., RELIANCE or NSE_EQ|INE002A01018)
         from_date: Start date in YYYY-MM-DD format
         to_date: End date in YYYY-MM-DD format
         exchange: Exchange name (used for logging)
-        timeframe: Timeframe string (1min, 5min, 15min, 1hour, 1day)
+        timeframe: Timeframe string; Upstox serves the keys of
+            ``UPSTOX_HISTORICAL_INTERVAL_MAP`` and raises for anything else
         chunk_days: Number of days per chunk request
         should_cancel: Callable returning True if job should stop
         on_progress: Callback(chunk_done, chunk_total) for progress updates
@@ -2006,29 +1945,27 @@ def _fetch_upstox_bars_chunked(
     """
     from backtest.brokers.session_manager import get_session_manager
     from backtest.brokers.upstox import resolve_instrument_key
-    
-    # Map our timeframes to Upstox intervals
-    upstox_interval_map = {
-        "1min": "1minute",
-        "5min": "5minute",
-        "15min": "15minute",
-        "30min": "30minute",
-        "1hour": "30minute",  # Upstox doesn't have 1hour, use 30min
-        "1day": "day",
-    }
-    upstox_interval = upstox_interval_map.get(timeframe, timeframe)
-    
+
+    # Upstox 400s on any interval outside its own set, so an unmapped timeframe
+    # would burn a retry on every window and still store nothing.
+    upstox_interval = UPSTOX_HISTORICAL_INTERVAL_MAP.get(timeframe)
+    if upstox_interval is None:
+        raise ValueError(
+            f"Upstox has no {timeframe!r} historical bars — it serves "
+            f"{sorted(UPSTOX_HISTORICAL_INTERVAL_MAP)} only"
+        )
+
     # Build windows if not provided
     if windows is None:
         windows = _build_windows(from_date, to_date, chunk_days)
     total_chunks = max(1, len(windows))
     if on_progress is not None:
         on_progress(0, total_chunks)
-    
+
     all_bars: list[dict] = []
     chunk_errors = 0
     chunk_done = 0
-    
+
     # Get Upstox broker session token
     try:
         broker = get_session_manager().get_broker("upstox")
@@ -2039,62 +1976,70 @@ def _fetch_upstox_bars_chunked(
     except Exception as exc:
         log.error("[data] Upstox: failed to get session token: %s", exc)
         return [], total_chunks
-    
+
     # Resolve instrument key: convert trading symbol to Upstox format
     # e.g., "RELIANCE" → "NSE_EQ|INE002A01018"
     try:
         instrument_key = resolve_instrument_key(instrument_token, timeout=30.0)
         log.info("[data] Upstox: resolved '%s' → '%s'", instrument_token, instrument_key)
     except Exception as exc:
-        log.error("[data] Upstox: failed to resolve instrument key for '%s': %s", instrument_token, exc)
+        log.error(
+            "[data] Upstox: failed to resolve instrument key for '%s': %s",
+            instrument_token, exc,
+        )
         return [], total_chunks
-    
+
     base_url = "https://api.upstox.com/v2"
     headers = {
         "Authorization": f"Bearer {token}",
         "Api-Version": "2.0",
         "Accept": "application/json",
     }
-    
+
     for window_idx, (win_from, win_to) in enumerate(windows):
         # Check cancellation
         if should_cancel and should_cancel():
             log.info("[data] Upstox: chunk loop cancelled at %d/%d", chunk_done, total_chunks)
             break
-        
+
         # Check circuit breaker
         if breaker and breaker.tripped:
             log.warning("[data] Upstox: circuit breaker tripped, skipping remaining chunks")
             break
-        
+
         # Build URL with path parameters
         # Upstox requires dates in YYYY-MM-DD format (no time component)
         # _build_windows returns datetime objects, so format them
-        from_date_str = win_from.strftime("%Y-%m-%d") if hasattr(win_from, 'strftime') else str(win_from)[:10]
-        to_date_str = win_to.strftime("%Y-%m-%d") if hasattr(win_to, 'strftime') else str(win_to)[:10]
-        
+        from_date_str = (
+            win_from.strftime("%Y-%m-%d") if hasattr(win_from, "strftime")
+            else str(win_from)[:10]
+        )
+        to_date_str = (
+            win_to.strftime("%Y-%m-%d") if hasattr(win_to, "strftime")
+            else str(win_to)[:10]
+        )
+
         # NOTE: Upstox API path order is {to_date}/{from_date}, NOT {from_date}/{to_date}
-        url = f"{base_url}/historical-candle/{instrument_key}/{upstox_interval}/{to_date_str}/{from_date_str}"
-        
-        import sys
-        print(f"[DEBUG] Upstox URL: {url}", file=sys.stderr, flush=True)
-        log.info("[data] Upstox: fetching %s for %s..%s", instrument_key, from_date_str, to_date_str)
-        
+        url = (
+            f"{base_url}/historical-candle/{instrument_key}/{upstox_interval}"
+            f"/{to_date_str}/{from_date_str}"
+        )
+
+        log.info(
+            "[data] Upstox: fetching %s for %s..%s",
+            instrument_key, from_date_str, to_date_str,
+        )
+
         # Retry logic for transient failures
         max_retries = 3
         success = False
         for attempt in range(max_retries + 1):
             try:
                 resp = requests.get(url, headers=headers, timeout=60)
-                
-                # Debug: print response details for 400 errors
-                if resp.status_code == 400:
-                    import sys
-                    print(f"[DEBUG] 400 Response: {resp.text[:500]}", file=sys.stderr, flush=True)
-                
+
                 if resp.status_code == 200:
                     payload = resp.json()
-                    
+
                     # Extract candles from response
                     # Response format: {"status": "success", "data": {"candles": [...]}}
                     candles = []
@@ -2104,7 +2049,7 @@ def _fetch_upstox_bars_chunked(
                             candles = data.get("candles", [])
                         elif "candles" in payload:
                             candles = payload["candles"]
-                    
+
                     # Convert Upstox candles to our format
                     # Upstox format: [timestamp, open, high, low, close, volume]
                     # timestamp is ISO 8601: 2024-01-01T09:15:00+05:30
@@ -2119,28 +2064,28 @@ def _fetch_upstox_bars_chunked(
                                 "v": int(candle[5]) if candle[5] else 0,
                             }
                             all_bars.append(bar)
-                    
+
                     success = True
                     chunk_done += 1
                     if on_progress is not None:
                         on_progress(chunk_done, total_chunks)
-                    
+
                     if breaker:
                         breaker.record(True)
-                    
+
                     log.debug(
                         "[data] Upstox: %s fetched %d candles for %s..%s",
                         instrument_key, len(candles), win_from, win_to,
                     )
                     break
-                    
+
                 elif resp.status_code == 401:
                     log.error("[data] Upstox: authentication failed (expired session?)")
                     chunk_errors += 1
                     if breaker:
                         breaker.record(False)
                     break  # Don't retry auth errors
-                    
+
                 elif resp.status_code == 429:
                     # Rate limited - wait longer
                     wait_time = min(2 ** attempt * 5, 60)
@@ -2150,11 +2095,12 @@ def _fetch_upstox_bars_chunked(
                     )
                     time.sleep(wait_time)
                     continue
-                    
+
                 else:
                     log.warning(
-                        "[data] Upstox: HTTP %d for %s %s..%s (attempt %d)",
+                        "[data] Upstox: HTTP %d for %s %s..%s (attempt %d): %s",
                         resp.status_code, instrument_key, win_from, win_to, attempt + 1,
+                        resp.text[:200],
                     )
                     if attempt < max_retries:
                         time.sleep(2 ** attempt)
@@ -2164,7 +2110,7 @@ def _fetch_upstox_bars_chunked(
                         if breaker:
                             breaker.record(False)
                         break
-                        
+
             except requests.RequestException as exc:
                 log.warning(
                     "[data] Upstox: request failed for %s %s..%s (attempt %d): %s",
@@ -2187,7 +2133,7 @@ def _fetch_upstox_bars_chunked(
                 if breaker:
                     breaker.record(False)
                 break
-        
+
         if not success and chunk_errors > 0:
             # If this chunk failed, don't continue hammering a dead gateway
             if breaker and breaker.consecutive_failures >= 5:
@@ -2196,12 +2142,12 @@ def _fetch_upstox_bars_chunked(
                     breaker.consecutive_failures,
                 )
                 break
-    
+
     log.info(
         "[data] Upstox fetch complete: %d bars, %d chunk errors out of %d chunks",
         len(all_bars), chunk_errors, total_chunks,
     )
-    
+
     return all_bars, chunk_errors
 
 
@@ -2282,20 +2228,18 @@ def _fetch_upstox_wrapper(
     token: str = "",
     mstock_tf: str = "",
 ) -> tuple[list[dict], int]:
-    """Wrapper to resolve Upstox instrument key and fetch data."""
-    upstox_instrument_key = _resolve_upstox_instrument_key(
-        engine, symbol, instrument_token, exchange
-    )
-    
-    if not upstox_instrument_key:
-        log.warning(
-            "[data] %s: cannot resolve Upstox instrument key for token %s — skipping",
-            symbol, instrument_token,
-        )
-        return [], 0
-    
+    """Wrapper to hand Upstox the symbol and fetch chunked bars.
+
+    Instrument-key resolution belongs to
+    :func:`backtest.brokers.upstox.resolve_instrument_key` (env overrides →
+    seeded index keys → instrument master → fail-closed), which
+    ``_fetch_upstox_bars_chunked`` already calls. Guessing ``NSE_EQ|SYMBOL``
+    here used to short-circuit it: that pass-through form is accepted by the
+    resolver but Upstox equities are keyed by ISIN, so every equity window
+    came back 400.
+    """
     return _fetch_upstox_bars_chunked(
-        upstox_instrument_key,
+        symbol or instrument_token,
         from_date,
         to_date,
         exchange,
@@ -2342,74 +2286,11 @@ _BROKER_FETCHERS: dict[str, _BrokerFetcher] = {
 
 def _get_broker_fetcher(broker: str) -> _BrokerFetcher | None:
     """Look up the fetch function for a broker by name.
-    
+
     Returns None if the broker is not registered (caller should handle gracefully).
     To register a new broker, add it to _BROKER_FETCHERS dict above.
     """
     return _BROKER_FETCHERS.get(broker)
-
-
-def _resolve_upstox_instrument_key(
-    engine, symbol: str, mstock_token: str, exchange: str
-) -> str | None:
-    """Resolve Upstox instrument key from mStock token or symbol.
-
-    Upstox uses format: EXCHANGE_SEGMENT|SYMBOL or EXCHANGE_SEGMENT|ISIN
-    Examples: NSE_EQ|RELIANCE, NSE_INDEX|Nifty 50, BSE_EQ|INE002A01018
-
-    Strategy:
-    1. Check if instruments table has upstox-specific fields
-    2. Fall back to constructing from exchange + symbol
-    3. For indices, use known mappings
-    """
-    # Index mappings (Upstox convention)
-    index_mappings = {
-        "NIFTY": "NSE_INDEX|Nifty 50",
-        "NIFTY50": "NSE_INDEX|Nifty 50",
-        "BANKNIFTY": "NSE_INDEX|Nifty Bank",
-        "NIFTY BANK": "NSE_INDEX|Nifty Bank",
-        "SENSEX": "BSE_INDEX|Sensex",
-        "FINNIFTY": "NSE_INDEX|Nifty Fin Svcs",
-        "MIDCPNIFTY": "NSE_INDEX|Nifty Mid Select",
-    }
-    
-    sym_upper = symbol.upper().strip()
-    if sym_upper in index_mappings:
-        return index_mappings[sym_upper]
-    
-    # Try to look up in database - check for upstox_instrument_key column
-    try:
-        from sqlalchemy import text
-        
-        # First try direct column lookup
-        result = engine.execute(
-            text(
-                "SELECT upstox_instrument_key FROM instruments WHERE tradingsymbol = :sym LIMIT 1"
-            ),
-            {"sym": sym_upper},
-        )
-        row = result.fetchone()
-        if row and row[0]:
-            return str(row[0])
-    except Exception:
-        pass  # Column doesn't exist or query failed
-    
-    # Fallback: construct from exchange and symbol
-    # Map mStock exchange names to Upstox segments
-    exchange_map = {
-        "NSE": "NSE_EQ",
-        "BSE": "BSE_EQ",
-        "NFO": "NSE_FO",
-        "BFO": "BSE_FO",
-        "MCX": "MCX_COM",
-        "CDS": "NSE_CD",
-    }
-    
-    segment = exchange_map.get(exchange, "NSE_EQ")
-    
-    # For equities, use symbol directly
-    # Note: This is a best-effort mapping; may need refinement
-    return f"{segment}|{sym_upper}"
 
 
 def _extract_bars(payload) -> list[dict]:
@@ -2520,84 +2401,3 @@ def _persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timefram
         conn.commit()
 
     return total
-
-
-def _update_coverage_summary(engine, symbol: str, timeframe: str, bars: list[dict]) -> None:
-    """Incrementally update data_coverage_summary after bars are stored.
-    
-    This is called per-symbol after successful persist, updating only the
-    affected (symbol, timeframe) row — typically <10ms vs 14s for full scan.
-    
-    Args:
-        engine: SQLAlchemy engine
-        symbol: Trading symbol
-        timeframe: Timeframe string (1min, 5min, etc.)
-        bars: List of bar dicts with 't' (timestamp) key
-    """
-    if not bars:
-        return
-    
-    try:
-        # Extract date range from bars
-        timestamps = []
-        for bar in bars:
-            ts_val = bar.get("t", bar.get("time", bar.get("timestamp")))
-            if ts_val:
-                # Parse ISO string or datetime object
-                if isinstance(ts_val, str):
-                    # ISO format: 2024-01-01T09:15:00+05:30
-                    dt = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
-                elif isinstance(ts_val, (int, float)):
-                    # Unix timestamp
-                    dt = datetime.fromtimestamp(ts_val, tz=timezone.utc)
-                else:
-                    dt = ts_val
-                
-                if hasattr(dt, 'date'):
-                    timestamps.append(dt.date() if hasattr(dt, 'date') else dt)
-        
-        if not timestamps:
-            return
-        
-        from_date = min(timestamps)
-        to_date = max(timestamps)
-        bar_count = len(bars)
-        
-        # Upsert into summary table
-        sql = text(
-            """
-            INSERT INTO data_coverage_summary (symbol, timeframe, bar_count, from_date, to_date, updated_at)
-            VALUES (:symbol, :timeframe, :count, :from_d, :to_d, now())
-            ON CONFLICT (symbol, timeframe) DO UPDATE
-                SET bar_count = data_coverage_summary.bar_count + EXCLUDED.bar_count,
-                    from_date = LEAST(COALESCE(data_coverage_summary.from_date, EXCLUDED.from_date), EXCLUDED.from_date),
-                    to_date = GREATEST(COALESCE(data_coverage_summary.to_date, EXCLUDED.to_date), EXCLUDED.to_date),
-                    updated_at = now()
-            """
-        )
-        
-        with engine.connect() as conn:
-            conn.execute(
-                sql,
-                {
-                    "symbol": symbol,
-                    "timeframe": timeframe,
-                    "count": bar_count,
-                    "from_d": from_date,
-                    "to_d": to_date,
-                }
-            )
-            conn.commit()
-            
-        log.debug(
-            "[data] coverage summary updated: %s %s +%d bars (%s..%s)",
-            symbol, timeframe, bar_count, from_date, to_date,
-        )
-        
-    except Exception as exc:  # noqa: BLE001 — summary update must not break fetch
-        log.warning(
-            "[data] failed to update coverage summary for %s %s: %s — will use stale data",
-            symbol, timeframe, exc,
-        )
-        # Don't re-raise; this is non-critical optimization
-

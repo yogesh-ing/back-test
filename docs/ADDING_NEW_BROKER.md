@@ -195,7 +195,7 @@ Before merging:
 ## Common Pitfalls
 
 - **Bytecode caching**: After editing broker files, kill ALL Python processes and restart with `-B` flag to avoid stale imports.
-- **Logger filtering**: If debug output doesn't appear, use `print(..., file=sys.stderr, flush=True)` instead of `logger.debug()`.
+- **Logger filtering**: If debug output doesn't appear, raise the app's log level — never `print()` a broker response to stderr. Token-exchange bodies carry the live access token and land in `server_*.err.log`.
 - **Session manager singleton**: The manager is process-wide. Changes require a full restart, not just a reload.
 - **OAuth state validation**: Always validate CSRF state in callbacks using `secrets.compare_digest()` to prevent timing attacks.
 

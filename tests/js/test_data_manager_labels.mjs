@@ -82,6 +82,9 @@ const sandbox = {
     setInterval: () => 0,
     clearInterval() {},
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    // data_manager.js reads ?from/?to off the URL at load time, so the
+    // sandbox needs the browser global it reads them through.
+    window: { location: { search: "" } },
     URLSearchParams, Object, Array, JSON, Number, String, Promise, Boolean,
     Math, Date, RegExp, Error, isNaN, parseInt, parseFloat,
 };
