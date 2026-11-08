@@ -55,7 +55,7 @@ import logging
 import os
 import time
 from collections import deque
-from datetime import date, datetime, time as dt_time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Deque, Iterable, Optional
 
@@ -66,6 +66,7 @@ from backtest.timekeeping import (
     from_market_clock,
     now_utc,
     session_date,
+    session_window,
 )
 from backtest.options.execution_gate import (
     PreTradeRiskGate,
@@ -132,9 +133,6 @@ logger = logging.getLogger("backtest.forward.options_bridge")
 #: Sentinel for "argument not supplied" in :meth:`OptionsBridge.set_manual_rule`
 #: — distinct from an explicit ``None``, which CLEARS the level.
 _UNSET: Any = object()
-
-_NSE_OPEN_TIME = dt_time(9, 15, 0)
-_NSE_CLOSE_MINUTES = 15 * 60 + 30  # 15:30 IST
 
 #: Non-expiry intraday square-off reason (OPT-5 / Recon F5).
 EXIT_INTRADAY_SQUAREOFF = "intraday_squareoff"
@@ -1745,7 +1743,11 @@ class OptionsBridge:
         *,
         ts_override: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        """Square off intraday option structures >= 20 min before 15:30 IST close (OPT-5).
+        """Square off intraday option structures >= 20 min before the session close (OPT-5).
+
+        The close is the day's own (15:30 IST, 15:40 on a declared Muhurat), so
+        the last minutes of a short session are still managed rather than carried
+        overnight against an intraday contract.
 
         The status read below is what makes PAUSE a reliable opt-out. This is the
         single choke point every square-off route passes — bar, tick and the
@@ -1765,8 +1767,10 @@ class OptionsBridge:
         if ist_dt is None:
             return None
         cur_minutes = ist_dt.hour * 60 + ist_dt.minute
-        cutoff_minutes = _NSE_CLOSE_MINUTES - int(mins_before)
-        if cur_minutes < cutoff_minutes or cur_minutes > _NSE_CLOSE_MINUTES:
+        close = session_window(ist_dt)[1]
+        close_minutes = close.hour * 60 + close.minute
+        cutoff_minutes = close_minutes - int(mins_before)
+        if cur_minutes < cutoff_minutes or cur_minutes > close_minutes:
             return None
         close_ts = ts_override if ts_override is not None else (
             str(ts) if ts else self._bar_ts(self._bar_dt)
@@ -3299,7 +3303,8 @@ class OptionsBridge:
         ist_dt = self._ist_clock_from_ts(ts)
         if ist_dt is None:
             return False
-        open_dt = datetime.combine(ist_dt.date(), _NSE_OPEN_TIME, tzinfo=EXCHANGE_TZ)
+        open_time = session_window(ist_dt)[0]
+        open_dt = datetime.combine(ist_dt.date(), open_time, tzinfo=EXCHANGE_TZ)
         elapsed = (ist_dt - open_dt).total_seconds()
         return 0.0 <= elapsed < window_s
 

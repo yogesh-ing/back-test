@@ -238,3 +238,21 @@ test("SSE freshness suppresses duplicate /api/market/status polls and market_chi
   sandbox.window.updateMarketChip({ day_state: "WEEKEND", session_state: "POST_CLOSE", is_open: false });
   assert.equal(dispatched.filter((e) => e.type === "market:state").length, 1);
 });
+
+test("Declared abridged session keeps live cadence to its own close", () => {
+  const { PollCadence } = createCadenceSandbox({
+    pathname: "/diary",
+    marketState: {
+      day_state: "TRADING_DAY",
+      session_state: "OPEN",
+      pre_open: "14:05:00",
+      session_open: "14:20:00",
+      session_close: "15:40:00",
+    },
+  });
+  // 15:35 is inside a Muhurat session and outside the regular 15:30 one; going
+  // quiet for its last ten minutes would idle the page during live trading.
+  assert.equal(PollCadence.isSessionLiveOrActive({ now: istTime(15, 35, 0) }), true);
+  assert.equal(PollCadence.isSessionLiveOrActive({ now: istTime(14, 10, 0) }), true);
+  assert.equal(PollCadence.isSessionLiveOrActive({ now: istTime(15, 45, 0) }), false);
+});

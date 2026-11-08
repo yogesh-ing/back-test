@@ -224,15 +224,25 @@ const OptionView = (function () {
       "🔌 " + escAttr(feedWaitLabel(row)) + " · frozen mark</div>";
   }
 
+  /** "HH:MM:SS" in minutes-since-midnight, or the fallback when absent. */
+  function clockMinutes(hhmmss, fallback) {
+    if (typeof hhmmss !== "string") return fallback;
+    const parts = hhmmss.split(":").map(Number);
+    if (parts.length < 2 || parts.some(isNaN)) return fallback;
+    return parts[0] * 60 + parts[1];
+  }
+
   /**
-   * Sprint D / Ticket D2: compute IST auto-squareoff clock ("15:10") from
-   * `intraday_squareoff_minutes_before` against NSE 15:30 IST close.
+   * Sprint D / Ticket D2: compute the IST auto-squareoff clock from
+   * `intraday_squareoff_minutes_before` against that session's own close —
+   * 15:30 IST normally, 15:40 on a declared abridged session (Muhurat).
    */
-  function squareoffTimeLabel(minutesBefore) {
+  function squareoffTimeLabel(minutesBefore, sessionCloseHhmmss) {
     const mins = Number.isFinite(Number(minutesBefore)) && Number(minutesBefore) > 0
       ? Math.round(Number(minutesBefore))
       : 20;
-    const total = Math.max(9 * 60 + 15, 15 * 60 + 30 - mins);
+    const closeMin = clockMinutes(sessionCloseHhmmss, 15 * 60 + 30);
+    const total = Math.max(9 * 60 + 15, closeMin - mins);
     const hh = String(Math.floor(total / 60)).padStart(2, "0");
     const mm = String(total % 60).padStart(2, "0");
     return hh + ":" + mm;
@@ -272,7 +282,10 @@ const OptionView = (function () {
       const title = "Positional carry contract (carry_policy=positional) — held across sessions until exit rule or expiry settlement";
       return ' <span class="badge badge-carry-positional" title="' + escAttr(title) + '">' + text + "</span>";
     }
-    const sqTime = squareoffTimeLabel(minsBefore);
+    const sessionClose = (typeof window !== "undefined" && window.__lastMarketState)
+      ? window.__lastMarketState.session_close
+      : null;
+    const sqTime = squareoffTimeLabel(minsBefore, sessionClose);
     const title = "Intraday carry contract (carry_policy=intraday) — auto square-off at " + sqTime + " IST while runner is RUNNING";
     return ' <span class="badge badge-carry-intraday" title="' + escAttr(title) + '">⏱ INTRADAY ' + sqTime + "</span>";
   }

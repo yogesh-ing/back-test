@@ -469,6 +469,13 @@ test("configDriftBadgeHtml renders amber respawn-when-flat pill with escaped rea
     assert.match(openPill, /1 open position/);
 });
 
+test("squareoffTimeLabel counts back from the session's own close", () => {
+    // 15:30 close stays 15:10 with no bounds supplied (older payload), while a
+    // declared Muhurat close of 15:40 must read 15:20.
+    assert.equal(OptionView.squareoffTimeLabel(20), "15:10");
+    assert.equal(OptionView.squareoffTimeLabel(20, "15:40:00"), "15:20");
+});
+
 // ---------------------------------------------------------------------------
 
 if (process.exitCode) {

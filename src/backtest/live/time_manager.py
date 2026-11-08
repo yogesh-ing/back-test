@@ -35,8 +35,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from datetime import time as dtime
 from datetime import timedelta, timezone
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
+
+from backtest.timekeeping import SPECIAL_SESSIONS, special_session
 
 import pandas as pd
 
@@ -286,6 +288,29 @@ class TimeManager:
 
     # -- market open/close -------------------------------------------------
 
+    def _day_is_traded(self, day: date) -> bool:
+        """Whether this manager's market trades on ``day``.
+
+        A declared abridged session (NSE Muhurat) outranks the weekday rule and
+        this manager's own holiday list, because both call the day closed for the
+        *regular* session and neither knows about the special circular.
+        """
+        if self.market == "NSE" and day in SPECIAL_SESSIONS:
+            return True
+        return day.weekday() < 5 and day not in self.hours.holidays
+
+    def _session_bounds(self, day: date) -> Tuple[dtime, dtime, dtime]:
+        """(pre_open, open, close) for ``day``, session-aware."""
+        if self.market == "NSE":
+            declared = special_session(day)
+            if declared is not None:
+                return declared.pre_open, declared.open, declared.close
+        return self.hours.pre_open, self.hours.open, self.hours.close
+
+    @staticmethod
+    def _minutes(moment: dtime) -> int:
+        return moment.hour * 60 + moment.minute
+
     def is_market_open(self, when: Optional[datetime] = None, symbol: Optional[str] = None) -> bool:
         """Check if market is open at given time.
 
@@ -309,22 +334,15 @@ class TimeManager:
         except Exception:
             local = dt
 
-        # Weekend check
-        if local.weekday() >= 5:  # Saturday=5, Sunday=6
+        # Day check: weekday + holiday, with a declared session overriding both
+        if not self._day_is_traded(local.date()):
             return False
 
-        # Holiday check
-        if local.date() in self.hours.holidays:
-            return False
-
-        # Time check
-        current_time = local.time()
+        # Time check, on the window that date actually trades
+        _, open_time, close_time = self._session_bounds(local.date())
+        current_minutes = self._minutes(local.time())
         # For simplicity, compare only hour/minute, ignore seconds for open/close
-        open_minutes = self.hours.open.hour * 60 + self.hours.open.minute
-        close_minutes = self.hours.close.hour * 60 + self.hours.close.minute
-        current_minutes = current_time.hour * 60 + current_time.minute
-
-        return open_minutes <= current_minutes <= close_minutes
+        return self._minutes(open_time) <= current_minutes <= self._minutes(close_time)
 
     def is_pre_market(self, when: Optional[datetime] = None) -> bool:
         dt = when or self.get_current_time()
@@ -334,14 +352,13 @@ class TimeManager:
         except Exception:
             local = dt
 
-        if local.weekday() >= 5 or local.date() in self.hours.holidays:
+        if not self._day_is_traded(local.date()):
             return False
 
-        pre_minutes = self.hours.pre_open.hour * 60 + self.hours.pre_open.minute
-        open_minutes = self.hours.open.hour * 60 + self.hours.open.minute
-        curr_minutes = local.time().hour * 60 + local.time().minute
+        pre_open, open_time, _close = self._session_bounds(local.date())
+        curr_minutes = self._minutes(local.time())
 
-        return pre_minutes <= curr_minutes < open_minutes
+        return self._minutes(pre_open) <= curr_minutes < self._minutes(open_time)
 
     def is_after_hours(self, when: Optional[datetime] = None) -> bool:
         dt = when or self.get_current_time()
@@ -351,14 +368,14 @@ class TimeManager:
         except Exception:
             local = dt
 
-        if local.weekday() >= 5 or local.date() in self.hours.holidays:
+        if not self._day_is_traded(local.date()):
             return False
 
-        close_minutes = self.hours.close.hour * 60 + self.hours.close.minute
-        post_minutes = self.hours.post_close.hour * 60 + self.hours.post_close.minute
-        curr_minutes = local.time().hour * 60 + local.time().minute
+        _pre, _open, close_time = self._session_bounds(local.date())
+        post_minutes = self._minutes(self.hours.post_close)
+        curr_minutes = self._minutes(local.time())
 
-        return close_minutes < curr_minutes <= post_minutes
+        return self._minutes(close_time) < curr_minutes <= post_minutes
 
     def get_next_market_open(self, from_time: Optional[datetime] = None) -> datetime:
         """Get next market open time."""
@@ -371,67 +388,17 @@ class TimeManager:
             local = dt
 
         # Start from next minute
-        candidate = local + timedelta(minutes=1)
-        # If already open and candidate is still today open hours, return candidate if it's at open?
-        # Simpler: iterate day by day
+        threshold = local + timedelta(minutes=1)
 
-        for _ in range(365):  # max 1 year search
-            # If weekend, jump to Monday
-            if candidate.weekday() >= 5:
-                # Days to Monday
-                days_ahead = 7 - candidate.weekday()
-                candidate = candidate + timedelta(days=days_ahead)
-                candidate = candidate.replace(
-                    hour=self.hours.open.hour,
-                    minute=self.hours.open.minute,
-                    second=0,
-                    microsecond=0,
-                )
+        for step in range(366):  # max one year of searching
+            day = threshold.date() + timedelta(days=step)
+            if not self._day_is_traded(day):
                 continue
-
-            if candidate.date() in self.hours.holidays:
-                candidate = candidate + timedelta(days=1)
-                candidate = candidate.replace(
-                    hour=self.hours.open.hour,
-                    minute=self.hours.open.minute,
-                    second=0,
-                    microsecond=0,
-                )
-                continue
-
-            open_minutes = self.hours.open.hour * 60 + self.hours.open.minute
-            close_minutes = self.hours.close.hour * 60 + self.hours.close.minute
-            curr_minutes = candidate.time().hour * 60 + candidate.time().minute
-
-            if curr_minutes <= open_minutes:
-                # Before or at open – today open is next
-                candidate = candidate.replace(
-                    hour=self.hours.open.hour,
-                    minute=self.hours.open.minute,
-                    second=0,
-                    microsecond=0,
-                )
-                return candidate
-            elif curr_minutes <= close_minutes:
-                # Currently open, next open is tomorrow
-                candidate = candidate + timedelta(days=1)
-                candidate = candidate.replace(
-                    hour=self.hours.open.hour,
-                    minute=self.hours.open.minute,
-                    second=0,
-                    microsecond=0,
-                )
-                continue
-            else:
-                # After close, next day open
-                candidate = candidate + timedelta(days=1)
-                candidate = candidate.replace(
-                    hour=self.hours.open.hour,
-                    minute=self.hours.open.minute,
-                    second=0,
-                    microsecond=0,
-                )
-                continue
+            open_dt = datetime.combine(
+                day, self._session_bounds(day)[1], tzinfo=threshold.tzinfo
+            )
+            if open_dt >= threshold:
+                return open_dt
 
         raise ValueError("Could not find next market open within 1 year")
 
@@ -445,51 +412,15 @@ class TimeManager:
         except Exception:
             local = dt
 
-        candidate = local
-
-        for _ in range(365):
-            if candidate.weekday() >= 5 or candidate.date() in self.hours.holidays:
-                candidate = candidate + timedelta(days=1)
-                candidate = candidate.replace(
-                    hour=self.hours.close.hour,
-                    minute=self.hours.close.minute,
-                    second=0,
-                    microsecond=0,
-                )
+        for step in range(366):
+            day = local.date() + timedelta(days=step)
+            if not self._day_is_traded(day):
                 continue
-
-            open_minutes = self.hours.open.hour * 60 + self.hours.open.minute
-            close_minutes = self.hours.close.hour * 60 + self.hours.close.minute
-            curr_minutes = candidate.time().hour * 60 + candidate.time().minute
-
-            if curr_minutes < open_minutes:
-                # Before open, close is today
-                candidate = candidate.replace(
-                    hour=self.hours.close.hour,
-                    minute=self.hours.close.minute,
-                    second=0,
-                    microsecond=0,
-                )
-                return candidate
-            elif curr_minutes <= close_minutes:
-                # Currently open, close today
-                candidate = candidate.replace(
-                    hour=self.hours.close.hour,
-                    minute=self.hours.close.minute,
-                    second=0,
-                    microsecond=0,
-                )
-                return candidate
-            else:
-                # After close, next day close
-                candidate = candidate + timedelta(days=1)
-                candidate = candidate.replace(
-                    hour=self.hours.close.hour,
-                    minute=self.hours.close.minute,
-                    second=0,
-                    microsecond=0,
-                )
-                continue
+            close_dt = datetime.combine(
+                day, self._session_bounds(day)[2], tzinfo=local.tzinfo
+            )
+            if close_dt >= local:
+                return close_dt
 
         raise ValueError("Could not find next market close within 1 year")
 
@@ -509,7 +440,7 @@ class TimeManager:
         current = start_date
 
         while current <= end_date:
-            if current.weekday() < 5 and current not in self.hours.holidays:
+            if self._day_is_traded(current):
                 trading_days.append(current)
             current += timedelta(days=1)
 

@@ -44,6 +44,17 @@
     }
   }
 
+  function toSeconds(hhmmss, fallback) {
+    if (typeof hhmmss !== "string") return fallback;
+    const parts = hhmmss.split(":").map(Number);
+    if (parts.length < 2 || parts.some(isNaN)) return fallback;
+    return parts[0] * 3600 + parts[1] * 60 + (parts[2] || 0);
+  }
+
+  function hhmm(hhmmss, fallback) {
+    return typeof hhmmss === "string" && hhmmss.length >= 5 ? hhmmss.slice(0, 5) : fallback;
+  }
+
   function resolveLiveState(baseState) {
     if (!baseState) return null;
     const st = Object.assign({}, baseState);
@@ -55,15 +66,18 @@
       return st;
     }
 
-    // On a TRADING_DAY, recalculate time-of-day in IST dynamically
+    // On a TRADING_DAY, recalculate time-of-day in IST dynamically, against the
+    // session's own bounds from the server. The 09:15/15:30 defaults are only a
+    // fallback for an old payload: an abridged session (Muhurat 14:20-15:40)
+    // must not be judged shut by a timer that has never heard of it.
     const ist = getIstDate();
     const curMins = ist.getHours() * 60 + ist.getMinutes();
     const curSecs = ist.getSeconds();
     const totalSecs = curMins * 60 + curSecs;
 
-    const preOpenSecs = 9 * 3600;           // 09:00:00
-    const marketOpenSecs = 9 * 3600 + 15 * 60; // 09:15:00
-    const marketCloseSecs = 15 * 3600 + 30 * 60; // 15:30:00
+    const preOpenSecs = toSeconds(st.pre_open, 9 * 3600);           // 09:00:00
+    const marketOpenSecs = toSeconds(st.session_open, 9 * 3600 + 15 * 60); // 09:15:00
+    const marketCloseSecs = toSeconds(st.session_close, 15 * 3600 + 30 * 60); // 15:30:00
 
     if (totalSecs < preOpenSecs) {
       st.session_state = "POST_CLOSE";
@@ -139,7 +153,7 @@
 
     // Tooltip formatting
     const formattedNextOpen = live.next_open_formatted || formatNextOpen(live.next_open_ts);
-    let title = "NSE Trading Hours: 09:15 - 15:30 IST.";
+    let title = `NSE Trading Hours: ${hhmm(live.session_open, "09:15")} - ${hhmm(live.session_close, "15:30")} IST.`;
     if (formattedNextOpen) {
       title += ` Next open: ${formattedNextOpen}.`;
     }

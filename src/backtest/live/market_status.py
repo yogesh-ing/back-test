@@ -10,15 +10,22 @@ Implements the contract specified in docs/MARKET-STATUS-SPEC-2026-10-02.md:
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from backtest.timekeeping import EXCHANGE_TZ as IST
-from backtest.timekeeping import MARKET_CLOSE_TIME, MARKET_OPEN_TIME
+from backtest.timekeeping import (
+    SPECIAL_SESSIONS,
+    session_pre_open,
+    session_window,
+)
 
 logger = logging.getLogger("backtest.live.market_status")
 
-PRE_OPEN_TIME = time(9, 0)
+
+def _hhmmss(moment) -> str:
+    return moment.strftime("%H:%M:%S")
+
 
 # Verbatim 2026 NSE equity trading holiday seed (weekday trading holidays)
 NSE_HOLIDAYS_2026: list[tuple[str, str, str]] = [
@@ -152,7 +159,22 @@ def get_market_day_state(
     gap_warning: Optional[str] = None
     holidays_map: Dict[date, str] = {}
 
-    if target_date.weekday() >= 5:
+    declared = SPECIAL_SESSIONS.get(target_date)
+    if declared is not None:
+        # A declared abridged session outranks the weekday rule *and* the holiday
+        # master: the master calls Diwali a trading holiday because the regular
+        # session is off, and the Muhurat circular is a separate notification it
+        # never carries. Reporting TRADING_DAY keeps every downstream consumer
+        # (feeds, runners, the status chip) on the path it already understands.
+        day_state = "TRADING_DAY"
+        holiday_name = declared.label
+        try:
+            hols, has_data = _get_holidays_from_db(target_date.year, segment, db_manager)
+            if has_data:
+                holidays_map = hols
+        except Exception:  # noqa: BLE001 — the declared session already decides the day
+            pass
+    elif target_date.weekday() >= 5:
         day_state = "WEEKEND"
         # Try loading holidays quietly for next_open_ts calculation
         try:
@@ -210,14 +232,18 @@ def _resolve_session(
         session_state = "POST_CLOSE"
         is_open = False
     else:
-        # TRADING_DAY
-        if target_time < PRE_OPEN_TIME:
+        # TRADING_DAY — on its own clock: a declared abridged session opens late
+        # and closes early (Muhurat 14:05 pre-open, 14:20 open), so the window
+        # comes from the session rather than the 09:15/15:30 constants.
+        session_open, session_close = session_window(now_ist)
+        pre_open = session_pre_open(now_ist)
+        if target_time < pre_open:
             session_state = "POST_CLOSE"
             is_open = False
-        elif PRE_OPEN_TIME <= target_time < MARKET_OPEN_TIME:
+        elif pre_open <= target_time < session_open:
             session_state = "PRE_OPEN"
             is_open = False
-        elif MARKET_OPEN_TIME <= target_time <= MARKET_CLOSE_TIME:
+        elif session_open <= target_time <= session_close:
             session_state = "OPEN"
             is_open = True
         else:
@@ -239,6 +265,13 @@ def _resolve_session(
         "is_open": is_open,
         "date": target_date.isoformat(),
         "time": target_time.strftime("%H:%M:%S"),
+        # The session's own bounds, so a client that repaints every second can
+        # follow the exchange clock instead of hard-coding 09:15/15:30 — an
+        # abridged session (Muhurat 14:20-15:40) must not be judged shut by a
+        # timer that has never heard of it.
+        "pre_open": _hhmmss(session_pre_open(target_date)),
+        "session_open": _hhmmss(session_window(target_date)[0]),
+        "session_close": _hhmmss(session_window(target_date)[1]),
     }
 
 
@@ -249,14 +282,19 @@ def _calculate_next_open_dt(
 ) -> datetime:
     current_date = now_ist.date()
     current_time = now_ist.time()
+    today_open = session_window(current_date)[0]
 
     # If it is a trading day and market hasn't opened yet today
-    if day_state == "TRADING_DAY" and current_time < MARKET_OPEN_TIME:
-        return datetime.combine(current_date, MARKET_OPEN_TIME, tzinfo=IST)
+    if day_state == "TRADING_DAY" and current_time < today_open:
+        return datetime.combine(current_date, today_open, tzinfo=IST)
 
-    # Otherwise search forward starting tomorrow
+    # Otherwise search forward starting tomorrow, skipping rest days that are not
+    # a declared abridged session.
     candidate = current_date + timedelta(days=1)
-    while candidate.weekday() >= 5 or candidate in holidays_map:
+    while (
+        (candidate.weekday() >= 5 or candidate in holidays_map)
+        and candidate not in SPECIAL_SESSIONS
+    ):
         candidate += timedelta(days=1)
 
-    return datetime.combine(candidate, MARKET_OPEN_TIME, tzinfo=IST)
+    return datetime.combine(candidate, session_window(candidate)[0], tzinfo=IST)

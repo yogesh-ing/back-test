@@ -921,6 +921,21 @@
       return new Date(utcMs + (5.5 * 3600000));
     }
 
+    // Session bounds come from the server so an abridged session (Muhurat
+    // 14:05 pre-open, 14:20–15:40) is counted down in its own minutes. The
+    // 09:15/15:30 defaults only cover a payload that predates the fields.
+    function secOfDay(hhmmss, fallback) {
+      if (typeof hhmmss !== "string") return fallback;
+      const parts = hhmmss.split(":").map(Number);
+      if (parts.length < 2 || parts.some(isNaN)) return fallback;
+      return parts[0] * 3600 + parts[1] * 60 + (parts[2] || 0);
+    }
+
+    function hhmmLabel(hhmmss, fallback) {
+      if (typeof hhmmss !== "string" || hhmmss.length < 5) return fallback;
+      return hhmmss.slice(0, 5);
+    }
+
     function formatDayDDMMM(isoStr) {
       if (!isoStr) return "";
       try {
@@ -959,13 +974,18 @@
       const totalSecs = curMins * 60 + curSecs;
 
       let dayState = market ? market.day_state : (ist.getDay() === 0 || ist.getDay() === 6 ? "WEEKEND" : "TRADING_DAY");
+      const openSecs = secOfDay(market && market.session_open, 9 * 3600 + 15 * 60);
+      const closeSecs = secOfDay(market && market.session_close, 15 * 3600 + 30 * 60);
+      const preSecs = secOfDay(market && market.pre_open, 9 * 3600);
+      const openLabel = hhmmLabel(market && market.session_open, "09:15");
+      const closeLabel = hhmmLabel(market && market.session_close, "15:30");
       let sessionState = "POST_CLOSE";
       if (dayState === "TRADING_DAY") {
-        if (totalSecs < 9 * 3600) {
+        if (totalSecs < preSecs) {
           sessionState = "POST_CLOSE";
-        } else if (totalSecs < (9 * 3600 + 15 * 60)) {
+        } else if (totalSecs < openSecs) {
           sessionState = "PRE_OPEN";
-        } else if (totalSecs <= (15 * 3600 + 30 * 60)) {
+        } else if (totalSecs <= closeSecs) {
           sessionState = "OPEN";
         } else {
           sessionState = "POST_CLOSE";
@@ -975,7 +995,7 @@
       if (dayState === "HOLIDAY") {
         const name = (market && market.holiday_name) ? market.holiday_name : "Holiday";
         const dateStr = (market && market.next_open_ts) ? formatDayDDMMM(market.next_open_ts) : "Mon 05 Oct";
-        el.textContent = `Market holiday · ${name} · Opens ${dateStr} 09:15 IST`;
+        el.textContent = `Market holiday · ${name} · Opens ${dateStr} ${openLabel} IST`;
         return;
       }
 
@@ -986,16 +1006,15 @@
 
       // TRADING_DAY
       if (sessionState === "PRE_OPEN") {
-        const openSecs = 9 * 3600 + 15 * 60;
         const diffSecs = Math.max(0, openSecs - totalSecs);
         const xM = Math.floor(diffSecs / 60);
         const yS = diffSecs % 60;
-        el.textContent = `Pre-open: opens 09:15 IST (in ${xM}m ${yS}s)`;
+        el.textContent = `Pre-open: opens ${openLabel} IST (in ${xM}m ${yS}s)`;
         return;
       }
 
       if (sessionState === "POST_CLOSE") {
-        el.textContent = "Session closed (15:30 IST) · Opens tomorrow 09:15 IST";
+        el.textContent = `Session closed (${closeLabel} IST) · Opens tomorrow ${openLabel} IST`;
         return;
       }
 

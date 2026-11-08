@@ -42,6 +42,7 @@ from backtest.data.coverage import (
 )
 from backtest.db.config import get_db_url
 from backtest.logging_config import get_logger
+from backtest.timekeeping import is_trading_day
 
 data_bp = Blueprint("data_api", __name__)
 log = get_logger(__name__)
@@ -1516,8 +1517,7 @@ def _windows_needing_fetch(windows: list, covered_days: set,
         d = c_start
         missing = False
         while d <= c_end:
-            if (d.weekday() < 5 and d.date() not in covered_days
-                    and d.date() not in holidays):
+            if (is_trading_day(d.date(), holidays) and d.date() not in covered_days):
                 missing = True
                 break
             d += timedelta(days=1)
@@ -1542,8 +1542,12 @@ _freshness_cache: dict[str, Any] = {"at": 0.0, "payload": None, "updating": Fals
 
 
 def _is_session_day(d, holidays) -> bool:
-    """A day that should have produced bars: Mon–Fri and not an exchange closure."""
-    return d.weekday() < 5 and d not in holidays
+    """A day that should have produced bars: a session day on the exchange clock.
+
+    Declared abridged sessions (Diwali Muhurat) count even though they fall on a
+    weekend and the holiday master calls them closures.
+    """
+    return is_trading_day(d, holidays)
 
 
 def _last_settled_session(now_ist, holidays) -> date:
@@ -1648,7 +1652,7 @@ def _compute_freshness() -> dict:
             if missing > 0 and last_d:
                 d = last_d + timedelta(days=1)
                 while d <= target:
-                    if d.weekday() < 5 and d not in holidays:  # Mon-Fri, not holiday
+                    if _is_session_day(d, holidays):
                         missing_dates.append(d.isoformat())
                     d += timedelta(days=1)
             per[str(tf)] = {

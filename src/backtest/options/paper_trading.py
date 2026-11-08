@@ -27,8 +27,14 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from enum import Enum
 from typing import Any, Protocol
 
-from backtest.live.market_status import IST, MARKET_CLOSE_TIME, MARKET_OPEN_TIME
-from backtest.timekeeping import from_market_clock, from_stored_utc, now_utc
+from backtest.live.market_status import IST
+from backtest.timekeeping import (
+    SPECIAL_SESSIONS,
+    from_market_clock,
+    from_stored_utc,
+    now_utc,
+    session_window,
+)
 from backtest.options.execution_gate import V1_ALLOWED_STRUCTURES, check_intent
 from backtest.strategy.intent import (
     OptionLeg,
@@ -49,8 +55,8 @@ STALE_AFTER_SECONDS = 180.0
 
 #: Marks may age only while the exchange is trading (§4.4: the exchange clock is
 #: authoritative), so the session window is part of the metric, not a filter.
-_SESSION_OPEN = MARKET_OPEN_TIME
-_SESSION_CLOSE = MARKET_CLOSE_TIME
+#: Asked per day from the clock authority, which also knows a declared abridged
+#: session (Muhurat) runs 14:20–15:40 on what the weekday rule calls a Sunday.
 #: Days of session time an age may span before the arithmetic stops counting.
 #: A mark that old is past every SLA in use, and the loop stays bounded.
 _MAX_AGE_DAYS = 30
@@ -88,9 +94,10 @@ def _session_seconds_between(mark: datetime, reference: datetime) -> float:
     day = start.date()
     sessions = 0
     while day <= end.date() and sessions < _MAX_AGE_DAYS:
-        if day.weekday() < 5:
-            open_dt = datetime.combine(day, _SESSION_OPEN, tzinfo=IST)
-            close_dt = datetime.combine(day, _SESSION_CLOSE, tzinfo=IST)
+        if day.weekday() < 5 or day in SPECIAL_SESSIONS:
+            day_open, day_close = session_window(day)
+            open_dt = datetime.combine(day, day_open, tzinfo=IST)
+            close_dt = datetime.combine(day, day_close, tzinfo=IST)
             total += max(
                 0.0,
                 (min(close_dt, end) - max(open_dt, start)).total_seconds(),
@@ -106,11 +113,14 @@ def session_is_open(now: datetime | None = None) -> bool:
     Pure clock arithmetic: the freshness gate asks this on every mark, so it may
     not reach for the holiday master, which is a database read. Weekends are shut
     by the weekday rule and a market holiday counts as open — over-reporting
-    staleness halts entries, which is the safe direction.
+    staleness halts entries, which is the safe direction. The window itself comes
+    from the clock authority, so a declared abridged session is measured on its
+    own 14:20–15:40 clock instead of the regular one.
     """
     reference = _utc(now) or _now_utc()
-    ist_time = reference.astimezone(IST).time()
-    return _SESSION_OPEN <= ist_time <= _SESSION_CLOSE
+    ist_now = reference.astimezone(IST)
+    session_open, session_close = session_window(ist_now)
+    return session_open <= ist_now.time() <= session_close
 
 
 def _age_seconds(last_updated: datetime | None, now: datetime | None) -> float | None:

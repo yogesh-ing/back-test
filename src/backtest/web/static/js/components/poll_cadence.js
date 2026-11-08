@@ -71,6 +71,16 @@
     return (ist.getHours() * 3600) + (ist.getMinutes() * 60) + ist.getSeconds();
   }
 
+  // Server-provided session bounds take precedence: an abridged session
+  // (Muhurat 14:20-15:40) is not a 09:15-15:30 session, and cadence that
+  // thinks otherwise goes quiet for its last ten minutes.
+  function secondsOfClock(hhmmss, fallback) {
+    if (typeof hhmmss !== "string") return fallback;
+    const parts = hhmmss.split(":").map(Number);
+    if (parts.length < 2 || parts.some(isNaN)) return fallback;
+    return parts[0] * 3600 + parts[1] * 60 + (parts[2] || 0);
+  }
+
   function isHidden() {
     return Boolean(typeof document !== "undefined" && document && document.hidden);
   }
@@ -114,9 +124,9 @@
     }
 
     const secs = getIstSecondsOfDay(nowOverride);
-    const preOpenSecs = 9 * 3600;               // 09:00:00 IST
-    const marketOpenSecs = 9 * 3600 + 15 * 60;  // 09:15:00 IST
-    const marketCloseSecs = 15 * 3600 + 30 * 60; // 15:30:00 IST
+    const preOpenSecs = secondsOfClock(st.pre_open, 9 * 3600);               // 09:00:00 IST
+    const marketOpenSecs = secondsOfClock(st.session_open, 9 * 3600 + 15 * 60);  // 09:15:00 IST
+    const marketCloseSecs = secondsOfClock(st.session_close, 15 * 3600 + 30 * 60); // 15:30:00 IST
 
     let sessionState = "POST_CLOSE";
     if (secs >= preOpenSecs && secs < marketOpenSecs) {

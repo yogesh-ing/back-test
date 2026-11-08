@@ -49,7 +49,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Engine
 
 from backtest.data.mstock_live_feed import _resolve_scriptmaster_row
-from backtest.timekeeping import EXCHANGE_TZ
+from backtest.timekeeping import EXCHANGE_TZ, is_trading_day
 from backtest.live.market_status import NSE_HOLIDAYS_2026
 
 logger = logging.getLogger("backtest.data.daily_bar_ingest")
@@ -232,7 +232,7 @@ def expected_nse_trading_days(
     days: list[date] = []
     cur = start_d
     while cur <= effective_end:
-        if cur.weekday() < 5 and cur not in holidays:
+        if is_trading_day(cur, holidays):
             days.append(cur)
         cur += timedelta(days=1)
     return days

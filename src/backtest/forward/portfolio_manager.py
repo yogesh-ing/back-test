@@ -33,7 +33,9 @@ from backtest.timekeeping import (
     current_session_date,
     format_session_scope,
     in_eod_squareoff_window,
+    is_trading_day,
     now_utc,
+    session_window,
 )
 from backtest.forward.feed import SyntheticFeed
 from backtest.forward.feed_registry import get_chain_bus, get_feed_registry
@@ -2415,9 +2417,10 @@ class PortfolioManager:
     def run_eod_mark_settlement(
         self, now: Optional[datetime] = None
     ) -> Dict[str, Any]:
-        """Event 6 (Sprint D / Ticket D1): official 15:30 IST EOD settlement.
+        """Event 6 (Sprint D / Ticket D1): official session-close IST EOD settlement.
 
-        Once per IST trading day at/after 15:30:00 IST, stamps ``prev_close_mark``
+        Once per IST trading day at/after that session's close (15:30 IST
+        normally, 15:40 on a declared abridged session) stamps ``prev_close_mark``
         and ``prior_close_net_pnl`` on all carried open option legs/structures,
         dual-writes state, and runs the Phase D1-a/b parity check.
 
@@ -2431,13 +2434,14 @@ class PortfolioManager:
             from backtest.live.market_status import get_market_day_state
 
             day_state = str(get_market_day_state(now_ist).get("day_state") or "")
-        except Exception:  # noqa: BLE001 — fall back to the weekday-only gate
-            day_state = "WEEKEND" if now_ist.weekday() >= 5 else "TRADING_DAY"
+        except Exception:  # noqa: BLE001 — fall back to the clock authority
+            day_state = "TRADING_DAY" if is_trading_day(now_ist) else "WEEKEND"
         if day_state == "WEEKEND":
             return {"settled": False, "reason": "weekend"}
         if day_state == "HOLIDAY":
             return {"settled": False, "reason": "holiday"}
-        if (now_ist.hour, now_ist.minute) < (15, 30):
+        close = session_window(now_ist)[1]
+        if (now_ist.hour, now_ist.minute) < (close.hour, close.minute):
             return {"settled": False, "reason": "before_close"}
         sess_iso = now_ist.date().isoformat()
         if self._eod_settled_session == sess_iso:

@@ -25,7 +25,12 @@ from datetime import date
 from typing import Any, Mapping, Optional
 
 from backtest.diary.attribution import make_instance_key
-from backtest.timekeeping import from_stored_utc, to_exchange
+from backtest.timekeeping import (
+    in_eod_squareoff_window,
+    from_stored_utc,
+    special_session,
+    to_exchange,
+)
 
 VALID_REGIME_CLOCKS = ("entry", "exit")
 VALID_REGIME_GROUPINGS = ("strategy", "instance")
@@ -127,6 +132,15 @@ def classify_ist_session_regime(raw_ts: Any, fallback_ts: Any = None) -> str:
             return "off_hours"
     except Exception:  # noqa: BLE001
         return "off_hours"
+
+    declared = special_session(ist_dt)
+    if declared is not None:
+        # A Muhurat session has no opening drive or midday chop: its ~80 minutes
+        # are either inside the square-off floor or before it.
+        if not declared.open <= ist_dt.time() <= declared.close:
+            return "off_hours"
+        return ("closing_squareoff" if in_eod_squareoff_window(ist_dt)
+                else "afternoon_gamma")
 
     minute_of_day = ist_dt.hour * 60 + ist_dt.minute
     # Note: closing_squareoff includes 15:30:xx up to 15:30:59 (end_min = 931)

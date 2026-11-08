@@ -38,8 +38,9 @@ package being present on a Windows host.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Optional, Union
+from typing import Iterable, Optional, Union
 
 UTC = timezone.utc
 EXCHANGE_TZ = timezone(timedelta(hours=5, minutes=30), name="IST")
@@ -47,12 +48,60 @@ EXCHANGE_TZ = timezone(timedelta(hours=5, minutes=30), name="IST")
 #: NSE regular-session bounds, in exchange time.
 MARKET_OPEN_TIME = time(9, 15)
 MARKET_CLOSE_TIME = time(15, 30)
+#: First minute the exchange accepts pre-open orders for the 09:15 print.
+PRE_OPEN_TIME = time(9, 0)
 #: Last minute a *positional* book may still open a new position. The 15:25–15:30
 #: auction is settlement, not a place to build a risk you then cannot exit.
 ENTRY_CUTOFF_TIME = time(15, 25)
 #: First minute of the end-of-day square-off sweep. 20 minutes clear of the close
 #: so a runner flattens itself before broker RMS auto-squareoff (~15:15–15:20).
 EOD_SQUAREOFF_WINDOW_START = time(15, 10)
+#: How deep into the close the square-off floor reaches, regular session.
+SQUAREOFF_FLOOR_MINUTES = 20
+ENTRY_CUTOFF_MINUTES = 5
+
+
+@dataclass(frozen=True)
+class SpecialSession:
+    """A declared abridged trading day, in exchange time.
+
+    NSE/BSE hold short sessions (Diwali Muhurat) that the holiday master does
+    not carry — the master marks Diwali a trading *holiday* because the regular
+    session is off, and the Muhurat circular is a separate notification. So a
+    declared session has to outrank both the holiday row and the weekday rule.
+
+    ``close`` is the envelope, the wider of equity and derivatives: the gates
+    downstream ask "is the exchange open", not "is my segment open".
+    """
+
+    day: date
+    label: str
+    pre_open: time
+    open: time
+    close: time
+
+    @property
+    def entry_cutoff(self) -> time:
+        """Position-opening deadline, same distance from the close as usual."""
+        return _minutes_before(self.close, ENTRY_CUTOFF_MINUTES)
+
+    @property
+    def squareoff_start(self) -> time:
+        """The 20-minute square-off floor, measured from this session's close."""
+        return _minutes_before(self.close, SQUAREOFF_FLOOR_MINUTES)
+
+
+#: Declared abridged sessions. NSE/BSE Diwali Muhurat, Samvat 2083: block deal
+#: 13:50–14:05, pre-open 14:05–14:20, equity 14:20–15:30, derivatives 14:20–15:40.
+SPECIAL_SESSIONS: dict = {
+    date(2026, 11, 8): SpecialSession(
+        day=date(2026, 11, 8),
+        label="Diwali Muhurat (Samvat 2083)",
+        pre_open=time(14, 5),
+        open=time(14, 20),
+        close=time(15, 40),
+    ),
+}
 
 
 class AmbiguousTimeError(ValueError):
@@ -278,21 +327,87 @@ def duration_seconds(
     return (b - a).total_seconds()
 
 
+def _minutes_before(moment: time, minutes: int) -> time:
+    total = moment.hour * 60 + moment.minute - int(minutes)
+    return time((total // 60) % 24, total % 60)
+
+
+def special_session(
+    value: Union[datetime, date, str, None] = None,
+) -> Optional[SpecialSession]:
+    """The declared abridged session for ``value``'s exchange date, if any."""
+    day = session_date(value)
+    return SPECIAL_SESSIONS.get(day) if day is not None else None
+
+
+def session_window(
+    value: Union[datetime, date, str, None] = None,
+) -> tuple:
+    """(open, close) in exchange time for the session containing ``value``.
+
+    Regular bounds everywhere except a declared special day, which is a short
+    session on its own clock (Muhurat opens 14:20, not 09:15).
+    """
+    declared = special_session(value)
+    if declared is None:
+        return MARKET_OPEN_TIME, MARKET_CLOSE_TIME
+    return declared.open, declared.close
+
+
+def session_pre_open(
+    value: Union[datetime, date, str, None] = None,
+) -> time:
+    """The pre-open print time for the session containing ``value``."""
+    declared = special_session(value)
+    return PRE_OPEN_TIME if declared is None else declared.pre_open
+
+
+def is_trading_day(
+    value: Union[datetime, date, str, None] = None,
+    holidays: Iterable[Union[date, str]] = (),
+) -> bool:
+    """Whether the exchange is open at all on ``value``'s exchange date.
+
+    Order of precedence, and the reason it lives here instead of at the call
+    sites: a declared special session wins outright (a Muhurat Sunday *is* a
+    trading day even though the holiday master calls it Diwali), then the
+    holiday list, then the Mon–Fri rule.
+    """
+    day = session_date(value)
+    if day is None:
+        return False
+    if day in SPECIAL_SESSIONS:
+        return True
+    if any(_coerce_date(holiday) == day for holiday in holidays):
+        return False
+    return day.weekday() < 5
+
+
 def market_is_open(value: Optional[datetime] = None) -> bool:
-    """Whether ``value`` (default: now) falls inside the regular NSE session."""
+    """Whether ``value`` (default: now) falls inside the session's own bounds."""
     reference = _as_exchange(value if value is not None else now_utc())
-    return MARKET_OPEN_TIME <= reference.time() <= MARKET_CLOSE_TIME
+    session_open, session_close = session_window(reference)
+    return session_open <= reference.time() <= session_close
 
 
 def in_eod_squareoff_window(value: Optional[datetime] = None) -> bool:
-    """Whether ``value`` (default: now) sits in the 15:10:00–15:29:59 IST sweep.
+    """Whether ``value`` (default: now) sits in the last 20 minutes of its session.
 
     The window an intraday book must be flat inside (BUG-39). It starts at the
     20-minute square-off floor and stops at the close, so a sweep can never
-    square off after the session it belongs to has ended.
+    square off after the session it belongs to has ended. On a declared special
+    day both ends move with that session — a 14:20–15:40 Muhurat must not be
+    flattened by the 15:10 floor of a session it is not part of.
     """
     reference = _as_exchange(value if value is not None else now_utc())
-    return EOD_SQUAREOFF_WINDOW_START <= reference.time() < MARKET_CLOSE_TIME
+    declared = special_session(reference)
+    _, session_close = session_window(reference)
+    start = (
+        declared.squareoff_start
+        if declared is not None
+        else EOD_SQUAREOFF_WINDOW_START
+    )
+    return start <= reference.time() < session_close
 
 
 def entry_window_refusal(
@@ -309,29 +424,29 @@ def entry_window_refusal(
     at HH:MM has to be exitable in the same session.
 
     ``intraday`` + ``squareoff_minutes`` narrow the deadline to the runner's own
-    EOD square-off (15:30 − N), so a structure cannot be opened *inside* the
+    EOD square-off (close − N), so a structure cannot be opened *inside* the
     window where the book is already flattening itself.
     """
     reference = _as_exchange(value if value is not None else now_utc())
     moment = reference.time()
-    if moment < MARKET_OPEN_TIME:
+    declared = special_session(reference)
+    session_open, session_close = session_window(reference)
+    if moment < session_open:
         return (
-            f"{reference:%H:%M:%S} IST is before the 09:15:00 open — "
+            f"{reference:%H:%M:%S} IST is before the {session_open:%H:%M:%S} open — "
             "no entry outside market hours"
         )
-    if moment > MARKET_CLOSE_TIME:
+    if moment > session_close:
         return (
-            f"{reference:%H:%M:%S} IST is after the 15:30:00 close — "
+            f"{reference:%H:%M:%S} IST is after the {session_close:%H:%M:%S} close — "
             "no entry outside market hours"
         )
-    deadline = ENTRY_CUTOFF_TIME
+    deadline = (
+        declared.entry_cutoff if declared is not None else ENTRY_CUTOFF_TIME
+    )
     if intraday and squareoff_minutes:
-        cutoff = (
-            MARKET_CLOSE_TIME.hour * 60
-            + MARKET_CLOSE_TIME.minute
-            - int(squareoff_minutes)
-        )
-        deadline = time(cutoff // 60, cutoff % 60)
+        cutoff = session_close.hour * 60 + session_close.minute - int(squareoff_minutes)
+        deadline = time((cutoff // 60) % 24, cutoff % 60)
     if moment > deadline:
         label = "intraday square-off" if intraday and squareoff_minutes else "entry cut-off"
         return (
@@ -374,6 +489,9 @@ __all__ = [
     "EXCHANGE_TZ",
     "MARKET_CLOSE_TIME",
     "MARKET_OPEN_TIME",
+    "PRE_OPEN_TIME",
+    "SPECIAL_SESSIONS",
+    "SpecialSession",
     "UTC",
     "current_session_date",
     "duration_seconds",
@@ -384,6 +502,7 @@ __all__ = [
     "from_market_clock",
     "from_stored_utc",
     "in_eod_squareoff_window",
+    "is_trading_day",
     "iso_exchange",
     "iso_utc",
     "ist_session_bounds_utc",
@@ -392,5 +511,8 @@ __all__ = [
     "now_utc",
     "parse_utc_iso",
     "session_date",
+    "session_pre_open",
+    "session_window",
+    "special_session",
     "to_exchange",
 ]

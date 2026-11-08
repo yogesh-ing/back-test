@@ -41,6 +41,7 @@ import requests
 
 from backtest.data.base import MSTOCK_INTERVAL_MAP, normalize_candles
 from backtest.live import auth as _live_auth
+from backtest.timekeeping import EXCHANGE_TZ, is_trading_day, session_window
 
 logger = logging.getLogger("backtest.data.mstock_live_feed")
 
@@ -95,17 +96,7 @@ __all__ = [
     "ScriptMasterCache",
     "clear_scriptmaster_cache",
     "has_mstock_live_auth",
-    "MARKET_OPEN_HOUR",
-    "MARKET_OPEN_MINUTE",
-    "MARKET_CLOSE_HOUR",
-    "MARKET_CLOSE_MINUTE",
 ]
-
-# NSE market hours (IST = UTC+5:30)
-MARKET_OPEN_HOUR = 9
-MARKET_OPEN_MINUTE = 15
-MARKET_CLOSE_HOUR = 15
-MARKET_CLOSE_MINUTE = 30
 
 #: Canonical timeframe names → mStock TypeA historical-interval names
 #: (ticket P4.3) — the shared wire-translation map from :mod:`backtest.data.base`.
@@ -122,17 +113,18 @@ def _market_open(now_utc: datetime | None = None) -> bool:
         ist = now_utc.astimezone(IST)
         info = get_market_day_state(ist)
         return bool(info.get("is_open", False))
-    except Exception:  # noqa: BLE001 — fail-open to standard hours check
+    except Exception:  # noqa: BLE001 — fail-open to the clock authority's window
         if now_utc is None:
             now_utc = datetime.now(timezone.utc)
-        ist = now_utc + timedelta(hours=5, minutes=30)
-        if ist.weekday() >= 5:
+        ist = now_utc.astimezone(EXCHANGE_TZ)
+        if not is_trading_day(ist):
             return False
+        session_open, session_close = session_window(ist)
         market_open = ist.replace(
-            hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0
+            hour=session_open.hour, minute=session_open.minute, second=0, microsecond=0
         )
         market_close = ist.replace(
-            hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE, second=0, microsecond=0
+            hour=session_close.hour, minute=session_close.minute, second=0, microsecond=0
         )
         return market_open <= ist <= market_close
 

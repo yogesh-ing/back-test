@@ -160,4 +160,25 @@ test("Short holiday name <= 18 chars: not truncated", () => {
     assert.equal(text().textContent, "NSE CLOSED · Christmas");
 });
 
+test("Declared abridged session: the hours line follows the server bounds", () => {
+    updateMarketChip({
+        day_state: "TRADING_DAY",
+        session_state: "OPEN",
+        holiday_name: "Diwali Muhurat (Samvat 2083)",
+        next_open_ts: "2026-11-09T09:15:00+05:30",
+        next_open_formatted: "Mon 09 Nov 09:15 IST",
+        gap_warning: null,
+        is_open: true,
+        pre_open: "14:05:00",
+        session_open: "14:20:00",
+        session_close: "15:40:00",
+    });
+    // The chip repaints every second from its own IST clock, so a hard-coded
+    // 15:30 would shut the page ten minutes before a Muhurat session ends.
+    assert.match(
+        chip().getAttribute("title"),
+        /NSE Trading Hours: 14:20 - 15:40 IST/,
+    );
+});
+
 console.log(`market_chip.js: ${passed} tests passed`);
