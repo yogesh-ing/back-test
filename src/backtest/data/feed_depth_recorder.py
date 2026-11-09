@@ -39,11 +39,16 @@ logger = logging.getLogger("backtest.data.feed_depth_recorder")
 ENABLE_FEED_ENV = "ENABLE_FEED"
 #: Optional capture directory override; defaults to ``logs/feed_depth`` (gitignored).
 ENABLE_FEED_DIR_ENV = "ENABLE_FEED_DIR"
+#: Optional ceiling on one session day's capture, in bytes.
+ENABLE_FEED_MAX_DAY_BYTES_ENV = "ENABLE_FEED_MAX_DAY_BYTES"
 
 DEFAULT_DIR = os.path.join("logs", "feed_depth")
 _TRUTHY = {"1", "true", "yes", "on"}
 _MAX_QUEUE = 20_000
-_MAX_DAY_BYTES = 64 * 1024 * 1024
+#: 512 MB: a full NSE session of five-level packets measured 1.09 MB/min on
+#: 2026-11-09 (09:15→15:30 ≈ 410 MB), so the old 64 MB stopped the capture around
+#: 10:15 and the whole point was to have the tape at the exits.
+_MAX_DAY_BYTES = 512 * 1024 * 1024
 _DAY_CACHE_S = 30.0
 
 _SCHEMA_VERSION = 1
@@ -58,6 +63,20 @@ def flag_enabled(env: Optional[dict[str, str]] = None) -> bool:
 def capture_dir(env: Optional[dict[str, str]] = None) -> str:
     source = os.environ if env is None else env
     return str(source.get(ENABLE_FEED_DIR_ENV, "").strip() or DEFAULT_DIR)
+
+
+def day_cap(env: Optional[dict[str, str]] = None) -> int:
+    """Bytes one session day may write; a bad override falls back, not off."""
+    source = os.environ if env is None else env
+    raw = str(source.get(ENABLE_FEED_MAX_DAY_BYTES_ENV, "")).strip()
+    if not raw:
+        return _MAX_DAY_BYTES
+    try:
+        value = int(float(raw))
+    except ValueError:
+        logger.warning("ignoring %s=%r (not a byte count)", ENABLE_FEED_MAX_DAY_BYTES_ENV, raw)
+        return _MAX_DAY_BYTES
+    return value if value > 0 else _MAX_DAY_BYTES
 
 
 def _scalar(value: Any) -> Any:
@@ -241,7 +260,7 @@ def get_recorder(env: Optional[dict[str, str]] = None) -> Optional[FeedDepthReco
         return None
     with _STATE_LOCK:
         if _RECORDER is None:
-            _RECORDER = FeedDepthRecorder(capture_dir(env))
+            _RECORDER = FeedDepthRecorder(capture_dir(env), max_day_bytes=day_cap(env))
             logger.info("ENABLE_FEED on: capturing depth packets to %s", _RECORDER.directory)
     return _RECORDER
 
@@ -333,8 +352,10 @@ def record_shadow_diff(payload: dict) -> None:
 __all__ = [
     "ENABLE_FEED_DIR_ENV",
     "ENABLE_FEED_ENV",
+    "ENABLE_FEED_MAX_DAY_BYTES_ENV",
     "FeedDepthRecorder",
     "capture_dir",
+    "day_cap",
     "flag_enabled",
     "get_recorder",
     "record_depth_packet",

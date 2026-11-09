@@ -984,18 +984,36 @@ class BidAskQuoteProvider:
         reason = self._check_sanity(quote, key, price, instrument_token)
         if reason is not None:
             raise UntrustedOptionQuoteError(f"{instrument_token}: {reason}")
+        # An order row keeps only the price; this writes down the whole ladder it came
+        # from, so a disputed fill can be settled from a file (ENABLE_FEED). Recorded
+        # before ``ltp`` is overwritten with the side price below: the pair of them is
+        # the finding — an offer of ₹493.65 against a last trade of ₹367.00 — and a
+        # witness that reads the fill price back as the last trade cannot show it.
+        self._record_price_used(quote, key, side, instrument_token)
         quote["ltp"] = price
         quote["execution_side"] = side
-        # An order row keeps only the price; this writes down the whole ladder it came
-        # from, so a disputed fill can be settled from a file (ENABLE_FEED).
+        return quote
+
+    def _record_price_used(
+        self, quote: dict[str, Any], key: str, side: str, instrument_token: str
+    ) -> None:
+        """Hand the packet a fill was priced from to the capture, with the name on it."""
+        row = dict(quote)
+        if not row.get("symbol") and not row.get("trading_symbol"):
+            contract = self._contract_for(instrument_token)
+            if contract is not None:
+                symbol = getattr(contract, "trading_symbol", None) or getattr(
+                    contract, "symbol", None
+                )
+                if symbol:
+                    row["symbol"] = str(symbol)
         record_price_used(
-            quote,
+            row,
             broker=str(getattr(self, "source_name", "unknown")),
             token=instrument_token,
             side=side,
             field=key,
         )
-        return quote
 
     def register_contract(self, contract: Any) -> None:
         """Delegate contract registration to the wrapped provider (R3)."""

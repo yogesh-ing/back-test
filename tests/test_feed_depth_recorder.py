@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
 from backtest.data.feed_depth_recorder import (
     FeedDepthRecorder,
     capture_dir,
+    day_cap,
     flag_enabled,
     get_recorder,
     record_depth_packet,
@@ -102,6 +104,18 @@ def test_flag_spellings(monkeypatch):
         monkeypatch.setenv("ENABLE_FEED", no)
         assert flag_enabled() is False
     assert capture_dir({}) == os.path.join("logs", "feed_depth")
+
+
+def test_the_day_cap_clears_a_full_session(flag_on, monkeypatch):
+    """64 MB used to stop the tape around 10:15 — before the exits it exists to witness."""
+    assert day_cap({}) == 512 * 1024 * 1024
+    assert day_cap({"ENABLE_FEED_MAX_DAY_BYTES": "1048576"}) == 1_048_576
+    assert day_cap({"ENABLE_FEED_MAX_DAY_BYTES": "0"}) == 512 * 1024 * 1024
+    assert day_cap({"ENABLE_FEED_MAX_DAY_BYTES": "plenty"}) == 512 * 1024 * 1024
+    assert get_recorder().max_day_bytes == 512 * 1024 * 1024
+    monkeypatch.setenv("ENABLE_FEED_MAX_DAY_BYTES", "4096")
+    reset_recorder()
+    assert get_recorder().max_day_bytes == 4096
 
 
 # -- what a packet line holds ------------------------------------------------
@@ -229,7 +243,26 @@ def test_the_seam_records_the_ask_it_turned_into_a_fill(flag_on):
     line = next(ln for ln in _lines(get_recorder()) if ln["kind"] == "price_used")
     assert line["price_used"] == pytest.approx(493.65)
     assert line["field"] == "ask" and line["token"] == TOKEN
+    # The two numbers apart, which is the whole reason this row exists: the offer
+    # the fill was priced from, and the last trade that offer contradicted. The
+    # capture used to run after the seam overwrote ``ltp``, so both read 493.65.
+    assert line["ltp"] == pytest.approx(367.0)
+    assert line["asks"][0][0] == pytest.approx(493.65)
     # The seam's label is a provider string, not a filesystem name: ``live:mstock``
     # used to become ``feed_live`` and the colon made the write fail silently.
     assert line["broker"] == "mstock"
     assert line["source_label"] == "live:mstock+bidask"
+
+
+class _NamedInner(_Inner):
+    """A provider that can name the contract behind a token."""
+
+    def contract_for(self, instrument_token: str):
+        return SimpleNamespace(trading_symbol="NIFTY26NOV25100PE")
+
+
+def test_the_fill_row_names_the_contract_not_just_the_token(flag_on):
+    provider = BidAskQuoteProvider(_NamedInner(_row()))  # type: ignore[arg-type]
+    provider.execution_quote(TOKEN, "BUY")
+    line = next(ln for ln in _lines(get_recorder()) if ln["kind"] == "price_used")
+    assert line["symbol"] == "NIFTY26NOV25100PE"
