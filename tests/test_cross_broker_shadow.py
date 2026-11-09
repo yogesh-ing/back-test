@@ -330,6 +330,17 @@ def test_an_empty_master_is_rate_limited_not_declared_final():
     assert calls["n"] == 2
 
 
+def test_an_upstox_sourced_book_gets_no_self_mirror(monkeypatch, caplog):
+    """A witness that compares a broker with itself always reports agreement."""
+    caplog.set_level(logging.INFO, logger=shadow.logger.name)
+    monkeypatch.setenv("ENABLE_FEED", "true")
+    shadow.reset()
+    provider = _provider({"64435": _row(300.0, 299.5, 300.5)})
+
+    assert shadow.maybe_start(provider, "NIFTY", source="upstox") is None
+    assert "SHADOW_UPSTOX_SELF" in caplog.text
+
+
 def test_the_mirror_off_when_capture_is_off(monkeypatch):
     assert shadow.shadow_enabled({}) is False
     assert shadow.shadow_enabled({"ENABLE_FEED": "true"}) is True

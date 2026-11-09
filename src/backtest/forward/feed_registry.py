@@ -264,7 +264,7 @@ class ChainBus:
             try:
                 from backtest.data.cross_broker_shadow import maybe_start
 
-                maybe_start(live_inner, key)
+                maybe_start(live_inner, key, source=source_key)
             except Exception:  # noqa: BLE001
                 logger.debug("shadow Upstox witness not started for %s", key, exc_info=True)
         return feed_out

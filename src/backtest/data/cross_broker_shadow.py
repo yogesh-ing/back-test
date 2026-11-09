@@ -314,17 +314,30 @@ def shadow_enabled(env: Optional[dict[str, str]] = None) -> bool:
     return flag_enabled(source)
 
 
-def maybe_start(chain_provider: Any, underlying: str) -> Optional[CrossBrokerShadow]:
+def maybe_start(
+    chain_provider: Any, underlying: str, *, source: str = ""
+) -> Optional[CrossBrokerShadow]:
     """Start the mirror for ``underlying`` once; None when capture is off.
 
-    Called from the feed registry when a live mStock chain provider is built. An
-    Upstox login is *not* required here: the operator logs in whenever the broker
-    session dies, usually after the books have acquired their feed, so the mirror
-    starts as a parked loop and opens its socket on the pass that first finds a
-    token. No token, no socket, no Upstox HTTP.
+    Called from the feed registry when a live option chain provider is built, with
+    the canonical source that provider came from. An Upstox session is *not*
+    required here: the operator logs in whenever the broker session dies, usually
+    after the books have acquired their feed, so the mirror starts as a parked
+    loop and opens its socket on the pass that first finds a token. No token, no
+    socket, no Upstox HTTP.
     """
     key = str(underlying).upper()
     if not shadow_enabled():
+        return None
+    if "upstox" in str(source).strip().lower():
+        # The books already trade on Upstox: a second Upstox socket would agree
+        # with itself, and a witness that always reports zero disagreement is
+        # worse than none — it retires the doubt instead of answering it.
+        logger.info(
+            "SHADOW_UPSTOX_SELF underlying=%s — the live feed is already Upstox, so "
+            "there is no second broker to mirror onto",
+            key,
+        )
         return None
     with _ACTIVE_LOCK:
         if key in _ACTIVE:
