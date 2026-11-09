@@ -32,6 +32,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Callable
 
+from backtest.data.feed_depth_recorder import record_price_used
 from backtest.instruments.option import OptionContract
 from backtest.instruments.base import OptionType
 from backtest.timekeeping import EXCHANGE_TZ, now_utc, session_date
@@ -985,6 +986,15 @@ class BidAskQuoteProvider:
             raise UntrustedOptionQuoteError(f"{instrument_token}: {reason}")
         quote["ltp"] = price
         quote["execution_side"] = side
+        # An order row keeps only the price; this writes down the whole ladder it came
+        # from, so a disputed fill can be settled from a file (ENABLE_FEED).
+        record_price_used(
+            quote,
+            broker=str(getattr(self, "source_name", "unknown")),
+            token=instrument_token,
+            side=side,
+            field=key,
+        )
         return quote
 
     def register_contract(self, contract: Any) -> None:
