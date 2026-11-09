@@ -16,3 +16,10 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault("BACKTEST_DATA_PROFILE", "testing")
+
+#: ``ENABLE_FEED`` in a developer's ``.env`` is the operator's capture switch, and
+#: it applies to pytest too — so a fixture's made-up ladder used to land in
+#: ``logs/feed_depth/`` beside real broker packets. Evidence files are what the
+#: cross-broker thresholds get computed from, so the suite writes its own lines
+#: somewhere else. Tests that want the recorder point it at a tmp dir themselves.
+os.environ.setdefault("ENABLE_FEED_DIR", os.path.join("logs", "feed_depth", "pytest"))

@@ -313,6 +313,23 @@ def record_price_used(quote: dict, *, broker: str, token: Any, side: str, field:
     recorder.record(line)
 
 
+def record_shadow_diff(payload: dict) -> None:
+    """Capture one cross-broker comparison (item F, shadow mode).
+
+    ``payload`` carries both brokers' views of the same contract; it is written to
+    its own ``feed_shadow_<day>.jsonl`` so a reader can tell a witness from a
+    packet. Nothing downstream may gate on it — the thresholds come from a session
+    of these rows, not from a hand-picked number.
+    """
+    recorder = get_recorder()
+    if recorder is None:
+        return
+    line = {"v": _SCHEMA_VERSION, "kind": "shadow_diff", "broker": "shadow"}
+    line.update(payload)
+    line["recv_utc"] = iso_utc(now_utc())
+    recorder.record(line)
+
+
 __all__ = [
     "ENABLE_FEED_DIR_ENV",
     "ENABLE_FEED_ENV",
@@ -322,5 +339,6 @@ __all__ = [
     "get_recorder",
     "record_depth_packet",
     "record_price_used",
+    "record_shadow_diff",
     "reset_recorder",
 ]

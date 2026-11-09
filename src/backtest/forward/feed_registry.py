@@ -257,6 +257,16 @@ class ChainBus:
                     wing_distance_pct=wing_distance_pct,
                     async_warm=True,
                 )
+        if live_inner is not None:
+            # Item F: mirror this underlying's ring on Upstox's V3 socket and write
+            # the disagreement down (ENABLE_FEED). Observe only — a shadow feed that
+            # cannot be started must never cost the book its own feed.
+            try:
+                from backtest.data.cross_broker_shadow import maybe_start
+
+                maybe_start(live_inner, key)
+            except Exception:  # noqa: BLE001
+                logger.debug("shadow Upstox witness not started for %s", key, exc_info=True)
         return feed_out
 
     @staticmethod

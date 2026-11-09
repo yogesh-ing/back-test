@@ -1674,6 +1674,15 @@ class LiveChainProvider:
         if contract is not None and getattr(contract, "trading_symbol", None):
             self._quotes.invalidate(str(contract.trading_symbol))
 
+    def contract_for(self, instrument_token: str) -> Any:
+        """The registered terms for one token, or None.
+
+        Read-only by design: it exists so the shadow cross-broker witness
+        (:mod:`backtest.data.cross_broker_shadow`) can name the contract behind a
+        ring token. No trading path may branch on it.
+        """
+        return self._contracts.get(str(instrument_token))
+
     def get_quote(self, instrument_token: str) -> dict[str, Any]:
         """Real L1 quote (TTL-cached) for one contract token.
 
