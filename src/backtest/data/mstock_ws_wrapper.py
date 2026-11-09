@@ -7,6 +7,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from backtest.data.feed_depth_recorder import get_recorder, record_depth_packet
+
 logger = logging.getLogger(__name__)
 
 TickBatchCallback = Callable[[Dict[str, dict]], None]
@@ -56,6 +58,8 @@ class MStockWebSocketWrapper:
             batch_mono = time.monotonic()
             batch_utc = datetime.now(timezone.utc).isoformat()
             notify = False
+            capturing = get_recorder() is not None
+            captured: list[tuple[str, dict, Any]] = []
             with self._lock:
                 for tick in ticks or []:
                     token = str(tick.get("instrument_token", ""))
@@ -91,6 +95,11 @@ class MStockWebSocketWrapper:
                             row.get("ltp"),
                             self._blank_ladder_counts.get(token, 0),
                         )
+                    if capturing:
+                        captured.append((token, row, tick.get("depth")))
+
+            for token, row, raw_depth in captured:
+                record_depth_packet("mstock", row, token=token, raw_depth=raw_depth)
 
             if notify:
                 self._dirty_event.set()
