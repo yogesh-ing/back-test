@@ -70,8 +70,13 @@ class ShortStraddleAtm(StructureStrategy):
         "emits": [],
         "structures": {},
         "exit": {
-            "stop_loss_points": 2000,
-            "take_profit_points": 1000,
+            # UNITS (2026-11-09): points of premium, which the engine prices as
+            # points × Σ(leg lot size × lots) = 150 for one NIFTY lot of this
+            # two-leg structure, i.e. the ₹1,950 stop / ₹1,050 target the book
+            # has always meant. See ``immediate_strangle`` for why these used to
+            # read 2000/1000 and what correct units did to that trade.
+            "stop_loss_points": 13,
+            "take_profit_points": 7,
             "signal_flip": False,
             "min_days_to_expiry": None,
         },

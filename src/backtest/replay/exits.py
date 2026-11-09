@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Optional
 
 from backtest.options.exit_policy import EXIT_STOP_LOSS, EXIT_TAKE_PROFIT, ExitConfig, ExitDecision
 
@@ -49,6 +49,7 @@ class OHLCConservativeExitResolver:
         pnl_open = Decimal("0")
         pnl_adverse = Decimal("0")
         pnl_favorable = Decimal("0")
+        total_units = Decimal("0")
         opens: dict[str, float] = {}
         closes: dict[str, float] = {}
         adverse_prices: dict[str, float] = {}
@@ -60,6 +61,7 @@ class OHLCConservativeExitResolver:
             low_price = Decimal(str(quote["low"]))
             high_price = Decimal(str(quote["high"]))
             units = Decimal(str(leg.total_quantity))
+            total_units += units
             sign = Decimal("1") if leg.is_long else Decimal("-1")
             entry = Decimal(str(leg.entry_price))
             pnl_open += (open_price - entry) * units * sign
@@ -73,8 +75,8 @@ class OHLCConservativeExitResolver:
             pnl_favorable += (favorable_price - entry) * units * sign
             adverse_prices[leg.instrument_token] = float(adverse_price)
 
-        stop_threshold = self._stop_threshold(exit_config, basis)
-        target_threshold = self._target_threshold(exit_config, basis)
+        stop_threshold = self._stop_threshold(exit_config, basis, total_units)
+        target_threshold = self._target_threshold(exit_config, basis, total_units)
         stop_hit = stop_threshold is not None and (
             pnl_open <= stop_threshold or pnl_adverse <= stop_threshold
         )
@@ -119,20 +121,26 @@ class OHLCConservativeExitResolver:
         return None
 
     @staticmethod
-    def _stop_threshold(config: ExitConfig, basis: Decimal) -> Decimal | None:
+    def _stop_threshold(
+        config: ExitConfig, basis: Decimal, units: Optional[Decimal] = None
+    ) -> Decimal | None:
         thresholds: list[Decimal] = []
-        if config.stop_loss_points is not None:
-            thresholds.append(-Decimal(str(config.stop_loss_points)))
+        stop_inr = config.priced_stop_loss_inr(units)
+        if stop_inr is not None:
+            thresholds.append(-stop_inr)
         if config.stop_loss_pct is not None and basis > 0:
             thresholds.append(-basis * Decimal(str(config.stop_loss_pct)))
         # Either configured stop can fire; the closer-to-zero loss is first.
         return max(thresholds) if thresholds else None
 
     @staticmethod
-    def _target_threshold(config: ExitConfig, basis: Decimal) -> Decimal | None:
+    def _target_threshold(
+        config: ExitConfig, basis: Decimal, units: Optional[Decimal] = None
+    ) -> Decimal | None:
         thresholds: list[Decimal] = []
-        if config.take_profit_points is not None:
-            thresholds.append(Decimal(str(config.take_profit_points)))
+        target_inr = config.priced_take_profit_inr(units)
+        if target_inr is not None:
+            thresholds.append(target_inr)
         if config.take_profit_pct is not None and basis > 0:
             thresholds.append(basis * Decimal(str(config.take_profit_pct)))
         # Either configured target can fire; the nearer gain is first.

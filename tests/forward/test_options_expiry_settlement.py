@@ -99,12 +99,18 @@ def _gate():
 def _v2(expression: dict) -> dict:
     """Legacy-shaped test expression -> v2 (Phase 4). Tests that declare
     no hard stop get a far-away points stop (defined-risk spreads cannot
-    use structure_capped at the entry gate)."""
+    use structure_capped at the entry gate).
+
+    2,000 points prices to ~₹300k on one lot of each leg — beyond any P&L
+    these settlement tests can print, and inside this scaffold's own ₹1M
+    ceiling. It used to be ``100_000.0``, which only stayed far away because
+    the engine read points as rupees (see ``exit_policy`` UNITS).
+    """
     expression = dict(expression)
     exit_cfg = dict(expression.get("exit") or {})
     hard = ("stop_loss_pct", "stop_loss_points", "stop_loss_price")
     if not any(k in exit_cfg for k in hard) and not exit_cfg.get("structure_capped"):
-        exit_cfg["stop_loss_points"] = 100_000.0
+        exit_cfg["stop_loss_points"] = 2_000.0
     return {
         "expression_version": 2,
         "type": expression.get("type", "long_call"),

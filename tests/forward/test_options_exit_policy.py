@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,6 +38,7 @@ from backtest.options.exit_policy import (
     RISK_REASONS,
     ExitConfig,
     ExitPolicy,
+    units_per_point,
 )
 from backtest.options.quote_providers import (
     SyntheticChainGenerator,
@@ -284,9 +286,49 @@ class TestPolicyRules:
         policy = ExitPolicy(
             ExitConfig(stop_loss_points=1500, take_profit_points=2500, min_days_to_expiry=None)
         )
-        assert policy.evaluate(unrealized_pnl=Decimal("-1500")).reason == EXIT_STOP_LOSS
-        assert policy.evaluate(unrealized_pnl=Decimal("2500")).reason == EXIT_TAKE_PROFIT
-        assert policy.evaluate(unrealized_pnl=Decimal("100")) is None
+        # Points are priced by the structure's own unit count: 50 units (one lot)
+        # makes the declared bracket a ₹75,000 stop and a ₹125,000 target.
+        units = Decimal("50")
+        assert (
+            policy.evaluate(unrealized_pnl=Decimal("-75000"), point_units=units).reason
+            == EXIT_STOP_LOSS
+        )
+        assert (
+            policy.evaluate(unrealized_pnl=Decimal("125000"), point_units=units).reason
+            == EXIT_TAKE_PROFIT
+        )
+        assert policy.evaluate(unrealized_pnl=Decimal("-74999"), point_units=units) is None
+        assert policy.evaluate(unrealized_pnl=Decimal("100"), point_units=units) is None
+        # 2026-11-08 regression: a points rule the caller cannot price in units
+        # must never be read as rupees. -1,500 against stop_loss_points=1500 is
+        # exactly the comparison that closed the Muhurat straddle.
+        assert policy.evaluate(unrealized_pnl=Decimal("-1500")) is None
+
+    def test_muhurat_shape_prices_at_its_own_units(self):
+        """The 2026-11-08 straddle: 2,000 pts × 150 units is a ₹300,000 stop.
+
+        The −₹11,794 mark that closed it on a bad ask sits far inside that, so
+        at correct units the position survives to a real exit at a real price.
+        The 13-point bracket the book ships now is what still stops it out.
+        """
+        units = Decimal("150")  # one 75-lot of each of two short legs
+        declared = ExitPolicy(ExitConfig(stop_loss_points=2000, min_days_to_expiry=None))
+        assert declared.evaluate(unrealized_pnl=Decimal("-11794"), point_units=units) is None
+        shipped = ExitPolicy(ExitConfig(stop_loss_points=13, min_days_to_expiry=None))
+        decision = shipped.evaluate(unrealized_pnl=Decimal("-11794"), point_units=units)
+        assert decision.reason == EXIT_STOP_LOSS
+        assert "13 pts × 150 units" in decision.detail
+
+    def test_units_per_point_counts_open_legs(self):
+        structure = SimpleNamespace(
+            legs=[
+                SimpleNamespace(status="OPEN", total_quantity=75),
+                SimpleNamespace(status="OPEN", quantity=1, lot_size=75),
+                SimpleNamespace(status="CLOSED", total_quantity=75),
+            ]
+        )
+        assert units_per_point(structure) == Decimal("150")
+        assert units_per_point(SimpleNamespace(legs=[])) == Decimal("0")
 
     def test_time_stop(self):
         assert self._evaluate(bars_held=9) is None
@@ -603,7 +645,11 @@ class TestSquareOffPrecedence:
         policy = ExitPolicy(
             ExitConfig(stop_loss_points=500, max_bars=3, min_days_to_expiry=None)
         )
-        assert policy.evaluate(unrealized_pnl=Decimal("-600"), bars_held=9).reason == EXIT_STOP_LOSS
+        units = Decimal("1")  # one unit, so the declared 500 pts is ₹500
+        assert (
+            policy.evaluate(unrealized_pnl=Decimal("-600"), bars_held=9, point_units=units).reason
+            == EXIT_STOP_LOSS
+        )
         assert policy.evaluate(bars_held=3).reason == EXIT_TIME_STOP
 
 

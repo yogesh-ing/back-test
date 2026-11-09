@@ -232,3 +232,39 @@ daily-loss fuse at all — it did.
   containment note 2026-11-04, live-session findings 2026-11-05.
 * Tasks: #19 (corroboration at the seam, this report's option B), #18 (broker-faithful
   execution and units, options C/D), #26 (recorder, option A).
+
+## 8. Resolution — what landed 2026-11-09 (the architect's today-list)
+
+* **A (`ENABLE_FEED`)** — the flag-gated recorder keeps every depth packet the broker
+  sent (`tools/depth_compare_record.py`), so a disputed print is settled from a file.
+* **#18 units** — `*_points` is points of premium everywhere it is read:
+  * `exit_policy.units_per_point()` and `ExitConfig.priced_stop_loss_inr()` /
+    `priced_take_profit_inr()` price a declared bracket as `points × Σ(leg lot_size × lots)`
+    from the legs actually filled. A points rule with no unit count is skipped with one
+    warning per process; it is never compared against a rupee P&L figure again.
+  * The same priced figure is what the Pre-Trade Risk Gate worst case, the take-profit
+    fee floor, the OHLC replay resolver and the exit detail line use.
+  * `execution_summary` printed `stop -₹2000` for a points declaration; it prints pts now.
+* **E1 opening window** — `timekeeping.opening_quiet_seconds()` (120 s on a regular day,
+  300 s on a declared special session) is enforced on the bar path as `OPENING_QUIET_WINDOW`.
+  The tick path had a version of this since Caveat Q-7; the bar path never asked, which is
+  how the 14:20:11 entry got through.
+* **Consequence for the shipped brackets.** The three short-premium plugins declared
+  `stop_loss_points: 2000 / take_profit_points: 1000` meaning ₹2,000 / ₹1,000. At correct
+  units that is a ₹300,000 stop, which the ₹25,000 per-trade ceiling refuses to open, so
+  the declarations now state the points that mean those rupees: 13 / 7 pts (₹1,950 /
+  ₹1,050 at one 75-lot of each leg, scaling with `quantity`). **Against section 3 of the
+  architect's note:** the exit would have been prevented only by leaving the declaration at
+  2000 pts, and that same declaration blocks the entry. The unit fix removes the misreading;
+  it does not make a bad mark harmless. Only F and D do that.
+* **Live state.** The PAUSED `straddle_short_atm` book still carries the 2000/1000 contract
+  it froze at spawn, so resuming it logs `MAX_LOSS_EXCEEDED: worst-case loss ₹300,000` and
+  a re-spawn is required to inherit 13/7. The RUNNING `CE_instant_buy` book is a defined-risk
+  long call and is unaffected by the units change.
+* **Still owed:** F (cross-broker corroboration at the fill seam) and B in shadow mode, with
+  tolerance from A's files rather than from this report; D before any live capital; the C
+  policy call; stricter special-session thresholds.
+* Tests: `tests/forward/test_options_exit_policy.py` (incl. the 2026-11-08 shape),
+  `tests/replay/test_ohlc_exit_units.py`,
+  `tests/forward/test_carry_policy_and_eod_sweep.py` (E1 on the bar path),
+  `tests/test_special_session_muhurat.py` (the window itself).

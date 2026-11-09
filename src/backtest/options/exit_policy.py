@@ -37,7 +37,7 @@ Configuration lives in the runner's expression block::
                 "max_loss_inr": 5000,         # per-trade risk cap (₹ of P&L)
                 "stop_loss_pct": 0.5,         # 50% of the net premium
                 "take_profit_pct": 1.0,       # +100% of the net premium
-                "stop_loss_points": 2000.0,   # ...or absolute ₹ of structure P&L
+                "stop_loss_points": 2000.0,   # points of premium (see UNITS below)
                 "take_profit_points": 3000.0,
                 "max_bars": 10,               # time stop, in bars
                 "min_days_to_expiry": 1,      # square off the day before expiry
@@ -50,6 +50,22 @@ Configuration lives in the runner's expression block::
 Every key is optional. Percent rules are measured against the structure's
 **net premium** (its max loss for all four V1 structures) and are skipped for
 credit structures, where a percentage of a negative base has no meaning.
+
+UNITS (2026-11-09, after the Muhurat incident — docs/OPTION-JUNK-ASK-INCIDENT-2026-11-08.md)
+--------------------------------------------------------------------------------
+``*_points`` keys are **points of premium**, never rupees. One point on one lot is
+``lot_size`` rupees, so a structure's rupee threshold is ``points × Σ leg(lot_size ×
+lots)`` — :func:`units_per_point` computes that divisor from the legs the broker
+actually filled, and :meth:`ExitConfig.priced_stop_loss_inr` /
+:meth:`~ExitConfig.priced_take_profit_inr` do the multiplication. The
+caller that knows the structure passes ``point_units`` to :meth:`ExitPolicy.evaluate`;
+without it a points rule is *unpriceable* and is skipped with a warning, because the
+one thing that must not happen is reading a points figure as rupees: on 2026-11-08 a
+``stop_loss_points: 2000`` compared against ``-₹11,794`` closed a straddle that correct
+units (₹300,000 at one 75-lot of each of its two legs) would never have opened — the
+Pre-Trade Risk Gate reads the same priced figure and caps one trade at ₹25,000.
+Rupees have their own key — ``max_loss_inr``, the platform's hard ceiling — and
+nothing here guesses a unit.
 """
 
 from __future__ import annotations
@@ -157,6 +173,41 @@ _KNOWN_KEYS = frozenset(
 FEE_FLOOR_MULTIPLIER: float = 1.2
 
 
+def units_per_point(structure: Any) -> Decimal:
+    """Rupees of this structure's P&L per one point of premium movement.
+
+    Σ over open legs of ``lot_size × lots`` — the number of contract units the
+    broker actually filled, so the divisor is the position, not a convention.
+    A two-leg structure of one 75-lot NIFTY leg each is 75 + 75 = 150 units, so
+    a 2,000-point stop is ₹300,000 — not ₹2,000.
+
+    Returns ``Decimal(0)`` for a structure with no priced legs; callers treat
+    that as *unpriceable* and skip the rule rather than fall back to rupees.
+    """
+    total = Decimal("0")
+    for leg in getattr(structure, "legs", None) or []:
+        status = getattr(leg, "status", None)
+        status = getattr(status, "value", status)
+        if status is not None and str(status).lower() != "open":
+            continue
+        units = getattr(leg, "total_quantity", None)
+        if units is None:
+            units = int(getattr(leg, "quantity", 0) or 0) * int(
+                getattr(leg, "lot_size", 0) or 0
+            )
+        try:
+            total += Decimal(str(units or 0))
+        except Exception:  # noqa: BLE001 — a junk leg must not crash the exit path
+            continue
+    return total
+
+
+#: Names already reported as an unpriceable points rule (see
+#: :meth:`ExitConfig._points_inr`) — the warning is per process, the check runs
+#: every bar.
+_UNPRICEABLE_WARNED: set[str] = set()
+
+
 def take_profit_fee_floor_violation(
     take_profit_inr: Optional[float],
     round_trip_fees_inr: Optional[float],
@@ -165,8 +216,10 @@ def take_profit_fee_floor_violation(
 ) -> Optional[str]:
     """Return a refusal reason when the take-profit is inside the round-trip fee.
 
-    ``take_profit_inr`` is the structure's declared favourable bracket in ₹ of
-    P&L (``take_profit_points``, or ``take_profit_pct`` × the premium base);
+    ``take_profit_inr`` is the structure's favourable bracket already priced in
+    ₹ of P&L — ``take_profit_pct`` × the premium base, or
+    :meth:`ExitConfig.priced_take_profit_inr` for a points declaration. Passing
+    raw points here repeats the units mistake documented in UNITS above.
     ``round_trip_fees_inr`` is the engine's own entry + exit fee estimate for
     the same structure. Returns ``None`` when either number is unknown/
     non-positive — the caller must not refuse on a number it cannot state — and
@@ -259,7 +312,9 @@ class ExitConfig:
     #: Stop / target as a fraction of the net premium paid (its max loss).
     stop_loss_pct: Optional[float] = None
     take_profit_pct: Optional[float] = None
-    #: Stop / target in absolute structure P&L (₹).
+    #: Stop / target in **points of premium**, priced in rupees by
+    #: :meth:`priced_stop_loss_inr` / :meth:`priced_take_profit_inr`.
+    #: Never compared to P&L raw.
     stop_loss_points: Optional[float] = None
     take_profit_points: Optional[float] = None
     #: Per-trade risk cap in ₹ of structure P&L. The platform's hard ceiling:
@@ -340,6 +395,43 @@ class ExitConfig:
             ),
         )
 
+    def _points_inr(
+        self, points: Optional[float], units: Optional[Decimal], name: str
+    ) -> Optional[Decimal]:
+        """Price a declared points threshold for this structure, or refuse to guess.
+
+        ``None`` means the rule cannot fire: nothing is declared, or the caller
+        could not state how many units the structure holds. Reading the points
+        figure as rupees is the failure this exists to prevent.
+        """
+        if points is None:
+            return None
+        if units is None or units <= 0:
+            if name not in _UNPRICEABLE_WARNED:  # once per process, not once per bar
+                _UNPRICEABLE_WARNED.add(name)
+                logger.warning(
+                    "[exit-policy] %s=%s is a points rule but this structure has no "
+                    "unit count, so the threshold cannot be priced and the rule is "
+                    "skipped — it is never read as rupees",
+                    name,
+                    points,
+                )
+            return None
+        return Decimal(str(points)) * Decimal(units)
+
+    def priced_stop_loss_inr(self, units: Optional[Decimal] = None) -> Optional[Decimal]:
+        """The declared points stop priced in ₹ of structure P&L, or ``None``.
+
+        Named ``priced_*`` so it can never be mistaken for a declared rupee
+        figure (``max_loss_inr``): reading a points threshold as rupees is the
+        defect documented in UNITS above.
+        """
+        return self._points_inr(self.stop_loss_points, units, "stop_loss_points")
+
+    def priced_take_profit_inr(self, units: Optional[Decimal] = None) -> Optional[Decimal]:
+        """The declared points target priced in ₹ of structure P&L, or ``None``."""
+        return self._points_inr(self.take_profit_points, units, "take_profit_points")
+
     def to_dict(self) -> dict[str, Any]:
         """Serialisable form (state payloads / UI)."""
         return {
@@ -401,14 +493,19 @@ class ExitPolicy:
         bars_without_view: int = 0,
         bar_date: Optional[date] = None,
         expiry: Optional[date] = None,
+        point_units: Optional[Decimal] = None,
     ) -> Optional[ExitDecision]:
-        """Return the exit decision for one bar, or ``None`` to keep holding."""
+        """Return the exit decision for one bar, or ``None`` to keep holding.
+
+        ``point_units`` is :func:`units_per_point` for the open structure; a
+        declared ``*_points`` rule without it is skipped, never read as rupees.
+        """
         pnl = Decimal(str(unrealized_pnl or 0))
         premium = Decimal(str(basis or 0))
         cfg = self.config
 
         # -- risk first: these fire regardless of what the strategy thinks ----
-        decision = self._risk_decision(pnl, premium, bars_held, bar_date, expiry)
+        decision = self._risk_decision(pnl, premium, bars_held, bar_date, expiry, point_units)
         if decision is not None:
             return decision
 
@@ -438,6 +535,7 @@ class ExitPolicy:
         bars_held: int,
         bar_date: Optional[date],
         expiry: Optional[date],
+        point_units: Optional[Decimal] = None,
     ) -> Optional[ExitDecision]:
         cfg = self.config
 
@@ -457,9 +555,12 @@ class ExitPolicy:
             days = (expiry - bar_date).days
             return ExitDecision(EXIT_DTE, f"{days}d to expiry ≤ {cfg.min_days_to_expiry}d")
 
-        if cfg.stop_loss_points is not None and pnl <= -Decimal(str(cfg.stop_loss_points)):
+        stop_inr = cfg.priced_stop_loss_inr(point_units)
+        if stop_inr is not None and pnl <= -stop_inr:
             return ExitDecision(
-                EXIT_STOP_LOSS, f"stop {pnl:,.0f} ≤ -{cfg.stop_loss_points:,.0f}"
+                EXIT_STOP_LOSS,
+                f"stop {pnl:,.0f} ≤ -{stop_inr:,.0f} "
+                f"({cfg.stop_loss_points:,.0f} pts × {point_units:,.0f} units)",
             )
         if (
             cfg.stop_loss_pct is not None
@@ -471,9 +572,12 @@ class ExitPolicy:
                 f"stop {pnl:,.0f} ≤ -{cfg.stop_loss_pct:.0%} of premium {premium:,.0f}",
             )
 
-        if cfg.take_profit_points is not None and pnl >= Decimal(str(cfg.take_profit_points)):
+        target_inr = cfg.priced_take_profit_inr(point_units)
+        if target_inr is not None and pnl >= target_inr:
             return ExitDecision(
-                EXIT_TAKE_PROFIT, f"target {pnl:,.0f} ≥ {cfg.take_profit_points:,.0f}"
+                EXIT_TAKE_PROFIT,
+                f"target {pnl:,.0f} ≥ {target_inr:,.0f} "
+                f"({cfg.take_profit_points:,.0f} pts × {point_units:,.0f} units)",
             )
         if (
             cfg.take_profit_pct is not None

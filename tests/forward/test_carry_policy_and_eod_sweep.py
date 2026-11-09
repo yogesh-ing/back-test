@@ -311,6 +311,20 @@ def test_live_intraday_bridge_refuses_past_its_own_squareoff_deadline():
     assert "square-off" in result["reason"]
 
 
+def test_the_opening_window_refuses_an_entry_then_opens_after_it():
+    """E1 (2026-11-09): 09:15:00..09:17:00 opens nothing on the bar path.
+
+    The Muhurat straddle entered 11 s after a 14:20 open against a ladder that
+    had not printed since the previous session, and stopped out on one packet.
+    """
+    bridge = _bridge(timeframe="1day", live=True)
+    result = _open_structure(bridge, hour=9, minute=16)
+    assert result.get("code") == "OPENING_QUIET_WINDOW"
+    assert "opening window" in result["reason"]
+    assert bridge._has_open_structure() is False
+    assert _open_structure(bridge, hour=9, minute=20).get("structure_id")
+
+
 def test_entry_still_opens_inside_the_window_on_a_live_feed():
     bridge = _bridge(timeframe="1day", live=True)
     result = _open_structure(bridge, hour=10)

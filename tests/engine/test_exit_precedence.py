@@ -39,11 +39,13 @@ def _bridge_with_config(exit_cfg, capital=1000000):
     gen = SyntheticChainGenerator()
     provider = SyntheticQuoteProvider(chain_generator=gen)
     # Re-entry is exercised on two-leg spreads — these bridges take the
-    # research profile. Phase 4: expressions are v2; a declared points
-    # stop (₹10k, inside the rulebook ceiling, beyond a 50-point spread's
-    # maximum loss) supplies the mandatory hard stop.
+    # research profile. Phase 4: expressions are v2; the mandatory hard stop
+    # is declared in the unit that means rupees here — a capped structure with
+    # a ₹10k max loss (inside the rulebook ceiling, beyond a 50-point spread's
+    # maximum loss). It used to be spelled ``stop_loss_points: 10_000``, which
+    # only worked because the engine misread points as rupees.
     broker = OptionPaperBroker(capital=capital, allowed_structures=RESEARCH_STRUCTURES)
-    exit_cfg = {"stop_loss_points": 10_000.0, **dict(exit_cfg)}
+    exit_cfg = {"structure_capped": True, "max_loss_inr": 10_000.0, **dict(exit_cfg)}
     expression = {
         "expression_version": 2,
         "type": {

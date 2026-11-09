@@ -47,20 +47,22 @@ from options_support import (  # noqa: F401 — market_closed is a pytest fixtur
 )
 
 # The mandatory hard stop is scaffolding here (these tests isolate
-# pricing): ₹900k sits beyond any P&L these books can print, inside the
-# scaffold gate's ceiling, so no exit rule ever fires.
+# pricing): a ₹900k declared max loss sits beyond any P&L these books can
+# print, inside the scaffold gate's ceiling, so no exit rule ever fires.
+# It used to be spelled ``stop_loss_points: 900_000`` — which only worked
+# because points were being read as rupees (see exit_policy UNITS).
 _V2LC = {
     "expression_version": 2,
     "type": "long_call",
     "quantity": 1,
-    "exit": {"stop_loss_points": 900_000.0, "min_days_to_expiry": None},
+    "exit": {"structure_capped": True, "max_loss_inr": 900_000.0, "min_days_to_expiry": None},
 }
 
 _V2_SPREAD = {
     "expression_version": 2,
     "type": "bull_call_spread",
     "quantity": 1,
-    "exit": {"stop_loss_points": 900_000.0, "min_days_to_expiry": None},
+    "exit": {"structure_capped": True, "max_loss_inr": 900_000.0, "min_days_to_expiry": None},
 }
 
 
@@ -138,7 +140,8 @@ def _option_config(**overrides):
                 },
                 "quantity": 1,
                 "exit": {
-                    "stop_loss_points": 1_000_000.0,
+                    "structure_capped": True,
+                    "max_loss_inr": 900_000.0,
                     "signal_flip": False,
                     "min_days_to_expiry": None,
                 },

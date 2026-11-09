@@ -65,6 +65,7 @@ from backtest.timekeeping import (
     entry_window_refusal,
     from_market_clock,
     now_utc,
+    opening_quiet_seconds,
     session_date,
     session_window,
 )
@@ -92,6 +93,7 @@ from backtest.options.exit_policy import (
     ExitDecision,
     ExitPolicy,
     _label,
+    units_per_point,
     take_profit_fee_floor_violation,
 )
 from backtest.options.intent_journal import (
@@ -435,11 +437,17 @@ class OptionsBridge:
             default=60.0,
             minimum=0.0,
         )
-        self.market_open_stabilization_seconds: float = self._resolve_float_knob(
-            "market_open_stabilization_seconds",
-            "MSTOCK_OPEN_STABILIZATION_SECONDS",
-            default=5.0,
-            minimum=0.0,
+        #: E1 (2026-11-09): an explicit override for the opening quiet window.
+        #: When undeclared the window comes from the clock authority for the
+        #: session being traded (2 minutes regular, 5 on a declared special
+        #: session), because that is a market-hours fact, not a strategy knob.
+        self.market_open_stabilization_seconds: Optional[float] = (
+            self._resolve_float_knob(
+                "market_open_stabilization_seconds",
+                "MSTOCK_OPEN_STABILIZATION_SECONDS",
+                default=None,
+                minimum=0.0,
+            )
         )
         self.max_bid_ask_spread_pct: Optional[float] = self._resolve_optional_spread_pct()
         self._last_exit_mono: Optional[float] = None
@@ -628,7 +636,7 @@ class OptionsBridge:
         probe_ts = tick_ts or getattr(view, "bar_timestamp", None)
         self._touch_market_clock(probe_ts)
         if from_tick:
-            if self._in_opening_stabilization_window(probe_ts):
+            if self._opening_quiet_refusal(probe_ts) is not None:
                 return None
             if self._blocked_tick_reentry():
                 return None
@@ -681,6 +689,19 @@ class OptionsBridge:
                 "rejected": True,
                 "reason": window_refusal,
                 "code": "OUTSIDE_ENTRY_WINDOW",
+            }
+        # E1 (2026-11-09): the opening window. The tick path has refused inside it
+        # since Caveat Q-7, but the bar path never asked — so the Muhurat straddle
+        # opened 11 s after the 14:20 open against a ladder that had not printed
+        # since the previous session. Live-gated like BUG-18 above: this is a
+        # forward-seam guard, not a rule for replaying history.
+        quiet_refusal = self._opening_quiet_refusal(probe_ts) if self._quotes_are_live else None
+        if quiet_refusal is not None:
+            self._journal_halt_once("OPENING_QUIET_WINDOW", quiet_refusal)
+            return {
+                "rejected": True,
+                "reason": quiet_refusal,
+                "code": "OPENING_QUIET_WINDOW",
             }
         # BUG-02: entry budget is per session day, not per signal. Count every
         # structural close (stop, target, flip, settlement, square-off) against
@@ -2248,6 +2269,7 @@ class OptionsBridge:
                 bars_without_view=self._bars_without_view,
                 bar_date=self._bar_date,
                 expiry=structure.expiry,
+                point_units=units_per_point(structure),
             )
             if (
                 decision is not None
@@ -2956,10 +2978,12 @@ class OptionsBridge:
         net = Decimal("0")
         has_sell = False
         leg_quotes: list[tuple[Any, Decimal]] = []
+        total_units = Decimal("0")
         for leg in intent.legs:
             quote = self.quote_provider.get_quote(leg.instrument_token) or {}
             price = Decimal(str(quote.get("ltp") or quote.get("ask") or quote.get("bid") or "0"))
             units = Decimal(str(int(leg.quantity) * int(leg.lot_size)))
+            total_units += units
             leg_quotes.append((leg, price))
             if str(leg.side).upper() == "BUY":
                 gross_buy += price * units
@@ -2969,13 +2993,18 @@ class OptionsBridge:
                 net -= price * units
         if has_sell:
             # A short structure's stateable worst case is its declared risk
-            # cap: max_loss_inr if set, else stop_loss_points, else
-            # stop_loss_pct × net credit collected (only when net < 0, i.e. a
-            # genuinely priced credit structure).
+            # cap: max_loss_inr if set, else stop_loss_points *priced in rupees*
+            # (points × the units being opened), else stop_loss_pct × net credit
+            # collected (only when net < 0, i.e. a genuinely priced credit
+            # structure). Reading a points figure as rupees here is what let a
+            # 2,000-point stop pass a ₹25,000 ceiling — see
+            # docs/OPTION-JUNK-ASK-INCIDENT-2026-11-08.md.
             if self._strict_exit_plan.max_loss_inr is not None:
                 worst: float | None = float(self._strict_exit_plan.max_loss_inr)
-            elif self._strict_exit_plan.stop_loss_points is not None:
-                worst = float(self._strict_exit_plan.stop_loss_points)
+            elif self._strict_exit_plan.stop_loss_points is not None and total_units > 0:
+                worst = float(
+                    Decimal(str(self._strict_exit_plan.stop_loss_points)) * total_units
+                )
             elif self._strict_exit_plan.stop_loss_pct is not None and net < Decimal("0"):
                 worst = float(self._strict_exit_plan.stop_loss_pct) * abs(float(net))
             else:
@@ -2986,8 +3015,8 @@ class OptionsBridge:
                 raise StructureNotAllowedError(
                     "WORST_CASE_UNPRICEABLE",
                     f"{structure_type}: short legs with no declared max_loss_inr "
-                    "or stop_loss_points in the ExitPlan — an unpriceable worst "
-                    "case cannot trade",
+                    "and no priceable stop_loss_points in the ExitPlan — an "
+                    "unpriceable worst case cannot trade",
                 )
         else:
             worst = float(max(net, Decimal("0")))
@@ -3021,15 +3050,17 @@ class OptionsBridge:
         if not leg_quotes:
             return
         plan = self._strict_exit_plan
+        tp_points: Optional[float] = None
         tp_inr: Optional[float] = None
         if plan.take_profit_points is not None:
-            tp_inr = float(plan.take_profit_points)
+            # Points of premium, priced once the legs are totalled below.
+            tp_points = float(plan.take_profit_points)
         elif plan.take_profit_pct is not None and net_premium != 0:
             # Percent is measured against the premium base — the credit for a
             # short structure, the debit for a long one. abs() keeps the sign
             # out of the ₹ comparison.
             tp_inr = float(plan.take_profit_pct) * abs(float(net_premium))
-        if tp_inr is None:
+        if tp_points is None and tp_inr is None:
             return
         fee_calc = getattr(self.option_broker, "fee_calculator", None)
         if fee_calc is None:
@@ -3057,6 +3088,10 @@ class OptionsBridge:
                     "price": price,  # same-quote estimate; conservative
                 }
             )
+        if tp_inr is None:
+            # take_profit_points × the units actually opened: ₹ per point of
+            # premium on this structure. Same divisor the exit rule uses.
+            tp_inr = tp_points * sum(int(entry["quantity"]) for entry in entry_legs)
         try:
             entry_fees = fee_calc.calculate_structure(
                 entry_legs, track_volume=False
@@ -3212,9 +3247,9 @@ class OptionsBridge:
         expr_key: str,
         env_key: str,
         *,
-        default: float,
+        default: Optional[float],
         minimum: float = 0.0,
-    ) -> float:
+    ) -> Optional[float]:
         raw = self.expression.get(expr_key)
         if raw is None:
             env_raw = os.environ.get(env_key, "").strip()
@@ -3295,18 +3330,30 @@ class OptionsBridge:
             squareoff_minutes=self.intraday_squareoff_minutes_before,
         )
 
-    def _in_opening_stabilization_window(self, ts: Any) -> bool:
-        """True during 09:15:00..(09:15:00 + stabilization_s) IST (Caveat Q-7)."""
-        window_s = self.market_open_stabilization_seconds
-        if window_s <= 0.0:
-            return False
+    def _opening_quiet_refusal(self, ts: Any) -> Optional[str]:
+        """E1: why this instant cannot open a structure inside the opening window.
+
+        The window is measured from the session's own open — 09:15 on a regular
+        day, 14:20 on a declared special session (Caveat Q-7). A declared
+        ``market_open_stabilization_seconds`` replaces the platform window,
+        including with 0 to disable it; silence means the platform's own figure.
+        """
         ist_dt = self._ist_clock_from_ts(ts)
         if ist_dt is None:
-            return False
-        open_time = session_window(ist_dt)[0]
-        open_dt = datetime.combine(ist_dt.date(), open_time, tzinfo=EXCHANGE_TZ)
+            return None
+        window_s = self.market_open_stabilization_seconds
+        if window_s is None:
+            window_s = opening_quiet_seconds(ist_dt)
+        if window_s <= 0.0:
+            return None
+        open_dt = datetime.combine(ist_dt.date(), session_window(ist_dt)[0], tzinfo=EXCHANGE_TZ)
         elapsed = (ist_dt - open_dt).total_seconds()
-        return 0.0 <= elapsed < window_s
+        if not 0.0 <= elapsed < window_s:
+            return None
+        return (
+            f"{elapsed:.0f}s after the {open_dt:%H:%M} open, inside the "
+            f"{window_s:g}s opening window — no new structures (E1)"
+        )
 
     def _entry_bucket_key(self, ts: Any) -> Optional[str]:
         """Bucket key for the BUG-01 entry latch, or ``None`` when unlatched.

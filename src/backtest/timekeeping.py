@@ -362,6 +362,26 @@ def session_pre_open(
     return PRE_OPEN_TIME if declared is None else declared.pre_open
 
 
+#: E1 (2026-11-09): minutes after the open during which nothing is opened. The
+#: Muhurat trade that stop-lossed on one unrecorded ask was entered 11 seconds
+#: after a 14:20 open, on a ladder that had not printed since 09:15 the day
+#: before. A short session gets the wider window because it has proportionally
+#: less settled price to trade against, not because it is riskier by name.
+OPENING_QUIET_MINUTES = 2
+SPECIAL_OPENING_QUIET_MINUTES = 5
+
+
+def opening_quiet_seconds(
+    value: Union[datetime, date, str, None] = None,
+) -> float:
+    """Seconds after this session's open in which a new position is refused."""
+    declared = special_session(value)
+    minutes = (
+        SPECIAL_OPENING_QUIET_MINUTES if declared is not None else OPENING_QUIET_MINUTES
+    )
+    return float(minutes * 60)
+
+
 def is_trading_day(
     value: Union[datetime, date, str, None] = None,
     holidays: Iterable[Union[date, str]] = (),
@@ -509,6 +529,7 @@ __all__ = [
     "market_is_open",
     "now_exchange",
     "now_utc",
+    "opening_quiet_seconds",
     "parse_utc_iso",
     "session_date",
     "session_pre_open",

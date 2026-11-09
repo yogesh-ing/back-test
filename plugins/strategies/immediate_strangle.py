@@ -121,16 +121,22 @@ class ImmediateStrangle(StructureStrategy):
             # A short strangle is a net-CREDIT structure: its net premium is
             # negative, and ``ExitPolicy`` deliberately skips percentage
             # stops/targets when the premium base is not positive (a percent of
-            # a negative credit has no meaning). The plan's
-            # ``stop_loss_pct 0.35 / take_profit_pct 0.50`` is therefore inert
-            # for THIS structure — the only form that fires is an absolute ₹
-            # bracket, so the resize is expressed in points (≥ ₹1,000 on a
-            # 65-lot NIFTY leg ≈ 15 pts, which clears the ~₹9/leg 5-minute
-            # spread bounce and the ₹193 round trip). The take-profit also has
-            # to clear the bridge fee-floor gate (≤ 1.2× round-trip fees is
-            # refused at entry), so the target sits well above ₹231.
-            "stop_loss_points": 2000,
-            "take_profit_points": 1000,
+            # a negative credit has no meaning). So the bracket has to be an
+            # absolute one, expressed in *_points.
+            #
+            # UNITS (2026-11-09, docs/OPTION-JUNK-ASK-INCIDENT-2026-11-08.md):
+            # ``*_points`` is points of premium, priced by the engine as
+            # points × Σ(leg lot size × lots) — 150 units for one lot of this
+            # two-leg NIFTY structure, so 1 pt ≈ ₹150 and these are the same
+            # ₹2,000 / ₹1,000 brackets they have always meant. They used to be
+            # written 2000 / 1000 because the engine read the figures as rupees;
+            # at correct units that would be a ₹300,000 stop, which the
+            # Pre-Trade Risk Gate (₹25,000 per trade) would refuse to open.
+            # Both scale with ``quantity`` — 3 lots makes the stop ₹5,850.
+            # The target also has to clear the bridge fee-floor gate (≤ 1.2×
+            # round-trip fees is refused at entry), so it sits above ₹231.
+            "stop_loss_points": 13,
+            "take_profit_points": 7,
             "signal_flip": False,
             "min_days_to_expiry": None,
         },

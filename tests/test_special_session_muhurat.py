@@ -20,6 +20,7 @@ from backtest.timekeeping import (
     in_eod_squareoff_window,
     is_trading_day,
     market_is_open,
+    opening_quiet_seconds,
     session_window,
     special_session,
 )
@@ -111,6 +112,19 @@ def test_entry_cutoff_sits_five_minutes_clear_of_the_close():
     assert entry_window_refusal(ist("15:30")) is None
     refusal = entry_window_refusal(ist("15:36"))
     assert refusal is not None and "after the 15:35 entry cut-off" in refusal
+
+
+def test_the_opening_window_is_the_sessions_own_five_minutes():
+    """E1: a short session gets the wider window — 5 min after 14:20, 2 after 09:15."""
+    assert opening_quiet_seconds(ist("14:21")) == 300.0
+    assert opening_quiet_seconds(datetime(2026, 11, 10, 9, 16, tzinfo=EXCHANGE_TZ)) == 120.0
+
+
+def test_the_opening_window_is_a_date_property_not_a_time_one():
+    """Asked at 14:21 or 15:30, the same day states the same window."""
+    assert opening_quiet_seconds(date(2026, 11, 8)) == 300.0
+    assert opening_quiet_seconds(date(2026, 11, 10)) == 120.0
+    assert opening_quiet_seconds(None) == 120.0
 
 
 def test_intraday_entry_deadline_is_the_sessions_own_squareoff():

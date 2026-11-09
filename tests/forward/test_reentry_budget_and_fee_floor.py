@@ -25,7 +25,7 @@ import pytest
 from backtest.forward.options_bridge import OptionsBridge
 from backtest.forward.paper_runner import OrderLedger, RunnerConfig, StrategyRunner
 from backtest.options.execution_gate import RESEARCH_STRUCTURES, StructureNotAllowedError
-from backtest.options.exit_policy import take_profit_fee_floor_violation
+from backtest.options.exit_policy import ExitConfig, take_profit_fee_floor_violation
 from backtest.options.quote_providers import (
     SyntheticChainGenerator,
     SyntheticQuoteProvider,
@@ -291,7 +291,8 @@ class TestTakeProfitFeeFloor:
         return bridge
 
     def test_the_bridge_refuses_a_target_inside_its_own_round_trip_fee(self):
-        bridge = self._bridge_with_fees(100.0, 193.0)
+        # 1 pt × 130 units (two 65-lot legs) = ₹130, inside the ₹231.60 floor.
+        bridge = self._bridge_with_fees(1.0, 193.0)
         intent = SimpleNamespace(structure_type="strangle", legs=self._legs(Decimal("44.85")))
         with pytest.raises(StructureNotAllowedError) as exc:
             bridge._check_take_profit_fee_floor(
@@ -349,9 +350,19 @@ class TestTakeProfitFeeFloor:
         plan = parse_exit_plan_strict(
             get_strategy("immediate_strangle").execution_spec().to_expression()["exit"]
         )
-        assert plan.take_profit_points == 1000.0
-        assert plan.stop_loss_points == 2000.0
-        assert take_profit_fee_floor_violation(plan.take_profit_points, 193.0) is None
+        assert plan.take_profit_points == 7
+        assert plan.stop_loss_points == 13
+        # The gate compares rupees, so the declared points are priced first —
+        # one lot of this two-leg structure at the 65-lot legs above is 130
+        # units, making the bracket a ₹910 target against a ₹231.60 floor.
+        cfg = ExitConfig(
+            stop_loss_points=plan.stop_loss_points,
+            take_profit_points=plan.take_profit_points,
+            min_days_to_expiry=None,
+        )
+        target_inr = cfg.priced_take_profit_inr(Decimal("130"))
+        assert target_inr == Decimal("910")
+        assert take_profit_fee_floor_violation(float(target_inr), 193.0) is None
 
 
 # ---------------------------------------------------------------------------

@@ -895,11 +895,15 @@ def execution_summary(spec: ExecutionSpec | None) -> dict[str, Any] | None:
     elif exit_plan.structure_capped:
         parts.append("stop = structure max loss")
     elif exit_plan.stop_loss_points is not None:
-        parts.append(f"stop −₹{exit_plan.stop_loss_points:g}")
+        # pts, never ₹: this figure is points of premium, and the engine prices
+        # it against the structure's own unit count (exit_policy UNITS).
+        parts.append(f"stop −{exit_plan.stop_loss_points:g} pts")
     elif exit_plan.stop_loss_price is not None:
         parts.append(f"stop at ₹{exit_plan.stop_loss_price:g}")
     if exit_plan.take_profit_pct is not None:
         parts.append(f"target +{exit_plan.take_profit_pct:.0%}")
+    elif exit_plan.take_profit_points is not None:
+        parts.append(f"target +{exit_plan.take_profit_points:g} pts")
     parts.append(
         f"{spec.default_lots} lot"
         + ("s" if spec.default_lots != 1 else "")
