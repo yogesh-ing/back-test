@@ -112,6 +112,7 @@ from backtest.options.paper_trading import (
     STALE_AFTER_SECONDS,
     OptionPaperBroker,
     PositionStatus,
+    ProtectedExitRefusedError,
     session_is_open,
 )
 from backtest.options.quote_providers import (
@@ -2342,6 +2343,39 @@ class OptionsBridge:
             )
             self._notify_halt(f"close_halted ({structure_id[:8]}): {exc}")
             return None
+        except ProtectedExitRefusedError as exc:
+            # Item D: the broker refused to book a price it could not vouch for,
+            # so nothing moved — the legs are still open, no fees were debited,
+            # and this method returns None like any other un-executed exit. The
+            # risk path asks again next bar, which is the recovery: one bad
+            # packet costs a retry, not the trade.
+            #
+            # NOT the live-halt path above — no order ever reached the venue, so
+            # there is nothing to reconcile and the runner keeps trading. What
+            # the operator owes is a loud, once-per-code notification, because a
+            # refusal that repeats means the book cannot exit at all.
+            code = f"exit_{exc.code}_refused"
+            if code not in self._halted_codes:
+                self._halted_codes.add(code)
+                logger.error(
+                    "[options-bridge] EXIT REFUSED for %s (%s): %s — structure "
+                    "left open, retrying next bar",
+                    structure_id[:8],
+                    exc.instrument_token,
+                    exc,
+                )
+                self._journal(
+                    KIND_HALTED,
+                    intent_id=decision_key(
+                        "halt", f"close {structure_id}", code=code, clock=self._bar_dt
+                    ),
+                    structure_id=structure_id,
+                    detail={"code": code, "reason": str(exc)},
+                    structure_type=structure.structure_type,
+                    underlying=structure.underlying,
+                )
+                self._alert_exit_refused(structure, exc, code)
+            return None
         except Exception as exc:  # noqa: BLE001 — a failed close must not kill the runner
             logger.warning("[options-bridge] close failed for %s: %s", structure_id[:8], exc)
             self._journal(
@@ -2543,6 +2577,46 @@ class OptionsBridge:
         self._journal_halt(reason, code=code)
         logger.warning("[options-bridge] OPTION_BLOCKED %s: %s", code, reason)
         return True
+
+    def _alert_exit_refused(
+        self,
+        structure: Any,
+        exc: ProtectedExitRefusedError,
+        code: str,
+    ) -> None:
+        """Tell the operator a protective exit could not be completed.
+
+        Same routing as the stale-mark episode (alert broker → in-app widget +
+        Telegram), raised at ``critical``: unlike a refused *entry*, this leaves
+        live risk in the book that the strategy has already decided to cut.
+        Alerting never blocks the retry loop.
+        """
+        runner_label = self.runner_name or self.runner_id or self.underlying
+        message = (
+            f"Option exit refused on {runner_label} ({structure.structure_type}): {exc}"
+        )
+        try:
+            from backtest.alerts.broker import get_alert_broker
+            from backtest.alerts.types import AlertType
+
+            get_alert_broker().raise_alert(
+                AlertType.DATA_FEED_STALE.value,
+                "critical",
+                message,
+                subject=f"exit:{structure.structure_id[:8]}",
+                data={
+                    "code": code,
+                    "runner_id": self.runner_id,
+                    "runner": runner_label,
+                    "underlying": structure.underlying,
+                    "structure_id": structure.structure_id,
+                    "structure_type": structure.structure_type,
+                    "instrument_token": exc.instrument_token,
+                    "reason": str(exc),
+                },
+            )
+        except Exception:  # noqa: BLE001 — alerting never blocks trading
+            logger.debug("[options-bridge] exit-refusal alert raise failed", exc_info=True)
 
     def _disconnected_entry_refusal(self) -> Optional[dict[str, Any]]:
         """Refuse a new entry while this book has no broker session (Sprint A1).

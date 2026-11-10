@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -147,6 +148,53 @@ def _ist_session_date(dt: datetime | None) -> str | None:
     if stamp is None:
         return None
     return stamp.astimezone(IST).date().isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Item D — bounded protective exits
+# ---------------------------------------------------------------------------
+#
+# On 2026-11-08 a single bad packet *was* the fill: a put was carried at a
+# ₹367.00 mark and bought back at ₹493.65, because the close asked the provider
+# for a price and booked whatever came back
+# (docs/OPTION-JUNK-ASK-INCIDENT-2026-11-08.md). Refusing a bad *entry* quote
+# does not help once the structure is open, so the exit seam bounds the fill
+# against the last mark this book itself trusted for that leg — what a venue
+# would call a market-with-collar order.
+#
+# The width is measured, not guessed. ``tools/out/measure_exit_collar_band.py``
+# over the 2026-11-09 dual capture (135,141 consecutive two-sided pairs of the
+# SAME contract's own ask, mStock + Upstox):
+#
+#   * legitimate moves stop at ₹11.25 (₹468.05 → ₹479.30 in 5 s, mStock) and
+#     ₹11.10 (≤2 s, Upstox); p99.9 is ₹6.45 at 5 s and ₹8.15 at 10 s.
+#   * the junk sits an order of magnitude above that ceiling: ₹1309.67
+#     (₹332.75 → ₹1642.42) and ₹106.55 (₹408.55 → ₹302.00), and the incident
+#     itself was +₹126.65 on ₹367.00 in 5 s (34.5 %).
+#
+# ``max(₹25, 5 % × mark)`` therefore refused none of the measured legitimate
+# exits and all three known-bad ones. The rupee term is a FLOOR, not a cap: a
+# ₹40 contract may still move 60 % and be believed, because this capture only
+# covers ₹250–500 premiums and the low-premium tail was never measured. A
+# refusal is not a lost trade — the structure stays open, the operator is
+# alerted, and the next bar retries against a fresh mark.
+EXIT_COLLAR_MIN_RS = Decimal("25")
+EXIT_COLLAR_MAX_REL = Decimal("0.05")
+
+#: How old the reference mark may be and still bound a fill. Outside the window
+#: the tape says a real move can legitimately exceed the collar, so the collar
+#: abstains rather than stranding the book at 15:29 with an unfailable exit.
+EXIT_COLLAR_REFERENCE_MAX_AGE_S = 10.0
+
+#: ``off`` / ``shadow`` (flag the fill, take it anyway) / ``enforce`` (refuse
+#: it). Same three-mode convention as the quote seam's sanity gates.
+EXIT_COLLAR_SANITY_ENV = "OPTION_EXIT_COLLAR"
+EXIT_COLLAR_MODES = ("off", "shadow", "enforce")
+DEFAULT_EXIT_COLLAR_MODE = "enforce"
+
+#: Cash settlement has no market left to bound against. Refusing there would
+#: leave a position open in a contract that no longer exists.
+EXIT_COLLAR_EXEMPT_REASONS = ("expiry_settlement",)
 
 
 # ---------------------------------------------------------------------------
@@ -828,6 +876,15 @@ class OptionPaperBroker:
         self._structures: dict[str, StructurePosition] = {}  # structure_id -> structure
         self._order_history: list[dict[str, Any]] = []
 
+        #: Exit-guard outcomes for this book, keyed ``"refused"`` / ``"shadow"``
+        #: / ``"no_quote"`` — so a session can be asked how often item D fired
+        #: without reading the log.
+        self.exit_guard_stats: dict[str, int] = {
+            "refused": 0,
+            "shadow": 0,
+            "no_quote": 0,
+        }
+
         # Deterministic ID sequences (A6): counters instead of uuid4 so a
         # backtest run is reproducible. Uniqueness holds within one broker
         # instance — which is the only scope a broker's ids need.
@@ -1087,6 +1144,13 @@ class OptionPaperBroker:
         default, e.g. a strategy signal or a UI button),
         ``"auto_square_off"`` (pre-expiry DTE exit) or
         ``"expiry_settlement"`` (cash settlement at expiry).
+
+        Item D: every leg is priced before any of them moves, and a price the
+        book cannot vouch for raises :class:`ProtectedExitRefusedError` instead
+        of filling. Nothing mutates on that path — the structure stays open,
+        with no fees, no ``closed_at`` and no observer events — because the
+        alternative, which is what happened on 2026-11-08, is to book a fill at
+        whatever a broken packet happened to carry.
         """
         structure = self._structures.get(structure_id)
         if structure is None:
@@ -1100,43 +1164,20 @@ class OptionPaperBroker:
             if position.status == PositionStatus.OPEN
         ]
         exit_fees = ZERO
+
+        # Price-all-then-close-all. Asking leg two after leg one already moved
+        # is how a refusal (or a provider exception from the spread-crossing
+        # seam) would leave half a structure in the book with one leg's fees
+        # debited.
+        priced = [
+            self._price_exit_leg(
+                structure, position, quote_provider, ts, reason=reason
+            )
+            for position in open_legs
+        ]
+
         closing_fills: list[dict[str, Any]] = []
-
-        for position in open_legs:
-            quote = _execution_quote(
-                quote_provider,
-                position.instrument_token,
-                "SELL" if position.is_long else "BUY",
-            )
-            is_failed_quote = (
-                not isinstance(quote, dict)
-                or not quote
-                or bool(quote.get("error"))
-            )
-            if is_failed_quote:
-                # Fail-closed exit: if the quote provider fails during a close,
-                # settle at the last known mark (or entry price) rather than
-                # booking a fake ₹0.00 fill.
-                quoted_price = (
-                    position.current_price
-                    if position.current_price > 0
-                    else position.entry_price
-                )
-            else:
-                quoted_price = Decimal(str(quote.get("ltp", 0) or 0))
-            exit_side = "SELL" if position.is_long else "BUY"
-            exit_tick = _resolve_tick_size(
-                quote_provider, position.instrument_token, position.metadata, position
-            )
-            exit_price = self._apply_slippage(
-                quoted_price,
-                exit_side,
-                quote=quote if isinstance(quote, dict) else None,
-                provider=quote_provider,
-                quantity=int(position.total_quantity),
-                tick_size=exit_tick,
-            )
-
+        for position, exit_side, quoted_price, exit_price in priced:
             pnl = position.close(exit_price, ts)
             total_pnl += pnl
 
@@ -1211,6 +1252,164 @@ class OptionPaperBroker:
         )
 
         return total_pnl
+
+    # ------------------------------------------------------------------
+    # Item D — the exit price guard
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _exit_collar_mode() -> str:
+        """The ``OPTION_EXIT_COLLAR`` mode: ``off`` / ``shadow`` / ``enforce``."""
+        mode = str(
+            os.getenv(EXIT_COLLAR_SANITY_ENV, DEFAULT_EXIT_COLLAR_MODE)
+        ).strip().lower()
+        return mode if mode in EXIT_COLLAR_MODES else DEFAULT_EXIT_COLLAR_MODE
+
+    @staticmethod
+    def _collar_problem(
+        position: OptionPosition,
+        fill_price: Decimal,
+        ts: datetime,
+    ) -> str | None:
+        """Why ``fill_price`` sits outside the collar — ``None`` if it does not.
+
+        The reference is the leg's own last mark: the bid on a long leg, the ask
+        on a short one, i.e. the SAME book field the exit fill is read from, one
+        refresh earlier. That is what makes this the measured comparison (a
+        liquid strike's ask does not move ₹11+ in five seconds) and not a
+        rupee-vs-points category error.
+
+        ``None`` — no bound — when the leg was never marked or the mark has aged
+        past :data:`EXIT_COLLAR_REFERENCE_MAX_AGE_S`. A stale reference cannot
+        convict a live price; refusing on one would strand the book instead of
+        protecting it.
+        """
+        reference = position.current_price
+        if reference is None or reference <= ZERO:
+            return None
+        age_s = _age_seconds(position.last_updated, ts)
+        if age_s is None or age_s > EXIT_COLLAR_REFERENCE_MAX_AGE_S:
+            return None
+        collar = max(EXIT_COLLAR_MIN_RS, EXIT_COLLAR_MAX_REL * reference)
+        deviation = abs(fill_price - reference)
+        if deviation <= collar:
+            return None
+        symbol = position.trading_symbol or position.instrument_token
+        return (
+            f"{symbol}: exit fill ₹{fill_price:.2f} is ₹{deviation:.2f} from the "
+            f"last trusted mark ₹{reference:.2f} (collar ₹{collar:.2f}, "
+            f"mark age {age_s:.1f}s)"
+        )
+
+    def _price_exit_leg(
+        self,
+        structure: StructurePosition,
+        position: OptionPosition,
+        quote_provider: QuoteProvider,
+        ts: datetime,
+        *,
+        reason: str,
+    ) -> tuple[OptionPosition, str, Decimal, Decimal]:
+        """Price one closing leg without moving it.
+
+        Returns ``(position, exit_side, quoted_price, exit_price)`` — the caller
+        applies the whole list only after every leg answered, so a refusal on
+        leg three cannot leave two legs closed.
+
+        Raises :class:`ProtectedExitRefusedError` for a price this book will not
+        book. Cash settlement (:data:`EXIT_COLLAR_EXEMPT_REASONS`) is exempt: a
+        contract that has expired has no market left to bound against, and the
+        alternative is an open position in something that no longer trades.
+        """
+        exit_side = "SELL" if position.is_long else "BUY"
+        symbol = position.trading_symbol or position.instrument_token
+        mode = self._exit_collar_mode()
+        if reason in EXIT_COLLAR_EXEMPT_REASONS:
+            mode = "off"
+
+        quote = _execution_quote(quote_provider, position.instrument_token, exit_side)
+        is_failed_quote = (
+            not isinstance(quote, dict)
+            or not quote
+            or bool(quote.get("error"))
+        )
+        if is_failed_quote and mode != "off":
+            # This used to settle the leg at ``current_price`` (or entry) when
+            # the provider answered with nothing — a price no counterparty
+            # quoted, which is exactly what the synthetic-data ban forbids at a
+            # fill. Leaving the structure open is the fail-closed answer.
+            self.exit_guard_stats["no_quote"] += 1
+            detail = quote.get("error") if isinstance(quote, dict) else "no quote row"
+            logger.error(
+                "[option-paper] EXIT_REFUSED no_quote structure=%s leg=%s: %s",
+                structure.structure_id[:8],
+                symbol,
+                detail,
+            )
+            raise ProtectedExitRefusedError(
+                f"{symbol}: the quote provider returned no executable price, so "
+                "the close was refused and the structure is still open",
+                structure_id=structure.structure_id,
+                instrument_token=position.instrument_token,
+                code="no_quote",
+            )
+        if is_failed_quote:
+            # Settlement path only: nothing is quoting an expired contract.
+            quoted_price = (
+                position.current_price
+                if position.current_price > 0
+                else position.entry_price
+            )
+        else:
+            quoted_price = Decimal(str(quote.get("ltp", 0) or 0))
+
+        exit_tick = _resolve_tick_size(
+            quote_provider, position.instrument_token, position.metadata, position
+        )
+        exit_price = self._apply_slippage(
+            quoted_price,
+            exit_side,
+            quote=quote if isinstance(quote, dict) else None,
+            provider=quote_provider,
+            quantity=int(position.total_quantity),
+            tick_size=exit_tick,
+        )
+
+        if mode == "off" or not _fills_against_live_depth(quote, exit_side, quote_provider):
+            # Either switched off, or this fill did not come off a venue's own
+            # two-sided book. The collar measures what a contract's published
+            # level did between two refreshes, so a model/mid price has nothing
+            # to be bounded against — that is the same proof BUG-06 uses to
+            # decide whether the spread was really crossed.
+            return position, exit_side, quoted_price, exit_price
+
+        problem = self._collar_problem(position, exit_price, ts)
+        if problem is None:
+            return position, exit_side, quoted_price, exit_price
+        if mode == "shadow":
+            self.exit_guard_stats["shadow"] += 1
+            logger.warning(
+                "[option-paper] EXIT_COLLAR_SHADOW structure=%s leg=%s — %s "
+                "(fill taken anyway; enforce refuses this)",
+                structure.structure_id[:8],
+                symbol,
+                problem,
+            )
+            return position, exit_side, quoted_price, exit_price
+
+        self.exit_guard_stats["refused"] += 1
+        logger.error(
+            "[option-paper] EXIT_REFUSED outside_collar structure=%s leg=%s — %s",
+            structure.structure_id[:8],
+            symbol,
+            problem,
+        )
+        raise ProtectedExitRefusedError(
+            problem,
+            structure_id=structure.structure_id,
+            instrument_token=position.instrument_token,
+            code="outside_collar",
+        )
 
     def update_mtm(
         self,
@@ -1648,3 +1847,33 @@ class InsufficientMarginError(Exception):
 class LotSizeValidationError(Exception):
     """Raised when lot size or quantity is invalid."""
     pass
+
+
+class ProtectedExitRefusedError(Exception):
+    """A closing fill was withheld because its price cannot be trusted.
+
+    Item D (see the collar constants at the top of this module). Raised by
+    :meth:`OptionPaperBroker.close_structure` BEFORE any leg moves, so the
+    structure is exactly as open as it was: no fill, no fees, no ``closed_at``,
+    no observer events. The caller's job is to make that loud — the bridge
+    journals a halt and alerts the operator, which is the same handling an
+    uncertain live close already gets.
+
+    ``code`` is ``"no_quote"`` (the provider answered with nothing bookable, so
+    a fill would have to be invented) or ``"outside_collar"`` (the price is on
+    offer but sits further from the last trusted mark than the measured collar
+    allows).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        structure_id: str = "",
+        instrument_token: str = "",
+        code: str = "outside_collar",
+    ) -> None:
+        super().__init__(message)
+        self.structure_id = structure_id
+        self.instrument_token = instrument_token
+        self.code = code

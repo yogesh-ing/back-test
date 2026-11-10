@@ -37,7 +37,11 @@ from flask import Flask, jsonify, request
 
 from backtest.data.sources_policy import require_synthetic
 from backtest.timekeeping import iso_utc, now_utc
-from backtest.options.paper_trading import InsufficientMarginError, OptionPaperBroker
+from backtest.options.paper_trading import (
+    InsufficientMarginError,
+    OptionPaperBroker,
+    ProtectedExitRefusedError,
+)
 from backtest.options.persistence import StructurePersistence
 from backtest.options.portfolio_greeks import PortfolioGreeksCalculator
 from backtest.options.expiry import ExpiryManager
@@ -660,6 +664,21 @@ def register_options_routes(app: Flask) -> None:
             pnl = broker.close_structure(structure_id, quotes)
         except ValueError as e:
             return jsonify({"error": str(e)}), 404
+        except ProtectedExitRefusedError as e:
+            # Item D: the fill was withheld, so the structure is still open and
+            # nothing was debited. 409, not a 500 — this is a known answer and
+            # the operator needs to read the price that caused it.
+            return (
+                jsonify(
+                    {
+                        "error": str(e),
+                        "code": e.code,
+                        "structure_id": e.structure_id,
+                        "still_open": True,
+                    }
+                ),
+                409,
+            )
 
         return (
             jsonify(
