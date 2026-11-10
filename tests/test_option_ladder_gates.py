@@ -718,13 +718,18 @@ class TestPairParity:
     def test_the_general_gates_and_parity_answer_to_separate_envs(self, monkeypatch) -> None:
         """Parity can enforce while the proven gates stay in shadow, and back."""
         monkeypatch.setenv("OPTION_QUOTE_SANITY", "shadow")
-        monkeypatch.setenv("OPTION_PARITY_SANITY", "enforce")
+        monkeypatch.setenv("OPTION_PARITY_SANITY", "off")
         provider, inner = self._provider()
         # ₹4 on a 340-point ITM call: the intrinsic floor sees it, shadow mode lets
-        # the fill through and only counts it.
+        # the fill through and only counts it. Parity is off here on purpose — a
+        # ₹4 ITM ask dissents from its own expiry too, and an enforcing gate is not
+        # allowed to be masked by a shadow one (see TestCrossBrokerCorroboration).
         inner.rows["24000CE"].update(ask=4.0, bid=4.0)
         assert provider.execution_quote("24000CE", "BUY")["ltp"] == 4.0
+        assert provider.sanity_stats == {"intrinsic_floor": 1}
+        assert inner.sibling_calls == 0
         # ₹268 on the 24400 put: every per-row gate is silent, parity refuses.
+        monkeypatch.setenv("OPTION_PARITY_SANITY", "enforce")
         inner.set("24400PE", 268.0)
         with pytest.raises(UntrustedOptionQuoteError) as exc:
             provider.execution_quote("24400PE", "BUY")
@@ -866,3 +871,179 @@ class _CachedLegInner:
 
     def __getattr__(self, name: str):
         return getattr(self._chain, name)
+
+
+# ---------------------------------------------------------------------------
+# 6. Cross-broker corroboration at the fill seam (§8 item F, promoted)
+# ---------------------------------------------------------------------------
+
+
+class _PeerMixin:
+    """Adds a second broker's L1 to any inner, settable per token.
+
+    Mirrors :meth:`LiveChainProvider.peer_l1` exactly — same shape, same
+    abstention (``None``) — so the seam is tested against the contract the live
+    mirror actually honors rather than against a richer fake.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.peers: dict[str, dict[str, Any]] = {}
+        self.peer_calls = 0
+
+    def peer_l1(self, instrument_token: str):
+        self.peer_calls += 1
+        return self.peers.get(str(instrument_token))
+
+
+class _PeerScripted(_PeerMixin, _ScriptedProvider):
+    pass
+
+
+class _PeerRing(_PeerMixin, _RingProvider):
+    pass
+
+
+def _peer(price: float, age_s: float = 1.0) -> dict[str, Any]:
+    return {"ltp": price, "bid": price - 0.5, "ask": price, "age_s": age_s,
+            "broker": "upstox"}
+
+
+class TestCrossBrokerCorroboration:
+    #: Spot 25080 with a 25050 strike keeps the put OTM, so the intrinsic floor is
+    #: silent and only the second broker can answer — the real incident's shape.
+    SPOT = 25080.0
+
+    def _provider(self) -> tuple[BidAskQuoteProvider, _PeerScripted]:
+        inner = _PeerScripted(spot=self.SPOT)
+        return BidAskQuoteProvider(inner), inner
+
+    def _enforce(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        monkeypatch.delenv("OPTION_PARITY_SANITY", raising=False)
+        monkeypatch.setenv("OPTION_CROSS_BROKER_SANITY", "enforce")
+
+    def _junk_and_witness(self, inner: _PeerScripted) -> None:
+        """The 2026-11-08 exit price, with Upstox's real book beside it."""
+        inner.add("25050PE", _contract("25050PE", 25050.0, OptionType.PE),
+                  ltp=367.0, bid=366.75, ask=493.65, source="ws")
+        inner.peers["25050PE"] = _peer(368.15)
+
+    def test_the_offer_the_other_broker_denies_is_refused(self, monkeypatch) -> None:
+        self._enforce(monkeypatch)
+        provider, inner = self._provider()
+        self._junk_and_witness(inner)
+        # 1.34x its own last trade: inside x5, above an OTM floor — every per-row
+        # gate is silent. This is the row that stopped the straddle.
+        with pytest.raises(UntrustedOptionQuoteError) as exc:
+            provider.execution_quote("25050PE", "BUY")
+        assert "cross_broker_l1" in str(exc.value)
+        assert provider.sanity_stats == {"cross_broker_l1": 1}
+
+    def test_band_is_the_measured_max_of_rupees_and_percent(self, monkeypatch) -> None:
+        """p99 ₹3.60, largest legitimate gap ₹7.45 → floor ₹10; 2 % past ₹500."""
+        self._enforce(monkeypatch)
+        provider, inner = self._provider()
+        for ask, expected in ((417.80, True), (418.00, False)):
+            inner.add("9100", _contract("9100", 26000.0, OptionType.PE),
+                      ltp=ask, bid=ask - 0.5, ask=ask, source="ws")
+            inner.peers["9100"] = _peer(407.85)
+            if expected:
+                assert provider.execution_quote("9100", "BUY")["ltp"] == pytest.approx(ask)
+            else:
+                with pytest.raises(UntrustedOptionQuoteError) as exc:
+                    provider.execution_quote("9100", "BUY")
+                assert "cross_broker_l1" in str(exc.value)
+        # A ₹14 gap on a ₹900 leg is inside 2 % (₹18) but not inside ₹10: without
+        # the proportional term the band would be scale-blind on deep ITM strikes.
+        inner.add("9101", _contract("9101", 26000.0, OptionType.PE),
+                  ltp=916.0, bid=915.5, ask=916.0, source="ws")
+        inner.peers["9101"] = _peer(900.0)
+        assert provider.execution_quote("9101", "BUY")["ltp"] == pytest.approx(916.0)
+
+    def test_a_stale_peer_is_not_a_witness(self, monkeypatch) -> None:
+        """2026-11-10: neither broker logged in, Upstox's ring ~28 h old.
+
+        Without the age condition that is 1,522 "disagreements" and the gate
+        refuses the whole session — so a stale peer must buy silence, not a veto.
+        """
+        self._enforce(monkeypatch)
+        provider, inner = self._provider()
+        self._junk_and_witness(inner)
+        inner.peers["25050PE"] = _peer(368.15, age_s=100_000.0)
+        assert provider.execution_quote("25050PE", "BUY")["ltp"] == pytest.approx(493.65)
+        assert provider.sanity_stats == {}
+
+    def test_no_second_broker_costs_corroboration_not_trading(self, monkeypatch) -> None:
+        self._enforce(monkeypatch)
+        provider, inner = self._provider()
+        self._junk_and_witness(inner)
+        inner.peers.pop("25050PE")
+        assert provider.execution_quote("25050PE", "BUY")["ltp"] == pytest.approx(493.65)
+        assert provider.sanity_stats == {}
+
+    def test_a_peer_that_offers_nothing_on_this_side_is_ignored(self, monkeypatch) -> None:
+        self._enforce(monkeypatch)
+        provider, inner = self._provider()
+        self._junk_and_witness(inner)
+        inner.peers["25050PE"] = {"ltp": 368.15, "bid": 367.0, "ask": 0.0, "age_s": 1.0}
+        assert provider.execution_quote("25050PE", "BUY")["ltp"] == pytest.approx(493.65)
+
+    def test_shadow_is_the_default_and_counts_without_refusing(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        monkeypatch.delenv("OPTION_PARITY_SANITY", raising=False)
+        monkeypatch.delenv("OPTION_CROSS_BROKER_SANITY", raising=False)
+        provider, inner = self._provider()
+        self._junk_and_witness(inner)
+        assert provider.execution_quote("25050PE", "BUY")["ltp"] == pytest.approx(493.65)
+        assert provider.sanity_stats == {"cross_broker_l1": 1}
+
+    def test_off_mode_never_asks_the_peer(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        monkeypatch.setenv("OPTION_CROSS_BROKER_SANITY", "off")
+        provider, inner = self._provider()
+        self._junk_and_witness(inner)
+        assert provider.execution_quote("25050PE", "BUY")["ltp"] == pytest.approx(493.65)
+        assert inner.peer_calls == 0
+
+    def test_an_enforcing_gate_is_not_masked_by_a_shadow_witness(self, monkeypatch) -> None:
+        """Parity still measuring must not veto the corroboration gate.
+
+        Both witnesses can be right about the same leg; the refusal has to name
+        the one that is enforcing, or flipping ``OPTION_CROSS_BROKER_SANITY`` to
+        ``enforce`` would change nothing while parity sat in ``shadow``.
+        """
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        monkeypatch.delenv("OPTION_PARITY_SANITY", raising=False)
+        monkeypatch.setenv("OPTION_CROSS_BROKER_SANITY", "enforce")
+        inner = _PeerRing()
+        provider = BidAskQuoteProvider(inner)
+        inner.set("24400PE", 268.0)  # dissents from its own expiry AND from Upstox
+        inner.peers["24400PE"] = _peer(68.5)
+        with pytest.raises(UntrustedOptionQuoteError) as exc:
+            provider.execution_quote("24400PE", "BUY")
+        assert "cross_broker_l1" in str(exc.value)
+        assert "pair_parity" not in str(exc.value)
+
+    def test_a_denied_bid_cannot_become_a_mark_either(self, monkeypatch) -> None:
+        """Item D's premise: refusing the price must also refuse the *mark*.
+
+        A straddle was stopped by a mark, not a fill, so the mark path gets the
+        same witness: on refusal the leg keeps its last honest price and the row
+        is labelled failed instead of re-priced.
+        """
+        self._enforce(monkeypatch)
+        provider, inner = self._provider()
+        inner.add("25050PE", _contract("25050PE", 25050.0, OptionType.PE),
+                  ltp=367.0, bid=366.75, ask=493.65, source="ws")
+        inner.peers["25050PE"] = {"ltp": 102.0, "bid": 101.5, "ask": 102.0,
+                                  "age_s": 0.9, "broker": "upstox"}
+        quote = provider.mark_quote("25050PE", "SELL")  # short leg → marked at ask
+        assert "cross_broker_l1" in str(quote.get("error"))
+        assert quote["ltp"] == pytest.approx(367.0)
+
+    def test_peer_l1_is_a_pure_read_when_no_mirror_is_running(self) -> None:
+        chain, broker = _live_ring()
+        reads = len(broker.ws_reads)
+        assert chain.peer_l1("63000") is None
+        assert len(broker.ws_reads) == reads

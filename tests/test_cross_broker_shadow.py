@@ -1,9 +1,12 @@
-"""The shadow cross-broker witness: it mirrors, it records, it decides nothing.
+"""The shadow cross-broker witness: it mirrors, it records, it prices nothing.
 
-Item F of ``docs/OPTION-JUNK-ASK-INCIDENT-2026-11-08.md`` — the second broker is
-supposed to be *beside* the trading path, not inside it, so the contract these
-tests hold is: right keys subscribed, one honest row per contract per sweep, and
-no path from this module into an entry, an exit or a mark.
+Item F of ``docs/OPTION-JUNK-ASK-INCIDENT-2026-11-08.md``. The second broker sits
+beside the trading path as a tape, and now answers exactly one question from
+the quote seam — "what is your own L1 for this contract right now" — which the
+``cross_broker_l1`` gate may use to refuse a price, never to make one. The
+contract these tests hold: right keys subscribed, one honest row per contract per
+sweep, no path from this module into an entry, an exit or a mark, and no effect on
+the mStock view.
 """
 
 from __future__ import annotations
@@ -352,9 +355,17 @@ def test_the_mirror_off_when_capture_is_off(monkeypatch):
 TRADE_PATHS = [
     "src/backtest/forward/options_bridge.py",
     "src/backtest/options/exit_policy.py",
-    "src/backtest/options/quote_providers.py",
     "src/backtest/options/execution_gate.py",
 ]
+
+#: The seam is the ONE trading path allowed to know the witness exists (item F
+#: promoted to the ``cross_broker_l1`` gate, 2026-11-10), and only to ask it a
+#: question — never to drive it or to price a leg with it.
+CORROBORATING_PATH = "src/backtest/options/quote_providers.py"
+#: Attributes of the mirror the seam may read. ``sweep``/``reconcile``/``start``
+#: belong to the recorder's own loop; a pricing path that called them could open
+#: a socket, spend Upstox HTTP, or rewrite the tape.
+ALLOWED_MIRROR_ATTRS = {"active", "l1_for"}
 
 
 def _module_dependencies(path: Path) -> set[str]:
@@ -383,7 +394,24 @@ def test_no_trading_path_reads_the_shadow_feed(relative):
     }
     assert not offenders, (
         f"{relative} now depends on the second-broker witness ({sorted(offenders)}): "
-        "shadow mode means it may be recorded, never acted on"
+        "corroboration lives in the quote seam, where every strategy passes — not "
+        "in an exit policy that one future strategy would forget to call"
+    )
+
+
+def test_the_seam_asks_the_witness_but_never_drives_it():
+    """``peer_l1`` is the only hand the fill seam has on the mirror."""
+    repo_root = Path(shadow.__file__).resolve().parents[3]
+    path = repo_root / CORROBORATING_PATH
+    deps = _module_dependencies(path)
+    reached = {
+        name.split(".", 1)[1]
+        for name in deps
+        if "cross_broker_shadow" in name or name.startswith("mirror.")
+    }
+    assert reached <= ALLOWED_MIRROR_ATTRS, (
+        f"the quote seam reaches {sorted(reached - ALLOWED_MIRROR_ATTRS)} on the "
+        "mirror; it may read a peer's L1, never sweep, subscribe or start a socket"
     )
 
 
@@ -396,3 +424,51 @@ def test_sweeping_never_changes_the_mstock_view():
     instance.sweep()
 
     assert json.dumps(provider.get_quote("64435"), sort_keys=True, default=str) == before
+
+
+# -- the seam's question: l1_for --------------------------------------------
+
+
+def test_l1_for_answers_with_the_peers_own_numbers_and_its_age():
+    instance = _shadow(
+        _provider({"64435": _row(300.0, 299.5, 300.5)}),
+        FakeWrapper({"NSE_FNO|24900CE": _row(300.4, 299.9, 300.9)}),
+    )
+    instance.reconcile()
+    peer = instance.l1_for("64435")
+    assert peer["ask"] == 300.9 and peer["bid"] == 299.9
+    assert peer["broker"] == "upstox"
+    assert 0.0 <= peer["age_s"] < 5.0
+
+
+def test_l1_for_is_none_before_any_socket_or_mapping_exists():
+    provider = _provider({"64435": _row(300.0, 299.5, 300.5)})
+    never_started = _shadow(provider, FakeWrapper())
+    assert never_started.l1_for("64435") is None          # no wrapper yet
+    started = _shadow(provider, FakeWrapper())
+    started.reconcile()
+    assert started.l1_for("64437") is None                 # unmapped on Upstox terms
+    assert started.l1_for("99999") is None                 # not even in the ring
+
+
+def test_l1_for_costs_mstock_nothing_and_upstox_no_http():
+    provider = _provider({"64435": _row(300.0, 299.5, 300.5)})
+    wrapper = FakeWrapper({"NSE_FNO|24900CE": _row(1.0, 1.0, 1.0)})
+    instance = _shadow(provider, wrapper)
+    instance.reconcile()
+    reads = len(wrapper.started_with)
+    instance.l1_for("64435")
+    assert provider.quote_calls == 0                       # mStock never touched
+    assert len(wrapper.started_with) == reads              # no resubscribe
+
+
+def test_a_peer_row_of_zeros_is_no_answer():
+    instance = _shadow(
+        _provider({"64435": _row(300.0, 299.5, 300.5)}),
+        FakeWrapper({"NSE_FNO|24900CE": {"ltp": 0.0, "bid": 0.0, "ask": 0.0}}),
+    )
+    instance.reconcile()
+    peer = instance.l1_for("64435")
+    assert peer["ask"] == 0.0
+    # The seam abstains on a zero side, so a blank peer cannot refuse a trade:
+    # verified where the decision lives, in test_option_ladder_gates.py §6.

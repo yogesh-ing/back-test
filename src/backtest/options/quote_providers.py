@@ -54,6 +54,11 @@ __all__ = [
     "PAIR_PARITY_MIN_STRIKES",
     "PAIR_PARITY_REASON",
     "PARITY_SANITY_ENV",
+    "CROSS_BROKER_REASON",
+    "CROSS_BROKER_SANITY_ENV",
+    "CROSS_BROKER_MAX_DEVIATION",
+    "CROSS_BROKER_MAX_REL",
+    "CROSS_BROKER_PEER_MAX_AGE_S",
     "QUOTE_SANITY_ENV",
     "bs_price",
     "parity_deviation",
@@ -782,6 +787,33 @@ PAIR_PARITY_REASON = "pair_parity"
 #: so the two proven gates can enforce while this one measures.
 PARITY_SANITY_ENV = "OPTION_PARITY_SANITY"
 
+#: Second-opinion gate: the same side of the book, at the other broker, right now.
+#: Reason code, counted in :attr:`BidAskQuoteProvider.sanity_stats`.
+CROSS_BROKER_REASON = "cross_broker_l1"
+#: Its own mode, default ``shadow`` — a gate that depends on a second broker being
+#: logged in must prove its hit rate before it can hold an exit open.
+CROSS_BROKER_SANITY_ENV = "OPTION_CROSS_BROKER_SANITY"
+#: Band ``dev > max(CROSS_BROKER_MAX_DEVIATION, CROSS_BROKER_MAX_REL * peer)``,
+#: measured on one session of ``shadow_diff`` rows
+#: (``tools/out/measure_cross_broker_band.py``, 2026-11-09: 5,119 pairs where both
+#: brokers were <= 10 s fresh). The disagreement floor is tight — p50 ₹0.20, p99
+#: ₹3.60, and the largest legitimate gap all session ₹7.45 on a ₹475 leg — and it
+#: is flat in rupees rather than proportional, which is why the absolute term
+#: carries the band and the percentage term only keeps it honest above ₹500. That
+#: rule flags exactly ONE pair in 5,119, and it is the phantom the incident needs:
+#: ``NIFTY26NOV25200PE`` offered at ₹302.00 while Upstox said ₹407.85 and both
+#: brokers' own last trade said ₹408.75 (ages 0.81 s / 1.09 s) — a ₹105.85 hole
+#: that passes the x5 ``ltp_distance`` test, because the bad number is 0.74x of a
+#: correct LTP, not a multiple of it.
+CROSS_BROKER_MAX_DEVIATION = 10.0
+CROSS_BROKER_MAX_REL = 0.02
+#: A peer older than this is a cached book, not a witness. Same ceiling the band
+#: was measured at, and it is load-bearing: on 2026-11-10, with neither broker
+#: logged in, every row on the tape was mStock zeros against an Upstox ladder
+#: ~28 h old. Without an age condition that comparison is 1522 "disagreements"
+#: and a gate would refuse the whole session.
+CROSS_BROKER_PEER_MAX_AGE_S = 10.0
+
 
 def parity_deviation(
     legs: Iterable[tuple[float, str, float]], strike: float
@@ -841,7 +873,7 @@ class BidAskQuoteProvider:
     Zero is not the only impossible number. On 2026-11-03 the seam took a ₹0.05
     ask on a leg worth ~₹340 because ``price <= 0`` was the whole test, so the
     same fail-closed rule now runs two more gates before a side price is
-    believed — see :meth:`_sanity_problem`: the price must sit near the LTP that
+    believed — see :meth:`_sanity_problems`: the price must sit near the LTP that
     arrived in the same packet, and it must not be under the contract's own
     intrinsic value. Mode is ``$OPTION_QUOTE_SANITY`` (``off`` / ``shadow`` /
     ``enforce``, default ``enforce``); refusals count into
@@ -851,9 +883,14 @@ class BidAskQuoteProvider:
     strikes of its expiry about where the forward is — runs under its own
     ``$OPTION_PARITY_SANITY`` mode and defaults to ``shadow``, because its band
     is still being calibrated from the capture file rather than derived from an
-    incident. Every flag, shadow or enforced, is also written to the capture
-    (``kind=sanity_flag``) so the next session's tape counts what a gate would
-    have done.
+    incident. A fourth, ``cross_broker_l1``, asks the *other broker*'s book for the
+    same side of the same contract right now — the only proof that survives a bad
+    price agreeing with its own last trade, which is the shape of the 2026-11-08
+    ₹493.65 offer; it answers to ``$OPTION_CROSS_BROKER_SANITY`` (default
+    ``shadow``) and abstains whenever no second broker is mirrored, so it can
+    never be the only defence. Every flag, shadow or enforced, is also written to
+    the capture (``kind=sanity_flag``) so the next session's tape counts what a
+    gate would have done.
 
     Note ``OptionPaperBroker.slippage_pct`` still applies ON TOP: the
     spread is where the market stands, slippage models your own impact.
@@ -914,14 +951,15 @@ class BidAskQuoteProvider:
         except Exception:  # noqa: BLE001 — abstain, never invent a spot
             return 0.0
 
-    def _sanity_problem(
+    def _sanity_problems(
         self, quote: dict[str, Any], key: str, price: float, instrument_token: str,
-        *, parity_enabled: bool = True,
-    ) -> tuple[str, str] | None:
-        """``(reason, detail)`` when this side price cannot be a real book.
+        *, parity_enabled: bool = True, corroboration_enabled: bool = True,
+    ) -> list[tuple[str, str]]:
+        """Every ``(reason, detail)`` this side price fails, most precise first.
 
-        Independent impossibility proofs, all read from data already in hand,
-        checked most-precise first so the log names the strongest reason:
+        Independent impossibility proofs, all read from data already in hand.
+        Returning all of them rather than the first is what keeps a witness in
+        ``shadow`` from hiding a gate in ``enforce`` — see :meth:`_check_sanity`:
 
         * ``intrinsic_floor`` — an ITM option is worth at least its intrinsic
           (minus one tick for grid rounding). ₹0.05 on a ₹340-strike leg is not
@@ -937,7 +975,10 @@ class BidAskQuoteProvider:
           of the same expiry about where the forward is. Its own mode
           (:data:`PARITY_SANITY_ENV`, shadow by default) decides whether it runs at
           all; see :meth:`_parity_problem`.
+        * ``cross_broker_l1`` — the other broker's book disagrees about this exact
+          side right now. See :meth:`_corroboration_problem`.
         """
+        problems: list[tuple[str, str]] = []
         try:
             ltp = float(quote.get("ltp") or 0.0)
         except (TypeError, ValueError):
@@ -968,24 +1009,28 @@ class BidAskQuoteProvider:
                 )
                 corroborated = ltp <= 0 or ltp >= intrinsic - tick
                 if intrinsic > 0 and corroborated and price < intrinsic - tick:
-                    return (
+                    problems.append((
                         "intrinsic_floor",
                         f"{key}={price:.2f} < intrinsic={intrinsic:.2f} "
                         f"({option_type} strike={strike:.0f} spot={spot:.2f})",
-                    )
+                    ))
 
         if ltp > 0 and price > 0:
             if price * LTP_DISTANCE_MAX_RATIO < ltp or price > ltp * LTP_DISTANCE_MAX_RATIO:
-                return (
+                problems.append((
                     "ltp_distance",
                     f"{key}={price:.2f} vs ltp={ltp:.2f} "
                     f"(outside x{LTP_DISTANCE_MAX_RATIO} of its own last trade)",
-                )
+                ))
         if parity_enabled and contract is not None:
             problem = self._parity_problem(contract, key, price, instrument_token)
             if problem is not None:
-                return problem
-        return None
+                problems.append(problem)
+        if corroboration_enabled:
+            problem = self._corroboration_problem(key, price, instrument_token)
+            if problem is not None:
+                problems.append(problem)
+        return problems
 
     @staticmethod
     def _parity_mode() -> str:
@@ -1012,7 +1057,7 @@ class BidAskQuoteProvider:
         dissents together, so the median moves with them), and needs no threshold
         about where NIFTY "should" be. What it cannot survive is one leg, or one
         whole side of the book, priced wrong in a way that agrees with its own LTP:
-        exactly the shape :meth:`_sanity_problem`'s per-row gates are blind to.
+        exactly the shape :meth:`_sanity_problems`'s per-row gates are blind to.
 
         Peers come from the wrapped provider read-only
         (:meth:`LiveChainProvider.parity_siblings`); a provider that cannot name
@@ -1056,6 +1101,71 @@ class BidAskQuoteProvider:
             f"(dev={deviation:+.2f}, band ±{PAIR_PARITY_MAX_DEVIATION:.2f})",
         )
 
+    @staticmethod
+    def _corroboration_mode() -> str:
+        """``off`` / ``shadow`` / ``enforce`` for the second-broker witness alone.
+
+        Default ``shadow``, for a reason parity does not have: this gate can only
+        answer when the operator is logged into the second broker. On a
+        single-broker day an enforcing version abstains always; on a two-broker day
+        it is the only thing between a bad offer and a stopped structure. The
+        capture decides — ``sanity_flag`` rows with ``reason=cross_broker_l1`` are
+        the vote, and they count what enforcement *would* have refused.
+        """
+        mode = str(os.getenv(CROSS_BROKER_SANITY_ENV, "shadow")).strip().lower()
+        return mode if mode in QUOTE_SANITY_MODES else "shadow"
+
+    def _corroboration_problem(
+        self, key: str, price: float, instrument_token: str
+    ) -> tuple[str, str] | None:
+        """``cross_broker_l1`` when the other broker's book disagrees on this side.
+
+        Every other proof here reads one broker's packet and asks whether it is
+        self-consistent, which is exactly why the 2026-11-08 offer of ₹493.65 on a
+        ₹367.00 put passed: 1.34x its own (correct) last trade, inside the x5 band,
+        and an OTM put has no intrinsic floor to breach. This asks a question the
+        bad row cannot answer, because the bad row is not an input to it.
+
+        Deliberately narrow, since a second opinion that overrules the venue you
+        trade on is a fresh way to lose a fill:
+
+        * the peer must be FRESH (:data:`CROSS_BROKER_PEER_MAX_AGE_S`) — the
+          2026-11-10 tape is mStock zeros against an Upstox ladder ~28 h old, and a
+          gate with no age condition reads that as 1,522 disagreements and refuses
+          the session;
+        * only the same side is compared; asking whether a bid agrees with the
+          other broker's ask would flag normal spread;
+        * ``None`` — abstain, never refuse — when no mirror is running, the token
+          is unmapped on the peer's terms, or the peer side is missing or
+          unreadable. Absence of a witness must not look like evidence of a
+          problem, so a broker logout costs corroboration, not trading.
+
+        Blind spot: both brokers publishing the same junk, or the *peer* being the
+        wrong one. Neither is detectable from L1 agreement and neither is what the
+        2026-11-08 incident looked like; the mirror's own ladder check
+        (``ladder_status``) is what covers the second.
+        """
+        getter = getattr(self.inner, "peer_l1", None)
+        if not callable(getter):
+            return None
+        try:
+            peer = getter(instrument_token) or {}
+            peer_price = float(peer.get(key) or 0.0)
+            age_s = float(peer.get("age_s"))
+        except (TypeError, ValueError):
+            return None
+        if peer_price <= 0 or not 0.0 <= age_s <= CROSS_BROKER_PEER_MAX_AGE_S:
+            return None
+        band = max(CROSS_BROKER_MAX_DEVIATION, CROSS_BROKER_MAX_REL * peer_price)
+        deviation = abs(price - peer_price)
+        if deviation <= band:
+            return None
+        return (
+            CROSS_BROKER_REASON,
+            f"{key}={price:.2f} vs {peer.get('broker', 'peer')} {key}={peer_price:.2f} "
+            f"(dev={deviation:.2f} > band {band:.2f}, peer age {age_s:.1f}s)",
+        )
+
     def _check_sanity(
         self, quote: dict[str, Any], key: str, price: float, instrument_token: str
     ) -> str | None:
@@ -1068,17 +1178,26 @@ class BidAskQuoteProvider:
         """
         general = self._sanity_mode()
         parity = self._parity_mode()
-        if general == "off" and parity == "off":
+        corroboration = self._corroboration_mode()
+        if general == "off" and parity == "off" and corroboration == "off":
             return None
-        problem = self._sanity_problem(
-            quote, key, price, instrument_token, parity_enabled=parity != "off"
+        modes = {PAIR_PARITY_REASON: parity, CROSS_BROKER_REASON: corroboration}
+        problems = self._sanity_problems(
+            quote, key, price, instrument_token,
+            parity_enabled=parity != "off",
+            corroboration_enabled=corroboration != "off",
         )
-        if problem is None:
+        # A gate that is switched off contributes nothing, even when it disagrees:
+        # ``OPTION_QUOTE_SANITY=off`` must restore the pre-2026-11-03 seam exactly.
+        problems = [p for p in problems if modes.get(p[0], general) != "off"]
+        if not problems:
             return None
-        reason, detail = problem
-        mode = parity if reason == PAIR_PARITY_REASON else general
-        if mode == "off":
-            return None
+        # An enforcing gate outranks a witnessing one whatever the check order, so
+        # turning on ``cross_broker_l1`` cannot be neutralised by parity still
+        # sitting in ``shadow``. Among shadows, the most precise reason is logged.
+        enforcing = [p for p in problems if modes.get(p[0], general) == "enforce"]
+        reason, detail = enforcing[0] if enforcing else problems[0]
+        mode = modes.get(reason, general)
         self.sanity_stats[reason] = self.sanity_stats.get(reason, 0) + 1
         logger.warning(
             "quote_sanity mode=%s reason=%s token=%s side=%s detail=%s",
@@ -1946,6 +2065,30 @@ class LiveChainProvider:
             if getattr(peer, "expiry", None) == expiry
             and str(getattr(peer, "instrument_token", "")) != own
         ]
+
+    def peer_l1(self, instrument_token: str) -> Optional[dict[str, Any]]:
+        """The second broker's L1 for this token, when a mirror is running.
+
+        Read-only, same rule as :meth:`ring_book`: it asks the shadow cross-broker
+        witness (:mod:`backtest.data.cross_broker_shadow`) what its socket holds,
+        so a corroboration check can never spend an HTTP quote request, open a
+        subscription, or reach a broker the book is not already mirrored onto.
+        ``None`` means "no second opinion" — no mirror for this underlying, the
+        token unmapped on the peer's terms, or the import unavailable — and the
+        caller abstains rather than refusing.
+        """
+        contract = self._contracts.get(str(instrument_token))
+        underlying = str(getattr(contract, "underlying", "") or "").upper()
+        if not underlying:
+            return None
+        try:
+            from backtest.data import cross_broker_shadow
+
+            mirror = cross_broker_shadow.active().get(underlying)
+            return mirror.l1_for(str(instrument_token)) if mirror is not None else None
+        except Exception:  # noqa: BLE001 — a missing witness must not break quoting
+            logger.debug("peer_l1 lookup failed for %s", instrument_token, exc_info=True)
+            return None
 
     def get_quote(self, instrument_token: str) -> dict[str, Any]:
         """Real L1 quote (TTL-cached) for one contract token.

@@ -16,13 +16,19 @@ Upstox packets themselves land in ``feed_upstox_<day>.jsonl`` because
 
 WHAT IT IS NOT
 --------------
-No gate, and it cannot become one from this side: nothing in the entry, exit or
-mark path reads it, and the mStock quote path is never consulted by it. The
-architect's instruction was thresholds from a session of these files rather
-than another hand-calibrated number, so the disagreement is measured, not
-acted on. Inert unless ``ENABLE_FEED`` is on; with no Upstox session it stays a
-parked loop that opens its socket on the pass that first finds a token — a
-missing second broker costs one log line, never a trading halt.
+No gate of its own making, and not a price source: it has exactly one reader in
+the trading path — :meth:`LiveChainProvider.peer_l1`, which the quote seam asks
+before it believes a side of the book (the ``cross_broker_l1`` gate, item F
+promoted) — and that reader only ever gets the peer's own L1 numbers back.
+Nothing here can write into the mStock view, subscribe a token, or spend an HTTP
+quote request. The gate defaults to ``shadow`` and abstains whenever this module
+has no answer, so a second broker being logged out costs corroboration, never a
+trade. The architect's instruction still binds: thresholds from a session of
+these files rather than another hand-calibrated number
+(``tools/out/measure_cross_broker_band.py``). Inert unless ``ENABLE_FEED`` is on;
+with no Upstox session it stays a parked loop that opens its socket on the pass
+that first finds a token — a missing second broker costs one log line, never a
+trading halt.
 
 The one effect it has on the trading path is that it reads mStock through the
 same TTL-cached quote accessor the book uses, so a sweep can warm a cache entry
@@ -261,6 +267,32 @@ class CrossBrokerShadow:
         return keys
 
     # -- the witness ---------------------------------------------------------
+
+    def l1_for(self, token: str) -> Optional[dict[str, Any]]:
+        """The second broker's L1 for one mStock ring token, or None.
+
+        This is the same read :meth:`sweep` writes to the tape, exposed for the
+        fill seam (:meth:`BidAskQuoteProvider._corroboration_problem`) instead of
+        the recorder: a witness that is only consulted once per 10 s cannot answer
+        a question asked at fill time. Returns ``None`` — abstention, never an
+        opinion — when there is no socket yet, the token was never mapped onto
+        Upstox terms, or the row is unreadable. It writes nothing and cannot make
+        a price; the caller has to decide what a disagreement means.
+        """
+        wrapper = self._wrapper
+        instrument_key = self._pairs.get(str(token))
+        if wrapper is None or instrument_key is None:
+            return None
+        try:
+            row = wrapper.get_quote(instrument_key)
+        except Exception:  # noqa: BLE001 — a missing witness must not reach the trade
+            logger.debug("shadow peer read failed for token=%s", token, exc_info=True)
+            return None
+        out = _l1(row)
+        if not out:
+            return None
+        out["broker"] = "upstox"
+        return out
 
     def sweep(self) -> int:
         """Write one ``shadow_diff`` row per mirrored contract. Returns rows written."""
