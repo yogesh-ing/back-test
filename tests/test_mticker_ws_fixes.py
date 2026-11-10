@@ -142,11 +142,16 @@ def _full_mode_packet(size: int = 200) -> bytes:
     struct.pack_into(">I", packet, 52, 4_800_000)  # oi high
     struct.pack_into(">I", packet, 56, 4_500_000)  # oi low
     struct.pack_into(">I", packet, 60, 1_477_033_670)  # exchange ts
-    # depth: 10 entries x 12 bytes (qty, price, orders, padding) from byte 64
+    # depth: 10 entries x 12 bytes (qty, price, orders, padding) from byte 64.
+    # Entries 0-4 are bids and 5-9 asks in wire order, so the synthetic book is
+    # built the way a venue posts one: bids stepping down with depth, asks up. A
+    # ladder that folds back towards the touch is refused by the wrapper, not
+    # priced (docs/OPTION-JUNK-ASK-INCIDENT-2026-11-08.md §8a).
     for i in range(10):
         off = 64 + i * 12
+        price = 15_160 - i * 5 if i < 5 else 15_185 + (i - 5) * 5
         struct.pack_into(">I", packet, off, 150 * (i + 1))
-        struct.pack_into(">I", packet, off + 4, 15_160 + i * 5)
+        struct.pack_into(">I", packet, off + 4, price)
         struct.pack_into(">H", packet, off + 8, 3)
         struct.pack_into(">H", packet, off + 10, 0)
     if size == 200:

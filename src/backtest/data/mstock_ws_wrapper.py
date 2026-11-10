@@ -8,6 +8,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from backtest.data.feed_depth_recorder import get_recorder, record_depth_packet
+from backtest.data.ladder_shape import order_problem
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +328,8 @@ class MStockWebSocketWrapper:
     LADDER_NONE = "none"
     LADDER_ONE_SIDED = "one_sided"
     LADDER_CROSSED = "crossed"
+    #: Levels arrived out of order, so neither touch price is the venue's best.
+    LADDER_UNSORTED = "unsorted"
 
     @classmethod
     def _sanitize_depth(cls, depth: Any) -> tuple[Dict[str, list], float, float, str]:
@@ -339,12 +342,16 @@ class MStockWebSocketWrapper:
         and positive quantity, and the side is priced by the *first surviving*
         level (``bids[0]`` blind is §8a's first defect, while picking max/min
         would invent a better price than the venue put at level 0 if the array
-        ever arrives out of order). Statuses:
+        ever arrives out of order). Because that array is taken as sent, an array
+        that is *not* ordered away from the touch prices nothing: the 2026-11-09
+        capture proved mStock does send folded ladders (10 of 87,819 packets, one
+        printing bids ``[330.05, 330.00, 329.95, 1640.62, 1640.57]`` against a
+        ₹329.45 last trade) while Upstox sent none of 48,008. Statuses:
 
-        - ``ok``         both sides valid, best bid below best ask
+        - ``ok``         both sides valid, ordered, best bid below best ask
         - ``one_sided``  only one side has a valid level (the other is zeroed —
                          mStock genuinely does this, so the real side stays)
-        - ``crossed`` / ``blank`` / ``none``  no side survives
+        - ``crossed`` / ``unsorted`` / ``blank`` / ``none``  no side survives
 
         Caller holds no lock; this is pure.
         """
@@ -360,6 +367,9 @@ class MStockWebSocketWrapper:
 
         if not bids and not asks:
             return cleaned, 0.0, 0.0, cls.LADDER_BLANK
+
+        if order_problem(bids, asks) is not None:
+            return cleaned, 0.0, 0.0, cls.LADDER_UNSORTED
 
         best_bid = bids[0]["price"] if bids else 0.0
         best_ask = asks[0]["price"] if asks else 0.0

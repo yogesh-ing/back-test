@@ -29,6 +29,7 @@ from backtest.instruments.base import OptionType
 from backtest.instruments.option import OptionContract
 from backtest.options.quote_providers import (
     BidAskQuoteProvider,
+    LiveChainProvider,
     NoExecutableQuoteError,
     UntrustedOptionQuoteError,
 )
@@ -135,12 +136,78 @@ class TestLadderSanitizing:
         """Skip dead levels, but do not invent the venue's best price for it."""
         _d, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(
             {
-                "bid": [_level(180.0), _level(185.0)],
-                "ask": [_level(190.0), _level(188.0)],
+                "bid": [_level(180.0), _level(179.0)],
+                "ask": [_level(190.0), _level(191.0)],
             }
         )
         assert status == "ok"
         assert (bid, ask) == (180.0, 190.0)
+
+    def test_a_ladder_that_folds_back_towards_the_touch_prices_nothing(self) -> None:
+        """Level 0 is the best price only on a ladder the venue ordered.
+
+        This fixture used to assert ``ok`` with ``(180.0, 190.0)`` — the bids
+        stepping UP and the asks stepping DOWN, which no book does. The 2026-11-09
+        capture proved mStock really sends these (10 of 87,819 packets, none of
+        them off Upstox), and pricing such a packet published a two-sided book
+        neither side of it was.
+        """
+        _d, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(
+            {
+                "bid": [_level(180.0), _level(185.0)],
+                "ask": [_level(190.0), _level(188.0)],
+            }
+        )
+        assert status == "unsorted"
+        assert bid == 0.0 and ask == 0.0
+
+    def test_the_2026_11_09_packet_that_priced_itself_five_times_over(self) -> None:
+        """The worst folded ladder on the tape, replayed level for level.
+
+        Token 64442 at 09:34:48 UTC: three bids at ₹330 then two at ₹1,640 with an
+        unchanged header and a ₹329.45 last trade, and the row was labelled ``ok``.
+        """
+        _d, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(
+            {
+                "bid": [
+                    _level(330.05), _level(330.00), _level(329.95),
+                    _level(1640.62), _level(1640.57),
+                ],
+                "ask": [
+                    _level(1642.42), _level(1642.47), _level(1642.52),
+                    _level(1642.67), _level(1642.72),
+                ],
+            }
+        )
+        assert status == "unsorted"
+        assert bid == 0.0 and ask == 0.0
+
+    def test_equal_adjacent_levels_are_a_book_not_a_fold(self) -> None:
+        """Zero false positives on 48,008 clean Upstox ladders depended on this."""
+        _d, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(
+            {"bid": [_level(180.0), _level(180.0)], "ask": [_level(183.0), _level(183.0)]}
+        )
+        assert status == "ok"
+        assert (bid, ask) == (180.0, 183.0)
+
+    def test_a_folded_single_side_is_refused_too(self) -> None:
+        """``one_sided`` keeps a real side — unless that side is the broken one."""
+        _d, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(
+            {"bid": [_level(180.0), _level(185.0)], "ask": []}
+        )
+        assert status == "unsorted"
+        assert bid == 0.0 and ask == 0.0
+
+    def test_dead_levels_are_trimmed_before_the_order_is_judged(self) -> None:
+        """The ₹0.05-with-no-quantity hole and the order rule must not fight."""
+        _d, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(
+            {
+                "bid": [_level(181.0), _level(184.0, qty=0), _level(180.0)],
+                "ask": [_level(183.0), _level(182.0, qty=0), _level(185.0)],
+            }
+        )
+        assert status == "ok"
+        assert (bid, ask) == (181.0, 183.0)
 
     def test_zero_price_level_is_skipped_and_the_next_real_level_wins(self) -> None:
         _d, bid, ask, status = MStockWebSocketWrapper._sanitize_depth(
@@ -198,6 +265,37 @@ class TestLastValidWriteWins:
             row = wrapper.get_quote("63001")
             assert row["ladder_status"] == "blank"
             assert row["bid"] == 0.0 and row["ask"] == 0.0
+        finally:
+            wrapper.close()
+
+    def test_folded_frame_keeps_the_last_ordered_book(self) -> None:
+        """A packet whose levels fold is retained like a blank one, not published.
+
+        The retained row is labelled ``kept:unsorted`` so the seam, the log and the
+        capture all say the book on offer is an older one — never this packet's.
+        """
+        broker, ticker, wrapper = _broker_with_ws()
+        try:
+            ticker.on_ticks(
+                ticker, [_tick(63004, 340.0, [_level(339.5)], [_level(341.0)])]
+            )
+            honest = wrapper.get_quote("63004")
+            ticker.on_ticks(
+                ticker,
+                [
+                    _tick(
+                        63004,
+                        344.0,
+                        [_level(339.5), _level(1640.62)],
+                        [_level(341.0), _level(340.5)],
+                    )
+                ],
+            )
+            merged = wrapper.get_quote("63004")
+            assert merged["ltp"] == 344.0
+            assert (merged["bid"], merged["ask"]) == (339.5, 341.0)
+            assert merged["ladder_status"] == "kept:unsorted"
+            assert merged["ladder_mono"] == pytest.approx(honest["ladder_mono"])
         finally:
             wrapper.close()
 
@@ -455,3 +553,316 @@ class TestQuoteSanityGates:
         with pytest.raises(UntrustedOptionQuoteError) as exc:
             provider.execution_quote("9011", "SELL")
         assert "intrinsic_floor" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# 4. Pair parity: the ring's other strikes price the same forward (§8 item B)
+# ---------------------------------------------------------------------------
+
+#: Spot and forward are set equal so the intrinsic floor and parity agree on the
+#: same book, and a test that expects ``pair_parity`` cannot be answered by a
+#: different reason code by accident.
+RING_SPOT = 24340.0
+RING_TV = 8.0
+RING_STRIKES = (24000.0, 24100.0, 24200.0, 24300.0, 24400.0, 24500.0, 24600.0)
+
+
+def _fair(strike: float, option_type: OptionType) -> float:
+    intrinsic = (
+        max(0.0, RING_SPOT - strike)
+        if option_type is OptionType.CE
+        else max(0.0, strike - RING_SPOT)
+    )
+    return intrinsic + RING_TV
+
+
+class _RingProvider:
+    """A provider whose hot ring holds one expiry's full CE/PE ladder.
+
+    ``set`` rewrites a leg's ask *and its own LTP together* on purpose: a bad
+    price that agrees with its last trade is precisely what the per-row gates
+    (§3) cannot see, and is what parity was derived for.
+    """
+
+    source_name = "ring"
+
+    def __init__(self, strikes: tuple[float, ...] = RING_STRIKES) -> None:
+        self.rows: dict[str, dict[str, Any]] = {}
+        self._contracts: dict[str, OptionContract] = {}
+        self.sibling_calls = 0
+        for strike in strikes:
+            for option_type in (OptionType.CE, OptionType.PE):
+                token = f"{int(strike)}{option_type.value}"
+                price = _fair(strike, option_type)
+                self._contracts[token] = _contract(token, strike, option_type)
+                self.rows[token] = {
+                    "ltp": price, "bid": price - 0.5, "ask": price, "source": "ws",
+                }
+
+    def set(self, token: str, price: float) -> None:
+        self.rows[token]["ask"] = price
+        self.rows[token]["bid"] = price - 0.5
+        self.rows[token]["ltp"] = price
+
+    def get_quote(self, instrument_token: str) -> dict[str, Any]:
+        return dict(self.rows.get(str(instrument_token), {}))
+
+    def get_spot(self, underlying: str) -> float:
+        return RING_SPOT
+
+    def parity_siblings(self, instrument_token: str) -> list[tuple[Any, dict]]:
+        self.sibling_calls += 1
+        return [
+            (contract, dict(self.rows[token]))
+            for token, contract in self._contracts.items()
+            if token != str(instrument_token)
+        ]
+
+
+class TestPairParity:
+    def _provider(self, strikes: tuple[float, ...] = RING_STRIKES):
+        inner = _RingProvider(strikes)
+        return BidAskQuoteProvider(inner), inner
+
+    def _enforce(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        monkeypatch.setenv("OPTION_PARITY_SANITY", "enforce")
+
+    def test_a_parity_consistent_ring_prices_clean(self, monkeypatch) -> None:
+        self._enforce(monkeypatch)
+        provider, inner = self._provider()
+        quote = provider.execution_quote("24000CE", "BUY")
+        assert quote["ltp"] == pytest.approx(348.0)
+        assert provider.sanity_stats == {}
+        assert inner.sibling_calls  # parity ran, it just agreed
+
+    def test_one_leg_out_of_line_with_its_expiry_is_refused(self, monkeypatch) -> None:
+        """The ₹268 put: right of its own LTP, wrong against every other strike."""
+        self._enforce(monkeypatch)
+        provider, inner = self._provider()
+        inner.set("24400PE", 268.0)  # honest 68, +₹200, with matching ltp
+        with pytest.raises(UntrustedOptionQuoteError) as exc:
+            provider.execution_quote("24400PE", "BUY")
+        assert "pair_parity" in str(exc.value)
+        assert provider.sanity_stats == {"pair_parity": 1}
+
+    def test_a_multiplicative_side_error_is_caught(self, monkeypatch) -> None:
+        """Doubling one side bends the implied forward differently at each strike.
+
+        This is the class the 2026-11-08 incident could not be caught by reading a
+        row alone: every leg agrees with its own LTP and sits above intrinsic.
+        """
+        self._enforce(monkeypatch)
+        provider, inner = self._provider()
+        for strike in RING_STRIKES:
+            token = f"{int(strike)}PE"
+            inner.set(token, 2.0 * inner.rows[token]["ask"])
+        with pytest.raises(UntrustedOptionQuoteError) as exc:
+            provider.execution_quote("24600PE", "BUY")
+        assert "pair_parity" in str(exc.value)
+
+    def test_a_common_shift_is_blind_and_that_is_documented(self, monkeypatch) -> None:
+        """Add ₹5 to every put and the ring's answer is "the forward moved".
+
+        Parity is relative, so it cannot see a whole side shift; that is the
+        cross-broker witness's job (``shadow_diff``, docs/OPTION-JUNK-ASK-
+        INCIDENT-2026-11-08.md §8f). Pinned here so the blind spot is a test
+        rather than a surprise.
+        """
+        self._enforce(monkeypatch)
+        provider, inner = self._provider()
+        for strike in RING_STRIKES:
+            token = f"{int(strike)}PE"
+            inner.set(token, inner.rows[token]["ask"] + 5.0)
+        quote = provider.execution_quote("24600PE", "BUY")
+        assert quote["ltp"] == pytest.approx(273.0)
+        assert provider.sanity_stats == {}
+
+    def test_a_thin_ring_has_no_opinion(self, monkeypatch) -> None:
+        """Below PAIR_PARITY_MIN_STRIKES peers the median is noise: abstain."""
+        self._enforce(monkeypatch)
+        provider, inner = self._provider((24000.0, 24100.0, 24200.0, 24300.0))
+        inner.set("24300PE", 500.0)
+        quote = provider.execution_quote("24300PE", "BUY")
+        assert quote["ltp"] == pytest.approx(500.0)
+        assert provider.sanity_stats == {}
+
+    def test_a_provider_without_peers_is_untouched(self, monkeypatch) -> None:
+        """The seam keeps working for every inner that never heard of parity."""
+        self._enforce(monkeypatch)
+        inner = _ScriptedProvider(spot=RING_SPOT)
+        provider = BidAskQuoteProvider(inner)
+        inner.add("9200", _contract("9200", 24350.0, OptionType.CE),
+                  ltp=340.0, bid=339.5, ask=341.0, source="ws")
+        assert provider.execution_quote("9200", "BUY")["ltp"] == 341.0
+        assert provider.sanity_stats == {}
+
+    def test_shadow_is_the_default_and_counts_without_refusing(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        monkeypatch.delenv("OPTION_PARITY_SANITY", raising=False)
+        provider, inner = self._provider()
+        inner.set("24400PE", 268.0)
+        quote = provider.execution_quote("24400PE", "BUY")
+        assert quote["ltp"] == pytest.approx(268.0)
+        assert provider.sanity_stats == {"pair_parity": 1}
+
+    def test_off_mode_never_reads_the_ring(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        monkeypatch.setenv("OPTION_PARITY_SANITY", "off")
+        provider, inner = self._provider()
+        inner.set("24400PE", 268.0)
+        assert provider.execution_quote("24400PE", "BUY")["ltp"] == pytest.approx(268.0)
+        assert provider.sanity_stats == {}
+        assert inner.sibling_calls == 0
+
+    def test_the_general_gates_and_parity_answer_to_separate_envs(self, monkeypatch) -> None:
+        """Parity can enforce while the proven gates stay in shadow, and back."""
+        monkeypatch.setenv("OPTION_QUOTE_SANITY", "shadow")
+        monkeypatch.setenv("OPTION_PARITY_SANITY", "enforce")
+        provider, inner = self._provider()
+        # ₹4 on a 340-point ITM call: the intrinsic floor sees it, shadow mode lets
+        # the fill through and only counts it.
+        inner.rows["24000CE"].update(ask=4.0, bid=4.0)
+        assert provider.execution_quote("24000CE", "BUY")["ltp"] == 4.0
+        # ₹268 on the 24400 put: every per-row gate is silent, parity refuses.
+        inner.set("24400PE", 268.0)
+        with pytest.raises(UntrustedOptionQuoteError) as exc:
+            provider.execution_quote("24400PE", "BUY")
+        assert "pair_parity" in str(exc.value)
+        assert provider.sanity_stats == {"intrinsic_floor": 1, "pair_parity": 1}
+
+
+# ---------------------------------------------------------------------------
+# 5. The reference is read-only: no HTTP, no subscription (§8 item B)
+# ---------------------------------------------------------------------------
+
+
+class _WSOnlyBroker:
+    """Answers only the WebSocket cache; any other door fails the test.
+
+    A peer read that cold-misses must not fall through to the broker's HTTP quote
+    (mStock's ``_try_ws_quote`` auto-subscribes on a miss) — a witness that
+    subscribes on behalf of every mark turns an observation into feed churn.
+    """
+
+    def __init__(self, missing: tuple[int, ...] = ()) -> None:
+        self.rows: dict[int, dict[str, Any]] = {}
+        self.ws_reads: list[int] = []
+        self._subscribed: set[int] = set()
+        self._missing = set(missing)
+
+    def get_ws_quote(self, token: int, max_age_seconds: float | None = None) -> dict:
+        self.ws_reads.append(int(token))
+        if int(token) in self._missing:
+            return {}
+        return dict(self.rows.get(int(token), {}))
+
+    def subscribe_tokens_ws(self, tokens, mode=None) -> list[int]:
+        self._subscribed.update(int(t) for t in tokens)
+        return sorted(self._subscribed)
+
+    def get_subscribed_tokens(self) -> set[int]:
+        return set(self._subscribed)
+
+    #: The doors a witness must never open: a peer fetched over HTTP, or the
+    #: chain endpoint asked for a leg the ring already holds.
+    FORBIDDEN = ("get_quote", "get_option_quote", "fetch_option_chain")
+
+    def __getattr__(self, name: str):
+        if name in self.FORBIDDEN:
+            raise AssertionError(
+                f"the parity witness reached for broker.{name} — building a "
+                "reference for one leg may not spend an HTTP quote"
+            )
+        raise AttributeError(name)
+
+
+def _live_ring(missing: tuple[int, ...] = ()):
+    broker = _WSOnlyBroker(missing=missing)
+    provider = LiveChainProvider(broker, require_live_spot=False)
+    expiry = date.today() + timedelta(days=7)
+    contracts: list[OptionContract] = []
+    for index, offset in enumerate(range(-6, 7)):
+        strike = 24350.0 + offset * 50.0
+        for option_type in (OptionType.CE, OptionType.PE):
+            token = str(63000 + index * 2 + (0 if option_type is OptionType.CE else 1))
+            contracts.append(
+                OptionContract(
+                    instrument_token=token,
+                    trading_symbol=f"NIFTY{token}",
+                    underlying="NIFTY",
+                    expiry=expiry,
+                    strike=Decimal(str(strike)),
+                    option_type=option_type,
+                    lot_size=75,
+                    tick_size=Decimal("0.05"),
+                )
+            )
+            price = _fair(strike, option_type)
+            broker.rows[int(token)] = {
+                "ltp": price, "bid": price - 0.5, "ask": price, "source": "ws",
+            }
+    provider.hot_ring.recenter("NIFTY", RING_SPOT, contracts, force=True)
+    return provider, broker
+
+
+class TestRingBookIsReadOnly:
+    def test_the_reference_walks_the_ring_through_the_ws_cache(self) -> None:
+        provider, broker = _live_ring()
+        book = provider.ring_book("NIFTY")
+        ring = provider.hot_ring.subscribed_tokens("NIFTY")
+        assert len(book) == len(ring) == 26
+        assert sorted(broker.ws_reads) == sorted(ring)
+
+    def test_a_second_read_inside_the_ttl_costs_nothing(self) -> None:
+        """26 legs per read × every mark of every book must not re-read the socket."""
+        provider, broker = _live_ring()
+        first = len(provider.ring_book("NIFTY"))
+        reads = len(broker.ws_reads)
+        assert len(provider.ring_book("NIFTY")) == first
+        assert len(broker.ws_reads) == reads
+
+    def test_a_peer_the_feed_stopped_printing_drops_out_of_the_median(self) -> None:
+        provider, _b = _live_ring(missing=(63000,))
+        book = provider.ring_book("NIFTY")
+        assert len(book) == 25
+        assert all(row.get("ask") for _c, row in book)
+
+    def test_siblings_are_the_ring_minus_the_leg_under_test(self) -> None:
+        provider, _b = _live_ring()
+        siblings = provider.parity_siblings("63000")
+        assert len(siblings) == 25
+        assert "63000" not in {str(c.instrument_token) for c, _r in siblings}
+
+    def test_a_token_outside_the_ring_has_no_peers(self) -> None:
+        provider, _b = _live_ring()
+        assert provider.parity_siblings("77777") == []
+
+    def test_the_seam_refuses_a_live_ring_dissent_end_to_end(self, monkeypatch) -> None:
+        monkeypatch.delenv("OPTION_QUOTE_SANITY", raising=False)
+        monkeypatch.setenv("OPTION_PARITY_SANITY", "enforce")
+        chain, broker = _live_ring()
+        chain.set_spot("NIFTY", RING_SPOT)
+        seam = BidAskQuoteProvider(_CachedLegInner(chain, broker))
+        broker.rows[63001]["ask"] += 200.0  # the 24350 PE, with a matching ltp
+        broker.rows[63001]["ltp"] = broker.rows[63001]["ask"]
+        with pytest.raises(UntrustedOptionQuoteError) as exc:
+            seam.execution_quote("63000", "BUY")
+        assert "pair_parity" in str(exc.value)
+        assert seam.sanity_stats == {"pair_parity": 1}
+
+
+class _CachedLegInner:
+    """The real ring for peers; the leg itself served from the cached row."""
+
+    source_name = "live:test"
+
+    def __init__(self, chain: LiveChainProvider, broker: _WSOnlyBroker) -> None:
+        self._chain = chain
+        self._broker = broker
+
+    def get_quote(self, instrument_token: str) -> dict[str, Any]:
+        return dict(self._broker.rows[int(instrument_token)])
+
+    def __getattr__(self, name: str):
+        return getattr(self._chain, name)

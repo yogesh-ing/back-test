@@ -33,8 +33,11 @@ TOKEN = "64442"
 
 
 def _levels(side: str, first: float) -> list[dict]:
+    # Bids step down with depth, asks up — a folded ladder is not a book a venue
+    # posts, and the wrapper now refuses one instead of caching it.
+    step = 0.05 if side == "ask" else -0.05
     return [
-        {"price": first + i * 0.05, "quantity": 65 * (i + 1)} for i in range(5)
+        {"price": first + i * step, "quantity": 65 * (i + 1)} for i in range(5)
     ]
 
 

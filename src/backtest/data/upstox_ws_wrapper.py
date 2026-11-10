@@ -61,6 +61,7 @@ import websocket
 
 from backtest.data import upstox_market_data_feed_v3_pb2 as pb
 from backtest.data.feed_depth_recorder import record_depth_packet
+from backtest.data.ladder_shape import order_problem
 from backtest.timekeeping import from_market_clock, iso_utc, now_utc
 
 logger = logging.getLogger("backtest.data.upstox_ws_wrapper")
@@ -152,6 +153,8 @@ class UpstoxWebSocketWrapper:
     LADDER_NONE = "none"
     LADDER_ONE_SIDED = "one_sided"
     LADDER_CROSSED = "crossed"
+    #: Levels arrived out of order, so neither touch price is the venue's best.
+    LADDER_UNSORTED = "unsorted"
 
     def __init__(
         self,
@@ -678,8 +681,14 @@ class UpstoxWebSocketWrapper:
         (same rule as mstock_ws_wrapper.py:364). Absent levels stay absent; they
         are never filled with the previous level or with a tick size.
 
-        Statuses: ``ok`` two-sided with bid<ask; ``one_sided`` a real venue-side
-        gap; ``crossed``/``blank``/``none`` → no usable side is published.
+        Statuses: ``ok`` two-sided, ordered, with bid<ask; ``one_sided`` a real
+        venue-side gap; ``crossed``/``unsorted``/``blank``/``none`` → no usable
+        side is published. ``unsorted`` is the case the level-index split makes
+        possible on either feed: a book whose steps fold back towards the touch
+        cannot have a best price at index 0, and mStock published ten such
+        packets on 2026-11-09 while Upstox published none. Refusing rather than
+        sorting is the same rule that forbids taking ``max``/``min`` — the app
+        may not invent a better price than the venue showed.
         """
         if levels is None:
             return {}, 0.0, 0.0, cls.LADDER_NONE
@@ -697,6 +706,8 @@ class UpstoxWebSocketWrapper:
         cleaned = {"bid": bids, "ask": asks}
         if not bids and not asks:
             return cleaned, 0.0, 0.0, cls.LADDER_BLANK
+        if order_problem(bids, asks) is not None:
+            return cleaned, 0.0, 0.0, cls.LADDER_UNSORTED
         best_bid = bids[0]["price"] if bids else 0.0
         best_ask = asks[0]["price"] if asks else 0.0
         if not bids or not asks:

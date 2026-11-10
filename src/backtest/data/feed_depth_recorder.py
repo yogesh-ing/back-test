@@ -332,7 +332,31 @@ def record_price_used(quote: dict, *, broker: str, token: Any, side: str, field:
     recorder.record(line)
 
 
-def record_shadow_diff(payload: dict) -> None:
+def record_sanity_flag(
+    quote: dict, *, broker: str, token: Any, reason: str, mode: str, field: str,
+    price: float, detail: str,
+) -> None:
+    """Capture one seam rejection (or shadow disagreement) with its evidence.
+
+    A ``quote_sanity`` log line names the price but not the book it came from, and
+    the thresholds for ``pair_parity`` have to be derived from a session of these
+    rows rather than hand-picked. The line carries the packet the check ran on and
+    the check's own numbers, so the tape answers "how often would a shadow gate
+    have fired, and against what reference".
+    """
+    recorder = get_recorder()
+    if recorder is None:
+        return
+    line = _row_line(broker, quote, "sanity_flag", token=token)
+    line["reason"] = reason
+    line["mode"] = mode
+    line["field"] = field
+    line["price_used"] = _scalar(price)
+    line["detail"] = detail
+    recorder.record(line)
+
+
+def record_shadow_diff(payload: dict, *, kind: str = "shadow_diff") -> None:
     """Capture one cross-broker comparison (item F, shadow mode).
 
     ``payload`` carries both brokers' views of the same contract; it is written to
@@ -343,7 +367,7 @@ def record_shadow_diff(payload: dict) -> None:
     recorder = get_recorder()
     if recorder is None:
         return
-    line = {"v": _SCHEMA_VERSION, "kind": "shadow_diff", "broker": "shadow"}
+    line = {"v": _SCHEMA_VERSION, "kind": kind, "broker": "shadow"}
     line.update(payload)
     line["recv_utc"] = iso_utc(now_utc())
     recorder.record(line)
@@ -360,6 +384,7 @@ __all__ = [
     "get_recorder",
     "record_depth_packet",
     "record_price_used",
+    "record_sanity_flag",
     "record_shadow_diff",
     "reset_recorder",
 ]

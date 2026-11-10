@@ -183,6 +183,19 @@ class TestDepthSanitizer:
         assert row["ladder_status"] == "crossed"
         assert row["bid"] == 0.0 and row["ask"] == 0.0
 
+    def test_a_folded_ask_step_prices_nothing(self, wrapper):
+        """Level 1 cheaper than level 0: the touch is not at index 0, so 0 is not used.
+
+        Upstox splits both ladders out of one array, so a mis-ordered frame is
+        possible here too; refusing it is the same rule mStock applies to the ten
+        such packets of 2026-11-09, and sorting would invent a price the venue
+        never showed.
+        """
+        levels = [(213.45, 75, 213.90, 525), (213.30, 225, 213.85, 150)]
+        row = wrapper._ingest(make_market_feed(levels))["NSE_FO|64439"]
+        assert row["ladder_status"] == "unsorted"
+        assert row["bid"] == 0.0 and row["ask"] == 0.0
+
     def test_one_sided_book_keeps_the_real_side(self, wrapper):
         levels = [(213.45, 75, 0.0, 0), (213.40, 150, 0.0, 0)]
         row = wrapper._ingest(make_market_feed(levels))["NSE_FO|64439"]

@@ -26,13 +26,14 @@ import inspect
 import logging
 import math
 import os
+import statistics
 import threading
 import time
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
-from backtest.data.feed_depth_recorder import record_price_used
+from backtest.data.feed_depth_recorder import record_price_used, record_sanity_flag
 from backtest.instruments.option import OptionContract
 from backtest.instruments.base import OptionType
 from backtest.timekeeping import EXCHANGE_TZ, now_utc, session_date
@@ -49,7 +50,13 @@ __all__ = [
     "DisconnectedQuoteProvider",
     "NoExecutableQuoteError",
     "SyntheticChainGenerator",
+    "PAIR_PARITY_MAX_DEVIATION",
+    "PAIR_PARITY_MIN_STRIKES",
+    "PAIR_PARITY_REASON",
+    "PARITY_SANITY_ENV",
+    "QUOTE_SANITY_ENV",
     "bs_price",
+    "parity_deviation",
 ]
 
 
@@ -742,6 +749,72 @@ NSE_OPTION_TICK_SIZE = 0.05
 #: 2026-11-03 straddle booked as profit.
 LTP_DISTANCE_MAX_RATIO = 5.0
 
+#: Pair parity (root-cause doc §8, item B). For one expiry, ``CE − PE + strike`` is
+#: the cost of a synthetic long future, so it must print the SAME number at every
+#: strike — put-call parity, no model and no spot needed. A leg whose own implied
+#: forward dissents from the median of its siblings has a bad price on that leg,
+#: even when it sits comfortably next to its own last trade: the ×1.345 PE-book
+#: injection replayed on the 2026-11-08 capture
+#: (``tools/out/demo_parity_catches_consistent_error.py``) passes both gates above
+#: and is invisible to them by construction — every PE print moved together with
+#: its own LTP.
+#:
+#: This band is measured, not picked. Replaying one full session of the
+#: cross-broker witness through :func:`parity_deviation`
+#: (``tools/out/measure_parity_band_20261109.py``, 2026-11-09, ~3,400 leg-reads per
+#: broker per side, median 12 paired strikes) gives |deviation| p50 ₹0.88 / p95
+#: ₹2.30 / p99 ₹3.25 on mStock asks and p95 ₹3.25 / p99 ₹4.90 on Upstox asks, while
+#: the whole Upstox session — the broker with no known defect — never printed a
+#: deviation above ₹7.25 on either side. ₹10 is the round number just clear of that
+#: clean ceiling, and it caught exactly five mStock legs all session, the largest
+#: ₹780.30 and ₹108.43 away from their own expiry's forward. One more session of
+#: ``sanity_flag`` / ``parity_scan`` capture rows decides whether it moves;
+#: ``LTP_DISTANCE_MAX_RATIO`` stays untouched — tightening it was ruled out, and
+#: this gate exists so it does not have to be.
+PAIR_PARITY_MAX_DEVIATION = 10.0
+#: Paired strikes, other than the leg's own, before the median means anything.
+#: Below this the ring is too thin (or the chain one-sided) and parity abstains.
+PAIR_PARITY_MIN_STRIKES = 4
+#: Reason code, counted in :attr:`BidAskQuoteProvider.sanity_stats`.
+PAIR_PARITY_REASON = "pair_parity"
+#: Parity runs in ``shadow`` by default — it is a witness first, a gate only after
+#: the operator sees a session's hit count. Separate from ``OPTION_QUOTE_SANITY``
+#: so the two proven gates can enforce while this one measures.
+PARITY_SANITY_ENV = "OPTION_PARITY_SANITY"
+
+
+def parity_deviation(
+    legs: Iterable[tuple[float, str, float]], strike: float
+) -> Optional[tuple[float, float, int]]:
+    """``(this strike's implied forward, the median of the others, how many)``.
+
+    ``legs`` is ``(strike, "CE"|"PE", price)`` for ONE expiry, every leg read from
+    the same ladder slot — mixing a bid with an ask would compare two different
+    spreads against each other. ``None`` when this strike has no pair on the other
+    side, or when fewer than :data:`PAIR_PARITY_MIN_STRIKES` other strikes carry
+    both sides, which is the ring being thin rather than a price being wrong.
+
+    Pure: no clock, no broker, no I/O — so the same function answers the seam and
+    the capture analysis that has to set the band.
+    """
+    sides: dict[float, dict[str, float]] = {}
+    for leg_strike, option_type, price in legs:
+        if leg_strike <= 0 or price <= 0 or option_type not in ("CE", "PE"):
+            continue
+        sides.setdefault(leg_strike, {})[option_type] = price
+    implied = {
+        leg_strike: book["CE"] - book["PE"] + leg_strike
+        for leg_strike, book in sides.items()
+        if "CE" in book and "PE" in book
+    }
+    own = implied.get(strike)
+    if own is None:
+        return None
+    others = [value for leg_strike, value in implied.items() if leg_strike != strike]
+    if len(others) < PAIR_PARITY_MIN_STRIKES:
+        return None
+    return own, float(statistics.median(others)), len(others)
+
 
 class BidAskQuoteProvider:
     """Execution realism wrapper: market orders cross the spread (PRD §4.1).
@@ -773,6 +846,14 @@ class BidAskQuoteProvider:
     intrinsic value. Mode is ``$OPTION_QUOTE_SANITY`` (``off`` / ``shadow`` /
     ``enforce``, default ``enforce``); refusals count into
     :attr:`sanity_stats` and log as ``quote_sanity``.
+
+    A third proof, ``pair_parity`` — the leg's strike must agree with the other
+    strikes of its expiry about where the forward is — runs under its own
+    ``$OPTION_PARITY_SANITY`` mode and defaults to ``shadow``, because its band
+    is still being calibrated from the capture file rather than derived from an
+    incident. Every flag, shadow or enforced, is also written to the capture
+    (``kind=sanity_flag``) so the next session's tape counts what a gate would
+    have done.
 
     Note ``OptionPaperBroker.slippage_pct`` still applies ON TOP: the
     spread is where the market stands, slippage models your own impact.
@@ -834,12 +915,13 @@ class BidAskQuoteProvider:
             return 0.0
 
     def _sanity_problem(
-        self, quote: dict[str, Any], key: str, price: float, instrument_token: str
+        self, quote: dict[str, Any], key: str, price: float, instrument_token: str,
+        *, parity_enabled: bool = True,
     ) -> tuple[str, str] | None:
         """``(reason, detail)`` when this side price cannot be a real book.
 
-        Two independent impossibility proofs, both read from data already in
-        hand, checked most-precise first so the log names the strongest reason:
+        Independent impossibility proofs, all read from data already in hand,
+        checked most-precise first so the log names the strongest reason:
 
         * ``intrinsic_floor`` — an ITM option is worth at least its intrinsic
           (minus one tick for grid rounding). ₹0.05 on a ₹340-strike leg is not
@@ -851,6 +933,10 @@ class BidAskQuoteProvider:
         * ``ltp_distance`` — the same packet carried an LTP for this very
           instrument; a book a multiple away from it is a decoding artefact or a
           row whose price moved on.
+        * ``pair_parity`` — this leg's own strike disagrees with the other strikes
+          of the same expiry about where the forward is. Its own mode
+          (:data:`PARITY_SANITY_ENV`, shadow by default) decides whether it runs at
+          all; see :meth:`_parity_problem`.
         """
         try:
             ltp = float(quote.get("ltp") or 0.0)
@@ -895,7 +981,80 @@ class BidAskQuoteProvider:
                     f"{key}={price:.2f} vs ltp={ltp:.2f} "
                     f"(outside x{LTP_DISTANCE_MAX_RATIO} of its own last trade)",
                 )
+        if parity_enabled and contract is not None:
+            problem = self._parity_problem(contract, key, price, instrument_token)
+            if problem is not None:
+                return problem
         return None
+
+    @staticmethod
+    def _parity_mode() -> str:
+        """``off`` / ``shadow`` / ``enforce`` for the parity witness alone.
+
+        Default ``shadow``: the band is a placeholder until a session of
+        ``sanity_flag`` capture rows says where the real noise floor is, and a
+        witness that refuses exits on its first day of calibration is worse than
+        no witness. The two proven gates keep their own
+        :data:`QUOTE_SANITY_ENV` (default ``enforce``).
+        """
+        mode = str(os.getenv(PARITY_SANITY_ENV, "shadow")).strip().lower()
+        return mode if mode in QUOTE_SANITY_MODES else "shadow"
+
+    def _parity_problem(
+        self, contract: Any, key: str, price: float, instrument_token: str
+    ) -> tuple[str, str] | None:
+        """``pair_parity`` when this leg dissents from its own expiry's forward.
+
+        For one expiry, ``CE − PE + strike`` is the cost of a synthetic long future
+        and must print the same number at every strike. The reference is the median
+        of the *ring's other strikes* — not an external spot or a model — so it
+        absorbs carry and interest, survives a market-wide move (every strike
+        dissents together, so the median moves with them), and needs no threshold
+        about where NIFTY "should" be. What it cannot survive is one leg, or one
+        whole side of the book, priced wrong in a way that agrees with its own LTP:
+        exactly the shape :meth:`_sanity_problem`'s per-row gates are blind to.
+
+        Peers come from the wrapped provider read-only
+        (:meth:`LiveChainProvider.parity_siblings`); a provider that cannot name
+        them, a ring too thin to have an opinion, or a missing pair on this strike
+        all abstain. Never raises: a witness must not become an outage.
+        """
+        if key not in ("bid", "ask"):
+            return None
+        getter = getattr(self.inner, "parity_siblings", None)
+        if not callable(getter):
+            return None
+        try:
+            siblings = getter(instrument_token) or []
+            strike = float(getattr(contract, "strike", 0) or 0)
+            option_type = getattr(contract, "option_type", "")
+            option_type = str(getattr(option_type, "value", option_type)).upper()
+            legs: list[tuple[float, str, float]] = [(strike, option_type, price)]
+            for sibling, row in siblings:
+                legs.append((
+                    float(getattr(sibling, "strike", 0) or 0),
+                    str(getattr(
+                        getattr(sibling, "option_type", ""), "value",
+                        getattr(sibling, "option_type", ""),
+                    )).upper(),
+                    float((row or {}).get(key) or 0.0),
+                ))
+            result = parity_deviation(legs, strike)
+        except Exception:  # noqa: BLE001 — a witness must not reach the trading path
+            logger.debug("pair_parity aborted", exc_info=True)
+            return None
+        if result is None or strike <= 0:
+            return None
+        own, reference, peers = result
+        deviation = own - reference
+        if abs(deviation) <= PAIR_PARITY_MAX_DEVIATION:
+            return None
+        return (
+            PAIR_PARITY_REASON,
+            f"{key}={price:.2f} on {option_type} {strike:.0f} implies forward "
+            f"{own:.2f} vs {reference:.2f} median of {peers} paired strikes "
+            f"(dev={deviation:+.2f}, band ±{PAIR_PARITY_MAX_DEVIATION:.2f})",
+        )
 
     def _check_sanity(
         self, quote: dict[str, Any], key: str, price: float, instrument_token: str
@@ -903,15 +1062,23 @@ class BidAskQuoteProvider:
         """Run the gates; return the reason when the price must be refused.
 
         ``shadow`` records and logs but lets the trade through — that is the
-        mode to run while the calibration of the two bounds is being watched.
+        mode to run while the calibration of a bound is being watched. Each
+        reason answers to its own env, so parity can measure while the two proven
+        gates enforce.
         """
-        mode = self._sanity_mode()
-        if mode == "off":
+        general = self._sanity_mode()
+        parity = self._parity_mode()
+        if general == "off" and parity == "off":
             return None
-        problem = self._sanity_problem(quote, key, price, instrument_token)
+        problem = self._sanity_problem(
+            quote, key, price, instrument_token, parity_enabled=parity != "off"
+        )
         if problem is None:
             return None
         reason, detail = problem
+        mode = parity if reason == PAIR_PARITY_REASON else general
+        if mode == "off":
+            return None
         self.sanity_stats[reason] = self.sanity_stats.get(reason, 0) + 1
         logger.warning(
             "quote_sanity mode=%s reason=%s token=%s side=%s detail=%s",
@@ -920,6 +1087,16 @@ class BidAskQuoteProvider:
             instrument_token,
             key,
             detail,
+        )
+        record_sanity_flag(
+            quote,
+            broker=str(getattr(self, "source_name", "unknown")),
+            token=instrument_token,
+            reason=reason,
+            mode=mode,
+            field=key,
+            price=price,
+            detail=detail,
         )
         if mode == "enforce":
             return f"{reason} ({detail})"
@@ -1625,10 +1802,7 @@ class LiveChainProvider:
     DEFAULT_SPOTS = dict(SyntheticChainGenerator.DEFAULT_SPOTS)
 
     def __init__(
-        self,
-        broker: Any,
-        quote_ttl_seconds: int = 5,
-        chain_ttl_seconds: int = 900,
+        self, broker: Any, quote_ttl_seconds: int = 5, chain_ttl_seconds: int = 900,
         require_live_spot: bool = True,
     ) -> None:
         self.broker = broker
@@ -1639,8 +1813,11 @@ class LiveChainProvider:
         self._contracts: dict[str, Any] = {}  # instrument_token → OptionContract
         self._spots: dict[str, float] = {}
         self.hot_ring = HotStrikeRing(broker, on_contract=self.register_contract)
+        #: ``hot_ring``'s lock is private; peer-ladder reads have their own.
         self._ring_lock = threading.Lock()
         self._warming_underlyings: set[str] = set()
+        #: underlying → (monotonic stamp, peer rows) for :meth:`ring_book`.
+        self._parity_cache: dict[str, tuple[float, list]] = {}
 
     # -- identity -----------------------------------------------------------
 
@@ -1700,6 +1877,75 @@ class LiveChainProvider:
         ring token. No trading path may branch on it.
         """
         return self._contracts.get(str(instrument_token))
+
+    #: How long a peer-ladder read may be reused. The parity reference is a median
+    #: over two dozen legs; re-reading them for every mark of every book would make
+    #: the witness cost the trading path it exists to observe. The leg under test
+    #: never comes from here — only its peers, whose median a half-second of lag
+    #: cannot move by anything close to the band.
+    PARITY_READ_TTL_S = 0.5
+    #: Peer freshness, matching the ring's own WS read window
+    #: (``MStockBroker._try_ws_quote``): a peer the feed stopped printing drops out
+    #: of the median instead of anchoring it to an old book.
+    PARITY_QUOTE_MAX_AGE_S = 10.0
+
+    def ring_book(self, underlying: str) -> list[tuple[Any, dict[str, Any]]]:
+        """Every contract the hot ring is quoting for ``underlying``, with its row.
+
+        Read-only, like :meth:`contract_for`: the peer set for ``pair_parity`` and
+        for the shadow scan that calibrates its band. Only tokens already in the
+        ring are read, and only through the broker's WebSocket cache — a peer that
+        is not subscribed is skipped rather than fetched, so building a reference
+        can never spend an HTTP quote request or trigger a subscription.
+        """
+        key = str(underlying).upper()
+        now = time.monotonic()
+        with self._ring_lock:
+            hit = self._parity_cache.get(key)
+            if hit is not None and now - hit[0] < self.PARITY_READ_TTL_S:
+                return list(hit[1])
+        getter = getattr(self.broker, "get_ws_quote", None)
+        out: list[tuple[Any, dict[str, Any]]] = []
+        if callable(getter):
+            for token in sorted(self.hot_ring.subscribed_tokens(key)):
+                contract = self._contracts.get(str(token))
+                if contract is None:
+                    continue
+                try:
+                    row = getter(
+                        int(token), max_age_seconds=self.PARITY_QUOTE_MAX_AGE_S
+                    ) or {}
+                except (TypeError, ValueError):
+                    continue
+                except Exception:  # noqa: BLE001 — a peer is allowed to be missing
+                    continue
+                if row:
+                    out.append((contract, row))
+        with self._ring_lock:
+            self._parity_cache[key] = (now, out)
+        return list(out)
+
+    def parity_siblings(self, instrument_token: str) -> list[tuple[Any, dict[str, Any]]]:
+        """The ring's other contracts that share this leg's expiry.
+
+        Read-only (:meth:`ring_book` says why); feeds the seam's ``pair_parity``
+        check. A leg whose terms are unknown, or whose expiry has no peers in the
+        ring, gets an empty list and the check abstains.
+        """
+        contract = self._contracts.get(str(instrument_token))
+        expiry = getattr(contract, "expiry", None) if contract is not None else None
+        underlying = (
+            str(getattr(contract, "underlying", "") or "").upper() if contract else ""
+        )
+        if expiry is None or not underlying:
+            return []
+        own = str(getattr(contract, "instrument_token", instrument_token))
+        return [
+            (peer, row)
+            for peer, row in self.ring_book(underlying)
+            if getattr(peer, "expiry", None) == expiry
+            and str(getattr(peer, "instrument_token", "")) != own
+        ]
 
     def get_quote(self, instrument_token: str) -> dict[str, Any]:
         """Real L1 quote (TTL-cached) for one contract token.
