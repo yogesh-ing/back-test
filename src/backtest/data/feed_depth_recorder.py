@@ -295,6 +295,10 @@ def _row_line(
         "oi": _scalar(row.get("oi")),
         "volume": _scalar(row.get("volume")),
         "exchange_ts": _scalar(row.get("timestamp")),
+        # The venue's own last-trade stamp (Upstox ``ltpc.ltt``). Present so the
+        # currentTs-vs-ltt measurement (impl plan T0.5-1) can read both stamps off
+        # one tape line; mStock rows carry no such field and write ``null``.
+        "last_trade_ts": _scalar(row.get("last_trade_ts")),
         "recv_utc": row.get("recv_utc") or iso_utc(now_utc()),
         "recv_mono": _scalar(row.get("recv_mono")),
         "ltp_mono": _scalar(row.get("ltp_mono")),

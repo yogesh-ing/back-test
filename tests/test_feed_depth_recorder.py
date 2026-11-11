@@ -141,6 +141,30 @@ def test_packet_keeps_all_five_levels_per_side(flag_on):
     assert line["recv_utc"].endswith("+00:00")
 
 
+def test_the_venue_last_trade_stamp_reaches_the_tape(flag_on):
+    """T0.5-0: the tape must carry ``last_trade_ts`` (Upstox ``ltpc.ltt``) so the
+    currentTs-vs-ltt measurement (impl plan T0.5-1) has both stamps to compare.
+
+    Reading one written line is the point — a writer that stores the field in its
+    dict but drops it at write time is exactly what finding A caught.
+    """
+    recorder = get_recorder()
+    assert recorder is not None
+    upstox_row = _row()
+    upstox_row["last_trade_ts"] = "2026-11-11T09:19:13.812000+05:30"
+    key = "NSE_FO|NIFTY|26NOV2026|25050|PE"
+    record_depth_packet("upstox", upstox_row, token=key)
+    line = next(ln for ln in _lines(recorder) if ln["kind"] == "packet" and ln["token"] == key)
+    assert line["last_trade_ts"] == "2026-11-11T09:19:13.812000+05:30"
+
+    reset_recorder()
+    recorder = get_recorder()
+    assert recorder is not None
+    record_depth_packet("mstock", _row(), token=TOKEN)  # no last_trade_ts on mStock rows
+    line = next(ln for ln in _lines(recorder) if ln["kind"] == "packet" and ln["token"] == TOKEN)
+    assert line["last_trade_ts"] is None  # written as null, never a crash
+
+
 def test_raw_ladder_survives_our_level_hygiene(flag_on):
     """Zero-price/zero-qty levels are dropped from the row — the capture keeps them."""
     recorder = get_recorder()
