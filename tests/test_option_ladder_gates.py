@@ -381,6 +381,149 @@ class TestServeGate:
             wrapper.close()
 
 
+class _FakeUpstoxFeed:
+    """The upstox_ws_wrapper read API, minus the socket: rows on demand."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, dict[str, Any]] = {}
+        self.connected = True
+        self.last_any = time.monotonic()
+        self.keys: set[str] = set()
+
+    def is_connected(self) -> bool:
+        return self.connected
+
+    def last_any_tick_mono(self) -> float:
+        return self.last_any
+
+    def get_quote(self, instrument_key: str) -> dict[str, Any] | None:
+        row = self.rows.get(str(instrument_key))
+        return dict(row) if row is not None else None
+
+    def subscribed_keys(self) -> list[str]:
+        return list(self.keys)
+
+
+class TestServeGateUpstoxTwin:
+    """The same gate table as ``TestServeGate``, for the Upstox caller (T0.4).
+
+    Rows are Upstox-wrapper-shaped (opaque ``NSE_FO|…`` keys, aware-UTC stamps);
+    the gate must refuse exactly what it refuses for mStock. The quiet-leg row
+    is refused under ``UPSTOX_SERVE_POLICY`` as shipped (fail-closed provisional
+    until T0.5-2 measures deliberate quiet tokens) and served only under a
+    ``liveness_rescue=True`` policy.
+    """
+
+    KEY = "NSE_FO|NIFTY|26NOV2026|25050|PE"
+
+    def _broker(self) -> tuple[Any, _FakeUpstoxFeed]:
+        from backtest.brokers.upstox import UpstoxBroker
+
+        broker = UpstoxBroker()
+        feed = _FakeUpstoxFeed()
+        feed.keys.add(self.KEY)
+        broker._ws_feed = feed  # Phase 1 item 2 attaches this for real
+        return broker, feed
+
+    def _inject(
+        self, feed: _FakeUpstoxFeed, age_s: float, ladder_age_s: float | None = None
+    ) -> None:
+        now = time.monotonic()
+        feed.rows[self.KEY] = {
+            "ltp": 493.65,
+            "bid": 493.60,
+            "ask": 493.70,
+            "depth": {"bid": [[493.60, 65]], "ask": [[493.70, 65]]},
+            "ladder_status": "ok",
+            "timestamp": "2026-11-11T03:49:14.812000+00:00",
+            "recv_mono": now - age_s,
+            "ltp_mono": now - age_s,
+            "ladder_mono": now - (ladder_age_s if ladder_age_s is not None else age_s),
+        }
+
+    def test_unattached_broker_serves_nothing(self) -> None:
+        """Phase 0 acceptance: no _ws_feed ⇒ {} from every caller, fail-closed."""
+        from backtest.brokers.upstox import UpstoxBroker
+
+        assert UpstoxBroker().get_ws_quote(self.KEY) == {}
+
+    def test_fresh_row_is_served(self) -> None:
+        broker, feed = self._broker()
+        self._inject(feed, age_s=1.0)
+        q = broker.get_ws_quote(self.KEY)
+        assert (q.get("bid"), q.get("ask")) == (493.60, 493.70)
+
+    def test_stale_row_is_refused(self) -> None:
+        broker, feed = self._broker()
+        self._inject(feed, age_s=40.0)
+        assert broker.get_ws_quote(self.KEY) == {}
+
+    def test_disconnected_socket_is_refused(self) -> None:
+        broker, feed = self._broker()
+        self._inject(feed, age_s=1.0)
+        feed.connected = False
+        assert broker.get_ws_quote(self.KEY) == {}
+
+    def test_unparseable_stamp_is_refused(self) -> None:
+        broker, feed = self._broker()
+        self._inject(feed, age_s=1.0)
+        feed.rows[self.KEY].pop("recv_mono")
+        feed.rows[self.KEY].pop("ltp_mono")
+        feed.rows[self.KEY]["timestamp"] = "not-a-stamp"
+        assert broker.get_ws_quote(self.KEY) == {}
+
+    def test_future_skewed_stamp_is_refused(self) -> None:
+        broker, feed = self._broker()
+        self._inject(feed, age_s=1.0)
+        feed.rows[self.KEY].pop("recv_mono")
+        feed.rows[self.KEY].pop("ltp_mono")
+        feed.rows[self.KEY]["timestamp"] = "2126-11-11T09:19:14+00:00"
+        assert broker.get_ws_quote(self.KEY) == {}
+
+    def test_expired_ladder_serves_price_without_depth(self) -> None:
+        broker, feed = self._broker()
+        self._inject(feed, age_s=1.0, ladder_age_s=400.0)
+        q = broker.get_ws_quote(self.KEY)
+        assert q["ltp"] == 493.65
+        assert q["bid"] == 0.0 and q["ask"] == 0.0
+        assert q["depth"] == {}
+        assert q["ladder_status"].startswith("expired:")
+
+    def test_quiet_leg_refused_under_the_shipped_upstox_policy(self) -> None:
+        """liveness_rescue=False (T0.5-2 decides otherwise) ⇒ no rescue."""
+        broker, feed = self._broker()
+        self._inject(feed, age_s=40.0)
+        assert broker.get_ws_quote(self.KEY) == {}
+
+    def test_quiet_leg_serves_when_the_rescue_is_enabled(self) -> None:
+        from backtest.data.depth_serve_gate import ServeGatePolicy, serve_ws_row
+
+        broker, feed = self._broker()
+        self._inject(feed, age_s=40.0)
+        row = feed.get_quote(self.KEY)
+        rescue = ServeGatePolicy(
+            venue="upstox", max_age_seconds=10.0, ladder_ttl_seconds=120.0, liveness_rescue=True
+        )
+        q = serve_ws_row(
+            row=row,
+            key=self.KEY,
+            now_mono=time.monotonic(),
+            is_connected=True,
+            last_any_tick_mono=feed.last_any,
+            token_subscribed=True,
+            policy=rescue,
+        )
+        assert (q.get("bid"), q.get("ask")) == (493.60, 493.70)
+
+    def test_unsubscribed_token_cannot_use_the_socket_liveness_bypass(self) -> None:
+        """Mirror of the mStock test: a token outside the registry is not
+        "fresh because the socket is"."""
+        broker, feed = self._broker()
+        feed.keys.clear()
+        self._inject(feed, age_s=40.0)
+        assert broker.get_ws_quote(self.KEY) == {}
+
+
 # ---------------------------------------------------------------------------
 # 3. Execution/mark seam: intrinsic floor + LTP distance (§8b, §8d)
 # ---------------------------------------------------------------------------

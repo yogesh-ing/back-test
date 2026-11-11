@@ -69,6 +69,7 @@ from backtest.brokers.base import (
     BrokerOrderId,
     MarginInfo,
 )
+from backtest.data.depth_serve_gate import UPSTOX_SERVE_POLICY, serve_ws_row
 
 __all__ = [
     "UpstoxBroker",
@@ -806,6 +807,61 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
             "volume": float(entry.get("volume") or entry.get("total_quantity") or 0.0),
             "oi": float(entry.get("oi") or entry.get("open_interest") or 0.0),
         }
+
+    def get_ws_quote(
+        self,
+        instrument_token: Any,
+        max_age_seconds: float = UPSTOX_SERVE_POLICY.max_age_seconds,
+        *,
+        socket_liveness_seconds: float | None = None,
+        ladder_ttl_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Get latest validated quote from the Upstox WebSocket cache.
+
+        Same public shape as ``MStockBroker.get_ws_quote`` and the same gate
+        (:mod:`backtest.data.depth_serve_gate`), with
+        ``UPSTOX_SERVE_POLICY``. Keys are Upstox instrument keys
+        (``NSE_FO|…``); they are normalized with ``str()`` only — no numeric
+        parsing, because a key-shaped venue has no numeric form.
+
+        While no feed is attached (Phase 0: ``_ws_feed`` stays unset until the
+        Phase-1 socket work) every call returns ``{}`` and the caller falls
+        back to HTTP LTP — so this method cannot change a fill until the plan
+        says a feed may be attached.
+        """
+        feed = getattr(self, "_ws_feed", None)
+        if not feed:
+            return {}
+
+        try:
+            key = str(instrument_token)
+            is_conn_fn = getattr(feed, "is_connected", None)
+            is_connected = (not callable(is_conn_fn)) or is_conn_fn()
+            last_any_fn = getattr(feed, "last_any_tick_mono", None)
+            last_any = float(last_any_fn()) if callable(last_any_fn) else 0.0
+            quote = feed.get_quote(key)
+            subscribed_fn = getattr(feed, "subscribed_keys", None)
+            token_subscribed = key in set(subscribed_fn()) if callable(subscribed_fn) else False
+            return serve_ws_row(
+                row=quote,
+                key=key,
+                now_mono=time.monotonic(),
+                is_connected=is_connected,
+                last_any_tick_mono=last_any,
+                token_subscribed=token_subscribed,
+                policy=UPSTOX_SERVE_POLICY,
+                max_age_seconds=max_age_seconds,
+                socket_liveness_seconds=socket_liveness_seconds,
+                ladder_ttl_seconds=ladder_ttl_seconds,
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Error getting WebSocket quote for key %s: %s",
+                instrument_token,
+                exc,
+            )
+            return {}
 
     @staticmethod
     def _quote_key(instrument_token: Any) -> str:
