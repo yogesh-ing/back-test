@@ -31,6 +31,12 @@ assembled post-hoc.
   A missing witness costs one log line (`FEED_LOSS_WITNESS`), never a halt.
   Losing the primary fires the critical `DATA_FEED_STALE` alert — that episode
   is S6 evidence, not a reason to switch feeds mid-session.
+- **Sockets (§7 Q1): exactly one Upstox socket.** The Upstox account cap is
+  2 sockets/user (Plus 5) — primary + witness on one account would sit at the
+  cap, so both Upstox roles share the single socket and its rings are budgeted
+  jointly (`check_limits` unions existing keys ∪ the new batch against the
+  per-mode map). Never spawn a second Upstox socket for convenience: the
+  budget is per-socket and would not span two.
 - Copy this runbook into the session plan with the table in §2 filled in.
 
 ## 2. The scorecard — criteria and computing commands
