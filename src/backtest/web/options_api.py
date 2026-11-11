@@ -241,10 +241,19 @@ def _live_chain_generator(underlying: str) -> Any | None:
     shared ChainBus, so the dashboard picks expiries the market actually has.
     """
     try:
+        from backtest.data.sources_policy import default_broker_source
         from backtest.forward.feed_registry import _default_quote_broker, get_chain_bus
 
+        # B4: the configured source is probed first — a deployment whose
+        # default feed is Dhan must not silently end up on an mStock chain
+        # just because mstock sits first in a fixed priority list.
+        configured = str(default_broker_source() or "").lower()
+        order: list[str] = []
+        for candidate in (configured, "mstock", "dhan", "upstox"):
+            if candidate and candidate not in order:
+                order.append(candidate)
         name = None
-        for candidate in ("mstock", "dhan", "upstox"):
+        for candidate in order:
             if _default_quote_broker(candidate) is not None:
                 name = candidate
                 break

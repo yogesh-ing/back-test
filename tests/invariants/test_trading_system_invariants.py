@@ -192,7 +192,13 @@ def test_tick_churn_cannot_take_more_than_one_entry_per_timeframe_bucket():
 class _DepthStub:
     """Two-sided rows like the live WS depth cache, wrapped by ``BidAskQuoteProvider``."""
 
-    source_name = "live:mstock"
+    #: The stub plays an mStock broker; the label is DERIVED like the real
+    #: providers (B4: ``live:{broker_name}``) rather than pinned to a literal.
+    broker_name = "mstock"
+
+    @property
+    def source_name(self) -> str:
+        return f"live:{self.broker_name}"
 
     def __init__(self, rows: dict[str, dict]) -> None:
         self.rows = {str(k): dict(v) for k, v in rows.items()}

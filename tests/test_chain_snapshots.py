@@ -52,6 +52,9 @@ def _contract(strike: int, expiry: date, ctype: OptionType = OptionType.CE) -> O
 class FakeSnapshotClient:
     """Canned broker: chain terms + whole-expiry quote payloads."""
 
+    #: Plays an mStock client; rows derive their ``source`` from this (B4).
+    broker_name = "mstock"
+
     def __init__(self, contracts, payloads=None, fail_expuries=()):
         self.contracts = list(contracts)
         self.payloads = dict(payloads or {})

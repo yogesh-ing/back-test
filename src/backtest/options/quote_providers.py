@@ -414,11 +414,24 @@ class SyntheticQuoteProvider:
 
 
 # ---------------------------------------------------------------------------
-# LiveQuoteProvider (G2.1 — real mStock LTP with TTL cache)
+# LiveQuoteProvider (G2.1 — real broker LTP with TTL cache)
 # ---------------------------------------------------------------------------
 
+
+def broker_label(broker: Any) -> str:
+    """B4 provenance: a row's label is the name of the broker that produced it.
+
+    Every real broker carries ``broker_name`` (:mod:`backtest.brokers.base`,
+    default ``"unnamed"``, overridden to ``mstock``/``dhan``/``upstox``).
+    A duck-typed client that carries none is honestly ``"unnamed"`` rather
+    than wearing a broker's name it cannot back — the 2026-11 sweep that
+    removed the hard-coded ``"live:mstock"`` stamps.
+    """
+    return str(getattr(broker, "broker_name", "") or "unnamed")
+
+
 class LiveQuoteProvider:
-    """Fetch real LTP from an authenticated mStock session.
+    """Fetch real LTP from an authenticated broker session.
 
     The mStock order client exposes ``get_latest()`` for quotes; this
     provider wraps it, normalises to the protocol's dict shape, and caches
@@ -434,7 +447,7 @@ class LiveQuoteProvider:
 
     @property
     def source_name(self) -> str:
-        return "live:mstock"
+        return f"live:{broker_label(self.broker)}"
 
     def register_contract(self, contract: Any) -> None:
         """Remember token → contract so numeric tokens translate to trading_symbol."""
@@ -2047,7 +2060,7 @@ class LiveChainProvider:
 
     @property
     def source_name(self) -> str:
-        return "live:mstock"
+        return f"live:{broker_label(self.broker)}"
 
     @property
     def generator(self) -> "LiveChainProvider":

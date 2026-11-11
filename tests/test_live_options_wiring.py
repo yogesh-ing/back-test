@@ -77,6 +77,9 @@ def _contract(
 class FakeBroker:
     """Duck-typed MStockBroker: canned chain + L1 quotes, counts calls."""
 
+    #: Plays an mStock broker, so the derived label (B4) reads live:mstock.
+    broker_name = "mstock"
+
     def __init__(self, contracts=None, quotes=None):
         self.contracts = list(contracts or [])
         self.quotes = dict(quotes or {})
@@ -409,7 +412,9 @@ class TestEngineQuoteSeam:
 
         mgr = MagicMock()
         mgr.is_authenticated.return_value = authenticated
-        mgr.get_active_broker.return_value = broker or MagicMock()
+        # B4: the label derives from the broker's own ``broker_name`` — the
+        # default mock plays the mStock session, so it must say so.
+        mgr.get_active_broker.return_value = broker or MagicMock(broker_name="mstock")
         monkeypatch.setattr(sm, "get_session_manager", lambda: mgr)
         return mgr
 

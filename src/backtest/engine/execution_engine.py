@@ -167,8 +167,10 @@ class ExecutionEngine:
 
         Returns (provider, data_source_label) where label is:
         - "synthetic" for synthetic path
-        - "live:mstock" for live authenticated path (a LiveQuoteProvider —
-          the QUOTE contract ``get_quote(token)`` + ``source_name``)
+        - "live:<broker>" for live authenticated path (a LiveQuoteProvider —
+          the QUOTE contract ``get_quote(token)`` + ``source_name``; B4: the
+          label is derived from the session broker's ``broker_name``, so an
+          mStock session reads ``live:mstock`` and a Dhan one ``live:dhan``)
         - "synthetic-fallback" when source=mstock but no valid session, so we fall back to synthetic
           with a label on the result (so callers know it's fallback, not real live).
         - :data:`NO_SOURCE_LABEL` when there is no chain feed to resolve at all.
@@ -200,10 +202,14 @@ class ExecutionEngine:
                 if session_mgr.is_authenticated():
                     # Live path — the QUOTE provider over the order broker
                     # (MStockBroker: get_option_quote per token, TTL-cached).
-                    from backtest.options.quote_providers import LiveQuoteProvider
+                    from backtest.options.quote_providers import (
+                        LiveQuoteProvider,
+                        broker_label,
+                    )
 
-                    provider = LiveQuoteProvider(broker=session_mgr.get_active_broker())
-                    return provider, "live:mstock"
+                    broker = session_mgr.get_active_broker()
+                    provider = LiveQuoteProvider(broker=broker)
+                    return provider, f"live:{broker_label(broker)}"
                 # No valid session → synthetic-fallback
                 # Per spec: live orders require an authenticated broker session,
                 # else OrderRejected("no_session")

@@ -57,10 +57,15 @@ class _DepthStub:
 
     Wrapped in :class:`BidAskQuoteProvider` its ``source_name`` composes to
     ``"live:mstock+bidask"`` — the marker the broker reads to know the spread
-    was crossed by the seam and must not be charged again.
+    was crossed by the seam and must not be charged again. The label is
+    DERIVED from ``broker_name`` like the real provider (B4), not literal.
     """
 
-    source_name = "live:mstock"
+    broker_name = "mstock"
+
+    @property
+    def source_name(self) -> str:
+        return f"live:{self.broker_name}"
 
     def __init__(self, rows: dict[str, dict], contracts: dict | None = None) -> None:
         self.rows = {str(k): dict(v) for k, v in rows.items()}

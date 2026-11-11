@@ -152,6 +152,9 @@ class TestCachedQuoteProvider:
 class TestLiveQuoteProvider:
     def _broker(self, ltp=150.0):
         broker = MagicMock()
+        # B4: the label derives from the broker's own broker_name — this mock
+        # plays the mStock client, so it must say so.
+        broker.broker_name = "mstock"
         broker.get_option_quote.return_value = {
             "ltp": ltp, "bid": ltp - 1, "ask": ltp + 1,
         }

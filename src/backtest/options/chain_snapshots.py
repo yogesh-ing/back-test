@@ -32,7 +32,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Optional
 
 from backtest.db.models import OptionChainSnapshot
-from backtest.options.quote_providers import LiveChainProvider
+from backtest.options.quote_providers import LiveChainProvider, broker_label
 
 logger = logging.getLogger("backtest.options.chain_snapshots")
 
@@ -182,7 +182,7 @@ class ChainSnapshotRecorder:
             rows.append(
                 OptionChainSnapshot(
                     snapshot_ts=ts,
-                    source="mstock",
+                    source=broker_label(self.client),
                     underlying=underlying,
                     expiry=c.expiry,
                     strike=Decimal(str(c.strike)),

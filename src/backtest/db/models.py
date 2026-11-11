@@ -738,6 +738,10 @@ class MarketDataCache(Base):
     volume: Mapped[Decimal] = mapped_column(Money, nullable=False, server_default=text("0"))
     bid: Mapped[Optional[Decimal]] = mapped_column(Price)
     ask: Mapped[Optional[Decimal]] = mapped_column(Price)
+    #: B4 provenance: the name of the broker/feed that produced the row.
+    #: Every INSERT sets this column explicitly — the legacy
+    #: ``server_default 'mstock'`` is schema back-compat only and must never
+    #: be the value a live row gets by accident.
     source: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'mstock'"))
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

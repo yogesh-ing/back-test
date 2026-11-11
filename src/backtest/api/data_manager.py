@@ -1045,7 +1045,9 @@ def _run_fetch_job_inner(
                         _job["fetched"] += 1
                 continue
 
-            inserted = _persist_bars(engine, bars, symbol, inst_exchange, timeframe)
+            inserted = _persist_bars(
+                engine, bars, symbol, inst_exchange, timeframe, source=broker
+            )
 
             log.info(
                 "[data] %s: %d bars fetched, %d inserted (%d/%d done)",
@@ -2314,8 +2316,15 @@ def _extract_bars(payload) -> list[dict]:
     return []
 
 
-def _persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timeframe: str) -> int:
-    """Upsert OHLCV bars into market_data_cache."""
+def _persist_bars(
+    engine, bars: list[dict], symbol: str, exchange: str, timeframe: str, source: str
+) -> int:
+    """Upsert OHLCV bars into market_data_cache.
+
+    ``source`` is the name of the broker whose fetcher produced ``bars`` (B4:
+    the label comes from the broker that produced the row) — stamped on every
+    row explicitly, never left to the column's ``server_default 'mstock'``.
+    """
     if not bars:
         return 0
 
@@ -2372,7 +2381,7 @@ def _persist_bars(engine, bars: list[dict], symbol: str, exchange: str, timefram
                     "low": l,
                     "close": c,
                     "volume": v,
-                    "source": "mstock",
+                    "source": str(source),
                 }
             )
         except Exception as exc:  # noqa: BLE001 — one malformed bar must not lose the rest

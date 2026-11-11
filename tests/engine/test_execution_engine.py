@@ -35,7 +35,7 @@ def test_routing_table_mode_source():
     # live + mstock with no session → synthetic-fallback
     _, label = engine._resolve_quote_source("mstock", "live")
     # Should be synthetic-fallback when no valid broker session
-    assert label in ("synthetic-fallback", "live:mstock", "synthetic")
+    assert label in ("synthetic-fallback", "synthetic") or label.startswith("live:")
 
 
 def test_c2_ownership_strategy_never_calls_broker():
@@ -66,7 +66,10 @@ def test_c2_ownership_strategy_never_calls_broker():
     )
     result2 = engine.execute(signal2, mode="paper", source="synthetic")
     assert isinstance(result2, Fill)
-    assert result2.data_source in ("synthetic", "synthetic-fallback", "live:mstock")
+    assert result2.data_source in (
+        "synthetic",
+        "synthetic-fallback",
+    ) or result2.data_source.startswith("live:")
 
 
 def test_lot_size_resolution():
@@ -132,7 +135,7 @@ def test_fallback_label_present():
     # Live + mstock with no session → should be OrderRejected no_session per U2.3 spec
     # But quote resolution still returns synthetic-fallback label
     _, label = engine._resolve_quote_source("mstock", "live")
-    assert label == "synthetic-fallback" or label == "live:mstock"
+    assert label == "synthetic-fallback" or label.startswith("live:")
 
     # For U2.1, execute with live+mstock and no session should reject no_session
     result = engine.execute(signal, mode="live", source="mstock")
@@ -143,8 +146,11 @@ def test_fallback_label_present():
         assert result.reason == "no_session"
         assert result.data_source == "synthetic-fallback"
     else:
-        # If session manager returns live:mstock (in some envs), it's still valid
-        assert result.data_source in ("synthetic-fallback", "live:mstock", "synthetic")
+        # If the session manager returns a live label (in some envs), it's still valid
+        assert result.data_source in (
+            "synthetic-fallback",
+            "synthetic",
+        ) or result.data_source.startswith("live:")
 
 
 def test_equity_signal_through_engine():

@@ -189,7 +189,10 @@ class ChainBus:
 
     def __init__(self) -> None:
         self._generators: Dict[str, _FeedEntry] = {}
-        self._live: Dict[str, _FeedEntry] = {}
+        #: Live entries are keyed by the stored ``_FeedEntry.key`` tuple —
+        #: ``(underlying, source, "")`` — so the same underlying from two
+        #: sources is two entries with independent identity and refcounts.
+        self._live: Dict[Tuple[str, str, str], _FeedEntry] = {}
         self._lock = threading.RLock()
 
     def acquire(
@@ -223,7 +226,8 @@ class ChainBus:
                     f"ChainBus.acquire(source={source_key!r}) requires a quote "
                     "broker client — no silent synthetic substitution"
                 )
-            entry = self._live.get(key)
+            live_key = (key, source_key, "")
+            entry = self._live.get(live_key)
             if entry is None:
                 from backtest.options.quote_providers import LiveChainProvider
 
@@ -235,9 +239,9 @@ class ChainBus:
                 live_inner = LiveChainProvider(broker)
                 entry = _FeedEntry(
                     feed=BidAskQuoteProvider(live_inner),
-                    key=(key, source_key, ""),
+                    key=live_key,
                 )
-                self._live[key] = entry
+                self._live[live_key] = entry
                 should_warm = bool(warm_ring and live_inner.has_ws_ring_support())
                 logger.info("live chain provider registered: %s (%s)", key, source_key)
             else:
@@ -301,16 +305,18 @@ class ChainBus:
     def release(self, underlying: str, source: str = "") -> int:
         """Drop one subscriber; evict the generator at zero."""
         key = str(underlying).upper()
-        is_synthetic = self._resolve_source(source) == "synthetic"
+        source_key = self._resolve_source(source)
+        is_synthetic = source_key == "synthetic"
         evicted_feed: Any = None
         with self._lock:
             store = self._generators if is_synthetic else self._live
-            entry = store.get(key)
+            lookup = key if is_synthetic else (key, source_key, "")
+            entry = store.get(lookup)
             if entry is None:
                 return 0
             entry.subscribers = max(0, entry.subscribers - 1)
             if entry.subscribers == 0:
-                store.pop(key, None)
+                store.pop(lookup, None)
                 if not is_synthetic:
                     evicted_feed = entry.feed
                 logger.info("chain generator released: %s (%s)", key, source)
@@ -328,13 +334,11 @@ class ChainBus:
         return remaining
 
     def subscriber_count(self, underlying: str, source: str = "") -> int:
+        key = str(underlying).upper()
+        source_key = self._resolve_source(source)
         with self._lock:
-            store = (
-                self._generators
-                if self._resolve_source(source) == "synthetic"
-                else self._live
-            )
-            entry = store.get(str(underlying).upper())
+            store = self._generators if source_key == "synthetic" else self._live
+            entry = store.get(key if source_key == "synthetic" else (key, source_key, ""))
             return entry.subscribers if entry else 0
 
     def generator_count(self) -> int:
