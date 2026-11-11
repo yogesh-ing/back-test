@@ -64,6 +64,7 @@ from backtest.data.sources_policy import (
     default_broker_source,
     policy_key,
     require_synthetic,
+    resolve_run_source,
 )
 from backtest.data.universe import get_universe_symbols
 from backtest.forward.options_bridge import OptionsBridge
@@ -1438,9 +1439,10 @@ class StrategyRunner:
         # Data-source policy (2026-09-30). A config that names no source gets
         # the policy's broker feed here, once, so the runner's own label, the
         # gate below, the ledger rows and the persisted state all describe the
-        # same feed — and none of them can fall back to a literal.
+        # same feed — and none of them can fall back to a literal. The
+        # operator's OPTION_DEPTH_SOURCE switch sits between the two (§7 Q3).
         if not str(config.source or "").strip():
-            config.source = default_broker_source()
+            config.source = resolve_run_source(None)
 
         # A runner is a long-lived thing that books P&L the operator reads as
         # real, so the source it bars from is checked the moment it is

@@ -17,7 +17,7 @@ from datetime import date as _date
 from flask import Blueprint, Response, current_app, jsonify, request
 from flask import stream_with_context
 
-from backtest.data.sources_policy import default_broker_source
+from backtest.data.sources_policy import resolve_run_source
 from backtest.data.universe import (
     CORRELATION_GROUPS,
     correlation_group_for,
@@ -69,17 +69,18 @@ def _error(message: str, status: int = 400) -> Tuple[Response, int]:
 def _default_runner_source() -> str:
     """What ``source=`` a runner gets when the client did not name one.
 
-    The policy answers it — ``default_broker_source()`` — never a literal here.
+    The policy answers it — ``resolve_run_source`` — never a literal here.
     In a normal deployment synthetic is disabled, so an unnamed runner is a
     **broker** runner, which is the portfolio's whole point (paper and live both
     trade mStock data). A process whose policy explicitly enables synthetic (the
     test suite's ``testing`` profile) keeps getting it by omission, so no test
     has to name a source it does not care about.
 
-    An empty answer means the config enables no feed at all; callers must refuse
-    that rather than start a runner with nothing to bar from.
+    An empty answer is impossible here (the resolver floors to ``mstock`` when
+    the policy enables nothing); a source the deployment disables is refused
+    at runner construction, not silently swapped.
     """
-    return default_broker_source()
+    return resolve_run_source(None)
 
 
 def _parse_target(data: dict) -> Tuple[str, list, str | None]:

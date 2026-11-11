@@ -434,6 +434,33 @@ def default_broker_source() -> str:
     return _first_enabled(("synthetic", "mstock", "dhan", "upstox"))
 
 
+#: The operator's spawn-time switch (§7 Q3): when ``config.source`` is unset,
+#: this names the depth-primary feed — ``OPTION_DEPTH_SOURCE=upstox`` for the
+#: Upstox-primary work — read **once at spawn**, never mid-bar.
+DEPTH_SOURCE_ENV = "OPTION_DEPTH_SOURCE"
+
+
+def resolve_run_source(config_source: Any = "", env: Mapping[str, str] | None = None) -> str:
+    """The one place every spawn answers 'which feed does this runner bar from?'
+
+    Precedence (impl plan Phase 3 item 5): an explicit ``config_source`` wins;
+    then the operator's ``OPTION_DEPTH_SOURCE`` switch; then the policy's
+    broker feed — the synthetic-by-omission contract is preserved, with a
+    literal ``mstock`` floor only when the policy enables nothing at all. An
+    unusable switch value is ignored silently: a typo must not stop a feed.
+    The answer belongs on ``config.source`` at spawn; env changes after that
+    cannot move it.
+    """
+    source = os.environ if env is None else env
+    explicit = policy_key(config_source)
+    if explicit:
+        return explicit
+    selected = policy_key(source.get(DEPTH_SOURCE_ENV, ""))
+    if selected:
+        return selected
+    return default_broker_source() or "mstock"
+
+
 def default_source_tag() -> str:
     """The taxonomy tag (``synthetic|replay|mstock``) for the default feed.
 

@@ -8,7 +8,10 @@ from datetime import datetime
 from pathlib import Path
 
 from backtest.data.source_tags import app_source_tag
-from backtest.data.sources_policy import default_backtest_source, default_broker_source
+from backtest.data.sources_policy import (
+    default_backtest_source,
+    resolve_run_source,
+)
 from backtest.engine.backtester import BacktestConfig
 from backtest.engine.plotting import plot_comparison, plot_result
 from backtest.logging_config import configure_logging
@@ -265,8 +268,9 @@ def papertrade_command(args):
         state_file = args.state_file or ".live_papertrade_state.json"
         # Live paper trading takes bars from the broker feed — that is the
         # whole classification (live data, paper risk), so an unnamed source
-        # resolves to the broker rather than to generated candles.
-        source_name = args.source or default_broker_source()
+        # resolves to the broker rather than to generated candles. The
+        # operator's OPTION_DEPTH_SOURCE switch sits between the two (§7 Q3).
+        source_name = args.source or resolve_run_source(None)
         source = build_source(source_name, data_root=args.data_root)
         # Ticket #10: surface the canonical taxonomy tag at the point of use
         # (imported, never re-declared) — the CLI/UI must not hide which
