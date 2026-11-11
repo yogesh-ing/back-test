@@ -47,8 +47,12 @@ from backtest.timekeeping import from_market_clock, now_utc
 logger = logging.getLogger("backtest.forward.feed_quality")
 
 __all__ = [
+    "FEED_ROLE_PRIMARY",
+    "FEED_ROLE_WITNESS",
     "FeedQualityMonitor",
     "get_quality_monitor",
+    "report_feed_loss",
+    "report_feed_recovery",
     "reset_quality_monitor",
     "aggregate_report",
     "QUALITY_LOG_PATH",
@@ -80,6 +84,65 @@ def _parse_bar_ts(ts: Any) -> Optional[datetime]:
         return from_market_clock(ts)
     except ValueError:
         return None
+
+
+#: Roles a feed plays in a book (plan Phase 3 item 3): the PRIMARY venue marks
+#: the book; the WITNESS is the cross-broker shadow's second opinion.
+FEED_ROLE_PRIMARY = "primary"
+FEED_ROLE_WITNESS = "witness"
+
+
+def report_feed_loss(role: str, broker: str, symbol: str, detail: str = "") -> None:
+    """The primary-feed-loss alert (Phase 3 item 3 / §8 item 8), wired to this
+    module's staleness signal rather than a new subsystem.
+
+    Losing the PRIMARY must page: 03:30 token expiry and "401 stops
+    reconnect" can silently demote the venue that marks the book. Losing the
+    WITNESS costs one log line and never a halt — the item-F rule that a
+    missing second broker must not stop trading. ``role`` is the feed's job in
+    the book as its caller knows it; this module never guesses it.
+    """
+    text = f"feed loss: {broker}/{symbol}" + (f" — {detail}" if detail else "")
+    if str(role or "").strip().lower() != FEED_ROLE_PRIMARY:
+        logger.warning("FEED_LOSS_WITNESS %s (one line, never a halt)", text)
+        return
+    try:
+        from backtest.alerts.broker import get_alert_broker
+        from backtest.alerts.types import AlertType
+
+        get_alert_broker().raise_alert(
+            AlertType.DATA_FEED_STALE.value,
+            "critical",
+            f"PRIMARY {text}",
+            subject=f"{broker}:{symbol}",
+            data={
+                "role": FEED_ROLE_PRIMARY,
+                "broker": broker,
+                "symbol": symbol,
+                "detail": detail,
+            },
+        )
+    except Exception:  # noqa: BLE001 — alerting never blocks trading
+        logger.exception("primary feed-loss alert raise failed")
+
+
+def report_feed_recovery(role: str, broker: str, symbol: str) -> None:
+    """Close the feed-loss episode once the primary delivers again (the
+    options_bridge stale-mark pattern: raise on loss, resolve on refresh).
+    Witness recovery stays exactly as quiet as witness loss."""
+    if str(role or "").strip().lower() != FEED_ROLE_PRIMARY:
+        return
+    try:
+        from backtest.alerts.broker import get_alert_broker
+        from backtest.alerts.types import AlertType
+
+        get_alert_broker().resolve_key(
+            AlertType.DATA_FEED_STALE.value,
+            f"{broker}:{symbol}",
+            reason="feed delivering again",
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("feed-loss alert resolve failed", exc_info=True)
 
 
 class FeedQualityMonitor:

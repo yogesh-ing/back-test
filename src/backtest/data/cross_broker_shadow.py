@@ -190,6 +190,9 @@ class CrossBrokerShadow:
         self._terms_next_try_mono = 0.0
         self.switches = 0
         self.last_error: Optional[str] = None
+        #: One witness-loss line per episode (Phase 3 item 3): the first failed
+        #: pass reports, later failures stay quiet, a good pass re-arms.
+        self._witness_loss_reported = False
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -225,10 +228,33 @@ class CrossBrokerShadow:
             try:
                 self.reconcile()
                 self.sweep()
+                self._witness_loss_reported = False
             except Exception as exc:  # noqa: BLE001 — a witness never outlives itself
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 logger.debug("shadow upstox pass failed", exc_info=True)
+                self._report_witness_loss(exc)
             self._stop.wait(self._interval_s)
+
+    def _report_witness_loss(self, exc: BaseException) -> None:
+        """Witness loss costs one log line and never a halt (item-F rule).
+
+        Episode-shaped: the first failed pass reports, later failures stay
+        quiet, and a good pass re-arms the reporter.
+        """
+        if self._witness_loss_reported:
+            return
+        self._witness_loss_reported = True
+        try:
+            from backtest.forward.feed_quality import FEED_ROLE_WITNESS, report_feed_loss
+
+            report_feed_loss(
+                FEED_ROLE_WITNESS,
+                self.secondary_venue,
+                self.underlying,
+                f"{type(exc).__name__}: {exc}",
+            )
+        except Exception:  # noqa: BLE001 — reporting must not break the loop
+            logger.debug("witness loss report failed", exc_info=True)
 
     # -- subscription set ----------------------------------------------------
 

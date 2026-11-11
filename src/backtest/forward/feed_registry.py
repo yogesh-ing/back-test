@@ -61,7 +61,12 @@ from backtest.data.sources_policy import (
     require_synthetic,
     synthetic_enabled,
 )
-from backtest.forward.feed_quality import get_quality_monitor
+from backtest.forward.feed_quality import (
+    FEED_ROLE_PRIMARY,
+    get_quality_monitor,
+    report_feed_loss,
+    report_feed_recovery,
+)
 from backtest.options.quote_providers import (
     BidAskQuoteProvider,
     DisconnectedQuoteProvider,
@@ -855,6 +860,10 @@ class _BrokerBarFeedBase:
         except Exception as exc:  # noqa: BLE001 — feed hiccups are logged, not fatal
             logger.warning("%s feed: latest_bar(%s) failed: %s", self.broker_name, symbol, exc)
             monitor.observe_error(str(exc))
+            # Phase 3 item 3: the bar feed IS the book's primary; its loss
+            # pages (the alert broker dedupes by key), its recovery closes the
+            # episode. The witness side logs one line and never halts.
+            report_feed_loss(FEED_ROLE_PRIMARY, self.broker_name, symbol, str(exc))
             return None
         bar = self._normalize_bar(raw)
         if bar is None:
@@ -868,6 +877,7 @@ class _BrokerBarFeedBase:
             if getattr(self._client, "emits_minute_bars", False):
                 bar["_timeframe"] = "1min"
             monitor.observe_bar(bar["ts"])
+            report_feed_recovery(FEED_ROLE_PRIMARY, self.broker_name, symbol)
         return bar
 
     @staticmethod
