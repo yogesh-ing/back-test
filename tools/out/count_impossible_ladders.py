@@ -20,6 +20,13 @@ The off-touch ratios below (ask > 1.5x ltp, bid < ltp/1.5) are NOT part of that
 definition; they are reported separately and are a ratio gate, so treat them as
 context for a breach rather than as evidence of one.
 
+COVERAGE VOCABULARY (plan-review §10.4): this tool and
+``measure_feed_cadence.py`` split packet frames the same way —
+``two_sided`` (both ladders and both touches present) / ``one_sided``
+(anything on at least one side) / ``no_book`` (nothing at all). Scorecard
+S1's "frames served with a two-sided book" means ``two_sided / packets``
+in exactly this vocabulary.
+
 Read-only, stdlib-only; never imports ``backtest``.
 
     python tools/out/count_impossible_ladders.py 2026-11-09
@@ -57,9 +64,17 @@ def scan(path):
             bids = [p for p, _ in row.get("bids") or []]
             asks = [p for p, _ in row.get("asks") or []]
             ltp = row.get("ltp") or 0.0
-            if not asks or not bids:
-                stats["empty_ladder"] += 1
+            # Coverage vocabulary — plan-review §10.4: the two analysis tools
+            # must mean the same thing by "coverage". Adopting the cadence
+            # tool's split (two_sided / one_sided / no_book) verbatim, so
+            # scorecard S1 can state one definition and both scripts agree.
+            if bids and asks and row.get("bid") and row.get("ask"):
+                stats["two_sided"] += 1
+            elif bids or asks or row.get("bid") or row.get("ask"):
+                stats["one_sided"] += 1
             else:
+                stats["no_book"] += 1
+            if asks and bids:
                 a_bad = [i for i in range(1, len(asks))
                          if asks[i] < asks[i - 1] - EPS]
                 b_bad = [i for i in range(1, len(bids))
@@ -89,8 +104,8 @@ def report(broker, path):
     n = max(1, stats["packets"])
     print(f"\n=== {broker}: {stats['packets']} packets, "
           f"{os.path.getsize(path) / 1e6:.0f} MB  ({path})")
-    for key in ("empty_ladder", "ask_not_monotone", "bid_not_monotone",
-                "crossed_book", "impossible_packets",
+    for key in ("two_sided", "one_sided", "no_book", "ask_not_monotone",
+                "bid_not_monotone", "crossed_book", "impossible_packets",
                 "ask_over_1p5x_ltp", "bid_under_ltp_over_1p5x"):
         print(f"   {key:<22} {stats[key]:>7}  ({100.0 * stats[key] / n:.3f}%)")
     print(f"   structurally impossible (unique packets, breaching the "

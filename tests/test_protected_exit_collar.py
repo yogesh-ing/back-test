@@ -667,6 +667,7 @@ def test_shadow_evaluations_journal_the_peer_mark_next_to_our_mark(monkeypatch, 
         assert float(trip["fill_price"]) == 493.65
         for row in rows:
             assert row["mode"] == "shadow"
+            assert row["side"] == "BUY"  # a short leg covers by buying
             assert row["peer"] and row["peer"]["broker"] == "upstox"
             assert row["peer"]["bid"] == 367.3  # the peer's own level
             assert "mark_age_s" in row
@@ -702,7 +703,7 @@ def test_the_peer_column_is_null_when_no_witness_runs(monkeypatch, tmp_path):
     _with_feed_capture(monkeypatch, tmp_path)
     try:
         OptionPaperBroker._journal_peer_mark(
-            _leg(367.00), Decimal("368.00"), SESSION_1000, None,
+            _leg(367.00), "buy", Decimal("368.00"), SESSION_1000, None,
             SimpleNamespace(),  # no peer_l1 at all
         )
         rows = _peer_mark_rows(tmp_path)

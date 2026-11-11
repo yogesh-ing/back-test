@@ -1305,6 +1305,7 @@ class OptionPaperBroker:
     @staticmethod
     def _journal_peer_mark(
         position: OptionPosition,
+        exit_side: str,
         fill_price: Decimal,
         ts: datetime,
         problem: str | None,
@@ -1315,7 +1316,9 @@ class OptionPaperBroker:
         lists. Shadow only: the journal exists to make the later enforce decision
         attributable ("venue basis" vs "garbage"), not to price anything. A
         missing witness journals ``peer: null`` — absence is not evidence — and
-        the journal itself must never block a fill.
+        the journal itself must never block a fill. ``exit_side`` rides along so
+        S7 can compare the fill against the peer's *same-side* level (a cover
+        buys at the ask — the peer's bid is not the counterfactual price).
         """
         try:
             getter = getattr(quote_provider, "peer_l1", None)
@@ -1328,6 +1331,7 @@ class OptionPaperBroker:
                     "underlying": str(getattr(position, "underlying", "") or ""),
                     "token": str(position.instrument_token),
                     "symbol": position.trading_symbol,
+                    "side": exit_side,
                     "mode": "shadow",
                     "decision": "trip" if problem else "ok",
                     "problem": problem or "",
@@ -1424,7 +1428,9 @@ class OptionPaperBroker:
 
         problem = self._collar_problem(position, exit_price, ts)
         if mode == "shadow":
-            self._journal_peer_mark(position, exit_price, ts, problem, quote_provider)
+            self._journal_peer_mark(
+                position, exit_side, exit_price, ts, problem, quote_provider
+            )
         if problem is None:
             return position, exit_side, quoted_price, exit_price
         if mode == "shadow":
