@@ -34,6 +34,19 @@ class _FakeFeed:
         self.closed = False
         self.connected = True
         self.keys: list[str] = []
+        self.rows: dict[str, dict] = {}
+
+    def get_quote(self, instrument_key):
+        row = self.rows.get(str(instrument_key))
+        return dict(row) if row is not None else None
+
+    def subscribed_keys(self):
+        return list(self.keys)
+
+    def last_any_tick_mono(self):
+        import time as _time
+
+        return _time.monotonic()
 
     def start(self, keys, mode=None):
         self.started.append((list(keys), mode))
@@ -204,3 +217,142 @@ class TestReinit:
         assert feed.closed is True
         assert broker._ws_feed is None
         assert broker.ws_subscribed_tokens() == set()
+
+
+# ---------------------------------------------------------------------------
+# item 4 — get_option_quote: WS first, HTTP fallback, never a digit guard
+# ---------------------------------------------------------------------------
+
+
+def _gate_fresh_row(**overrides) -> dict:
+    import time as _time
+
+    row = {
+        "ltp": 493.65,
+        "bid": 493.60,
+        "ask": 493.70,
+        "volume": 1000.0,
+        "oi": 54465.0,
+        "depth": {"bid": [[493.60, 65]], "ask": [[493.70, 65]]},
+        "ladder_status": "ok",
+        "timestamp": "2026-11-11T03:49:14.812000+00:00",
+        "recv_mono": _time.monotonic(),
+        "ltp_mono": _time.monotonic(),
+        "ladder_mono": _time.monotonic(),
+    }
+    row.update(overrides)
+    return row
+
+
+class TestOptionQuoteWiring:
+    def test_ws_row_wins_and_no_http_is_issued(self, monkeypatch) -> None:
+        """Finding C: a key-shaped contract must never be refused by a digit test."""
+        broker, feed = _broker_with_feed()
+        feed.rows = {"NSE_FO|NIFTY|26NOV2026|25050|PE": _gate_fresh_row()}
+
+        def no_http(*args, **kwargs):
+            raise AssertionError("HTTP quote call must not happen when the WS row serves")
+
+        monkeypatch.setattr(broker, "_api_request", no_http)
+        q = broker.get_option_quote("NSE_FO|NIFTY|26NOV2026|25050|PE")
+        assert (q["bid"], q["ask"]) == (493.60, 493.70)
+        assert q["ladder_status"] == "ok"
+
+    def test_http_fallback_when_the_cache_is_empty(self, monkeypatch) -> None:
+        broker, feed = _broker_with_feed()
+        calls = []
+
+        def fake_api(method, path, params=None, **kwargs):
+            calls.append((method, path, params))
+            key = params["instrument_key"]
+            return {
+                "data": {
+                    key: {
+                        "last_price": 493.65,
+                        "depth": {
+                            "buy": [{"price": 493.60, "quantity": 65}],
+                            "sell": [{"price": 493.70, "quantity": 65}],
+                        },
+                        "volume": 1000.0,
+                        "open_interest": 54465.0,
+                    }
+                }
+            }
+
+        monkeypatch.setattr(broker, "_api_request", fake_api)
+        q = broker.get_option_quote("NSE_FO|NIFTY|26NOV2026|25050|PE")
+        assert q["ltp"] == 493.65 and (q["bid"], q["ask"]) == (493.60, 493.70)
+        assert len(calls) == 1  # exactly one HTTP call, with the raw key
+
+    def test_no_feed_at_all_still_falls_back_to_http(self, monkeypatch) -> None:
+        broker = UpstoxBroker()  # unattached: get_ws_quote returns {}
+        monkeypatch.setattr(
+            broker,
+            "_api_request",
+            lambda *a, **k: {
+                "data": {"NSE_FO|A": {"last_price": 10.0, "depth": {}}}
+            },
+        )
+        q = broker.get_option_quote("NSE_FO|A")
+        assert q["ltp"] == 10.0
+
+
+# ---------------------------------------------------------------------------
+# item 5 — spot lookup: the broker that owns the book names its own index
+# ---------------------------------------------------------------------------
+
+
+class TestSpotLookup:
+    def test_upstox_index_key_is_the_venues_own_spelling(self) -> None:
+        assert UpstoxBroker.underlying_index_key("NIFTY") == "NSE_INDEX|Nifty 50"
+        assert UpstoxBroker.underlying_index_key("banknifty") == "NSE_INDEX|Nifty Bank"
+
+    def test_unmapped_underlying_returns_none_not_a_guess(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "backtest.brokers.upstox._load_instrument_keys", lambda timeout: {}
+        )
+        assert UpstoxBroker.underlying_index_key("NOPE") is None
+
+    def test_provider_spot_asks_the_broker_for_its_own_key(self) -> None:
+        calls = []
+
+        class _KeyedBroker:
+            def underlying_index_key(self, underlying):
+                return "NSE_INDEX|Nifty 50"
+
+            def get_ws_quote(self, key, max_age_seconds=None, **kw):
+                calls.append(key)
+                return {"ltp": 25062.5}
+
+        provider = LiveChainProvider(_KeyedBroker())
+        assert provider._infer_spot_from_ws("NIFTY") == 25062.5
+        assert calls == ["NSE_INDEX|Nifty 50"]  # a string key, never 26000
+
+    def test_mstock_numeric_path_is_bit_for_bit_unchanged(self) -> None:
+        calls = []
+
+        class _NumericBroker:
+            UNDERLYING_INDEX_TOKENS = {"NIFTY": 26000}
+
+            def get_ws_quote(self, token, max_age_seconds=None, **kw):
+                calls.append(token)
+                return {"ltp": 25062.5}
+
+        provider = LiveChainProvider(_NumericBroker())
+        assert provider._infer_spot_from_ws("NIFTY") == 25062.5
+        assert calls == [26000]
+
+    def test_no_key_on_the_venue_makes_spot_abstain(self) -> None:
+        calls = []
+
+        class _BlindBroker:
+            def underlying_index_key(self, underlying):
+                return None
+
+            def get_ws_quote(self, key, max_age_seconds=None, **kw):
+                calls.append(key)
+                return {"ltp": 25062.5}
+
+        provider = LiveChainProvider(_BlindBroker())
+        assert provider._infer_spot_from_ws("NIFTY") is None
+        assert calls == []  # no invented number, no lookup at all

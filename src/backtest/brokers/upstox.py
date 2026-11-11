@@ -802,16 +802,24 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
         return contracts
 
     def get_option_quote(self, instrument_token: Any) -> dict[str, Any]:
-        """L1 quote for one contract — ``GET /v2/market-quote/quotes``.
+        """L1 quote for one contract — WS cache first, HTTP fallback.
 
-        Accepts an instrument key (``NFO|...``), a trading symbol, or a bare
-        :class:`OptionContract` (same acceptance as MStockBroker). Returns
-        ``{"ltp", "bid", "ask", "volume", "oi"}`` — the keys
-        :class:`LiveQuoteProvider` reads. Bid/ask come from market depth when
-        Upstox returns it; otherwise they stay 0 and the caller falls back to
-        LTP.
+        Ordering mirrors ``MStockBroker.get_option_quote`` (the row the serve
+        gate validated is the row the fill seam sees), **not its guard**:
+        mStock refuses symbol-shaped keys because a numeric token is its only
+        WS spelling, while every Upstox contract key *is* an ``NSE_FO|…``
+        string (finding C). A digit test copied across would refuse every one
+        of our own contracts.
+
+        Returns ``{"ltp", "bid", "ask", "volume", "oi", ...}`` — WS rows carry
+        the mStock-shaped extras (depth, ladder_status, stamps); the HTTP
+        fallback is ``GET /v3/market-quote/quotes`` depth when Upstox returns
+        it, else 0s and the caller falls back to LTP.
         """
         key = self._quote_key(instrument_token)
+        ws_quote = self.get_ws_quote(key)
+        if ws_quote:
+            return ws_quote
         payload = self._api_request(
             "GET", "/market-quote/quotes", params={"instrument_key": key}
         )
@@ -919,6 +927,21 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
         """Index spot keys are never unsubscribed: losing them blinds the ring's
         ATM centering (the DEFAULT_INDEX_TOKENS guard, venue-native spelling)."""
         return "INDEX|" in key.upper()
+
+    @staticmethod
+    def underlying_index_key(underlying: str) -> str | None:
+        """This venue's index instrument key for a spot lookup (finding B).
+
+        Delegates to :func:`resolve_instrument_key` — the seeded table
+        (``NIFTY`` → ``NSE_INDEX|Nifty 50``), the ``UPSTOX_INSTRUMENT_KEYS``
+        override, then the instrument master. **Never a second key table.**
+        Returns ``None`` when the venue has no key: spot abstains rather than
+        guessing a number.
+        """
+        try:
+            return resolve_instrument_key(str(underlying).upper())
+        except Exception:  # noqa: BLE001 — unmapped is None, not a crash
+            return None
 
     def _init_websocket_feed(self) -> None:
         """Attach the depth wrapper once a session token exists.
