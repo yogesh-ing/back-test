@@ -54,7 +54,7 @@ from backtest.brokers.base import (
 )
 from backtest.instruments.option import OptionContract
 from backtest.instruments.base import ExerciseType, SettlementType
-from backtest.timekeeping import EXCHANGE_TZ, duration_seconds, now_utc
+from backtest.data.depth_serve_gate import MSTOCK_SERVE_POLICY, serve_ws_row
 
 __all__ = ["MStockBroker", "MStockOrderError", "OrderOutcomeUnknown"]
 
@@ -1024,146 +1024,51 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             int(instrument_token) in self._ws_subscribed_tokens
         )
 
-    @staticmethod
-    def _parse_legacy_ws_timestamp_age(ts: Any) -> float | None:
-        """Compute age in seconds for legacy/test quotes lacking ``recv_mono``.
-
-        Feed timestamps go through ``from_market_clock`` (naive means exchange
-        time) so the age never depends on the host's local clock. Time-only
-        stamps carry no date; they are paired with today's exchange session.
-        """
-        if ts is None:
-            return None
-        if isinstance(ts, datetime):
-            return duration_seconds(ts, now_utc())
-        if isinstance(ts, str):
-            text = ts.strip()
-            if not text:
-                return None
-            try:
-                return duration_seconds(text, now_utc())
-            except ValueError:
-                pass
-            for fmt in ("%I:%M:%S%p", "%I:%M:%S %p", "%H:%M:%S"):
-                try:
-                    parsed_t = datetime.strptime(text.upper(), fmt).time()
-                    stamp = datetime.combine(
-                        datetime.now(EXCHANGE_TZ).date(), parsed_t, tzinfo=EXCHANGE_TZ
-                    )
-                    return max(0.0, (now_utc() - stamp).total_seconds())
-                except ValueError:
-                    continue
-        return None
-
     def get_ws_quote(
         self,
         instrument_token: int,
-        max_age_seconds: float = 10.0,
+        max_age_seconds: float = MSTOCK_SERVE_POLICY.max_age_seconds,
         *,
         socket_liveness_seconds: float | None = None,
         ladder_ttl_seconds: float | None = None,
     ) -> dict[str, Any]:
-        """Get latest validated quote from WebSocket cache.
+        """Get latest validated quote from the WebSocket cache.
 
-        Two independent clocks, because a packet proves two different things.
-
-        **Price freshness** (``max_age_seconds``, per token, with a socket-wide
-        fallback): distinguishes two regimes using ``ltp_mono``/``recv_mono`` +
-        ``last_any_tick_mono()``:
-
-        1. **Live socket + quiet OTM strike**: ``is_connected()`` is True and
-           the socket received any index/option frame within
-           ``socket_liveness_seconds`` (defaults to ``max_age_seconds``) *and*
-           this token is in the subscription registry — a subscribed OTM leg
-           whose book has not printed in >10s stays valid (preserving live
-           2-sided Bid/Ask instead of falsely degrading to one-sided HTTP LTP).
-        2. **Disconnected/zombie socket or post-15:30 market close**: socket is
-           closed OR neither the token nor the socket has received frames within
-           their freshness window, OR the cached row carries neither
-           ``recv_mono`` nor a valid ``timestamp`` — rejected immediately
-           (``return {}``), eliminating Finding F5 post-close frozen marks.
-
-        **Ladder trust** (``ladder_ttl_seconds``): an old price is still a price;
-        an old *book* is not depth. A row whose ladder stopped printing past its
-        TTL — including one the wrapper retained through blank frames, which
-        carries a ``kept:`` label and its original stamp — is served with
-        ``bid``/``ask`` zeroed and ``ladder_status=expired:*``. Callers keep the
-        LTP for marking and lose the ability to claim a cross-the-spread fill.
-        Rows that predate ladder labelling (legacy/test dicts) are untouched.
+        The gate itself — two clocks, subscription truth, ladder TTL,
+        fail-closed — is shared with every venue in
+        :mod:`backtest.data.depth_serve_gate`; this method only gathers this
+        broker's primitives (a copy of the cached row, socket state, the
+        subscribed-token registry under ``_ws_lock``) and applies
+        ``MSTOCK_SERVE_POLICY``. Semantics are unchanged from the pre-split
+        implementation: ``max_age_seconds=None`` or ``<= 0`` disables the age
+        check, an explicit ``socket_liveness_seconds``/``ladder_ttl_seconds``
+        overrides the policy, and any unexpected error returns ``{}`` — a fill
+        must never price off a row the gate could not vouch for.
         """
         if not self._ws_feed:
             return {}
 
         try:
             is_conn_fn = getattr(self._ws_feed, "is_connected", None)
-            if callable(is_conn_fn) and not is_conn_fn():
-                logger.debug(
-                    "WebSocket disconnected; rejecting cached quote for token %d",
-                    instrument_token,
-                )
-                return {}
-
+            is_connected = (not callable(is_conn_fn)) or is_conn_fn()
+            last_any_fn = getattr(self._ws_feed, "last_any_tick_mono", None)
+            last_any = float(last_any_fn()) if callable(last_any_fn) else 0.0
             quote = self._ws_feed.get_quote(str(instrument_token))
-            if not quote:
-                return {}
-
-            now_mono = time.monotonic()
-
-            if max_age_seconds is not None and max_age_seconds > 0:
-                recv_mono = quote.get("ltp_mono")
-                if recv_mono is None:
-                    recv_mono = quote.get("recv_mono")
-                if recv_mono is not None:
-                    quote_age = max(0.0, now_mono - float(recv_mono))
-                    if quote_age > max_age_seconds:
-                        last_any_fn = getattr(self._ws_feed, "last_any_tick_mono", None)
-                        last_any = (
-                            float(last_any_fn()) if callable(last_any_fn) else 0.0
-                        )
-                        liveness_limit = (
-                            float(max_age_seconds)
-                            if socket_liveness_seconds is None
-                            else float(socket_liveness_seconds)
-                        )
-                        socket_alive = (
-                            last_any > 0.0 and (now_mono - last_any) <= liveness_limit
-                        )
-                        tok_int = int(instrument_token)
-                        with self._ws_lock:
-                            token_subscribed = tok_int in self._ws_subscribed_tokens
-                        if not (socket_alive and token_subscribed):
-                            logger.debug(
-                                "Stale WS tick token=%d age=%.1fs "
-                                "alive=%s subscribed=%s; rejecting",
-                                instrument_token,
-                                quote_age,
-                                socket_alive,
-                                token_subscribed,
-                            )
-                            return {}
-                else:
-                    # Legacy/injected dict without recv_mono: fail closed if
-                    # timestamp is missing, unparseable, future-skewed, or stale.
-                    ts = quote.get("timestamp")
-                    if ts is None:
-                        logger.debug(
-                            "WS quote for token %d lacks recv_mono and timestamp; rejecting",
-                            instrument_token,
-                        )
-                        return {}
-                    age = self._parse_legacy_ws_timestamp_age(ts)
-                    if age is None or age < -5.0 or age > max_age_seconds:
-                        logger.debug(
-                            "Stale or unparseable WS timestamp for token %d (%r); rejecting",
-                            instrument_token,
-                            ts,
-                        )
-                        return {}
-
-            out = dict(quote)
-            out.setdefault("source", "ws")
-            self._expire_ladder(out, instrument_token, now_mono, ladder_ttl_seconds)
-            return out
+            tok_int = int(instrument_token)
+            with self._ws_lock:
+                token_subscribed = tok_int in self._ws_subscribed_tokens
+            return serve_ws_row(
+                row=quote,
+                key=instrument_token,
+                now_mono=time.monotonic(),
+                is_connected=is_connected,
+                last_any_tick_mono=last_any,
+                token_subscribed=token_subscribed,
+                policy=MSTOCK_SERVE_POLICY,
+                max_age_seconds=max_age_seconds,
+                socket_liveness_seconds=socket_liveness_seconds,
+                ladder_ttl_seconds=ladder_ttl_seconds,
+            )
 
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -1172,48 +1077,6 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
                 exc,
             )
             return {}
-
-    def _expire_ladder(
-        self,
-        row: dict[str, Any],
-        instrument_token: int,
-        now_mono: float,
-        ladder_ttl_seconds: float | None,
-    ) -> None:
-        """Downgrade an untrustworthy ladder in place; keep the price.
-
-        Never raises — the price side of the row is still usable for marks.
-        """
-        status = row.get("ladder_status")
-        if status is None:
-            return
-        text = str(status)
-        if not row.get("bid") and not row.get("ask"):
-            # Nothing to expire: no side of this row claims to be depth.
-            return
-        ttl = (
-            float(self.WS_LADDER_TTL_SECONDS)
-            if ladder_ttl_seconds is None
-            else float(ladder_ttl_seconds)
-        )
-        stamp = row.get("ladder_mono")
-        age = None if stamp is None else max(0.0, now_mono - float(stamp))
-        if age is not None and age <= ttl:
-            return
-        logger.warning(
-            "ladder_expired token=%s status=%s age=%s ttl=%.0fs bid=%s ask=%s; "
-            "serving price without depth",
-            instrument_token,
-            text,
-            "unstamped" if age is None else f"{age:.1f}s",
-            ttl,
-            row.get("bid"),
-            row.get("ask"),
-        )
-        row["bid"] = 0.0
-        row["ask"] = 0.0
-        row["depth"] = {}
-        row["ladder_status"] = f"expired:{text}"
 
     def get_session_token(self) -> str | None:
         """Raw session token — backend use only.
