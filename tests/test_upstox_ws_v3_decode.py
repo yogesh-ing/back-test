@@ -354,3 +354,58 @@ class TestEnvelopeAndLimits:
         clean = _redact_ws_url(url)
         assert "secret123" not in clean and "abc" not in clean
         assert clean.endswith("code=<redacted>")
+
+
+# ---------------------------------------------------------------------------
+# cache generations: no row may outlive the socket that wrote it
+# ---------------------------------------------------------------------------
+
+
+class _FakeWs:
+    """Just enough socket for _on_open: a place for the sub frame to land."""
+
+    def __init__(self):
+        self.frames = []
+
+    def send_bytes(self, payload):
+        self.frames.append(payload)
+
+
+class TestCacheGenerations:
+    def test_reconnect_starts_a_new_cache_generation(self, wrapper):
+        """A row cached on the dead socket must not become servable on the new one."""
+        key = "NSE_FO|64439"
+        wrapper._ingest(make_market_feed(TWO_SIDED))
+        assert wrapper.get_quote(key) is not None
+        wrapper._on_open(_FakeWs())  # the socket came back
+        assert wrapper.get_quote(key) is None
+        assert wrapper.last_any_tick_mono() == 0.0
+
+    def test_the_resubscribe_frame_still_goes_out_after_the_purge(self, wrapper):
+        """The purge clears rows, not subscriptions — _keys must survive it."""
+        ws = _FakeWs()
+        wrapper._keys = ["NSE_FO|64439"]
+        wrapper._on_open(ws)
+        assert len(ws.frames) == 1
+        import json
+
+        body = json.loads(ws.frames[0].decode())
+        assert body["method"] == "sub"
+        assert body["data"]["instrumentKeys"] == ["NSE_FO|64439"]
+
+    def test_forget_token_drops_the_cached_row(self, wrapper):
+        key = "NSE_FO|64439"
+        wrapper._ingest(make_market_feed(TWO_SIDED))
+        assert wrapper.get_quote(key) is not None
+        assert wrapper.forget_token(key) is True
+        assert wrapper.get_quote(key) is None
+        assert wrapper.forget_token(key) is False  # second forget is a no-op
+
+    def test_unsubscribe_purges_the_cached_row(self, wrapper):
+        key = "NSE_FO|64439"
+        wrapper._keys = [key]
+        wrapper._app = _FakeWs()  # _mutate_keys needs a connected socket
+        wrapper._ingest(make_market_feed(TWO_SIDED))
+        wrapper.unsubscribe([key])
+        assert wrapper.get_quote(key) is None
+        assert wrapper.subscribed_keys() == []

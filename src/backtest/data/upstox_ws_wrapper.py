@@ -368,8 +368,42 @@ class UpstoxWebSocketWrapper:
 
     # -- websocket callbacks -------------------------------------------------
 
+    def forget_token(self, instrument_key: str) -> bool:
+        """Drop every cached trace of a key (unsubscribe / re-login).
+
+        A key evicted from the subscription registry and later re-subscribed
+        must not re-serve its pre-eviction row — the cold-start rule that makes
+        the broker's serve gate meaningful (mStock's wrapper has the twin;
+        ``docs/OPTION-DEPTH-GARBAGE-ROOT-CAUSE-2026-11-03.md``).
+        """
+        key = str(instrument_key)
+        with self._lock:
+            existed = self._quotes.pop(key, None) is not None
+            self._blank_ladder_counts.pop(key, None)
+            self._last_status_logged.pop(key, None)
+        return existed
+
+    def _purge_all(self) -> None:
+        """Start a cache generation: no row may outlive the socket that wrote it.
+
+        Every (re)connect is a new socket — a row cached before a drop would
+        otherwise become servable again the instant the liveness watermark
+        moved (``mstock_ws_wrapper._purge_all`` is the twin). Frame counters
+        and raw-type telemetry are session-wide and stay.
+        """
+        with self._lock:
+            self._quotes.clear()
+            self._blank_ladder_counts.clear()
+            self._last_status_logged.clear()
+            self._last_any_tick_mono = 0.0
+
     def _on_open(self, ws: Any) -> None:
-        """Subscribe on every (re)connect; the socket starts with no subscriptions."""
+        """Subscribe on every (re)connect; the socket starts with no subscriptions.
+
+        The cache generation starts with the socket: rows written by a previous
+        connection are purged before any subscription frame goes out.
+        """
+        self._purge_all()
         self._connected.set()
         self.last_error = None
         logger.info("upstox ws connected via %s", self.last_ws_url)
