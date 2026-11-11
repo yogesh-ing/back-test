@@ -2,7 +2,26 @@
 
 **Status:** constructed 2026-11-11 by the reviewing architect against plan `@9ee25c5` and the code
 in `arena/16087b3a-back-test`. Phase 0 is specified to file/signature level; Phases 1–3 to task
-level; Phase 4 is a session runbook. **No code is written yet — this is the build order.**
+level; Phase 4 is a session runbook.
+**Amended 2026-11-11 by the implementing engineer**, re-verified line-by-line against this branch
+(`@388296b`). Every file:line anchor below was checked and is correct; four findings were folded in
+and each one adds a task or a ground rule rather than changing a decision:
+
+| # | Finding | Consequence in this doc |
+|---|---|---|
+| **A** | T0.5-1 claims "no app instrumentation needed" — it is false. The Upstox cache row **does** hold `last_trade_ts` (`ltpc.ltt`, built at `data/upstox_ws_wrapper.py:618`, and carried through the ladder-merge field list at `:657`), but the recorder's `_row_line` writes an explicit whitelist (`data/feed_depth_recorder.py:277-302`): `exchange_ts` is the frame's `currentTs` and `last_trade_ts` is not in the list, so it never reaches the tape. A script cannot compare two stamps when one was thrown away at write time. | New **T0.5-0** (one writer line + its test) lands before T0.5-1, which depends on it. |
+| **B** | No task covers `_infer_spot_from_ws` (`options/quote_providers.py:2128-2144`), which falls back to a hardcoded **numeric** `UNDERLYING_INDEX_TOKENS` default (`NIFTY: 26000`, …) and calls `get_ws_quote(int)`. Under an Upstox primary that lookup silently returns nothing, so spot — the ATM reference the whole ring recenters on — goes blind. | New **Phase 1 item 5**. |
+| **C** | Phase 1 item 4 says "same WS-first/HTTP-fallback shape as `mstock.py:1800-1824`". The *shape* is right; the *guard* inside that range (`brokers/mstock.py:1855-1862`) refuses symbol-shaped keys and returns `{}` — correct for mStock, fatal if copied, since Upstox keys **are** `NSE_FO|…` strings. | Item 4 restated: copy the ordering, never the numeric-format test. |
+| **D** | Phase 1 is not read-side-neutral. `quote_providers.py:2026` (`ring_book`) and `:2135` (`_infer_spot_from_ws`) call `broker.get_ws_quote` on the *configured* broker, so the moment `UpstoxBroker` gains a `_ws_feed` (item 2), any book already running `source=upstox` starts serving Upstox rows to its fill seam — before Phase 3's switch and before Phase 4's shadow day. | New **ground rule 7** + a gate line in the Phase 1 acceptance. |
+
+Also recorded, because it was the likeliest blocker for T0.1: the "move verbatim" of
+`_parse_legacy_ws_timestamp_age` (`brokers/mstock.py:1028-1056`) and `_expire_ladder`
+(`:1176-1216`) is **clock-ratchet-safe**. Both ranges use `datetime.now(EXCHANGE_TZ)` (zone-aware,
+not bare) and monotonic stamps only; mStock's two sites that `tests/test_timekeeping_policy.py`
+actually counts are `:2032` (bare `now()`) and `:1247` (`replace(tzinfo=None)`) — both outside the
+moved code. So the extraction neither adds nor removes a call site.
+
+**No code was written when the plan was constructed; Phase 1 item 1 is the first build.**
 **Subject to:** plan §7 decisions (binding) and plan §6 non-goals. Where this doc and the plan
 disagree, the plan wins and this doc is wrong.
 
@@ -26,6 +45,14 @@ disagree, the plan wins and this doc is wrong.
 5. **Fail-closed is the default.** Every new serve path returns `{}` on doubt; no invented price
    (synthetic-data ban applies per venue).
 6. Commit granularity: one commit per task (T0.1 …), each with its tests green before the next.
+7. **A phase is not "safe" because the switch hasn't been thrown.** Phase 0 truly is neutral (no
+   `_ws_feed` exists on `UpstoxBroker`, so `get_ws_quote` returns `{}` from every caller). Phase 1
+   is **not**: item 2 attaches the feed, and `ring_book`/`_infer_spot_from_ws`/`get_quote` already
+   call the *configured* broker's `get_ws_quote`. So Phase 1 must ship with the read path proven
+   inert for `source=mstock` (the default) **and** must not be deployed to a checkout with a live
+   `source=upstox` book until Phase 4's shadow-day controls are in place. State the blast radius
+   in the commit message; the operator's rule is that nothing reaches a live book without a
+   shadow day behind it.
 
 ---
 
@@ -148,14 +175,28 @@ Docstring of `serve_ws_row` keeps the two-clock rationale from `MStockBroker.get
 
 ### T0.5 — the two Phase-0 measurements (tools, not app code)
 
-Both run off the existing `ENABLE_FEED` recorder tapes — **no app instrumentation needed**
-(`record_depth_packet` already captures raw frames: `upstox_ws_wrapper.py:507`).
+**Corrected:** measurement 1 is *not* tape-only (finding A), so it gets a predecessor.
 
-1. **`currentTs` vs `ltp` field separation.** New read-only script
-   `tools/out/measure_stamp_sources.py <date> --broker upstox`: per frame, compare `currentTs`,
-   `ltpc.ltt`/`last_trade_ts`, and `recv_utc`; report which one tracks receipt (±0.4 s band) and
-   which tracks exchange prints. Output committed as `tools/out/stamps_<date>.txt`. This decides
-   which stamp `serve_ws_row`'s wall-clock fallback may trust.
+#### T0.5-0 — put the second stamp on the tape (writer, one line)
+
+`data/feed_depth_recorder.py` — add `"last_trade_ts": _scalar(row.get("last_trade_ts"))` to the
+`_row_line` dict (near `:297`, beside `exchange_ts`). `_scalar` is the existing coercion, so the
+line is inert for mStock rows (the key is absent → `None`) and non-null only for Upstox `full`
+frames that carry `ltpc.ltt`. One test in the recorder's own suite: an Upstox-shaped row with
+`last_trade_ts` set appears in the written JSONL; a row without it writes `null`, not a crash.
+**Until this lands and a session is recorded, T0.5-1 cannot be run at all** — the field it needs
+is discarded before the file is written.
+
+#### T0.5-1 / T0.5-2 — the measurements themselves
+
+Both run off the `ENABLE_FEED` recorder tapes (raw frames: `upstox_ws_wrapper.py:507`).
+
+1. **`currentTs` vs `ltp` field separation** (needs T0.5-0). New read-only script
+   `tools/out/measure_stamp_sources.py <date> --broker upstox`: per frame, compare `exchange_ts`
+   (`currentTs`), `last_trade_ts` (`ltpc.ltt`), and `recv_utc`; report which one tracks receipt
+   (±0.4 s band) and which tracks exchange prints. Output committed as
+   `tools/out/stamps_<date>.txt`. This decides which stamp `serve_ws_row`'s wall-clock fallback may
+   trust.
 2. **Deliberate quiet token.** Using `measure_feed_cadence.py -v` on a full session: pick the
    least-printing subscribed OTM leg and verify from the tape whether its silences (up to 41.5 s
    measured) are *illiquid-but-healthy* (socket frames continue for other keys) or *feed loss*.
@@ -178,6 +219,8 @@ Both run off the existing `ENABLE_FEED` recorder tapes — **no app instrumentat
 - [ ] No trading path can reach `UpstoxBroker.get_ws_quote` with a live feed (no `_ws_feed`
       attachment exists yet) — assert in a test that an un-attached broker returns `{}`.
 - [ ] `tests/test_timekeeping_policy.py` green (no new clock call sites).
+- [ ] T0.5-0 shipped and the next recorded Upstox session actually contains `last_trade_ts` —
+      verified by reading one line of the JSONL, not by trusting the writer.
 
 ---
 
@@ -204,9 +247,36 @@ One commit per line; each lands with tests before the next.
    reset `last_any_tick_mono` — "no row may outlive the socket that wrote it"
    (`mstock_ws_wrapper.py:176` precedent; pin with the twin of
    `test_reconnect_starts_a_new_cache_generation`, `test_option_ladder_gates.py:302`).
-4. **Wire `get_option_quote`** (`brokers/upstox.py:776`) to try `get_ws_quote` first (same
-   WS-first/HTTP-fallback shape as `mstock.py:1800-1824`), so the row the gate validates is the
-   row the fill seam sees.
+4. **Wire `get_option_quote`** (`brokers/upstox.py:776`) to try `get_ws_quote` first, so the row
+   the gate validates is the row the fill seam sees. Copy the *shape* of
+   `brokers/mstock.py:1800-1824` (WS first, HTTP only when the WS answer is empty), **not its
+   guard**: mStock's `get_option_quote` refuses symbol-shaped keys at `:1855-1862` and returns
+   `{}` — right for a numeric venue, fatal for Upstox, whose keys *are* `NSE_FO|…` strings. An
+   Upstox `get_option_quote` that tests for digits would refuse every one of its own contracts and
+   fall through to HTTP for all of them.
+   *Acceptance:* with a fake feed holding one row, `get_option_quote` on an `NSE_FO|…` key returns
+   that row and issues **zero** HTTP calls; the mStock numeric behaviour stays as pinned.
+5. **Spot lookup under a string venue** (finding B) — `_infer_spot_from_ws`
+   (`options/quote_providers.py:2128-2144`) is the only reader that *invents* a key format: it
+   consults `getattr(self.broker, "UNDERLYING_INDEX_TOKENS", {"NIFTY": 26000, …})`, and that
+   attribute exists on exactly one broker (`brokers/mstock.py:489`, numeric), so an Upstox book
+   silently gets the mStock numbers and calls `get_ws_quote(26000)`. Result: spot — the ATM
+   reference the whole ring recenters on — goes blind, and every strike decision downstream is
+   made against a stale or missing center. **This is the site Phase 1 item 1 does not cover**:
+   normalizing to opaque strings still needs someone to *produce* the opaque key. Upstox already
+   resolves `NIFTY → NSE_INDEX|Nifty 50` in `resolve_instrument_key` (`brokers/upstox.py:242`,
+   seeded table at `:106-114`, `UPSTOX_INSTRUMENT_KEYS` env override honoured) — expose that
+   lookup on the broker surface the way `UNDERLYING_INDEX_TOKENS` is today and have
+   `_infer_spot_from_ws` ask the broker that owns the book. Never hand-write a second key table.
+   *Acceptance:* a fake Upstox broker returns a non-numeric index key from its own lookup and
+   `get_ws_quote` is called with that string; the mStock numeric path is bit-for-bit unchanged;
+   an underlying with no key on either venue → spot abstains (no invented number).
+
+*Acceptance (ground rule 7):* after all five items, a book configured `source=mstock` — the default
+— makes **identical** subscribe and `get_ws_quote` calls to today; an Upstox feed-capable broker is
+reachable only from a test or a book explicitly configured `source=upstox`. Before any deploy that
+attaches an Upstox `_ws_feed` to a live process, prove with the running log that no live book has
+`source=upstox` while Phase 4's shadow controls are absent.
 
 ---
 
@@ -281,8 +351,14 @@ One commit per line; each lands with tests before the next.
 | Flipping the switch flips `shadow_diff` row meaning | 3 | schema test: rows written under both primaries are distinguishable |
 | Two rings blow the per-socket key cap | 3 | joint-cap refusal test |
 | Silent primary demotion mid-session | 3 | S6 + alert test |
+| A tape-based Phase-0 measurement turns out to have no data on the tape | 0 | T0.5-0 lands first and the acceptance list requires reading one recorded line before the script is trusted |
+| Item 1 is merged and a live `source=upstox` book starts feeding a fill seam before its shadow day | 1 | ground rule 7 + the Phase 1 "Acceptance (ground rule 7)" line; item 4 ships as two commits — the wiring is unreachable until the feed is attached |
 
-## Effort (unchanged from plan §9)
+## Effort (amended)
 
-Phase 0 ≈ 1 day (T0.1–T0.4) + one measurement session (T0.5); Phase 1 ≈ 1 day; Phases 2–3
-mechanical once 0–1 land (~1 day combined); Phase 4 = one market session + after-close analysis.
+Phase 0 ≈ 1 day (T0.1–T0.4) + T0.5-0 (≈ 15 min of writer code, then one session of tape) + one
+measurement session (T0.5-1/2) — **the measurement day is gated by T0.5-0 shipping before it**, so
+T0.5-0 should land as early as possible, not at the end of Phase 0.
+Phase 1 ≈ 1–1.5 days (item 1 is the careful one; item 5 is a new broker-surface method plus its
+twin, and item 4 is two commits). Phases 2–3 mechanical once 0–1 land (~1 day combined);
+Phase 4 = one market session + after-close analysis.
