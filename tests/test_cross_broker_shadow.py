@@ -47,6 +47,10 @@ class FakeRing:
 class FakeProvider:
     """mStock's side: the hot ring plus the token → contract registry."""
 
+    #: Plays the mStock venue — rows derive their primary label from this (B4).
+    broker_name = "mstock"
+    source_name = "live:mstock"
+
     def __init__(self, contracts, rows):
         self._contracts = {c.instrument_token: c for c in contracts}
         self._rows = rows
@@ -205,15 +209,19 @@ def test_a_sweep_writes_both_views_and_the_delta(capture):
     assert row["kind"] == "shadow_diff"
     assert row["broker"] == "shadow"
     assert row["token"] == "64435"
-    assert row["upstox_key"] == "NSE_FNO|24900CE"
+    assert row["secondary_key"] == "NSE_FNO|24900CE"
     assert row["symbol"] == "NIFTY26NOV24900CE"
     assert row["expiry"] == "2026-11-23"
-    assert row["mstock"]["ltp"] == 300.0 and row["mstock"]["ladder_status"] == "ok"
-    assert row["upstox"]["ltp"] == 221.65
-    # The number the whole exercise is about: what mStock says minus what Upstox says.
+    # Roles + the actual venue names (B5) — no mstock/upstox literals.
+    assert row["primary_venue"] == "mstock"
+    assert row["secondary_venue"] == "upstox"
+    assert row["primary"]["ltp"] == 300.0 and row["primary"]["ladder_status"] == "ok"
+    assert row["secondary"]["ltp"] == 221.65
+    # The number the whole exercise is about: primary minus secondary.
     assert row["delta"]["ltp"] == pytest.approx(78.35)
     assert row["delta"]["ask"] == pytest.approx(78.80)
-    assert row["upstox_connected"] is True
+    assert row["secondary_connected"] is True
+    assert "mstock" not in row and "upstox" not in row
 
 
 def test_a_side_never_traded_yet_deltas_as_unknown_not_zero(capture):
@@ -333,15 +341,35 @@ def test_an_empty_master_is_rate_limited_not_declared_final():
     assert calls["n"] == 2
 
 
-def test_an_upstox_sourced_book_gets_no_self_mirror(monkeypatch, caplog):
-    """A witness that compares a broker with itself always reports agreement."""
+def test_a_primary_never_mirrors_itself_in_either_direction(monkeypatch, caplog):
+    """B5, symmetric: primary never mirrors itself — both directions.
+
+    A witness that compares a broker with itself always reports agreement, so
+    the refusal is an equality of venue names, not an Upstox special case:
+    mstock/mstock and upstox/upstox are refused alike whichever side names the
+    pair, and only a cross-venue pair may mirror.
+    """
     caplog.set_level(logging.INFO, logger=shadow.logger.name)
     monkeypatch.setenv("ENABLE_FEED", "true")
     shadow.reset()
     provider = _provider({"64435": _row(300.0, 299.5, 300.5)})
 
+    # Direction 1 (reachable today): an Upstox primary against the Upstox
+    # mirror — refused before anything is constructed.
     assert shadow.maybe_start(provider, "NIFTY", source="upstox") is None
-    assert "SHADOW_UPSTOX_SELF" in caplog.text
+    assert "SHADOW_SELF_MIRROR" in caplog.text
+    assert "primary=upstox" in caplog.text and "witness=upstox" in caplog.text
+    assert shadow.active() == {}
+
+    # The rule itself, both directions: same venue refused, cross venue allowed.
+    assert shadow.mirrors_itself("upstox", "upstox") is True
+    assert shadow.mirrors_itself("mstock", "mstock") is True
+    assert shadow.mirrors_itself("mstock", "upstox") is False
+    assert shadow.mirrors_itself("upstox", "mstock") is False
+    # Direction 2: an mStock primary would refuse an mStock witness just the
+    # same — the rule is the pair's equality, not the mirror's venue.
+    assert shadow.mirrors_itself("mstock", shadow.MIRROR_VENUE) is False
+    assert shadow.mirrors_itself("upstox", shadow.MIRROR_VENUE) is True
 
 
 def test_the_mirror_off_when_capture_is_off(monkeypatch):
@@ -426,6 +454,27 @@ def test_sweeping_never_changes_the_mstock_view():
     assert json.dumps(provider.get_quote("64435"), sort_keys=True, default=str) == before
 
 
+def test_rows_under_different_primaries_are_distinguishable(capture):
+    """Risk-register tripwire: flipping the switch must not flip a row's
+    meaning — the actual venue names travel with the primary/secondary roles."""
+    provider_a = _provider({"64435": _row(300.0, 299.5, 300.5)})
+    provider_b = _provider({"64435": _row(300.0, 299.5, 300.5)})
+    provider_b.broker_name = "dhan"
+    provider_b.source_name = "live:dhan"
+
+    shadow_a = _shadow(provider_a, FakeWrapper({"NSE_FNO|24900CE": _row(1.0, 1.0, 1.0)}))
+    shadow_a.reconcile()
+    shadow_a.sweep()
+    shadow_b = _shadow(provider_b, FakeWrapper({"NSE_FNO|24900CE": _row(1.0, 1.0, 1.0)}))
+    shadow_b.reconcile()
+    shadow_b.sweep()
+
+    rows = _shadow_lines(capture)
+    assert [row["primary_venue"] for row in rows] == ["mstock", "dhan"]
+    assert all(row["secondary_venue"] == "upstox" for row in rows)
+    assert all(row["primary"]["ltp"] == 300.0 for row in rows)
+
+
 # -- the seam's question: l1_for --------------------------------------------
 
 
@@ -439,6 +488,22 @@ def test_l1_for_answers_with_the_peers_own_numbers_and_its_age():
     assert peer["ask"] == 300.9 and peer["bid"] == 299.9
     assert peer["broker"] == "upstox"
     assert 0.0 <= peer["age_s"] < 5.0
+
+
+def test_the_peer_row_names_its_own_venue_whichever_is_accused():
+    """The ee0372b corroboration reads the *peer* — the row carries the peer's
+    actual venue name, so an mStock witness reads mStock back, not a literal."""
+    instance = shadow.CrossBrokerShadow(
+        "NIFTY",
+        _provider({"64435": _row(300.0, 299.5, 300.5)}),
+        token_provider=lambda: "session-token",
+        upstox_chain=lambda underlying: UP_CONTRACTS,
+        wrapper_factory=lambda _tp: FakeWrapper({"NSE_FNO|24900CE": _row(300.4, 299.9, 300.9)}),
+        secondary_venue="mstock",
+    )
+    instance.reconcile()
+    peer = instance.l1_for("64435")
+    assert peer["broker"] == "mstock", "the peer names itself, whichever venue it is"
 
 
 def test_l1_for_is_none_before_any_socket_or_mapping_exists():

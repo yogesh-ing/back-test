@@ -137,8 +137,8 @@ def main() -> int:
         pairs = {k[0] for k in legs if k[1] == "CE"} & {k[0] for k in legs if k[1] == "PE"}
         if len(pairs) < 10:
             continue
-        if all((legs[(s, o)].get("mstock") or {}).get("ask")
-               and (legs[(s, o)].get("upstox") or {}).get("ask")
+        if all((legs[(s, o)].get("primary") or legs[(s, o)].get("mstock") or {}).get("ask")
+               and (legs[(s, o)].get("secondary") or legs[(s, o)].get("upstox") or {}).get("ask")
                for s in pairs for o in ("CE", "PE")):
             chosen = (stamp, legs, pairs)
             break

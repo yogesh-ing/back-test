@@ -81,8 +81,10 @@ def main(paths: list[str], verbose: bool) -> int:
                 row = json.loads(line)
                 if row.get("kind") != "shadow_diff":
                     continue
-                primary = row.get("mstock") or {}
-                secondary = row.get("upstox") or {}
+                # Roles first (Phase-3 schema: primary/secondary + venue
+                # names); the literal pair is the legacy-tape fallback.
+                primary = row.get("primary") or row.get("mstock") or {}
+                secondary = row.get("secondary") or row.get("upstox") or {}
                 if not _num(primary.get("ltp")) and not _num(primary.get("bid")):
                     coverage["primary_blank"] += 1
                     continue
@@ -166,7 +168,8 @@ def main(paths: list[str], verbose: bool) -> int:
             print(f"\nworst {key} disagreements:")
             ranked = sorted(worst[key], key=lambda item: item[0], reverse=True)
             for deviation, row in ranked[:15]:
-                primary, secondary = row["mstock"], row["upstox"]
+                primary = row.get("primary") or row["mstock"]
+                secondary = row.get("secondary") or row["upstox"]
                 side = key.split(":")[1]
                 print(
                     f"  {str(row.get('symbol')):<24} D=₹{deviation:>8.2f} "

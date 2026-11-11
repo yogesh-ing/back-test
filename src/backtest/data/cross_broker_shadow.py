@@ -102,7 +102,7 @@ def _l1(row: Any) -> dict[str, Any]:
 
 
 def _delta(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[str, Any]:
-    """mStock minus Upstox for the side a fill would cross. Absent price → None."""
+    """Primary minus secondary for the side a fill would cross. Absent price → None."""
     out: dict[str, Any] = {}
     for field in ("ltp", "bid", "ask"):
         try:
@@ -115,8 +115,48 @@ def _delta(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[str, Any]
     return out
 
 
+#: The venue this module's mirror runs (its socket). The witness is always the
+#: PEER of the primary — never the primary itself (B5).
+MIRROR_VENUE = "upstox"
+
+
+def _venue(value: Any) -> str:
+    """Normalise a venue/source name the way the policy keys read."""
+    return str(value or "").strip().lower()
+
+
+def mirrors_itself(primary_venue: str, witness_venue: str) -> bool:
+    """B5 (symmetric): a primary never mirrors itself — in either direction.
+
+    A witness that compares a venue with itself always reports agreement and
+    retires the doubt instead of answering it. The rule is an equality of
+    venue names, so it refuses ``mstock``/``mstock`` and ``upstox``/``upstox``
+    alike whichever side names the pair.
+    """
+    primary, witness = _venue(primary_venue), _venue(witness_venue)
+    return bool(primary) and primary == witness
+
+
+def _venue_of(chain_provider: Any) -> str:
+    """The actual venue name of a chain provider — B4: the label comes from the
+    broker that produced the rows (``source_name`` derives from
+    ``broker_name``); ``unknown`` when the provider names nobody."""
+    broker = getattr(chain_provider, "broker", None)
+    name = str(getattr(broker, "broker_name", "") or "").strip().lower()
+    if name and name != "unnamed":
+        return name
+    from backtest.data.feed_depth_recorder import _broker_word
+
+    return _broker_word(str(getattr(chain_provider, "source_name", "") or ""))
+
+
 class CrossBrokerShadow:
-    """Mirror mStock's live option set on Upstox and record the disagreement."""
+    """Mirror the primary venue's live option set on its peer and record the disagreement.
+
+    Roles, not literals: the row schema labels its two sides ``primary`` /
+    ``secondary`` with the actual venue names (:attr:`primary_venue`,
+    :attr:`secondary_venue`), so flipping the switch flips no row's meaning.
+    """
 
     def __init__(
         self,
@@ -127,9 +167,15 @@ class CrossBrokerShadow:
         upstox_chain: Callable[[str], list[Any]],
         interval_s: float = DEFAULT_INTERVAL_S,
         wrapper_factory: Optional[Callable[[Callable[[], Optional[str]]], Any]] = None,
+        primary_venue: str = "",
+        secondary_venue: str = "",
     ) -> None:
         self.underlying = str(underlying).upper()
         self._provider = chain_provider
+        #: The two sides' actual venue names (B4): rows label themselves with
+        #: these, never with the literals ``mstock``/``upstox``.
+        self.primary_venue = _venue(primary_venue) or _venue_of(chain_provider)
+        self.secondary_venue = _venue(secondary_venue) or MIRROR_VENUE
         self._token_provider = token_provider
         self._upstox_chain = upstox_chain
         self._interval_s = float(interval_s)
@@ -291,7 +337,8 @@ class CrossBrokerShadow:
         out = _l1(row)
         if not out:
             return None
-        out["broker"] = "upstox"
+        # The peer's actual venue, whichever side the corroboration accuses.
+        out["broker"] = self.secondary_venue
         return out
 
     def sweep(self) -> int:
@@ -315,7 +362,7 @@ class CrossBrokerShadow:
                     "underlying": self.underlying,
                     "token": token,
                     "symbol": getattr(contract, "trading_symbol", None),
-                    "upstox_key": instrument_key,
+                    "secondary_key": instrument_key,
                     "expiry": str(getattr(contract, "expiry", "") or ""),
                     "strike": _scalar(getattr(contract, "strike", None)),
                     "option_type": str(
@@ -323,10 +370,14 @@ class CrossBrokerShadow:
                         or getattr(contract, "option_type", "")
                         or ""
                     ),
-                    "mstock": primary,
-                    "upstox": secondary,
+                    # Roles + actual venue names (B5): flipping the switch must
+                    # not flip a row's meaning, so no mstock/upstox literals.
+                    "primary_venue": self.primary_venue,
+                    "secondary_venue": self.secondary_venue,
+                    "primary": primary,
+                    "secondary": secondary,
                     "delta": _delta(primary, secondary),
-                    "upstox_connected": bool(wrapper.is_connected()),
+                    "secondary_connected": bool(wrapper.is_connected()),
                 }
             )
             written += 1
@@ -361,14 +412,19 @@ def maybe_start(
     key = str(underlying).upper()
     if not shadow_enabled():
         return None
-    if "upstox" in str(source).strip().lower():
-        # The books already trade on Upstox: a second Upstox socket would agree
-        # with itself, and a witness that always reports zero disagreement is
-        # worse than none — it retires the doubt instead of answering it.
+    primary_venue = _venue(source) or _venue_of(chain_provider)
+    if mirrors_itself(primary_venue, MIRROR_VENUE):
+        # B5, symmetric: a primary never mirrors itself, in either direction. A
+        # witness that compares a venue with itself always reports agreement,
+        # and a witness that always reports zero disagreement is worse than
+        # none — it retires the doubt instead of answering it.
         logger.info(
-            "SHADOW_UPSTOX_SELF underlying=%s — the live feed is already Upstox, so "
-            "there is no second broker to mirror onto",
+            "SHADOW_SELF_MIRROR underlying=%s primary=%s witness=%s — the live "
+            "feed is already the would-be witness, so there is no second broker "
+            "to mirror onto",
             key,
+            primary_venue,
+            MIRROR_VENUE,
         )
         return None
     with _ACTIVE_LOCK:
@@ -404,6 +460,8 @@ def maybe_start(
             chain_provider,
             token_provider=token_provider,
             upstox_chain=lambda underlying: _chain_of(_upstox(), underlying),
+            primary_venue=primary_venue,
+            secondary_venue=MIRROR_VENUE,
         )
         with _ACTIVE_LOCK:
             rival = _ACTIVE.setdefault(key, shadow)
@@ -431,4 +489,12 @@ def reset() -> None:
         shadow.close()
 
 
-__all__ = ["CrossBrokerShadow", "active", "maybe_start", "reset", "shadow_enabled"]
+__all__ = [
+    "CrossBrokerShadow",
+    "MIRROR_VENUE",
+    "active",
+    "maybe_start",
+    "mirrors_itself",
+    "reset",
+    "shadow_enabled",
+]
