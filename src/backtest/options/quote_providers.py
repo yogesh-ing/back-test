@@ -469,10 +469,14 @@ class LiveQuoteProvider:
         key = str(instrument_token)
         contract = self._contracts.get(key)
         if numeric_token in (None, ""):
-            if key.isdigit():
+            # The registered contract knows its own token in the venue's format;
+            # a digit-shaped key is only a fallback for a leg that was restored
+            # before its contract was registered. Testing the key for digits
+            # first would throw away a key-shaped venue's tokens.
+            if contract is not None:
+                numeric_token = getattr(contract, "instrument_token", None) or None
+            elif key.isdigit():
                 numeric_token = key
-            elif contract is not None:
-                numeric_token = getattr(contract, "instrument_token", None)
         if contract is not None and getattr(contract, "trading_symbol", None):
             key = str(contract.trading_symbol)
 
@@ -1443,6 +1447,52 @@ class DisconnectedQuoteProvider:
 
 
 # ---------------------------------------------------------------------------
+# Subscription tokens — one key format per venue, one code path for both
+# ---------------------------------------------------------------------------
+
+#: What a subscription token can be: mStock's numeric instrument token, or an
+#: Upstox-style opaque instrument key (``NSE_FO|NIFTY|…``).
+RingToken = int | str
+
+
+def normalize_token(raw: Any) -> RingToken:
+    """A token as the ring stores it — the venue's own format, never a guess.
+
+    A pure-digit spelling becomes ``int`` so the mStock ring is bit-for-bit what
+    it was (the broker, its ``_ws_subscribed_tokens`` set and the pinned test
+    tables all speak ``int``); anything else is kept verbatim as an opaque key,
+    because a venue that names its contracts with strings has no numeric form to
+    fall back to. Empty/None has no token and must be skipped by the caller.
+    """
+    text = "" if raw is None else str(raw).strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        try:
+            return int(text)
+        except (OverflowError, ValueError):  # pragma: no cover — defensive
+            return text
+    return text
+
+
+def token_text(token: Any) -> str:
+    """The registry spelling of a token — how a token looks up its contract."""
+    return "" if token is None else str(token).strip()
+
+
+def token_sort_key(token: Any) -> tuple[int, int, str]:
+    """Order tokens without comparing an ``int`` to a ``str``.
+
+    A ring that mixes venues (a migrated book whose held legs are numeric while
+    its fresh legs are keys) must still sort: ``sorted(mixed)`` raises
+    ``TypeError`` and would take the recenter — and every subscription behind it
+    — down with it.
+    """
+    text = token_text(token)
+    return (0, int(text), "") if text.isdigit() else (1, 0, text)
+
+
+# ---------------------------------------------------------------------------
 # HotStrikeRing (Plan §3.2 — ATM ± 6 CE/PE MODE_FULL pre-subscription)
 # ---------------------------------------------------------------------------
 
@@ -1459,6 +1509,10 @@ class HotStrikeRing:
       Re-centering occurs only when ``ATM`` moves by ``>= 1`` strike step; tokens
       inside ``ATM ± 8`` remain subscribed to avoid churn on minor oscillations,
       and pinned open-position tokens are **never** evicted.
+    * Tokens are stored in the venue's own spelling (:func:`normalize_token`):
+      ``int`` for a numeric broker, opaque ``str`` for a key-shaped one. The ring
+      never converts between the two — translation to the wire format belongs to
+      ``subscribe_tokens_ws`` on the broker that owns the socket.
     """
 
     STRIKE_STEPS: dict[str, int] = {
@@ -1516,6 +1570,8 @@ class HotStrikeRing:
         self._wing_tokens_by_underlying: dict[str, set[int]] = {}
         self._wing_distances_pct: dict[str, set[float]] = {}
         self._dirty_wings: set[str] = set()
+        #: underlyings already reported by :meth:`recenter` as an empty ring.
+        self._empty_ring_warned: set[str] = set()
         self._pinned_tokens: dict[int, int] = {}
 
         add_reinit = getattr(broker, "add_ws_reinit_listener", None)
@@ -1525,7 +1581,14 @@ class HotStrikeRing:
             except Exception:  # noqa: BLE001
                 logger.debug("Could not attach ws reinit listener", exc_info=True)
 
-    def _broker_subscribed_snapshot(self) -> set[int] | None:
+    def _broker_subscribed_snapshot(self) -> set[RingToken] | None:
+        """What the socket believes it holds, in the ring's own spelling.
+
+        Normalized through :func:`normalize_token` so the membership tests below
+        compare like with like: a broker that stores ``26001`` while the ring
+        holds ``"26001"`` (or the other way round) would report every token as
+        missing and re-subscribe the whole ring on every bar.
+        """
         accessor = getattr(self.broker, "ws_subscribed_tokens", None)
         if callable(accessor):
             try:
@@ -1533,20 +1596,22 @@ class HotStrikeRing:
             except Exception:  # noqa: BLE001
                 snap = None
             if isinstance(snap, (set, frozenset)):
-                return set(snap)
+                return {normalize_token(tok) for tok in snap}
         raw = getattr(self.broker, "__dict__", {}).get("_ws_subscribed_tokens")
         if isinstance(raw, (set, frozenset)):
-            return set(raw)
+            return {normalize_token(tok) for tok in raw}
         return None
 
     def _on_broker_ws_reinit(self) -> None:
         """Re-apply active ring and pinned subscriptions after a TOTP WS re-init."""
         with self._lock:
-            ring_all: list[int] = sorted(
-                {tok for m in self._ring_tokens.values() for tok in m}
+            ring_all: list[RingToken] = sorted(
+                {tok for m in self._ring_tokens.values() for tok in m},
+                key=token_sort_key,
             )
-            pinned_all: list[int] = sorted(
-                tok for tok, cnt in self._pinned_tokens.items() if cnt > 0
+            pinned_all: list[RingToken] = sorted(
+                (tok for tok, cnt in self._pinned_tokens.items() if cnt > 0),
+                key=token_sort_key,
             )
         broker_sub = self._broker_subscribed_snapshot()
         if broker_sub is not None:
@@ -1572,16 +1637,15 @@ class HotStrikeRing:
                 wings.add(dist)
                 self._dirty_wings.add(key)
 
-    def pin_tokens(self, tokens: Iterable[int | str]) -> list[int]:
+    def pin_tokens(self, tokens: Iterable[Any]) -> list[RingToken]:
         """Protect held open-leg tokens from ever being evicted by re-centering."""
-        pinned: list[int] = []
+        pinned: list[RingToken] = []
         with self._lock:
             for raw in tokens:
-                try:
-                    tok = int(str(raw).strip())
-                except (TypeError, ValueError):
-                    continue
-                if tok <= 0:
+                tok = normalize_token(raw)
+                # A numeric token must be positive; a key-shaped one is opaque
+                # and its content is the broker's problem, not ours.
+                if not tok or (isinstance(tok, int) and tok <= 0):
                     continue
                 self._pinned_tokens[tok] = self._pinned_tokens.get(tok, 0) + 1
                 pinned.append(tok)
@@ -1589,20 +1653,17 @@ class HotStrikeRing:
         if pinned and callable(pin_fn):
             pin_fn(pinned, mode="full")
         elif pinned:
-            self._subscribe_ws(sorted(set(pinned)), mode="full")
+            self._subscribe_ws(sorted(set(pinned), key=token_sort_key), mode="full")
         return pinned
 
-    def unpin_tokens(self, tokens: Iterable[int | str]) -> list[int]:
+    def unpin_tokens(self, tokens: Iterable[Any]) -> list[RingToken]:
         """Release pin refcount 1-for-1 on both ring and broker; evict stale OOTM legs."""
-        decremented: list[int] = []
-        zeroed: list[int] = []
-        stale_evict: list[int] = []
+        decremented: list[RingToken] = []
+        zeroed: list[RingToken] = []
+        stale_evict: list[RingToken] = []
         with self._lock:
             for raw in tokens:
-                try:
-                    tok = int(str(raw).strip())
-                except (TypeError, ValueError):
-                    continue
+                tok = normalize_token(raw)
                 cur = self._pinned_tokens.get(tok, 0)
                 if cur <= 0:
                     continue
@@ -1641,15 +1702,15 @@ class HotStrikeRing:
         if decremented and callable(unpin_fn):
             unpin_fn(decremented)
         if stale_evict:
-            self._unsubscribe_ws(sorted(set(stale_evict)))
+            self._unsubscribe_ws(sorted(set(stale_evict), key=token_sort_key))
         return zeroed
 
-    def subscribed_tokens(self, underlying: str | None = None) -> set[int]:
-        """Return currently tracked HotStrikeRing numeric tokens."""
+    def subscribed_tokens(self, underlying: str | None = None) -> set[RingToken]:
+        """Return currently tracked HotStrikeRing tokens (venue's own spelling)."""
         with self._lock:
             if underlying is not None:
                 return set(self._ring_tokens.get(str(underlying).upper(), {}).keys())
-            out: set[int] = set()
+            out: set[RingToken] = set()
             for tok_map in self._ring_tokens.values():
                 out.update(tok_map.keys())
             return out
@@ -1671,7 +1732,15 @@ class HotStrikeRing:
         ]
         return float(min(diffs)) if diffs else 50.0
 
-    def _subscribe_ws(self, tokens: list[int], *, mode: str | None = None) -> list[int]:
+    def _subscribe_ws(
+        self, tokens: Sequence[RingToken], *, mode: str | None = None
+    ) -> list[Any]:
+        """Hand tokens to the broker that owns the socket — it does the translation.
+
+        The ring deliberately passes its keys through: ``MStockBroker.subscribe_tokens_ws``
+        wants ``int``, an Upstox feed wants ``NSE_FO|…``, and a second conversion here
+        would be a second place the two venues can disagree.
+        """
         if not tokens:
             return []
         use_mode = self.ring_mode if mode is None else mode
@@ -1684,7 +1753,7 @@ class HotStrikeRing:
             return ok
         return []
 
-    def _unsubscribe_ws(self, tokens: list[int]) -> list[int]:
+    def _unsubscribe_ws(self, tokens: Sequence[RingToken]) -> list[Any]:
         if not tokens:
             return []
         unsub_fn = getattr(self.broker, "unsubscribe_tokens_ws", None)
@@ -1700,8 +1769,14 @@ class HotStrikeRing:
         *,
         reference_date: date | None = None,
         force: bool = False,
-    ) -> dict[str, list[int]]:
-        """Center ``ATM ± 6`` CE/PE subscriptions around ``spot`` with hysteresis."""
+    ) -> dict[str, list[Any]]:
+        """Center ``ATM ± 6`` CE/PE subscriptions around ``spot`` with hysteresis.
+
+        Returns the broker's own answer — ``{"subscribed": [...], "unsubscribed":
+        [...]}`` and nothing else. Several pinned tests compare that dict by
+        equality, so an extra diagnostic key here is a behaviour change; a ring
+        that ends up empty is reported by log line instead (see below).
+        """
         key = str(underlying).upper()
         spot_val = float(spot)
         if spot_val <= 0 or not contracts:
@@ -1753,15 +1828,16 @@ class HotStrikeRing:
         inner_radius = self.half_width * step + 1e-6
         outer_radius = self.evict_half_width * step + 1e-6
 
-        desired_tokens: dict[int, float] = {}
-        wing_tokens: set[int] = set()
+        desired_tokens: dict[RingToken, float] = {}
+        wing_tokens: set[RingToken] = set()
         contracts_to_register: list[Any] = []
+        tokenless = 0
 
         for c in expiry_contracts:
-            raw_tok = str(getattr(c, "instrument_token", "") or "").strip()
-            if not raw_tok.isdigit():
+            tok = normalize_token(getattr(c, "instrument_token", ""))
+            if not tok:
+                tokenless += 1
                 continue
-            tok = int(raw_tok)
             strike = float(c.strike)
             raw_type = str(getattr(c.option_type, "value", c.option_type)).upper()
             is_ce = raw_type.startswith("C")
@@ -1784,6 +1860,30 @@ class HotStrikeRing:
                 if in_wing:
                     wing_tokens.add(tok)
 
+        if not desired_tokens:
+            # The silent zero-subscription path. A ring that selects nothing is how
+            # a venue whose token spelling this code could not read ends up trading
+            # with no depth at all — every leg then answers from LTP-only HTTP and
+            # the fill seam refuses without ever saying why. It has to be a line in
+            # the log, because the return dict is compared by equality in pinned
+            # tests and cannot gain a diagnostic key. Once per underlying until the
+            # ring fills: a book with no tokens recenters every bar and would drown
+            # the log in the one message that matters.
+            with self._lock:
+                first = key not in self._empty_ring_warned
+                if first:
+                    self._empty_ring_warned.add(key)
+            if first:
+                logger.warning(
+                    "HOT_RING_EMPTY underlying=%s expiry=%s contracts=%d tokenless=%d "
+                    "atm=%.2f step=%.2f — nothing subscribed, so this underlying has no "
+                    "WebSocket depth",
+                    key, nearest_expiry, len(expiry_contracts), tokenless, new_atm, step,
+                )
+        else:
+            with self._lock:
+                self._empty_ring_warned.discard(key)
+
         if self._on_contract is not None:
             for c in contracts_to_register:
                 self._on_contract(c)
@@ -1803,7 +1903,7 @@ class HotStrikeRing:
                 if len(desired_tokens) > budget:
                     prioritized = sorted(
                         desired_tokens,
-                        key=lambda t: (abs(desired_tokens[t] - new_atm), t),
+                        key=lambda t: (abs(desired_tokens[t] - new_atm), token_sort_key(t)),
                     )[:budget]
                     keep_set = set(prioritized)
                     desired_tokens = {
@@ -1814,14 +1914,17 @@ class HotStrikeRing:
             current_map = dict(self._ring_tokens.get(key, {}))
             expiry_changed = prev_expiry is not None and prev_expiry != nearest_expiry
             to_subscribe = sorted(
-                tok
-                for tok in desired_tokens
-                if tok not in current_map
-                or (broker_sub is not None and tok not in broker_sub)
+                (
+                    tok
+                    for tok in desired_tokens
+                    if tok not in current_map
+                    or (broker_sub is not None and tok not in broker_sub)
+                ),
+                key=token_sort_key,
             )
 
-            to_evict: list[int] = []
-            next_map: dict[int, float] = {}
+            to_evict: list[RingToken] = []
+            next_map: dict[RingToken, float] = {}
             for tok, old_strike in current_map.items():
                 if tok in desired_tokens:
                     next_map[tok] = desired_tokens[tok]
@@ -1841,7 +1944,7 @@ class HotStrikeRing:
             for tok, strike in desired_tokens.items():
                 next_map[tok] = strike
 
-            to_subscribe = sorted(set(to_subscribe))
+            to_subscribe = sorted(set(to_subscribe), key=token_sort_key)
             self._ring_tokens[key] = next_map
             self._wing_tokens_by_underlying[key] = wing_tokens
             self._center_strike[key] = new_atm
@@ -1849,10 +1952,10 @@ class HotStrikeRing:
             self._expiry_by_underlying[key] = nearest_expiry
 
         subscribed = self._subscribe_ws(to_subscribe, mode=self.ring_mode)
-        unsubscribed = self._unsubscribe_ws(sorted(to_evict))
+        unsubscribed = self._unsubscribe_ws(sorted(to_evict, key=token_sort_key))
         return {"subscribed": subscribed, "unsubscribed": unsubscribed}
 
-    def release_underlying(self, underlying: str) -> list[int]:
+    def release_underlying(self, underlying: str) -> list[Any]:
         """Unsubscribe all non-pinned ring tokens for ``underlying`` on bus eviction."""
         key = str(underlying).upper()
         with self._lock:
@@ -1863,8 +1966,10 @@ class HotStrikeRing:
             self._expiry_by_underlying.pop(key, None)
             self._wing_distances_pct.pop(key, None)
             self._dirty_wings.discard(key)
+            self._empty_ring_warned.discard(key)
             removable = sorted(
-                tok for tok in current_map if self._pinned_tokens.get(tok, 0) <= 0
+                (tok for tok in current_map if self._pinned_tokens.get(tok, 0) <= 0),
+                key=token_sort_key,
             )
             no_rings_left = not self._ring_tokens and not self._pinned_tokens
         if no_rings_left:
@@ -2026,14 +2131,17 @@ class LiveChainProvider:
         getter = getattr(self.broker, "get_ws_quote", None)
         out: list[tuple[Any, dict[str, Any]]] = []
         if callable(getter):
-            for token in sorted(self.hot_ring.subscribed_tokens(key)):
-                contract = self._contracts.get(str(token))
+            for token in sorted(self.hot_ring.subscribed_tokens(key), key=token_sort_key):
+                contract = self._contracts.get(token_text(token))
                 if contract is None:
                     continue
                 try:
-                    row = getter(
-                        int(token), max_age_seconds=self.PARITY_QUOTE_MAX_AGE_S
-                    ) or {}
+                    # The token goes to the broker exactly as the ring holds it:
+                    # ``int`` for mStock's cache, an opaque key for a key-shaped
+                    # venue. ``int(token)`` here used to raise — and be swallowed
+                    # by the ``except`` below — so a key-shaped peer silently
+                    # vanished from the parity reference instead of failing loudly.
+                    row = getter(token, max_age_seconds=self.PARITY_QUOTE_MAX_AGE_S) or {}
                 except (TypeError, ValueError):
                     continue
                 except Exception:  # noqa: BLE001 — a peer is allowed to be missing
@@ -2104,7 +2212,13 @@ class LiveChainProvider:
         """
         key = str(instrument_token)
         contract = self._contracts.get(key)
-        numeric = key if key.isdigit() else getattr(contract, "instrument_token", None)
+        # The contract's own token is the WS cache key whatever the venue spells
+        # it as; the digit test is only for a token that has no registered
+        # contract at all (a restored leg before the chain reload).
+        if contract is not None:
+            numeric = getattr(contract, "instrument_token", None) or None
+        else:
+            numeric = key if key.isdigit() else None
         if contract is not None and getattr(contract, "trading_symbol", None):
             key = str(contract.trading_symbol)
         return self._quotes.get_quote(key, numeric_token=numeric)
@@ -2349,7 +2463,10 @@ class LiveChainProvider:
         if symbol:
             quote = self._quotes.get_quote(
                 str(symbol),
-                numeric_token=token if token.isdigit() else None,
+                # This IS the contract's own token — the format is the venue's
+                # business, so it is handed over verbatim rather than validated
+                # for digits first.
+                numeric_token=token or None,
             )
             if float(quote.get("ltp", 0) or 0) > 0:
                 return float(quote["ltp"])
