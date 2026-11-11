@@ -240,12 +240,26 @@ class UpstoxWebSocketWrapper:
         self._thread.start()
 
     def check_limits(self, keys: List[str], mode: str) -> None:
-        """Refuse a subscription the documented feeder limits would drop (:43-52)."""
+        """Refuse a subscription the documented feeder limits would drop (:43-52).
+
+        The ceiling is per SOCKET, not per caller (Phase 3 item 2, §7 Q1):
+        every ring sharing this socket — two rings of one underlying, or a
+        mixed-source process — spends the same budget, so the check is the
+        UNION of what the socket already holds and what is being asked. Two
+        batches each legal alone must not jointly exceed the cap.
+        """
         limit = MODE_KEY_LIMITS.get(mode)
-        if limit is not None and len(keys) > limit:
+        if limit is None:
+            return
+        with self._lock:
+            already = set(self._keys)
+        joint = already | {str(k).strip() for k in keys if str(k).strip()}
+        if len(joint) > limit:
             raise SubscriptionLimitError(
-                f"mode {mode!r} allows {limit} instrument keys "
-                f"(market-data-feed-v3.md:43-52); asked for {len(keys)}"
+                f"mode {mode!r} allows {limit} instrument keys per socket "
+                f"(market-data-feed-v3.md:43-52); this socket already carries "
+                f"{len(already)} across its rings and {len(keys)} more were "
+                f"asked — {len(joint)} unique keys together"
             )
 
     def wait_for_connection(self, timeout: float = 15.0) -> bool:
