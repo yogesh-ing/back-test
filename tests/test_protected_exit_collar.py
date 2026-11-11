@@ -18,12 +18,16 @@ See ``docs/OPTION-JUNK-ASK-INCIDENT-2026-11-08.md`` §5 D.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from backtest.data.feed_depth_recorder import reset_recorder
 
 from backtest.forward.options_bridge import OptionsBridge
 from backtest.options.execution_gate import RESEARCH_STRUCTURES
@@ -606,3 +610,105 @@ def test_a_no_quote_refusal_gets_its_own_code(monkeypatch):
 
     halted = [row for row in journal.rows if row["kind"] == KIND_HALTED]
     assert halted[0]["detail"]["code"] == "exit_no_quote_refused"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 item 4 — the peer-mark journal (the column Phase 4's S4/S5/S7 read)
+# ---------------------------------------------------------------------------
+
+def _peer_mark_rows(tmp_path: Path) -> list[dict]:
+    reset_recorder()  # close the recorder first — joins its writer thread
+    rows: list[dict] = []
+    for path in sorted(Path(tmp_path).glob("feed_*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("kind") == "peer_mark":
+                rows.append(row)
+    return rows
+
+
+def _with_feed_capture(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("ENABLE_FEED", "true")
+    monkeypatch.setenv("ENABLE_FEED_DIR", str(tmp_path))
+    reset_recorder()
+
+
+def test_shadow_evaluations_journal_the_peer_mark_next_to_our_mark(monkeypatch, tmp_path):
+    """Every shadow collar evaluation lands our mark beside the peer's L1 — the
+    trip that costs money and the fine leg both, so S5's coverage denominator
+    is the evaluations themselves (§7 Q2)."""
+    monkeypatch.setenv(EXIT_COLLAR_SANITY_ENV, "shadow")
+    _with_feed_capture(monkeypatch, tmp_path)
+    try:
+        broker, fills = _broker()
+        quotes = VenueBook()
+        quotes.set(CE_TOKEN, bid=336.90, ask=337.10)
+        quotes.set(PE_TOKEN, bid=320.85, ask=321.05)
+        positions = broker.execute_structure(_straddle_intent(), quotes)
+        structure_id = positions[0].structure_id
+        quotes.set(PE_TOKEN, bid=366.75, ask=367.00)
+        broker.update_mtm(quotes)
+        quotes.peer_l1 = lambda token: {
+            "broker": "upstox", "ltp": 367.5, "bid": 367.3,
+            "ask": 367.8, "age_s": 0.4,
+        }
+        quotes.set(PE_TOKEN, bid=493.00, ask=493.65)  # the trip
+        broker.close_structure(structure_id, quotes, reason="stop_loss")
+
+        rows = _peer_mark_rows(tmp_path)
+        assert len(rows) == 2, rows  # one per closed leg — 100% of evaluations
+        decisions = {row["decision"] for row in rows}
+        assert decisions == {"ok", "trip"}
+        trip = next(row for row in rows if row["decision"] == "trip")
+        assert "exit fill" in trip["problem"] and "493.65" in trip["problem"]
+        assert trip["mark"] == 367.00
+        assert float(trip["fill_price"]) == 493.65
+        for row in rows:
+            assert row["mode"] == "shadow"
+            assert row["peer"] and row["peer"]["broker"] == "upstox"
+            assert row["peer"]["bid"] == 367.3  # the peer's own level
+            assert "mark_age_s" in row
+    finally:
+        reset_recorder()
+
+
+def test_enforce_mode_journals_nothing(monkeypatch, tmp_path):
+    """The journal exists to make the SHADOW decision attributable before the
+    flip to enforce — an enforce refusal raises, and writes no peer marks."""
+    monkeypatch.setenv(EXIT_COLLAR_SANITY_ENV, "enforce")
+    _with_feed_capture(monkeypatch, tmp_path)
+    try:
+        broker, _ = _broker()
+        quotes = VenueBook()
+        quotes.set(CE_TOKEN, bid=336.90, ask=337.10)
+        quotes.set(PE_TOKEN, bid=320.85, ask=321.05)
+        positions = broker.execute_structure(_straddle_intent(), quotes)
+        structure_id = positions[0].structure_id
+        quotes.set(PE_TOKEN, bid=366.75, ask=367.00)
+        broker.update_mtm(quotes)
+        quotes.set(PE_TOKEN, bid=493.00, ask=493.65)
+        with pytest.raises(ProtectedExitRefusedError):
+            broker.close_structure(structure_id, quotes, reason="stop_loss")
+        assert _peer_mark_rows(tmp_path) == []
+    finally:
+        reset_recorder()
+
+
+def test_the_peer_column_is_null_when_no_witness_runs(monkeypatch, tmp_path):
+    """Absence of a witness is not evidence: the row still journals our mark
+    with ``peer: null``, so S4's split never mistakes silence for agreement."""
+    _with_feed_capture(monkeypatch, tmp_path)
+    try:
+        OptionPaperBroker._journal_peer_mark(
+            _leg(367.00), Decimal("368.00"), SESSION_1000, None,
+            SimpleNamespace(),  # no peer_l1 at all
+        )
+        rows = _peer_mark_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["decision"] == "ok"
+        assert rows[0]["mark"] == 367.00
+        assert rows[0]["peer"] is None
+    finally:
+        reset_recorder()

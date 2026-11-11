@@ -36,6 +36,7 @@ from backtest.timekeeping import (
     now_utc,
     session_window,
 )
+from backtest.data.feed_depth_recorder import _scalar, record_peer_mark
 from backtest.options.execution_gate import V1_ALLOWED_STRUCTURES, check_intent
 from backtest.strategy.intent import (
     OptionLeg,
@@ -1301,6 +1302,44 @@ class OptionPaperBroker:
             f"mark age {age_s:.1f}s)"
         )
 
+    @staticmethod
+    def _journal_peer_mark(
+        position: OptionPosition,
+        fill_price: Decimal,
+        ts: datetime,
+        problem: str | None,
+        quote_provider: QuoteProvider,
+    ) -> None:
+        """Phase 3 item 4 (§7 Q2): the peer venue's L1 next to our mark, on every
+        shadow collar evaluation — the column Phase 4's S4/S5 split on and S7
+        lists. Shadow only: the journal exists to make the later enforce decision
+        attributable ("venue basis" vs "garbage"), not to price anything. A
+        missing witness journals ``peer: null`` — absence is not evidence — and
+        the journal itself must never block a fill.
+        """
+        try:
+            getter = getattr(quote_provider, "peer_l1", None)
+            peer = getter(position.instrument_token) if callable(getter) else None
+        except Exception:  # noqa: BLE001 — the witness is advisory by contract
+            peer = None
+        try:
+            record_peer_mark(
+                {
+                    "underlying": str(getattr(position, "underlying", "") or ""),
+                    "token": str(position.instrument_token),
+                    "symbol": position.trading_symbol,
+                    "mode": "shadow",
+                    "decision": "trip" if problem else "ok",
+                    "problem": problem or "",
+                    "fill_price": _scalar(fill_price),
+                    "mark": _scalar(position.current_price),
+                    "mark_age_s": _age_seconds(position.last_updated, ts),
+                    "peer": peer,
+                }
+            )
+        except Exception:  # noqa: BLE001 — observability never reaches the trade
+            logger.debug("peer-mark journal failed", exc_info=True)
+
     def _price_exit_leg(
         self,
         structure: StructurePosition,
@@ -1384,6 +1423,8 @@ class OptionPaperBroker:
             return position, exit_side, quoted_price, exit_price
 
         problem = self._collar_problem(position, exit_price, ts)
+        if mode == "shadow":
+            self._journal_peer_mark(position, exit_price, ts, problem, quote_provider)
         if problem is None:
             return position, exit_side, quoted_price, exit_price
         if mode == "shadow":

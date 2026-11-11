@@ -360,6 +360,24 @@ def record_sanity_flag(
     recorder.record(line)
 
 
+def record_peer_mark(payload: dict, *, kind: str = "peer_mark") -> None:
+    """One collar evaluation's paired marks (Phase 3 item 4, §7 Q2).
+
+    Our mark and the peer venue's L1 side by side: the column Phase 4's S4/S5
+    split on and S7 lists — without it a collar trip is not attributable to
+    "venue basis" (the two venues genuinely differ) vs "garbage" (one venue
+    printed an impossible level). Lands on the witness tape next to
+    ``shadow_diff`` rows; nothing downstream may gate on it.
+    """
+    recorder = get_recorder()
+    if recorder is None:
+        return
+    line = {"v": _SCHEMA_VERSION, "kind": kind, "broker": "shadow"}
+    line.update(payload)
+    line["recv_utc"] = iso_utc(now_utc())
+    recorder.record(line)
+
+
 def record_shadow_diff(payload: dict, *, kind: str = "shadow_diff") -> None:
     """Capture one cross-broker comparison (item F, shadow mode).
 
