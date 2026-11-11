@@ -409,3 +409,68 @@ class TestCacheGenerations:
         wrapper.unsubscribe([key])
         assert wrapper.get_quote(key) is None
         assert wrapper.subscribed_keys() == []
+
+
+# ---------------------------------------------------------------------------
+# coalesced tick bus (mstock_ws_wrapper twin)
+# ---------------------------------------------------------------------------
+
+
+class TestTickBus:
+    def test_listeners_receive_coalesced_row_batches(self, wrapper):
+        import threading
+
+        got = {}
+        done = threading.Event()
+
+        def listener(batch):
+            got.update(batch)
+            done.set()
+
+        wrapper._coalesce_s = 0.0  # no coalescing delay for the test
+        wrapper.add_tick_listener(listener)
+        rows = wrapper._ingest(make_market_feed(TWO_SIDED))
+        assert done.wait(timeout=2.0), "tick bus never delivered a batch"
+        assert set(got) == set(rows) == {"NSE_FO|64439"}
+        assert got["NSE_FO|64439"]["ladder_status"] == "ok"
+        wrapper.close()
+
+    def test_a_crashing_listener_cannot_kill_the_bus(self, wrapper):
+        import threading
+
+        good = {}
+        done = threading.Event()
+
+        def bad(batch):
+            raise RuntimeError("listener bug")
+
+        def listener(batch):
+            good.update(batch)
+            done.set()
+
+        wrapper._coalesce_s = 0.0
+        wrapper.add_tick_listener(bad)
+        wrapper.add_tick_listener(listener)
+        wrapper._ingest(make_market_feed(TWO_SIDED))
+        assert done.wait(timeout=2.0), "bus died with the crashing listener"
+        assert good["NSE_FO|64439"]["ltp"] == 213.75
+        wrapper.close()
+
+    def test_removed_listeners_stop_receiving(self, wrapper):
+        import threading
+
+        calls = []
+        done = threading.Event()
+
+        def listener(batch):
+            calls.append(batch)
+            done.set()
+
+        wrapper._coalesce_s = 0.0
+        wrapper.add_tick_listener(listener)
+        wrapper.remove_tick_listener(listener)
+        wrapper._ingest(make_market_feed(TWO_SIDED))
+        # Give the dispatcher a moment; nothing should arrive.
+        done.wait(timeout=0.3)
+        assert calls == []
+        wrapper.close()

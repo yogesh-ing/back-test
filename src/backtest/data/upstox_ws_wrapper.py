@@ -166,6 +166,7 @@ class UpstoxWebSocketWrapper:
         reconnect_delay_s: float = _DEFAULT_RECONNECT_DELAY_S,
         max_reconnects: int = _DEFAULT_MAX_RECONNECTS,
         request_timeout_s: float = 15.0,
+        coalesce_ms: float = 150.0,
     ) -> None:
         if mode not in VALID_MODES:
             raise ValueError(f"mode must be one of {VALID_MODES}, got {mode!r}")
@@ -193,6 +194,14 @@ class UpstoxWebSocketWrapper:
         self._keys: List[str] = []
         self._app: Optional[Any] = None
         self._thread: Optional[threading.Thread] = None
+
+        #: Coalesced tick bus (the ``mstock_ws_wrapper`` twin): listeners get
+        #: ``{instrument_key: row}`` batches at most every ``coalesce_ms``.
+        self._coalesce_s: float = max(0.0, float(coalesce_ms) / 1000.0)
+        self._listeners: List[Callable[[Dict[str, dict]], None]] = []
+        self._dirty_tokens: set = set()
+        self._dirty_event = threading.Event()
+        self._dispatcher_thread: Optional[threading.Thread] = None
 
         #: Public observability — what the socket actually did.
         self.closes: List[tuple] = []
@@ -254,6 +263,7 @@ class UpstoxWebSocketWrapper:
     def close(self) -> None:
         """Stop the reader thread and close the socket. Idempotent."""
         self._stop.set()
+        self._dirty_event.set()  # release the tick-bus dispatcher so it exits
         self._connected.clear()
         app = self._app
         if app is not None:
@@ -264,6 +274,9 @@ class UpstoxWebSocketWrapper:
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=3.0)
+        dispatcher = self._dispatcher_thread
+        if dispatcher is not None and dispatcher is not threading.current_thread():
+            dispatcher.join(timeout=3.0)
 
     def __enter__(self) -> "UpstoxWebSocketWrapper":
         return self
@@ -381,6 +394,7 @@ class UpstoxWebSocketWrapper:
             existed = self._quotes.pop(key, None) is not None
             self._blank_ladder_counts.pop(key, None)
             self._last_status_logged.pop(key, None)
+            self._dirty_tokens.discard(key)
         return existed
 
     def _purge_all(self) -> None:
@@ -395,7 +409,72 @@ class UpstoxWebSocketWrapper:
             self._quotes.clear()
             self._blank_ladder_counts.clear()
             self._last_status_logged.clear()
+            self._dirty_tokens.clear()
             self._last_any_tick_mono = 0.0
+
+    # -- coalesced tick bus (mstock_ws_wrapper twin) -------------------------
+
+    def add_tick_listener(self, callback: Callable[[Dict[str, dict]], None]) -> None:
+        """Register a listener receiving coalesced ``{instrument_key: row}`` batches."""
+        if not callable(callback):
+            raise TypeError("tick listener must be callable")
+        with self._lock:
+            if callback not in self._listeners:
+                self._listeners.append(callback)
+            self._ensure_dispatcher_locked()
+
+    def remove_tick_listener(self, callback: Callable[[Dict[str, dict]], None]) -> None:
+        """Unregister a previously registered tick listener."""
+        with self._lock:
+            if callback in self._listeners:
+                self._listeners.remove(callback)
+
+    register_listener = add_tick_listener
+    unregister_listener = remove_tick_listener
+
+    def _ensure_dispatcher_locked(self) -> None:
+        if self._stop.is_set():
+            return
+        if self._dispatcher_thread is not None and self._dispatcher_thread.is_alive():
+            return
+        self._dispatcher_thread = threading.Thread(
+            target=self._dispatch_loop,
+            name="upstox-tick-bus",
+            daemon=True,
+        )
+        self._dispatcher_thread.start()
+
+    def _dispatch_loop(self) -> None:
+        while not self._stop.is_set():
+            self._dirty_event.wait()
+            if self._stop.is_set():
+                break
+            if self._coalesce_s > 0.0:
+                if self._stop.wait(timeout=self._coalesce_s):
+                    break
+
+            with self._lock:
+                self._dirty_event.clear()
+                if not self._dirty_tokens or not self._listeners:
+                    self._dirty_tokens.clear()
+                    continue
+                tokens = list(self._dirty_tokens)
+                self._dirty_tokens.clear()
+                batch: Dict[str, dict] = {
+                    tok: dict(self._quotes[tok])
+                    for tok in tokens
+                    if tok in self._quotes
+                }
+                listeners = list(self._listeners)
+
+            if not batch:
+                continue
+
+            for listener in listeners:
+                try:
+                    listener(batch)
+                except Exception:  # noqa: BLE001 — never crash bus or reader
+                    logger.exception("upstox tick bus listener error")
 
     def _on_open(self, ws: Any) -> None:
         """Subscribe on every (re)connect; the socket starts with no subscriptions.
@@ -536,6 +615,8 @@ class UpstoxWebSocketWrapper:
                 retained = self._retain_ladder(key, row)
                 self._quotes[key] = retained
                 self._last_any_tick_mono = mono
+                self._dirty_tokens.add(key)
+                self._dirty_event.set()
             rows[key] = retained
             self._log_transition(key, retained)
             record_depth_packet("upstox", retained, token=key)

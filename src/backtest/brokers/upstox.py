@@ -51,10 +51,11 @@ import json
 import logging
 import os
 import secrets
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable, Iterable
 
 import requests
 
@@ -411,6 +412,17 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
         # Kept past the handshake — the API key is an app identifier, not a
         # secret (the secret itself is discarded after the token exchange).
         self._client_id: str | None = None
+        # WebSocket market depth feed (attached on login, socket opened lazily
+        # on the first subscription — Phase 1 item 2 of the depth plan).
+        self._ws_feed: Any = None
+        self._ws_subscribed_tokens: set[str] = set()
+        self._ws_token_modes: dict[str, str] = {}
+        self._ws_desired_modes: dict[str, str] = {}
+        self._ws_token_pins: dict[str, int] = {}
+        self._ws_reinit_listeners: list[Callable[[], None]] = []
+        self._ws_tick_listeners: list[Callable[[dict[str, dict]], None]] = []
+        self._ws_lock = threading.RLock()
+        self._ws_started: bool = False
 
     # ------------------------------------------------------------------
     # Step 1 — app credentials (client_id + client_secret; local validation)
@@ -528,6 +540,7 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
         self._temp_api_secret = None
         self._parked_auth_code = None
         logger.info("Upstox session established (expires at %s)", expires_at.isoformat())
+        self._init_websocket_feed()
         return {
             "success": True,
             "message": "Upstox session established",
@@ -623,9 +636,23 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
         self._temp_api_secret = None
         self._parked_auth_code = None
         logger.info("Upstox session restored from remembered token (expires %s)", expires_at)
+        self._init_websocket_feed()
 
     def logout(self) -> None:
         """Clear all in-memory session state (token, expiry, temp context)."""
+        feed = self._ws_feed
+        if feed is not None:
+            close_fn = getattr(feed, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:  # noqa: BLE001 — shutdown best effort
+                    logger.debug("Upstox WS close failed on logout", exc_info=True)
+            self._ws_feed = None
+            with self._ws_lock:
+                self._ws_subscribed_tokens = set()
+                self._ws_token_modes = {}
+                self._ws_started = False
         had_session = self._access_token is not None
         self._access_token = None
         self._expires_at = None
@@ -862,6 +889,319 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
                 exc,
             )
             return {}
+
+    # ------------------------------------------------------------------
+    # WebSocket depth surface (impl plan Phase 1 item 2)
+    #
+    # Same contract as MStockBroker's surface so HotStrikeRing and
+    # LiveChainProvider work unchanged: subscribe_tokens_ws /
+    # unsubscribe_tokens_ws / pin_ws_tokens / unpin_ws_tokens /
+    # ws_subscribed_tokens / add_ws_reinit_listener / add_tick_listener.
+    # Keys are Upstox instrument keys kept in their own spelling end to end —
+    # translation to wire envelopes belongs to the wrapper alone.
+    # ------------------------------------------------------------------
+
+    #: Ring/MTicker mode vocabulary -> Upstox envelope modes
+    #: (market-data-feed-v3.md:95-100). ``quote`` (an L1 ask) maps to ``full``
+    #: because ``ltpc`` carries no two-sided book at all.
+    _WS_MODE_MAP = {
+        "ltp": "ltpc",
+        "quote": "full",
+        "full": "full",
+        "ltpc": "ltpc",
+        "option_greeks": "option_greeks",
+        "full_d30": "full_d30",
+    }
+    _WS_MODE_RANK = {"ltpc": 1, "option_greeks": 2, "full": 3, "full_d30": 3}
+
+    @staticmethod
+    def _is_protected_key(key: str) -> bool:
+        """Index spot keys are never unsubscribed: losing them blinds the ring's
+        ATM centering (the DEFAULT_INDEX_TOKENS guard, venue-native spelling)."""
+        return "INDEX|" in key.upper()
+
+    def _init_websocket_feed(self) -> None:
+        """Attach the depth wrapper once a session token exists.
+
+        The socket stays cold until the first ``subscribe_tokens_ws`` — an
+        attached-but-idle feed costs nothing, and a broker nobody subscribes
+        through never opens a connection. Re-login replaces the wrapper: the
+        subscription registry resets with the socket generation (the
+        2026-10-26 lesson), tick listeners are re-attached, and the reinit
+        callbacks let HotStrikeRing re-apply its subscriptions.
+        """
+        try:
+            from backtest.data.upstox_ws_wrapper import UpstoxWebSocketWrapper
+
+            if self._ws_feed is not None:
+                close_old = getattr(self._ws_feed, "close", None)
+                if callable(close_old):
+                    close_old()
+            with self._ws_lock:
+                tick_listeners = list(self._ws_tick_listeners)
+                self._ws_subscribed_tokens = set()
+                self._ws_token_modes = {}
+                self._ws_started = False
+
+            logger.info("Attaching Upstox WebSocket depth feed")
+            self._ws_feed = UpstoxWebSocketWrapper(
+                token_provider=lambda: self._access_token or ""
+            )
+            for tick_cb in tick_listeners:
+                try:
+                    self._ws_feed.add_tick_listener(tick_cb)
+                except Exception:  # noqa: BLE001
+                    logger.debug("Could not re-attach WS tick listener", exc_info=True)
+
+            with self._ws_lock:
+                reinit_cbs = list(self._ws_reinit_listeners)
+            for cb in reinit_cbs:
+                try:
+                    cb()
+                except Exception:  # noqa: BLE001
+                    logger.debug("WS reinit listener failed", exc_info=True)
+
+        except Exception as exc:  # noqa: BLE001 — HTTP LTP fallback stays
+            logger.error("Failed to attach Upstox WebSocket feed: %s", exc)
+            self._ws_feed = None
+
+    def ws_subscribed_tokens(self) -> set[str]:
+        """Snapshot copy of the instrument keys the socket believes it holds."""
+        with self._ws_lock:
+            return set(self._ws_subscribed_tokens)
+
+    def add_ws_reinit_listener(self, callback: Callable[[], None]) -> None:
+        """Register a callback fired whenever re-login creates a new WS feed."""
+        if not callable(callback):
+            raise TypeError("ws reinit listener must be callable")
+        with self._ws_lock:
+            if callback not in self._ws_reinit_listeners:
+                self._ws_reinit_listeners.append(callback)
+
+    def remove_ws_reinit_listener(self, callback: Callable[[], None]) -> None:
+        with self._ws_lock:
+            if callback in self._ws_reinit_listeners:
+                self._ws_reinit_listeners.remove(callback)
+
+    def add_tick_listener(self, callback: Callable[[dict[str, dict]], None]) -> None:
+        """Register a coalesced WS tick listener preserved across re-login."""
+        if not callable(callback):
+            raise TypeError("tick listener must be callable")
+        with self._ws_lock:
+            if callback not in self._ws_tick_listeners:
+                self._ws_tick_listeners.append(callback)
+            feed = self._ws_feed
+        if feed is not None:
+            add_fn = getattr(feed, "add_tick_listener", None)
+            if callable(add_fn):
+                add_fn(callback)
+
+    def remove_tick_listener(self, callback: Callable[[dict[str, dict]], None]) -> None:
+        with self._ws_lock:
+            if callback in self._ws_tick_listeners:
+                self._ws_tick_listeners.remove(callback)
+            feed = self._ws_feed
+        if feed is not None:
+            remove_fn = getattr(feed, "remove_tick_listener", None)
+            if callable(remove_fn):
+                remove_fn(callback)
+
+    def subscribe_tokens_ws(
+        self,
+        instrument_keys: Iterable[Any],
+        mode: str = "full",
+        *,
+        wait_timeout: float = 0.0,
+    ) -> list[str]:
+        """Batch-subscribe instrument keys on the depth feed.
+
+        Non-blocking by default so hot paths never stall on a disconnected
+        socket. The first call opens the socket (``start``); later calls send
+        ``sub``/``change_mode`` envelopes. Keys pass through in their own
+        spelling — no numeric parsing on a key-shaped venue (finding C).
+        """
+        norm_mode = self._WS_MODE_MAP.get((mode or "full").strip().lower(), "full")
+        requested_rank = self._WS_MODE_RANK.get(norm_mode, 3)
+
+        parsed: list[str] = []
+        seen: set[str] = set()
+        for raw_key in instrument_keys:
+            key = str(raw_key).strip()
+            if key and key not in seen:
+                seen.add(key)
+                parsed.append(key)
+        if not parsed:
+            return []
+
+        with self._ws_lock:
+            for key in parsed:
+                prev = self._ws_desired_modes.get(key)
+                if prev is None or self._WS_MODE_RANK.get(prev, 1) < requested_rank:
+                    self._ws_desired_modes[key] = norm_mode
+            feed = self._ws_feed
+            if feed is None:
+                return []
+            to_send = [
+                key
+                for key in parsed
+                if key not in self._ws_subscribed_tokens
+                or self._WS_MODE_RANK.get(self._ws_token_modes.get(key, "ltpc"), 1)
+                < requested_rank
+            ]
+            if not to_send:
+                return []
+            started = self._ws_started
+
+        if not started:
+            start_fn = getattr(feed, "start", None)
+            if callable(start_fn):
+                try:
+                    start_fn(to_send, norm_mode)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Upstox WS start failed for %s: %s", to_send[:10], exc)
+                    return []
+                with self._ws_lock:
+                    self._ws_started = True
+                    for key in to_send:
+                        self._ws_subscribed_tokens.add(key)
+                        self._ws_token_modes[key] = norm_mode
+                logger.info(
+                    "Upstox WS socket starting with %d key(s) (mode=%s): %s",
+                    len(to_send),
+                    norm_mode,
+                    to_send[:10],
+                )
+                return to_send
+            # A duck-typed feed without start() falls through to subscribe().
+
+        is_conn_fn = getattr(feed, "is_connected", None)
+        connected = bool(is_conn_fn()) if callable(is_conn_fn) else True
+        if not connected:
+            wait_fn = getattr(feed, "wait_for_connection", None)
+            if wait_timeout > 0.0 and callable(wait_fn):
+                connected = bool(wait_fn(timeout=wait_timeout))
+            if not connected:
+                logger.debug(
+                    "Upstox WS not connected; skipping batch subscribe (%d keys)",
+                    len(to_send),
+                )
+                return []
+
+        try:
+            new_only = [
+                key for key in to_send if key not in self._ws_subscribed_tokens
+            ]
+            upgraded = [key for key in to_send if key not in new_only]
+            sub_fn = getattr(feed, "subscribe", None)
+            if new_only and callable(sub_fn):
+                sub_fn(new_only, norm_mode)
+            change_fn = getattr(feed, "change_mode", None)
+            if upgraded and callable(change_fn):
+                change_fn(upgraded, norm_mode)
+            with self._ws_lock:
+                for key in to_send:
+                    self._ws_subscribed_tokens.add(key)
+                    self._ws_token_modes[key] = norm_mode
+            logger.info(
+                "Subscribed %d Upstox WS key(s) (mode=%s): %s",
+                len(to_send),
+                norm_mode,
+                to_send[:10],
+            )
+            return to_send
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Failed to batch-subscribe Upstox WS keys %s: %s", to_send[:10], exc
+            )
+            return []
+
+    def unsubscribe_tokens_ws(self, instrument_keys: Iterable[Any]) -> list[str]:
+        """Batch-unsubscribe keys while protecting index spots and pinned legs."""
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for raw_key in instrument_keys:
+            key = str(raw_key).strip()
+            if key and key not in seen:
+                seen.add(key)
+                candidates.append(key)
+        if not candidates:
+            return []
+
+        with self._ws_lock:
+            allowed = [
+                key
+                for key in candidates
+                if not self._is_protected_key(key) and self._ws_token_pins.get(key, 0) <= 0
+            ]
+            for key in allowed:
+                self._ws_desired_modes.pop(key, None)
+            feed = self._ws_feed
+            if feed is None:
+                return []
+            removable = [key for key in allowed if key in self._ws_subscribed_tokens]
+            if not removable:
+                return []
+
+        is_conn_fn = getattr(feed, "is_connected", None)
+        connected = bool(is_conn_fn()) if callable(is_conn_fn) else True
+        try:
+            unsub_fn = getattr(feed, "unsubscribe", None)
+            if connected and callable(unsub_fn):
+                unsub_fn(removable)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to unsubscribe Upstox WS keys %s: %s", removable[:10], exc
+            )
+
+        with self._ws_lock:
+            for key in removable:
+                self._ws_subscribed_tokens.discard(key)
+                self._ws_token_modes.pop(key, None)
+        # Cold start for anything re-subscribed later (2026-10-26, cause 7).
+        forget = getattr(feed, "forget_token", None)
+        if callable(forget):
+            for key in allowed:
+                try:
+                    forget(key)
+                except Exception:  # noqa: BLE001 — a fake feed may not have it
+                    logger.debug("Upstox WS forget_token failed for %s", key)
+        logger.info(
+            "Unsubscribed %d Upstox WS key(s): %s", len(removable), removable[:10]
+        )
+        return removable
+
+    def pin_ws_tokens(
+        self,
+        instrument_keys: Iterable[Any],
+        mode: str = "full",
+    ) -> list[str]:
+        """Increment refcount on held-position keys and ensure subscription."""
+        pinned: list[str] = []
+        with self._ws_lock:
+            for raw_key in instrument_keys:
+                key = str(raw_key).strip()
+                if not key:
+                    continue
+                self._ws_token_pins[key] = self._ws_token_pins.get(key, 0) + 1
+                pinned.append(key)
+        if pinned:
+            self.subscribe_tokens_ws(pinned, mode=mode, wait_timeout=0.0)
+        return pinned
+
+    def unpin_ws_tokens(self, instrument_keys: Iterable[Any]) -> list[str]:
+        """Decrement refcount on closed-position keys (never force-unsubscribes)."""
+        released: list[str] = []
+        with self._ws_lock:
+            for raw_key in instrument_keys:
+                key = str(raw_key).strip()
+                cur = self._ws_token_pins.get(key, 0)
+                if cur <= 1:
+                    if key in self._ws_token_pins:
+                        self._ws_token_pins.pop(key, None)
+                        released.append(key)
+                else:
+                    self._ws_token_pins[key] = cur - 1
+        return released
 
     @staticmethod
     def _quote_key(instrument_token: Any) -> str:
