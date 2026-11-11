@@ -2240,21 +2240,34 @@ class LiveChainProvider:
         )
 
     def _infer_spot_from_ws(self, underlying: str) -> float | None:
-        index_map = getattr(
-            self.broker,
-            "UNDERLYING_INDEX_TOKENS",
-            {"NIFTY": 26000, "BANKNIFTY": 26009, "MIDCPNIFTY": 26013, "FINNIFTY": 26037},
-        )
-        tok = index_map.get(str(underlying).upper())
+        key = str(underlying).upper()
         get_ws = getattr(self.broker, "get_ws_quote", None)
-        if tok is not None and callable(get_ws):
-            try:
-                q = get_ws(tok, max_age_seconds=30.0) or {}
-                ltp = float(q.get("ltp", 0.0) or 0.0)
-                if ltp > 0.0:
-                    return ltp
-            except Exception:  # noqa: BLE001
-                return None
+        if not callable(get_ws):
+            return None
+        # The broker that owns the book knows its own index spelling: mStock's
+        # numeric UNDERLYING_INDEX_TOKENS, Upstox's NSE_INDEX|… keys via its
+        # resolver. Never a second key table here (impl plan Phase 1 item 5) —
+        # and an underlying the venue cannot name makes spot abstain, because a
+        # stale or invented center re-strikes the whole ring.
+        resolver = getattr(self.broker, "underlying_index_key", None)
+        if callable(resolver):
+            tok = resolver(key)
+        else:
+            index_map = getattr(
+                self.broker,
+                "UNDERLYING_INDEX_TOKENS",
+                {"NIFTY": 26000, "BANKNIFTY": 26009, "MIDCPNIFTY": 26013, "FINNIFTY": 26037},
+            )
+            tok = index_map.get(key)
+        if tok is None:
+            return None
+        try:
+            q = get_ws(tok, max_age_seconds=30.0) or {}
+            ltp = float(q.get("ltp", 0.0) or 0.0)
+            if ltp > 0.0:
+                return ltp
+        except Exception:  # noqa: BLE001
+            return None
         return None
 
     def register_wing_distance(self, underlying: str, distance_pct: float) -> None:
