@@ -1,0 +1,23 @@
+
+=== mstock 2026-11-11  (333 MB, 484927 packets, 73 tokens, kinds={'packet': 484927, 'price_used': 28, 'sanity_flag': 190})
+   two-sided book   227298  (46.87%)
+   one-sided        1  (0.00%)
+   no book at all   257628  (53.13%)
+   frame gap   p50=0.33s p90=2.60s p99=13.55s max=112.5s  n=484846
+   tokens=73 frames/token min=220 max=116055
+   per-LEG p99 gap: median=16.24s p90=18.45s worst=26.4s (n=73 legs); quietest leg max=106.6s
+   venue stamp kinds: sentinel=257636 (53.13%), tzless=227291 (46.87%)
+   sentinels that ALSO carried no book: 257628 of 257636 — a frame with nothing to cross is the frame with no clock
+   recv_utc - venue timestamp (offset-bearing stamps only): p05=nans p50=nans p95=nans min=nans max=nans  n=0
+   tz-less venue strings, read as exchange wall clock — skew p05=0.558s p50=3.153s p95=60.681s n=227291 (usable only if this box's clock is the exchange clock)
+   (no offset-bearing venue stamps — the two-clock gate has no second clock from this venue; recv_mono only)
+
+=== upstox 2026-11-11  (285 MB, 556654 packets, 56 tokens, kinds={'packet': 556654})
+   two-sided book   556654  (100.00%)
+   one-sided        0  (0.00%)
+   no book at all   0  (0.00%)
+   frame gap   p50=0.91s p90=1.66s p99=1.95s max=44.3s  n=556598
+   tokens=56 frames/token min=4134 max=16085
+   per-LEG p99 gap: median=1.87s p90=2.65s worst=2.8s (n=56 legs); quietest leg max=41.5s
+   venue stamp kinds: aware=556654 (100.00%)
+   recv_utc - venue timestamp (offset-bearing stamps only): p05=-0.378s p50=0.102s p95=0.206s min=-0.577s max=44.581s  n=556654

@@ -1,0 +1,23 @@
+
+=== mstock: 491387 packets, 338 MB  (C:\learning\back-test\logs\feed_depth\feed_mstock_2026-11-11.jsonl)
+   empty_ladder            260457  (53.004%)
+   ask_not_monotone             0  (0.000%)
+   bid_not_monotone             1  (0.000%)
+   crossed_book                 0  (0.000%)
+   impossible_packets           1  (0.000%)
+   ask_over_1p5x_ltp           12  (0.002%)
+   bid_under_ltp_over_1p5x       8  (0.002%)
+   structurally impossible (unique packets, breaching the monotone/non-crossed invariant): 1
+   2026-11-11T06:22:07.000011+00:00 tok=62338 ltp=739.2 ask_spread=0.20 askbad=False bidbad=True crossed=False
+      bids=[737.35, 738.14, 738.09, 737.99, 737.94]
+      asks=[739.44, 739.49, 739.54, 739.59, 739.64]
+
+=== upstox: 565297 packets, 290 MB  (C:\learning\back-test\logs\feed_depth\feed_upstox_2026-11-11.jsonl)
+   empty_ladder                 0  (0.000%)
+   ask_not_monotone             0  (0.000%)
+   bid_not_monotone             0  (0.000%)
+   crossed_book                 0  (0.000%)
+   impossible_packets           0  (0.000%)
+   ask_over_1p5x_ltp            0  (0.000%)
+   bid_under_ltp_over_1p5x       0  (0.000%)
+   structurally impossible (unique packets, breaching the monotone/non-crossed invariant): 0

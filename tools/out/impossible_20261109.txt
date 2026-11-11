@@ -1,0 +1,50 @@
+
+=== mstock: 299318 packets, 218 MB  (C:\learning\bt-mainmerge\logs\feed_depth\feed_mstock_2026-11-09.jsonl)
+   empty_ladder            211499  (70.660%)
+   ask_not_monotone             8  (0.003%)
+   bid_not_monotone             6  (0.002%)
+   crossed_book                 0  (0.000%)
+   impossible_packets          10  (0.003%)
+   ask_over_1p5x_ltp            5  (0.002%)
+   bid_under_ltp_over_1p5x       0  (0.000%)
+   structurally impossible (unique packets, breaching the monotone/non-crossed invariant): 10
+   2026-11-09T10:07:45.765282+00:00 tok=64459 ltp=496.05 ask_spread=903.76 askbad=True bidbad=True crossed=False
+      bids=[496.5, 494.36, 1105.3, 1100.0, 1073.5]
+      asks=[1282.15, 1284.0, 1293.1, 640.19, 1543.95]
+   2026-11-09T08:47:22.479336+00:00 tok=64455 ltp=432.1 ask_spread=376.35 askbad=True bidbad=False crossed=False
+      bids=[431.6, 431.55, 431.0, 430.0, 429.0]
+      asks=[435.45, 435.5, 435.42, 59.15, 59.2]
+   2026-11-09T08:15:10.532710+00:00 tok=64422 ltp=217.45 ask_spread=274.02 askbad=True bidbad=True crossed=False
+      bids=[216.6, 0.2, 216.5, 216.45]
+      asks=[217.45, 0.35, 217.5, 274.37, 217.55]
+   2026-11-09T07:13:47.678096+00:00 tok=64438 ltp=338.0 ask_spread=136.60 askbad=True bidbad=False crossed=False
+      bids=[338.3, 338.25, 338.2, 338.15, 338.1]
+      asks=[339.3, 339.45, 202.85, 202.9]
+   2026-11-09T09:56:02.308218+00:00 tok=64442 ltp=324.75 ask_spread=54.16 askbad=True bidbad=True crossed=False
+      bids=[242.55, 242.45, 242.4, 323.85, 323.8]
+      asks=[325.6, 325.65, 325.7, 326.41, 272.25]
+   2026-11-09T09:47:02.710083+00:00 tok=64452 ltp=408.75 ask_spread=7.95 askbad=False bidbad=True crossed=False
+      bids=[300.05, 408.75, 297.75, 297.7, 297.0]
+      asks=[302.0, 304.0, 308.8, 308.85, 309.95]
+   2026-11-09T07:58:29.871822+00:00 tok=64445 ltp=174.15 ask_spread=1.51 askbad=True bidbad=True crossed=False
+      bids=[174.55, 174.5, 176.3, 176.25, 176.2]
+      asks=[202.8, 202.85, 204.31, 202.95, 203.0]
+   2026-11-09T08:56:31.906301+00:00 tok=64433 ltp=400.05 ask_spread=1.50 askbad=True bidbad=False crossed=False
+      bids=[398.8, 398.75, 398.6, 398.55, 398.5]
+      asks=[400.3, 400.35, 400.4, 401.8, 400.5]
+   2026-11-09T07:42:25.750063+00:00 tok=64424 ltp=17.0 ask_spread=0.35 askbad=True bidbad=False crossed=False
+      bids=[16.8, 16.75, 16.7, 16.65, 16.6]
+      asks=[17.3, 17.35, 17.4, 17.5, 17.15]
+   2026-11-09T09:34:48.509950+00:00 tok=64442 ltp=329.45 ask_spread=0.30 askbad=False bidbad=True crossed=False
+      bids=[330.05, 330.0, 329.95, 1640.62, 1640.57]
+      asks=[1642.42, 1642.47, 1642.52, 1642.67, 1642.72]
+
+=== upstox: 48008 packets, 25 MB  (C:\learning\bt-mainmerge\logs\feed_depth\feed_upstox_2026-11-09.jsonl)
+   empty_ladder                 0  (0.000%)
+   ask_not_monotone             0  (0.000%)
+   bid_not_monotone             0  (0.000%)
+   crossed_book                 0  (0.000%)
+   impossible_packets           0  (0.000%)
+   ask_over_1p5x_ltp            0  (0.000%)
+   bid_under_ltp_over_1p5x       0  (0.000%)
+   structurally impossible (unique packets, breaching the monotone/non-crossed invariant): 0
