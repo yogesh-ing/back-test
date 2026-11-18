@@ -52,7 +52,7 @@ await test("strategy keys read as names, not identifiers", () => {
     assert.equal(Labels.strategy("bollinger_reversion"), "Bollinger reversion");
     assert.equal(Labels.strategy("sma_crossover"), "SMA crossover");
     assert.equal(Labels.strategy("banknifty_ema_momentum"), "Banknifty EMA momentum");
-    assert.equal(Labels.strategy("swing_donchian_breakout"), "Swing Donchian breakout");
+    assert.equal(Labels.strategy("donchian_breakout"), "Donchian breakout");
     assert.equal(Labels.strategy("buy_and_hold"), "Buy and hold");
     assert.equal(Labels.strategy("hf_equity_scalp"), "HF equity scalp");
 });
@@ -60,7 +60,7 @@ await test("strategy keys read as names, not identifiers", () => {
 await test("no label still carries an underscore", () => {
     const Labels = boot();
     for (const key of [
-        "ema_reversion_pob", "volume_oi_surge", "swing_rsi2_meanrev", "one_min_scalp",
+        "ema_reversion_pob", "volume_oi_surge", "rsi2_meanrev", "one_min_scalp",
         "immediate_strangle", "straddle_short_atm", "directional_options",
     ]) {
         assert.doesNotMatch(Labels.strategy(key), /_/, `${key} kept its underscores`);
@@ -72,7 +72,7 @@ await test("an operator's own capitals survive, so a name is never re-cased into
     const Labels = boot();
     assert.equal(Labels.strategy("CE_instant_buy"), "CE instant buy");
     assert.equal(Labels.strategy("PE_instant_buy"), "PE instant buy");
-    assert.equal(Labels.humanise("swing_rsi2_meanrev"), "Swing RSI2 meanrev");
+    assert.equal(Labels.humanise("rsi2_meanrev"), "RSI2 meanrev");
 });
 
 await test("option structures use the vocabulary the spawn form already uses", () => {

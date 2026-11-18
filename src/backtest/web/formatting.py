@@ -88,7 +88,7 @@ _PROPER = {"donchian": "Donchian", "bollinger": "Bollinger"}
 
 
 def format_label(value: object) -> str:
-    """``swing_rsi2_meanrev`` → ``Swing RSI2 meanrev``: one word per underscore.
+    """``rsi2_meanrev`` → ``RSI2 meanrev``: one word per underscore.
 
     A part the operator already capitalised (``CE_instant_buy``) is a name, not
     a word to re-case, so it survives untouched.

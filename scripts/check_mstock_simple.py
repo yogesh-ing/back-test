@@ -140,13 +140,11 @@ def main():
     print("\n[6] Strategy Eligibility:")
     try:
         # Import strategy classes directly
-        from backtest.strategies.nifty_scalper import NiftyScalper
-        from backtest.strategies.banknifty_straddle import BankNiftyStraddle
+        from backtest.strategies.banknifty_ema_momentum import BankNiftyEmaMomentum
         from backtest.strategies.option_directional import DirectionalOptions
         
         strategies = [
-            ("NiftyScalper", NiftyScalper),
-            ("BankNiftyStraddle", BankNiftyStraddle),
+            ("BankNiftyEmaMomentum", BankNiftyEmaMomentum),
             ("DirectionalOptions", DirectionalOptions),
         ]
         

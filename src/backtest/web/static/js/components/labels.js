@@ -31,7 +31,7 @@ const Labels = (() => {
         return String(key ?? "").split(/[_\s]+/).filter(Boolean);
     }
 
-    /** "swing_rsi2_meanrev" → "Swing RSI2 meanrev": one word per underscore. */
+    /** "rsi2_meanrev" → "RSI2 meanrev": one word per underscore. */
     function humanise(key) {
         return parts(key).map((part, index) => {
             const alpha = part.replace(/[0-9]+$/, "");

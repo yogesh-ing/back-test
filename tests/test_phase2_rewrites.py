@@ -189,7 +189,7 @@ def test_strangle_intent_is_explicit_and_opens_via_bridge():
     "name",
     [
         "bollinger_reversion", "buy_and_hold", "donchian_breakout", "ema_pullback",
-        "macd_trend", "momentum_roc", "nifty_scalper", "price_move",
+        "macd_trend", "momentum_roc", "price_move",
         "rsi_reversion", "sma_crossover",
     ],
 )
@@ -224,11 +224,7 @@ def test_directional_tail_declares_spec(name):
 
 @pytest.mark.parametrize(
     "name",
-    [
-        "hf_equity_scalp", "one_min_scalp", "swing_donchian_breakout",
-        "swing_ema_pullback", "swing_hourly_supertrend", "swing_rsi2_meanrev",
-        "supertrend_equity",
-    ],
+    ["hf_equity_scalp", "one_min_scalp"],
 )
 def test_equity_plugins_ported(name):
     from backtest.strategy.templates import EquityStrategy
@@ -238,50 +234,15 @@ def test_equity_plugins_ported(name):
     cls.validate()
 
 
-def test_imported_triage_one_survivor_five_retired():
+def test_imported_triage_retired_names_stay_absent():
     from backtest.strategy.registry import list_strategies
 
-    _get("supertrend_equity")  # forces discovery
+    _get("sma_crossover")  # forces discovery
     names = list_strategies()
-    assert "supertrend_equity" in names
     for retired in ("v1", "v2", "v3", "mysupertrendv1",
-                    "outsidebarstrategy", "supertrendstrategy"):
+                    "outsidebarstrategy", "supertrendstrategy",
+                    "supertrend_equity"):
         assert retired not in names  # snapshot preserves every original
-
-
-def test_survivor_signals_match_snapshot_original():
-    # Fixture equivalence (§9.3 #2): the survivor's signals on deterministic
-    # candles must equal the snapshot original's, bar for bar.
-    import importlib.util
-    from pathlib import Path
-
-    from backtest.strategy import registry
-
-    snap = (
-        Path(__file__).resolve().parents[1]
-        / "docs/archive/strategy-snapshot-2026-10-15/plugins/supertrend_strategy_imported.py"
-    )
-    module_spec = importlib.util.spec_from_file_location("_snapshot_supertrend", snap)
-    module = importlib.util.module_from_spec(module_spec)
-    try:
-        module_spec.loader.exec_module(module)
-        idx = pd.date_range("2026-01-01", periods=120, freq="D")
-        closes = [100 + i * 0.8 for i in range(60)] + [148 - i * 0.9 for i in range(60)]
-        candles = pd.DataFrame(
-            {
-                "open": closes, "high": [c * 1.01 for c in closes],
-                "low": [c * 0.99 for c in closes], "close": closes,
-                "volume": [1000] * 120,
-            },
-            index=idx,
-        )
-        original = module.SupertrendStrategy()
-        survivor = _get("supertrend_equity")()
-        assert list(survivor.generate_signals(candles)) == list(
-            original.generate_signals(candles)
-        )
-    finally:
-        registry.unregister("supertrendstrategy")
 
 
 def test_strangle_declared_distance_actually_selects_the_legs():

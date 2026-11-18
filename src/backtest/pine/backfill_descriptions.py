@@ -46,10 +46,6 @@ DEFAULT_DESCRIPTIONS = {
         "Baseline buy-and-hold strategy. Always long for benchmark comparison. "
         "No alpha generation — pure market exposure."
     ),
-    "nifty_scalper": (
-        "NIFTY scalping strategy. Quick entries/exits on small price movements. "
-        "Requires low latency and tight spreads."
-    ),
     "banknifty_ema_momentum": (
         "BANKNIFTY EMA momentum options strategy. Buys ATM calls/puts on "
         "EMA trend direction (renamed from banknifty_straddle, which never "

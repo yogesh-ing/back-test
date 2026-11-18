@@ -55,22 +55,6 @@ KNOWN_FAILS: dict[str, dict[str, str]] = {
             "R-D2 — frame-anchored VWAP; rare disagreements on 1-min"
         ),
     },
-    "supertrend_equity": {
-        "test_decisions_change_somewhere": (
-            "R-S3 — long-only Pine conversion (shorts folded into entries); "
-            "on the template's short scenario windows the supertrend never "
-            "flips, so the decision is constant there. It does flip on "
-            "sustained reversals (pinned vs the snapshot original in "
-            "tests/test_phase2_rewrites.py)."
-        ),
-    },
-    "swing_donchian_breakout": {
-        "test_decisions_change_somewhere": (
-            "R-S3 — pre-existing: no breakout triggers on the template "
-            "scenario windows at its default channel length (unchanged by "
-            "the Phase 2 EquityStrategy port, which is signal-identical)."
-        ),
-    },
     "ema_reversion_pob": {
         "test_positional_index_fallback": (
             "R-T2 — raises on a RangeIndex feed (no parseable timestamps)"
@@ -80,9 +64,6 @@ KNOWN_FAILS: dict[str, dict[str, str]] = {
         "test_per_bar_budget": "R-P1 — 25–31 ms per evaluation on a full buffer",
     },
     "donchian_breakout": {
-        "test_per_bar_budget": "R-P1 — 25–31 ms per evaluation on a full buffer",
-    },
-    "nifty_scalper": {
         "test_per_bar_budget": "R-P1 — 25–31 ms per evaluation on a full buffer",
     },
 }

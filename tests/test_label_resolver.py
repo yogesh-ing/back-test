@@ -47,10 +47,10 @@ def test_the_server_resolver_reads_one_word_per_underscore():
 
     assert format_label("bollinger_reversion") == "Bollinger reversion"
     assert format_label("sma_crossover") == "SMA crossover"
-    assert format_label("swing_rsi2_meanrev") == "Swing RSI2 meanrev"
+    assert format_label("rsi2_meanrev") == "RSI2 meanrev"
     assert format_label("hf_equity_scalp") == "HF equity scalp"
     assert format_label("banknifty_ema_momentum") == "Banknifty EMA momentum"
-    assert format_label("swing_donchian_breakout") == "Swing Donchian breakout"
+    assert format_label("donchian_breakout") == "Donchian breakout"
 
 
 def test_a_part_the_operator_capitalised_survives():
@@ -111,10 +111,10 @@ def test_the_two_halves_share_one_vocabulary():
 
 
 HOUSE_KEYS = [
-    "bollinger_reversion", "sma_crossover", "swing_rsi2_meanrev", "hf_equity_scalp",
-    "banknifty_ema_momentum", "swing_donchian_breakout", "CE_instant_buy",
+    "bollinger_reversion", "sma_crossover", "rsi2_meanrev", "hf_equity_scalp",
+    "banknifty_ema_momentum", "donchian_breakout", "CE_instant_buy",
     "PE_instant_buy", "ema_reversion_pob", "volume_oi_surge", "vwap_ema_rsi",
-    "supertrend_equity", "one_min_scalp", "immediate_strangle", "NIFTY_50",
+    "strangle_wing_points", "one_min_scalp", "immediate_strangle", "NIFTY_50",
     "equity_intraday", "options_index", "bear_put_spread", "direction_aware",
 ]
 
