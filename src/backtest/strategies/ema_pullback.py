@@ -48,16 +48,18 @@ class EmaPullback(EquityStrategy):
             'Single-instrument equity/index position, long only, one position at a time.'
         ),
         'exits_risk': (
-            'Exits on a stretch-target above the fast EMA or when the trend breaks (fast EMA'
-            'loses the slow EMA). The trend break is the de-facto stop; worst case is the adverse '
-            'move between entry and that break.'
+            'Exits on a stretch-target above the fast EMA, when the trend breaks (fast EMA'
+            'loses the slow EMA), or when the price bracket fires: a hard stop at -2% of the '
+            'entry price and a target at +3%, both editable at spawn. The trend break and the '
+            'stop together cap the adverse move between entry and exit.'
         ),
         'parameters': (
             'fast=10, slow=50 (EMA windows), stretch_pct=1.0 (% stretch above the fast EMA that '
-            "counts as 'target reached')."
+            "counts as 'target reached'), stop_loss_pct=2.0 and take_profit_pct=3.0 (% of entry "
+            'price; set either to 0 to disable that side of the bracket).'
         ),
     }
-    version = "1.0"
+    version = "1.1"
     author = "Trading Bot"
     params = {
         "fast": {
@@ -84,12 +86,30 @@ class EmaPullback(EquityStrategy):
             "label": "Exit Stretch %",
             "tooltip": "Exit when close exceeds fast EMA by this percent.",
         },
+        "stop_loss_pct": {
+            "default": 2.0,
+            "min": 0.0,
+            "max": 50.0,
+            "type": "float",
+            "label": "Stop Loss %",
+            "tooltip": "Exit when close falls this percent below the entry price (0 = off).",
+        },
+        "take_profit_pct": {
+            "default": 3.0,
+            "min": 0.0,
+            "max": 100.0,
+            "type": "float",
+            "label": "Take Profit %",
+            "tooltip": "Exit when close rises this percent above the entry price (0 = off).",
+        },
     }
 
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         fast_n = int(self.fast)
         slow_n = int(self.slow)
         stretch = float(self.stretch_pct)
+        sl = float(self.stop_loss_pct) / 100.0
+        tp = float(self.take_profit_pct) / 100.0
 
         fast_ema = candles["close"].ewm(span=fast_n, adjust=False).mean()
         slow_ema = candles["close"].ewm(span=slow_n, adjust=False).mean()
@@ -104,15 +124,22 @@ class EmaPullback(EquityStrategy):
         exit_cond = (close < slow_ema) | (close >= fast_ema * (1.0 + stretch / 100.0))
 
         held = False
+        entry_price = 0.0
         entries = entry.to_numpy(copy=True)
         exits = exit_cond.to_numpy(copy=True)
+        closes = close.to_numpy()
         out = np.zeros(len(candles), dtype=np.int64)
         for i in range(len(out)):
             if not held:
                 if entries[i]:
                     held = True
+                    entry_price = closes[i]
                     out[i] = 1
-            elif exits[i]:
+            elif (
+                exits[i]
+                or (sl > 0 and closes[i] <= entry_price * (1.0 - sl))
+                or (tp > 0 and closes[i] >= entry_price * (1.0 + tp))
+            ):
                 held = False
             else:
                 out[i] = 1

@@ -74,7 +74,7 @@ def test_strategy_space(client):
     j = r.get_json()
     assert r.status_code == 200
     names = [p["name"] for p in j["parameters"]]
-    assert names == ["fast", "slow"]
+    assert names == ["fast", "slow", "stop_loss_pct", "take_profit_pct"]
     assert client.get("/api/optimize/strategies/nope/space").status_code == 404
 
 
