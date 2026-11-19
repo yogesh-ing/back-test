@@ -220,6 +220,35 @@ def test_full_run_lifecycle(service, store, sma_doc):
     assert service.config_from_run(rerun).grid_size() == 12
 
 
+def test_imported_baseline_run_completes(service, sma_doc, monkeypatch):
+    """The skip-baseline path must finish, not die on the re-run-only payload.
+
+    A Tune This hand-off from a fill-exact backtest on real data sets
+    baselineImported; the service then skips its own baseline evaluation.
+    ``base_payload`` only exists on the re-run branch, so reading its curve
+    unconditionally in _finalize raised UnboundLocalError and failed the run.
+    The attestation is forced to real-data here because the fixture loader is
+    synthetic — the branch condition, not the data, is what is under test.
+    """
+    monkeypatch.setattr(
+        service, "_attestation_from_cfg",
+        lambda cfg, doc=None, candles=None: {"data_source_real": True, "acknowledged": True},
+    )
+    quoted = {"sharpe": 1.1, "total_return_pct": 12.0, "total_trades": 30}
+    doc = sma_doc
+    doc["backtestConfig"].update({
+        "baselineImported": True,
+        "baselineMetrics": quoted,
+        "sourceBacktestId": "bt_test123",
+    })
+    run = service.wait(service.submit(doc)["run_id"], timeout=120)
+    assert run["status"] == "completed", run.get("error_message")
+    assert run["baseline_metrics"] == quoted
+    assert run["baseline_score"] is None
+    assert run["analysis"]["curves"]["baseline"] == []
+    assert run["analysis"]["curves"]["optimized"], "the winner still gets its curve"
+
+
 def test_failed_loader_marks_run_failed(store, fake_manager, sma_doc):
     from backtest.optimization.service import OptimizationService
 

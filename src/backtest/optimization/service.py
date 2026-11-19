@@ -877,6 +877,9 @@ class OptimizationService:
                 settings.get("engine") == "driver"
                 and bool(attestation.get("data_source_real"))
             )
+            # Only the re-run branch below produces a payload; an imported
+            # baseline has no curve (the hand-off carries metrics, not bars).
+            base_payload = None
             if origin_claims_fill_exact and origin_fill_exact:
                 quoted = dict(cfg.backtest.baseline_metrics or {})
                 baseline = {
@@ -1014,7 +1017,7 @@ class OptimizationService:
         self._finalize(
             job,
             baseline,
-            base_payload.get("curve"),
+            base_payload.get("curve") if base_payload else None,
             best,
             best_curve,
             sensitivity,
