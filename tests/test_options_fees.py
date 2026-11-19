@@ -499,3 +499,67 @@ class TestOptionPaperBrokerFeeIntegration:
         )
         positions = broker.execute_structure(intent, self._quote_provider())
         assert len(positions) == 1  # the trade still went through
+
+
+# ===========================================================================
+# Exercise STT — buyer of an ITM option settling intrinsic at expiry
+# ===========================================================================
+
+
+class TestExerciseSTT:
+    """NIFTY 22000 CE settles with spot 22500: intrinsic Rs 500/unit x 75
+    units = Rs 37,500 settlement turnover, Rs 20 flat brokerage.
+
+        stt                   56.25   (0.15% of intrinsic, Budget 2026)
+        exchange_transaction  13.14   (0.03503% of settlement)
+        sebi_turnover          0.04
+        ipft                   0.04
+        gst                    5.98   (18% on 20 + 13.14 + 0.04 + 0.04)
+        TOTAL                 75.45
+
+    No stamp duty (a buy-side trade charge) and no sell-side premium STT —
+    the premium leg already paid its own when it traded.
+    """
+
+    SETTLEMENT = dict(settlement_value=D("37500"), quantity=D("75"), brokerage=D("20"))
+
+    @pytest.fixture()
+    def charges(self):
+        return IndiaEquityFees().exercise_charges(**self.SETTLEMENT)
+
+    def test_stt_line_item_present_at_exercise_rate(self, charges):
+        assert charges["stt"] == D("56.25")
+
+    def test_itemised_breakdown_matches_anchor(self, charges):
+        assert charges["exchange_transaction"] == D("13.14")
+        assert charges["sebi_turnover"] == D("0.04")
+        assert charges["ipft"] == D("0.04")
+        assert charges["gst"] == D("5.98")
+        assert sum(charges.values(), D("0")) == D("75.45")
+
+    def test_no_stamp_duty_on_settlement(self, charges):
+        assert "stamp_duty" not in charges
+
+    def test_stt_is_on_intrinsic_not_premium(self, charges):
+        # Premium paid may have been tiny (e.g. Rs 5/unit = Rs 375); the
+        # exercise STT must follow the settlement value, not the premium.
+        assert charges["stt"] == D("37500") * D("0.0015")
+
+    def test_pre_april_2026_override(self):
+        fees = IndiaEquityFees(stt_options_exercise=D("0.00125"))
+        charges = fees.exercise_charges(**self.SETTLEMENT)
+        assert charges["stt"] == D("46.88")  # 37500 * 0.00125, half-up
+
+    def test_zero_settlement_pays_no_stt(self):
+        charges = IndiaEquityFees().exercise_charges(
+            settlement_value=D("0"), quantity=D("75"), brokerage=D("0")
+        )
+        assert charges["stt"] == D("0.00")
+
+    def test_base_schedule_default_is_empty(self):
+        from backtest.simulator import NoStatutoryFees
+
+        assert NoStatutoryFees().exercise_charges(**self.SETTLEMENT) == {}
+
+    def test_to_dict_round_trips_the_rate(self):
+        assert IndiaEquityFees().to_dict()["stt_options_exercise"] == "0.0015"

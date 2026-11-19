@@ -320,6 +320,19 @@ class FeeSchedule(ABC):
     ) -> dict[str, Decimal]:
         """Every non-brokerage charge, itemised."""
 
+    def exercise_charges(
+        self,
+        settlement_value: Decimal,
+        quantity: Decimal,
+        brokerage: Decimal,
+    ) -> dict[str, Decimal]:
+        """Charges on an ITM option exercised at expiry (intrinsic settlement).
+
+        ``settlement_value`` is intrinsic × quantity. Default: no statutory
+        charges; schedules with an exercise STT override this.
+        """
+        return {}
+
     def to_dict(self) -> dict[str, Any]:
         return {"schedule": self.name}
 
@@ -359,7 +372,8 @@ class IndiaEquityFees(FeeSchedule):
 
     Budget 2026 raised the F&O STT rates — futures sell 0.02% → 0.05%,
     options sell 0.1% → 0.15%, exercise 0.125% → 0.15% — effective
-    2026-04-01. Exercise STT is not modelled (no exercise flows). Replaying
+    2026-04-01. Exercise STT (buyer of an ITM option settling intrinsic at
+    expiry) is modelled by :meth:`exercise_charges`. Replaying
     pre-April-2026 F&O data? Override ``stt_futures_sell`` /
     ``stt_options_sell`` back to ``0.0002`` / ``0.001`` (pre-2024-10-01:
     ``0.000125`` / ``0.000625``).
@@ -377,6 +391,11 @@ class IndiaEquityFees(FeeSchedule):
     # options sell 0.1% -> 0.15%. Override for pre-April-2026 replays.
     stt_futures_sell: Decimal = Decimal("0.0005")
     stt_options_sell: Decimal = Decimal("0.0015")
+    # Exercise STT: charged to the buyer of an ITM option that settles
+    # intrinsic at expiry, on the intrinsic value (not the premium).
+    # Budget 2026 raised 0.125% -> 0.15%, effective 2026-04-01; override to
+    # Decimal("0.00125") for pre-April-2026 replays.
+    stt_options_exercise: Decimal = Decimal("0.0015")
 
     exchange_txn_equity: Decimal = Decimal("0.0000297")
     exchange_txn_futures: Decimal = Decimal("0.0000173")
@@ -459,11 +478,29 @@ class IndiaEquityFees(FeeSchedule):
 
         return out
 
+    def exercise_charges(self, settlement_value, quantity, brokerage):
+        # Exercise is a settlement, not a trade: STT at the exercise rate on
+        # intrinsic, exchange/SEBI/IPFT on the settlement turnover, GST on
+        # brokerage + those charges. No stamp duty (buy-side trade charge)
+        # and no sell-side premium STT — the premium leg already paid its own.
+        settlement_value = Decimal(settlement_value)
+        out: dict[str, Decimal] = {}
+        out["stt"] = _round(settlement_value * self.stt_options_exercise)
+        exchange_txn = _round(settlement_value * self.exchange_txn_options)
+        out["exchange_transaction"] = exchange_txn
+        sebi = _round(settlement_value * self.sebi_turnover)
+        out["sebi_turnover"] = sebi
+        ipft = _round(settlement_value * self.ipft)
+        out["ipft"] = ipft
+        out["gst"] = _round((Decimal(brokerage) + exchange_txn + sebi + ipft) * self.gst_rate)
+        return out
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schedule": self.name,
             "stt_delivery": str(self.stt_delivery),
             "stt_intraday_sell": str(self.stt_intraday_sell),
+            "stt_options_exercise": str(self.stt_options_exercise),
             "exchange_txn_equity": str(self.exchange_txn_equity),
             "sebi_turnover": str(self.sebi_turnover),
             "stamp_duty_delivery": str(self.stamp_duty_delivery),
