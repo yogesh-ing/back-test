@@ -278,7 +278,8 @@ def _header(doc: PdfDocument, report: PnLReport) -> None:
         + report.generated_at.astimezone(timezone.utc).strftime("%d-%b-%Y %H:%M UTC")
         + " · "
         + ("paper + live" if report.include_paper else "live only")
-        + (" · demo book" if report.demo else ""),
+        + (" · demo book" if report.demo else "")
+        + (" · model-priced" if report.model_priced else ""),
         size=9,
     )
     doc.space(10)
@@ -288,6 +289,22 @@ def _header(doc: PdfDocument, report: PnLReport) -> None:
             "DEMO BOOK — sample trades, not a record of any real account.",
             size=10,
             bold=True,
+        )
+        doc.space(12)
+    if report.model_priced:
+        doc.text(
+            _LEFT,
+            "MODEL-PRICED — option premiums are Black-Scholes simulations, not "
+            "observed chain quotes.",
+            size=10,
+            bold=True,
+        )
+        doc.space(4)
+        doc.text(
+            _LEFT,
+            "Research only: cannot be certified, optimized, or deployed to paper.",
+            size=9,
+            gray=0.3,
         )
         doc.space(12)
     doc.rule(_LEFT, _RIGHT)

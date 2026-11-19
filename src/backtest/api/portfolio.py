@@ -814,6 +814,14 @@ def watch_series_view(instance_id: str) -> Tuple[Response, int]:
 def create_runner() -> Tuple[Response, int]:
     data = request.get_json(silent=True) or {}
 
+    # Quarantine (plan V3 §5 door 4): a runner descended from a model-priced
+    # backtest can never be deployed. Read the stored lineage, not a client flag.
+    from backtest.api.model_quarantine import refuse_lineage
+
+    refused = refuse_lineage(data)
+    if refused:
+        return refused
+
     name = str(data.get("name", "")).strip()
     strategy_name = str(data.get("strategy", data.get("strategy_name", ""))).strip()
     if not strategy_name:

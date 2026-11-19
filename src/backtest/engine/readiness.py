@@ -50,6 +50,7 @@ __all__ = [
     "MONTE_CARLO_GREEN_PCT",
     "MONTE_CARLO_YELLOW_PCT",
     "build_readiness",
+    "is_model_priced",
 ]
 
 GREEN = "green"
@@ -119,6 +120,38 @@ def _band_dd(value: float) -> str:
 # ---------------------------------------------------------------------------
 # The eight checks
 # ---------------------------------------------------------------------------
+
+
+def is_model_priced(result: Mapping[str, Any]) -> bool:
+    """True when option quotes came from the Black-Scholes model, not a chain.
+
+    Reads the top-level ``pricing_feed`` the adapter stamps and falls back to
+    the config blob (where it also rides for read-back survival). A model run
+    is categorically uncertifiable — no metric, however green, changes that.
+    """
+    feed = result.get("pricing_feed")
+    if feed is None:
+        feed = (result.get("config") or {}).get("pricing_feed")
+    return str(feed or "").strip().lower() == "model_bs"
+
+
+def _pricing_feed(result: Mapping[str, Any]) -> dict[str, Any] | None:
+    """A ninth, RED check — appended only for model-priced runs.
+
+    Equity runs get None so their eight-check counts are untouched.
+    """
+    if not is_model_priced(result):
+        return None
+    return _check(
+        "pricing_feed",
+        "Pricing feed",
+        RED,
+        "Black-Scholes model",
+        "Option prices are simulated from realised volatility, not observed "
+        "chain quotes. This run is research-only: it cannot be certified, "
+        "optimized, or deployed to paper. Re-run on real option-chain history "
+        "to unlock those doors.",
+    )
 
 
 def _engine(provenance: Mapping[str, Any]) -> dict[str, Any]:
@@ -375,6 +408,7 @@ def build_readiness(result: Mapping[str, Any]) -> dict[str, Any]:
     provenance = result.get("provenance") or {}
     closed = int(_num(metrics.get("closed_trades")) or 0)
     has_evidence = closed >= NO_EVIDENCE_TRADES
+    is_model = is_model_priced(result)
 
     checks = [
         _engine(provenance),
@@ -386,6 +420,9 @@ def build_readiness(result: Mapping[str, Any]) -> dict[str, Any]:
         _max_drawdown(metrics, has_evidence),
         _monte_carlo(result.get("monte_carlo")),
     ]
+    model_check = _pricing_feed(result)
+    if model_check is not None:
+        checks.append(model_check)
 
     counts = {GREEN: 0, YELLOW: 0, RED: 0, UNKNOWN: 0}
     for c in checks:
@@ -423,6 +460,17 @@ def build_readiness(result: Mapping[str, Any]) -> dict[str, Any]:
             "to the full engine before reading this as green."
         )
 
+    if is_model:
+        # A model run fails certification by category, not by a weak metric.
+        # Say so plainly instead of the generic "review the flagged items".
+        verdict = "fail"
+        summary = (
+            "Model-priced backtest: option quotes are simulated from realised "
+            "volatility, not observed chain data. Research only — this result "
+            "cannot be certified, optimized, or deployed to paper. Re-run on "
+            "real option-chain history to unlock those doors."
+        )
+
     return {
         "advisory": True,
         "gates_nothing": True,
@@ -436,5 +484,10 @@ def build_readiness(result: Mapping[str, Any]) -> dict[str, Any]:
         "unproven": [c["label"] for c in checks if c["status"] == UNKNOWN],
         # §5 gates the §6 button on this. The button itself is §6; exposing the
         # flag now means the panel does not have to be edited again to use it.
-        "tune_this_available": all_green,
+        # A model run is never tunable, however green its other rows look.
+        "tune_this_available": all_green and not is_model,
+        # The quarantine flag the UI and the downstream doors read. Server-side
+        # truth: a model-priced run can never enter Optimize or paper→live.
+        "certifiable": not is_model,
+        "certification_reason": "model_pricing" if is_model else None,
     }

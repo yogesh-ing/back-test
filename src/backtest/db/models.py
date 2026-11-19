@@ -2139,8 +2139,15 @@ class BacktestRun(Base):
     date_from: Mapped[date] = mapped_column(Date, nullable=False)
     date_to: Mapped[date] = mapped_column(Date, nullable=False)
     capital: Mapped[Decimal] = mapped_column(Money, nullable=False)
-    #: backtest_driver | quick_screen — cross-engine aggregation is invalid.
+    #: backtest_driver | quick_screen | options — cross-engine aggregation is invalid.
     engine: Mapped[str] = mapped_column(String(30), nullable=False)
+
+    #: How options were priced (plan V3): ``model_bs`` for quarantined
+    #: Black-Scholes model runs, NULL for legacy equity runs. Migration 025.
+    pricing_feed: Mapped[Optional[str]] = mapped_column(String(32))
+    #: Feed configuration for model runs (IV source/premium, spread floors,
+    #: exit knobs). NULL for equity runs. Migration 025.
+    model_params: Mapped[Optional[Any]] = mapped_column(JSONVariant)
 
     #: Schema version of the stored payload. Bumped in BacktestAdapter (single
     #: canonical source); read endpoint refuses mismatched majors with 422.

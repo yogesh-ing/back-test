@@ -208,6 +208,27 @@ def _option_refusal(doc: Any) -> Tuple[Response, int] | None:
     return _error(message) if message else None
 
 
+def _model_priced_refusal(doc: Any) -> Tuple[Response, int] | None:
+    """A 403 when the optimize baseline imports a model-priced backtest.
+
+    The origin run id is read from the request, but the model flag is read from
+    the STORED ledger row (:mod:`backtest.api.model_quarantine`) — a client
+    cannot smuggle a model result into Optimize by hiding ``certifiable``.
+    """
+    if not isinstance(doc, dict):
+        return None
+    bt = doc.get("backtestConfig") or doc.get("backtest_config") or doc.get("backtest") or {}
+    origin = (
+        bt.get("sourceBacktestId")
+        or bt.get("source_backtest_id")
+        or doc.get("sourceBacktestId")
+        or doc.get("baseline_run_id")
+    )
+    from backtest.api.model_quarantine import refuse_model_priced
+
+    return refuse_model_priced(origin)
+
+
 def _handle(fn):
     """Map service exceptions to HTTP responses."""
     from functools import wraps
@@ -369,11 +390,17 @@ def create_run() -> Tuple[Response, int]:
     _refused = guard_source()
     if _refused:
         return _refused  # type: ignore[return-value]
-    svc = _service()
     doc = request.get_json(silent=True) or {}
+    # Quarantine doors read the stored backtest ledger, not the optimization DB,
+    # so they fire before the service is built — a model baseline is refused even
+    # when Optimize itself has no database.
     refused = _option_refusal(doc)
     if refused:
         return refused  # type: ignore[return-value]
+    refused = _model_priced_refusal(doc)
+    if refused:
+        return refused  # type: ignore[return-value]
+    svc = _service()
     start = bool(doc.pop("start", True)) if isinstance(doc, dict) else True
     run = svc.submit(doc, created_by=_user(), start=start)
     return _ok({"run": run, "run_id": run["run_id"]}, 201)
@@ -468,6 +495,15 @@ def run_action(run_id: str, action: str) -> Tuple[Response, int]:
 
 def _apply(run_id: str) -> Tuple[Response, int]:
     body = request.get_json(silent=True) or {}
+    # Defense in depth: a model origin is already refused at submit, but the
+    # deploy door re-checks the stored lineage so a hand-built optimize run
+    # cannot carry a model result into paper.
+    origin = (_service().store.get_run(run_id) or {}).get("backtest_config") or {}
+    from backtest.api.model_quarantine import refuse_model_priced
+
+    refused = refuse_model_priced(origin.get("sourceBacktestId"))
+    if refused:
+        return refused  # type: ignore[return-value]
     result = _service().apply(
         run_id,
         target=str(body.get("target") or "none"),
@@ -649,6 +685,11 @@ def create_preset() -> Tuple[Response, int]:
     params = body.get("params")
     if not strategy or not name or not isinstance(params, dict) or not params:
         return _error("strategy_id, name and a non-empty params object are required")
+    from backtest.api.model_quarantine import refuse_model_priced
+
+    refused = refuse_model_priced(body.get("backtest_run_id"))
+    if refused:
+        return refused  # type: ignore[return-value]
     preset = _service().store.create_preset(
         strategy_id=strategy,
         name=name,

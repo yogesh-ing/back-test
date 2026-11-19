@@ -615,13 +615,25 @@ def _slot_label(job: dict, payload: dict) -> str:
     Two slots on the same strategy are common (that is how a parameter sweep
     works), and a correlation matrix keyed on a duplicated name would silently
     collapse them into one row.
+
+    Plan V3 §4.3 (decision a): equity and option curves are never compared on
+    one axis — ₹ equity vs option-premium P&L are different instruments. Where
+    an option curve *is* labelled (its own comparison surface), the label carries
+    its ``pricing_feed`` so a Black-Scholes model curve is never mistaken for an
+    observed-chain one. Equity payloads have no feed and stay byte-identical.
     """
     name = str(job.get("strategy") or "?")
     symbol = str(job.get("symbol") or "")
     params = job.get("params") or {}
     detail = ",".join(f"{k}={v}" for k, v in sorted(params.items())) if params else ""
     base = f"{name} · {symbol}" if symbol else name
-    return f"{base} ({detail})" if detail else base
+    label = f"{base} ({detail})" if detail else base
+    feed = str(payload.get("pricing_feed") or "").strip().lower()
+    if feed == "model_bs":
+        label += " [model BS]"
+    elif feed == "chain_history":
+        label += " [chain]"
+    return label
 
 
 def _comparison_block(

@@ -303,6 +303,11 @@ class BacktestRunLedger:
             date_to=date_to,
             capital=clamp(cfg.get("capital"), "money"),
             engine=str(cfg.get("engine") or "")[:30],
+            pricing_feed=(
+                str(payload.get("pricing_feed") or cfg.get("pricing_feed") or "")[:32]
+                or None
+            ),
+            model_params=clean_json(payload.get("model_params") or cfg.get("model_params")),
             payload_version=PAYLOAD_VERSION,
             params=clean_json(cfg.get("strategy_params") or {}),
             config=clean_json(cfg),
@@ -712,6 +717,8 @@ class BacktestRunLedger:
             "cost_shock": meta.pop("cost_shock", None),
             "provenance": meta.pop("provenance", None),
             "readiness": meta.pop("readiness", None),
+            "pricing_feed": meta.pop("pricing_feed", None),
+            "model_params": meta.pop("model_params", None),
         }
         extras = (series_body or {}).get("extras") or {}
         payload.update(

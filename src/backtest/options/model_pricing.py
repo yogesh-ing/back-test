@@ -202,6 +202,15 @@ class ModelBSFeed:
     ) -> None:
         self.config = config or ModelPricingConfig()
         self.iv_bars = iv_bars
+        if self.iv_bars is not None and isinstance(self.iv_bars.index, pd.DatetimeIndex):
+            # asof() compares against the aware exchange-time moment quote()
+            # pins, so the series must carry the same clock. Naive bar stamps
+            # are exchange time (the declared door, vectorized); aware ones are
+            # converted, never re-guessed.
+            if self.iv_bars.index.tz is None:
+                self.iv_bars = self.iv_bars.tz_localize(EXCHANGE_TZ)
+            else:
+                self.iv_bars = self.iv_bars.tz_convert(EXCHANGE_TZ)
         self.strike_step = int(strike_step)
         if self.strike_step <= 0:
             raise ValueError("strike_step must be > 0")

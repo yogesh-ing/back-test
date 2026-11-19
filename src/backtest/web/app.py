@@ -37,6 +37,7 @@ from backtest.api import (
 )
 from backtest.api.data_guard import data_source_status
 from backtest.api.optimize import optimize_bp
+from backtest.api.options_model import model_backtest_enabled, options_model_bp
 from backtest.pine.api import pine_bp
 from backtest.api.playbooks import playbooks_bp
 from backtest.api.segments import segments_bp
@@ -525,6 +526,7 @@ def create_app(
     app.register_blueprint(strategies_bp)
     app.register_blueprint(symbols_bp)
     app.register_blueprint(backtest_bp)
+    app.register_blueprint(options_model_bp)
     app.register_blueprint(forward_bp)
     app.register_blueprint(broker_auth_bp)
     app.register_blueprint(data_bp)
@@ -700,6 +702,7 @@ def create_app(
             jsonify(
                 {
                     "source": app.config["BACKTEST_SOURCE"],
+                    "options_model_backtest_enabled": model_backtest_enabled(),
                     "currency": {
                         "code": app.config["CURRENCY"],
                         "symbol": app.config["CURRENCY_SYMBOL"],

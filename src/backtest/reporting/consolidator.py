@@ -163,6 +163,9 @@ class PnLReport:
     discrepancies: list[dict[str, Any]] = field(default_factory=list)
     #: True when any part of this report came from the demo book.
     demo: bool = False
+    #: True when any row is model-priced (Black-Scholes simulation, not observed
+    #: option quotes). Such a statement is research-only and banners itself.
+    model_priced: bool = False
 
     # -- derived -----------------------------------------------------------
 
@@ -215,6 +218,7 @@ class PnLReport:
             "include_paper": self.include_paper,
             "brokers": self.brokers,
             "demo": self.demo,
+            "model_priced": self.model_priced,
             "summary": self.summary(),
             "fee_rows": self.fee_rows(),
             "by_broker": [row.to_dict() for row in self.by_broker],
@@ -304,7 +308,14 @@ class ConsolidatedPnL:
             warnings=list(source_warnings),
             sources=bundle.describe(),
             demo=any(t.source == "demo" for t in records),
+            model_priced=any(t.pricing_feed == "model_bs" for t in records),
         )
+        if report.model_priced:
+            report.warnings.append(
+                "Model-priced rows: option premiums are Black-Scholes simulations, "
+                "not observed chain quotes — research only, not a record of real "
+                "option returns."
+            )
 
         records, merge_note = _dedupe(records)
         if merge_note:

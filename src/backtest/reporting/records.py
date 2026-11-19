@@ -162,6 +162,10 @@ class TradeRecord:
     exit_reason: str = ""
     #: Provenance: ``db`` | ``memory`` | ``demo`` | … (never hidden).
     source: str = "db"
+    #: Option pricing basis: ``model_bs`` (Black-Scholes simulation) |
+    #: ``chain_history`` (observed quotes) | ``""`` (equity / unknown). A
+    #: model-priced row can never be certified — the statement banners it.
+    pricing_feed: str = ""
     #: Free-form marker rendered next to the row (e.g. ``SIMULATED``).
     tag: str = ""
     tax_category: TaxCategory = TaxCategory.UNCLASSIFIED
@@ -180,6 +184,7 @@ class TradeRecord:
         self.exit_time = _normalize_aware_dt(self.exit_time)
         self.mode = str(self.mode or "paper").strip().lower()
         self.broker = str(self.broker or "").strip().lower()
+        self.pricing_feed = str(self.pricing_feed or "").strip().lower()
         try:
             self.segment = TradeSegment.validate(self.segment)
         except Exception:  # noqa: BLE001 — keep the raw string, flag it later
@@ -300,6 +305,7 @@ class TradeRecord:
             "tax_category_label": self.tax_category.label,
             "exit_reason": self.exit_reason,
             "source": self.source,
+            "pricing_feed": self.pricing_feed,
             "tag": self.tag,
             "notes": list(self.notes),
         }
