@@ -249,6 +249,50 @@ def test_imported_baseline_run_completes(service, sma_doc, monkeypatch):
     assert run["analysis"]["curves"]["optimized"], "the winner still gets its curve"
 
 
+def test_apply_from_db_backtest_spawns_a_feed_runner(service, fake_manager, sma_doc, monkeypatch):
+    """A Tune This hand-off carries source="db" — the BACKTEST vocabulary.
+
+    The spawned paper runner only accepts feed tags (mstock/dhan/upstox/
+    replay/synthetic); passing "db" through verbatim made RunnerConfig refuse
+    the apply with "source must be one of [...]". The feed answer must come
+    from the spawn-time resolution, not the historical data source.
+    """
+    from backtest.data.source_tags import SOURCE_TAG_VALUES
+
+    monkeypatch.setattr(
+        service, "_attestation_from_cfg",
+        lambda cfg, doc=None, candles=None: {"data_source_real": True, "acknowledged": True},
+    )
+    doc = sma_doc
+    doc["backtestConfig"].update({
+        "source": "db",
+        "baselineImported": True,
+        "baselineMetrics": {"sharpe": -0.08, "total_return_pct": -4.78, "total_trades": 227},
+        "sourceBacktestId": "bt_test123",
+    })
+    run = service.wait(service.submit(doc)["run_id"], timeout=120)
+    assert run["status"] == "completed", run.get("error_message")
+    out = service.apply(run["run_id"], target="paper")
+    cfg = fake_manager.runners[out["instance_id"]].config
+    assert cfg.source != "db"
+    assert cfg.source in SOURCE_TAG_VALUES
+
+
+def test_apply_carries_an_explicit_broker_feed_through(service, fake_manager, sma_doc, monkeypatch):
+    """A backtest that already named a feed keeps it: the runner bars from the
+    same venue the search measured, not a silently different one."""
+    monkeypatch.setattr(
+        service, "_attestation_from_cfg",
+        lambda cfg, doc=None, candles=None: {"data_source_real": True, "acknowledged": True},
+    )
+    doc = sma_doc
+    doc["backtestConfig"]["source"] = "upstox"
+    run = service.wait(service.submit(doc)["run_id"], timeout=120)
+    assert run["status"] == "completed", run.get("error_message")
+    out = service.apply(run["run_id"], target="paper")
+    assert fake_manager.runners[out["instance_id"]].config.source == "upstox"
+
+
 def test_failed_loader_marks_run_failed(store, fake_manager, sma_doc):
     from backtest.optimization.service import OptimizationService
 

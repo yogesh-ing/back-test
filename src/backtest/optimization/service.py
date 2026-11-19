@@ -37,7 +37,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from backtest.data.base import periods_per_year as annualisation_factor
-from backtest.data.sources_policy import default_backtest_source, default_broker_source
+from backtest.data.sources_policy import default_backtest_source, resolve_run_source
 from backtest.engine.monte_carlo import DEFAULT_SIMULATIONS, monte_carlo_trade_order
 from backtest.optimization import analysis as an
 from backtest.optimization.attestation import (
@@ -1366,12 +1366,22 @@ class OptimizationService:
                     raise OptimizationError(
                         "live apply needs an existing live runner (instance_id)", 400
                     )
+                from backtest.data.source_tags import SOURCE_TAG_VALUES
                 from backtest.forward.paper_runner import RunnerConfig
 
                 bt = run.get("backtest_config") or {}
                 default_name = f"opt-{run['strategy_id']}-{run_id[:6]}"
                 if target == "ab_test":
                     default_name += "-B"
+                # The backtest's data source is not the runner's feed: "db"
+                # and "csv" are historical vocabularies the runner rejects.
+                # Only a name that already IS a feed tag carries over; any
+                # other answer gets the same spawn-time resolution every
+                # other trading path uses.
+                bt_source = str(bt.get("source") or "").strip().lower()
+                feed_source = (
+                    bt_source if bt_source in SOURCE_TAG_VALUES else resolve_run_source(None)
+                )
                 new_cfg = RunnerConfig(
                     name=name or default_name,
                     strategy_name=run["strategy_id"],
@@ -1380,9 +1390,7 @@ class OptimizationService:
                     timeframe=str(bt.get("timeframe") or "1day"),
                     strategy_params=strategy_params,
                     mode="paper",
-                    # A runner is a trading path: an unnamed source means the
-                    # broker feed, not a literal generated-data one.
-                    source=str(bt.get("source") or default_broker_source()),
+                    source=feed_source,
                 )
                 new_id = manager.add_runner(new_cfg, start=True)
                 details.update(
