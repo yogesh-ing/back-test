@@ -107,10 +107,12 @@
         if (!strategy || !symbol || !from || !to) return null;
 
         // §6 "engine from current result (whichever was used)". The Optimize
-        // vocabulary is ("driver", "quick_screen", "options"); the backtest
-        // spells the canonical engine as "".
+        // vocabulary is ("driver", "quick_screen", "options"). The backtest
+        // REQUEST spells the canonical engine "", but the RESULT payload
+        // spells it "backtest_driver" (the provenance vocabulary) — passing
+        // that through verbatim is rejected by the optimizer's parser.
         const rawEngine = String(cfg.engine || "").trim().toLowerCase();
-        const engine = rawEngine || "driver";
+        const engine = !rawEngine || rawEngine === "backtest_driver" ? "driver" : rawEngine;
 
         const wf = walkForwardFor(from, to);
         const prov = run.result.provenance || {};

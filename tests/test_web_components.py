@@ -446,7 +446,7 @@ def test_tune_this_prefill_behaviour():
     assert (
         result.returncode == 0
     ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    assert "28 tests passed" in result.stdout
+    assert "29 tests passed" in result.stdout
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")

@@ -99,6 +99,21 @@ test("a canonical run carries engine=driver", () => {
     assert.equal(TuneThis.buildPrefill(RUN()).engine, "driver");
 });
 
+test("the result payload's 'backtest_driver' spelling is translated to driver", () => {
+    /**
+     * /api/backtest/run stamps config.engine="backtest_driver" (provenance
+     * vocabulary) on every canonical result. The optimizer only accepts
+     * driver|quick_screen|options, so passing it through verbatim rejected
+     * every Tune This hand-off at Start ("must be one of driver, ...").
+     */
+    const run = RUN();
+    run.result.config.engine = "backtest_driver";
+    const p = TuneThis.buildPrefill(run);
+    assert.equal(p.engine, "driver");
+    assert.match(p.engineLabel, /Fill-Exact/);
+    assert.equal(p.baselineFillExact, true);
+});
+
 test("a Quick-Screen run carries engine=quick_screen", () => {
     /**
      * The §1.1 bug, one hop downstream. Drop the engine and a result screened
