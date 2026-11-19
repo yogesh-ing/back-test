@@ -1084,12 +1084,22 @@ class OrderExecutor:
         requested: Decimal,
         liquidity: Decimal | None = None,
     ) -> ExecutionResult:
-        if not order.is_terminal:
-            order.reject(f"{code}: {reason}")
+        # An order that already traded was accepted by the market, so a
+        # terminal failure cancels its remainder (PARTIAL->CANCELLED is legal);
+        # it cannot be rejected (PARTIAL->REJECTED is not). Without this a
+        # partial fill that meets a dead bar raises InvalidTransitionError and
+        # the order zombifies, retrying every bar. Mirrors the FOK/IOC handling.
+        if order.status is OrderStatus.PARTIAL:
+            order.cancel(f"{code}: {reason}")
+            status = ExecutionStatus.CANCELLED
+        else:
+            if not order.is_terminal:
+                order.reject(f"{code}: {reason}")
+            status = ExecutionStatus.REJECTED
         result = ExecutionResult(
             order_id=order.order_id,
             symbol=order.symbol,
-            status=ExecutionStatus.REJECTED,
+            status=status,
             remaining_quantity=order.remaining_quantity,
             rejection_code=code,
             reason=reason,
@@ -1097,7 +1107,7 @@ class OrderExecutor:
             available_liquidity=liquidity,
         )
         self._record(result)
-        logger.warning("rejected %s: [%s] %s", order.symbol, code, reason)
+        logger.warning("%s %s: [%s] %s", status, order.symbol, code, reason)
         self._fire(ExecutionEvent.REJECT, order, result)
         return result
 

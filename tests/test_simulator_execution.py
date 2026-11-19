@@ -226,6 +226,23 @@ class TestLiquidity:
         result = executor().execute(buy(100), {**MD, "volume": 0})
         assert result.rejection_code == RejectionCode.NO_LIQUIDITY
 
+    def test_partial_then_dead_bar_cancels_remainder(self):
+        """A partial fill that meets a zero-volume bar must terminate cleanly.
+
+        PARTIAL->REJECTED is illegal, so the remainder is cancelled (the order
+        was already accepted by the market). Regression: this used to raise
+        InvalidTransitionError and leave the order zombified, retrying every bar.
+        """
+        ex = executor()
+        order = buy(5000)
+        assert ex.execute(order, MD).status == ExecutionStatus.PARTIAL
+        result = ex.execute(order, {**MD, "volume": 0})
+        assert result.status == ExecutionStatus.CANCELLED
+        assert result.rejection_code == RejectionCode.NO_LIQUIDITY
+        assert order.status is OrderStatus.CANCELLED
+        assert order.is_terminal
+        assert order.filled_quantity == D("1000.00000000")
+
     def test_missing_volume_assumed_plentiful_by_default(self):
         md = {k: v for k, v in MD.items() if k != "volume"}
         assert executor().execute(buy(5000), md).status == ExecutionStatus.FILLED
