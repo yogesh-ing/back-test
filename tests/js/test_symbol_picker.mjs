@@ -237,7 +237,7 @@ await test("the timeframe dropdown offers ONLY what the symbol has", () => {
     assert.ok(!sel.innerHTML.includes("1min"), "a phantom intraday option is exactly the bug");
 });
 
-await test("a symbol with 1min+1day offers both, coarsest last-selected by default", () => {
+await test("a symbol with 1min+1day offers both, daily selected by default", () => {
     const sel = makeEl("tf-both");
     const offered = Timeframes.applyTo(sel, ["1min", "1day"]);
     eqList(offered, ["1min", "1day"]);
@@ -264,6 +264,20 @@ await test("unknown coverage leaves the full list (absence is not evidence)", ()
     const sel = makeEl("tf-unknown");
     assert.equal(Timeframes.applyTo(sel, null).length, Timeframes.TIMEFRAMES.length);
     assert.equal(Timeframes.applyTo(sel, []).length, Timeframes.TIMEFRAMES.length);
+});
+
+await test("no prior selection defaults to daily, never the coarsest weekly", () => {
+    // The regression: wanted is finest-first, so wanted[last] is 1week — the
+    // page used to open on weekly bars. Daily is the server's own fallback
+    // (periods_per_year / resolve_interval), so the UI matches it.
+    const full = makeEl("tf-default-full");
+    Timeframes.applyTo(full, null);
+    assert.equal(full.value, "1day");
+    assert.notEqual(full.value, "1week");
+    // No daily offered: fall back to the FINEST available, not the coarsest.
+    const intraday = makeEl("tf-default-intraday");
+    Timeframes.applyTo(intraday, ["5min", "1hour"]);
+    assert.equal(intraday.value, "5min");
 });
 
 // ------------------------------------------------------------ symbol picker

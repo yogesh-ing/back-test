@@ -101,7 +101,12 @@
             .map((tf) => `<option value="${tf.id}">${tf.label}</option>`)
             .join("");
         const keep = wanted.find((tf) => tf.id === toCanonical(previous));
-        select.value = keep ? keep.id : wanted[wanted.length - 1].id;
+        // No surviving selection: default to daily (the server's own fallback
+        // in periods_per_year / resolve_interval), else the finest available.
+        // wanted is finest-first, so wanted[last] is the COARSEST — defaulting
+        // to it opened the page on weekly bars.
+        const fallback = wanted.find((tf) => tf.id === "1day") || wanted[0];
+        select.value = keep ? keep.id : fallback.id;
         return wanted.map((tf) => tf.id);
     }
 
