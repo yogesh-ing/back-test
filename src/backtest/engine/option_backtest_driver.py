@@ -51,6 +51,7 @@ from backtest.instruments.option import OptionContract
 from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.expiry import ExpiryManager
 from backtest.options.feed_adapter import FeedQuoteAdapter
+from backtest.options.margin import MarginCalculator
 from backtest.options.paper_trading import (
     InsufficientMarginError,
     OptionPaperBroker,
@@ -78,6 +79,16 @@ PHASE_A_STRUCTURES: frozenset[str] = frozenset(
 #: Above this conviction the default decider buys an outright option
 #: (uncapped upside) instead of a defined-risk spread.
 DEFAULT_SPREAD_THRESHOLD = 0.7
+
+#: Which direction a structure expresses — used by the signal-flip exit.
+#: Structures not listed (two-sided / calendar) have no single direction,
+#: so a view reversal is not a flip for them.
+_STRUCTURE_DIRECTION: dict[str, Direction] = {
+    "long_call": Direction.BULLISH,
+    "bull_call_spread": Direction.BULLISH,
+    "long_put": Direction.BEARISH,
+    "bear_put_spread": Direction.BEARISH,
+}
 
 
 class UnsupportedStructureError(ValueError):
@@ -428,6 +439,13 @@ class BacktestConfig:
     ``selector_type`` / ``selector_kwargs`` / ``decider`` are the seam's
     injection points; ``squareoff_minutes_before`` is passed to the
     ``ExpiryManager``.
+
+    Exit knobs are opt-in (``None``/``False`` = legacy hold-to-expiry
+    behaviour).  Stops and targets are fractions of the structure's **net
+    entry premium** (``abs(total_entry_cost)``), measured against
+    ``net_open_pnl`` (already net of entry commissions and statutory fees)
+    and evaluated **at bar close** on marked prices — intrabar slippage
+    through the stop level is not modelled, so real fills can be worse.
     """
 
     capital: float = 1_000_000.0
@@ -439,6 +457,9 @@ class BacktestConfig:
     strategy_params: Mapping[str, Any] = field(default_factory=dict)
     squareoff_minutes_before: int = 0
     max_open_structures: int | None = None  # PRD risk.max_positions; None = unlimited
+    stop_loss_pct: float | None = None
+    take_profit_pct: float | None = None
+    exit_on_signal_flip: bool = False
 
 
 @dataclass(frozen=True)
@@ -457,6 +478,9 @@ class BacktestResult:
     metrics: dict[str, Any]
     config: BacktestConfig
     pricing_feed: str
+    #: Per-bar aggregate position greeks (feed path only; theta per year,
+    #: vega per 1 vol point, signed by leg direction × units).
+    greeks_curve: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -465,6 +489,7 @@ class BacktestResult:
             "trades": [record.to_dict() for record in self.trade_log],
             "equity_curve": [point.to_dict() for point in self.equity_curve],
             "pricing_feed": self.pricing_feed,
+            "greeks_curve": self.greeks_curve,
         }
 
 
@@ -477,6 +502,7 @@ class OptionBacktestDriver:
         → strategy.generate_market_view(candles_window)
         → build_intent_from_view (the A3 seam)
         → broker.execute_structure → broker.update_mtm
+        → _manage_exits (opt-in stop/target/flip at bar close)
         → expiry_manager.process_expiries → capture_equity
 
     Two correctness-critical details baked in:
@@ -548,7 +574,11 @@ class OptionBacktestDriver:
 
         self.trade_log: list[StructureTradeRecord] = []
         self.equity_curve: list[EquityPoint] = []
+        self.greeks_curve: list[dict[str, Any]] = []
         self._skipped_entries: list[dict[str, Any]] = []
+        self._margin_calc = MarginCalculator()
+        self._structure_margin: dict[str, Decimal] = {}
+        self._peak_margin = Decimal("0")
 
     # -- main loop -------------------------------------------------------
 
@@ -583,13 +613,23 @@ class OptionBacktestDriver:
         if view is not None and chain:
             self._try_entry(view, chain, expiry, timestamp)
 
-        # 5. MTM, expiry pipeline, snapshot
+        # 5. MTM, engine-tier exits, expiry pipeline, snapshot
         self.broker.update_mtm(self.quote_provider, timestamp)
+        self._manage_exits(view, timestamp)
         self.expiry_manager.process_expiries(
             self.quote_provider,
             self.settlement_provider,
             as_of=timestamp,
         )
+        self._capture_greeks(timestamp)
+        open_margin = sum(
+            (
+                self._structure_margin.get(s.structure_id, Decimal("0"))
+                for s in self.broker.get_open_structures()
+            ),
+            Decimal("0"),
+        )
+        self._peak_margin = max(self._peak_margin, open_margin)
         self.equity_curve.append(capture_equity(self.broker, timestamp))
 
     def _try_entry(
@@ -635,8 +675,118 @@ class OptionBacktestDriver:
         positions: list,
         timestamp: datetime,
     ) -> None:
-        """Hook for bookkeeping when a structure fills (e.g. entry logging)."""
+        """Record the structure's entry-time margin for return-on-margin.
+
+        Uses the conservative V1 SPAN approximation
+        (:class:`MarginCalculator`): premium for long legs, SPAN+exposure
+        for shorts, spread netting for two-leg verticals.  Entry spot comes
+        from the view — the same spot the strikes were selected against.
+        """
+        if not positions:
+            return
+        spot = float(view.spot_price or 0)
+        longs = [p for p in positions if p.is_long]
+        shorts = [p for p in positions if p.is_short]
+        if len(positions) == 1 and longs:
+            p = positions[0]
+            margin = self._margin_calc.calculate_long_margin(
+                float(p.entry_price), p.lot_size, p.quantity
+            ).net_margin
+        elif len(longs) == 1 and len(shorts) == 1:
+            long_leg, short_leg = longs[0], shorts[0]
+            margin = self._margin_calc.calculate_spread_margin(
+                long_strike=float(long_leg.strike),
+                short_strike=float(short_leg.strike),
+                long_premium=float(long_leg.entry_price),
+                short_premium=float(short_leg.entry_price),
+                lot_size=long_leg.lot_size,
+                lots=long_leg.quantity,
+                underlying_price=spot,
+            ).net_margin
+        else:
+            margin = 0.0
+            for p in positions:
+                if p.is_long:
+                    margin += self._margin_calc.calculate_long_margin(
+                        float(p.entry_price), p.lot_size, p.quantity
+                    ).net_margin
+                else:
+                    margin += self._margin_calc.calculate_short_margin(
+                        spot, float(p.strike), p.lot_size, p.quantity,
+                        float(p.entry_price),
+                    ).net_margin
+        self._structure_margin[positions[0].structure_id] = Decimal(str(margin))
+
+    def _manage_exits(self, view: MarketView | None, timestamp: datetime) -> None:
+        """Bar-close exit pass: stop/target on net premium, then signal flip.
+
+        Risk exits take priority over the flip.  A structure entered this
+        same bar is evaluated too — its ``net_open_pnl`` starts negative by
+        the entry costs, so a very tight stop can fire immediately; that is
+        the honest bar-close semantics, not a bug.
+        """
+        cfg = self.config
+        if (
+            cfg.stop_loss_pct is None
+            and cfg.take_profit_pct is None
+            and not cfg.exit_on_signal_flip
+        ):
+            return
+        for structure in self.broker.get_open_structures():
+            reason = self._exit_reason(structure, view)
+            if reason is not None:
+                self.broker.close_structure(
+                    structure.structure_id,
+                    self.quote_provider,
+                    timestamp,
+                    reason=reason,
+                )
+
+    def _exit_reason(
+        self, structure: StructurePosition, view: MarketView | None
+    ) -> str | None:
+        cfg = self.config
+        basis = abs(structure.total_entry_cost)
+        if basis > 0:
+            pnl = structure.net_open_pnl
+            if cfg.stop_loss_pct is not None and pnl <= -Decimal(str(cfg.stop_loss_pct)) * basis:
+                return "stop_loss"
+            if cfg.take_profit_pct is not None and pnl >= Decimal(str(cfg.take_profit_pct)) * basis:
+                return "take_profit"
+        if cfg.exit_on_signal_flip and view is not None:
+            wanted = _STRUCTURE_DIRECTION.get(structure.structure_type)
+            if (
+                wanted is not None
+                and view.direction is not Direction.NEUTRAL
+                and view.direction is not wanted
+            ):
+                return "signal_flip"
         return None
+
+    def _capture_greeks(self, timestamp: datetime) -> None:
+        """Aggregate open-leg greeks into one curve point per bar.
+
+        Feed path only: the legacy synthetic quote dict carries no greeks,
+        so its curve stays empty and its loop does no extra pricing calls.
+        """
+        if self.pricing_feed is None:
+            return
+        totals = {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+        found = False
+        for structure in self.broker.get_open_structures():
+            for leg in structure.legs:
+                if leg.status is not PositionStatus.OPEN:
+                    continue
+                quote = self.quote_provider.get_quote(leg.instrument_token)
+                if "delta" not in quote:
+                    continue
+                found = True
+                sign = 1.0 if leg.is_long else -1.0
+                units = float(leg.total_quantity)
+                for key in totals:
+                    totals[key] += sign * units * float(quote.get(key) or 0.0)
+        if found:
+            self.greeks_curve.append({"timestamp": timestamp.isoformat(), **totals})
 
     def _chain_for(
         self,
@@ -673,6 +823,11 @@ class OptionBacktestDriver:
         equity = [float(point.equity) for point in self.equity_curve]
         closed = [r for r in self.trade_log if not r.is_open]
         wins = [r for r in closed if r.is_win]
+        closed_structures = self.broker.get_closed_structures()
+        net_realized = sum((s.net_pnl for s in closed_structures), Decimal("0"))
+        premium_deployed = sum(
+            (abs(s.total_entry_cost) for s in closed_structures), Decimal("0")
+        )
         metrics = {
             "total_trades": len(self.trade_log),
             "closed_trades": len(closed),
@@ -682,6 +837,18 @@ class OptionBacktestDriver:
             "final_equity": str(self.equity_curve[-1].equity) if self.equity_curve else None,
             "max_drawdown": _max_drawdown(equity),
             "skipped_entries": len(self._skipped_entries),
+            # Margin-aware returns (plan V3): net of the full fee stack.
+            # Premium denominator is the per-trade sum of |net entry cost|;
+            # margin denominator is the peak concurrent open margin.
+            "net_realized_pnl": str(net_realized),
+            "premium_deployed": str(premium_deployed),
+            "return_on_premium": (
+                float(net_realized / premium_deployed) if premium_deployed > 0 else None
+            ),
+            "peak_margin_used": str(self._peak_margin),
+            "return_on_margin": (
+                float(net_realized / self._peak_margin) if self._peak_margin > 0 else None
+            ),
         }
         return BacktestResult(
             trade_log=self.trade_log,
@@ -694,6 +861,7 @@ class OptionBacktestDriver:
                 if self.pricing_feed is not None
                 else self.quote_provider.source_name
             ),
+            greeks_curve=self.greeks_curve,
         )
 
 

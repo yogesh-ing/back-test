@@ -158,6 +158,14 @@ class FeedQuoteAdapter:
             "oi": 0,
             "pricing_feed": quote.source_tag,
             "model": not self.feed.data_source_real,
+            # Per-unit greeks straight off the feed (theta per year, vega per
+            # 1 vol point). The broker ignores extra keys; the driver's
+            # greeks-curve pass reads them.
+            "iv": quote.iv,
+            "delta": quote.delta,
+            "gamma": quote.gamma,
+            "theta": quote.theta,
+            "vega": quote.vega,
         }
 
     # -- SettlementPriceProvider protocol --------------------------------
