@@ -32,12 +32,13 @@ import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Mapping, Protocol, runtime_checkable
+from typing import Mapping
 
 import numpy as np
 import pandas as pd
 
 from backtest.options.greeks import BlackScholes
+from backtest.options.pricing_feed import LegQuote, OptionPricingFeed
 from backtest.options.quote_providers import MIN_QUOTE_TICK, bs_price
 from backtest.timekeeping import EXCHANGE_TZ, from_market_clock
 
@@ -90,65 +91,6 @@ def _aware_exchange(bar_time: datetime) -> datetime:
         # Naive bar stamps are exchange time — the declared door, not a guess.
         return from_market_clock(bar_time)
     return bar_time.astimezone(EXCHANGE_TZ)
-
-
-@dataclass(frozen=True)
-class LegQuote:
-    """One leg's model quote at one bar. Money is Decimal, greeks are float.
-
-    ``theta`` is per year and ``vega`` per 1 vol point (the
-    :class:`~backtest.options.greeks.OptionGreeks` convention).
-    ``bar_time`` pins the quote for deterministic replay debugging.
-    """
-
-    mid: Decimal
-    bid: Decimal
-    ask: Decimal
-    iv: float
-    delta: float
-    gamma: float
-    theta: float
-    vega: float
-    source_tag: str
-    bar_time: datetime
-
-
-@runtime_checkable
-class OptionPricingFeed(Protocol):
-    """The only pricing surface the backtest driver may depend on.
-
-    The driver must not import ``bs_price``, ``quote_providers`` or any
-    concrete feed class — only this protocol (enforced by an import-graph
-    test in Phase 2).
-    """
-
-    source_tag: str
-    data_source_real: bool
-
-    def set_reference(self, bar_time: datetime) -> None:
-        """Pin quote generation to a bar time (determinism)."""
-        ...
-
-    def quote(
-        self,
-        *,
-        underlying: str,
-        strike: float,
-        expiry: date,
-        option_type: str,
-        spot: float,
-        bar_time: datetime | None = None,
-    ) -> LegQuote:
-        """Price one leg. ``bar_time`` defaults to the pinned reference."""
-        ...
-
-    def expiry_settlement(
-        self,
-        session_closes: pd.Series,
-        volumes: pd.Series | None = None,
-    ) -> Decimal:
-        """Settlement price for the expiry session (VWAP of the last 30 bars)."""
-        ...
 
 
 @dataclass

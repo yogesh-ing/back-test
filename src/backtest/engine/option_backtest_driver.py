@@ -50,18 +50,17 @@ import pandas as pd
 from backtest.instruments.option import OptionContract
 from backtest.options.execution_gate import RESEARCH_STRUCTURES
 from backtest.options.expiry import ExpiryManager
+from backtest.options.feed_adapter import FeedQuoteAdapter
 from backtest.options.paper_trading import (
     InsufficientMarginError,
     OptionPaperBroker,
     PositionStatus,
     StructurePosition,
 )
-from backtest.options.quote_providers import (
-    SyntheticChainGenerator,
-    SyntheticQuoteProvider,
-)
+from backtest.options.pricing_feed import OptionPricingFeed
 from backtest.options.selector import create_selector
 from backtest.options.structures import create_structure
+from backtest.options.synthetic_wiring import build_synthetic_quotes
 from backtest.strategy.intent import Direction, MarketView, TradeIntent
 from backtest.strategies.option_directional import DirectionalOptions
 
@@ -447,6 +446,9 @@ class BacktestResult:
     """Everything one run produced — trade log, equity curve, alerts, and
     a metrics summary.  Money fields stay :class:`Decimal`; call ``to_dict``
     for the JSON-safe shape.
+
+    ``pricing_feed`` is required and has no default: a result that cannot
+    state how its options were priced is a bug (plan V3 §3, rule 2).
     """
 
     trade_log: list[StructureTradeRecord]
@@ -454,6 +456,7 @@ class BacktestResult:
     alerts: list[dict[str, Any]]
     metrics: dict[str, Any]
     config: BacktestConfig
+    pricing_feed: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -461,6 +464,7 @@ class BacktestResult:
             "alerts": self.alerts,
             "trades": [record.to_dict() for record in self.trade_log],
             "equity_curve": [point.to_dict() for point in self.equity_curve],
+            "pricing_feed": self.pricing_feed,
         }
 
 
@@ -496,19 +500,35 @@ class OptionBacktestDriver:
         *,
         config: BacktestConfig | None = None,
         underlying: str = "NIFTY",
-        generator: SyntheticChainGenerator | None = None,
+        generator: Any | None = None,
         broker: OptionPaperBroker | None = None,
         strategy: Any | None = None,
         expiry_manager: ExpiryManager | None = None,
+        pricing_feed: OptionPricingFeed | None = None,
     ) -> None:
         """All collaborators are injectable for testing; each ``None``
-        default constructs the production default."""
+        default constructs the production default.
+
+        ``pricing_feed`` selects the feed-backed path (plan V3): any
+        :class:`OptionPricingFeed` prices the chains, quotes and settlement
+        through :class:`FeedQuoteAdapter`. ``None`` keeps the legacy
+        synthetic-generator path byte-identical for the existing suite.
+        """
         self.candles = candles
         self.config = config or BacktestConfig()
         self.underlying = underlying
+        self.pricing_feed = pricing_feed
 
-        self.generator = generator or SyntheticChainGenerator()
-        self.quote_provider = SyntheticQuoteProvider(self.generator)
+        if pricing_feed is not None:
+            self.generator = None
+            self.quote_provider = FeedQuoteAdapter(pricing_feed, underlying)
+            # The adapter settles off the feed's VWAP of the session closes.
+            self.settlement_provider = self.quote_provider
+        else:
+            self.generator, self.quote_provider = build_synthetic_quotes(generator)
+            # Settlement off the generator's spot — the same synthetic world
+            # the options priced against (still injectable for tests).
+            self.settlement_provider = _GeneratorSettlementProvider(self.generator)
         self.broker = broker or OptionPaperBroker(
             capital=self.config.capital,
             slippage_pct=self.config.slippage_pct,
@@ -526,10 +546,6 @@ class OptionBacktestDriver:
             squareoff_minutes_before=self.config.squareoff_minutes_before,
         )
 
-        # Settlement off the generator's spot — the same synthetic world
-        # the options priced against (still injectable for tests).
-        self.settlement_provider = _GeneratorSettlementProvider(self.generator)
-
         self.trade_log: list[StructureTradeRecord] = []
         self.equity_curve: list[EquityPoint] = []
         self._skipped_entries: list[dict[str, Any]] = []
@@ -544,10 +560,15 @@ class OptionBacktestDriver:
         return self._compile()
 
     def _process_bar(self, timestamp: datetime, bar: pd.Series) -> None:
-        # 1. Spot + pricing reference
+        # 1. Spot + pricing reference. Feed path pins the clock FIRST so the
+        # adapter buckets the close into the right session for settlement.
         close = float(bar["close"])
-        self.generator.set_spot(self.underlying, close)
-        self.quote_provider.set_reference(timestamp)
+        if self.pricing_feed is not None:
+            self.quote_provider.set_reference(timestamp)
+            self.quote_provider.set_spot(self.underlying, close)
+        else:
+            self.generator.set_spot(self.underlying, close)
+            self.quote_provider.set_reference(timestamp)
 
         # 2. Strategy view on the full history up to and including this bar
         window = self.candles.loc[: bar.name]
@@ -627,6 +648,12 @@ class OptionBacktestDriver:
         option_type = "CE"
         if view is not None and view.direction is Direction.BEARISH:
             option_type = "PE"
+        if self.pricing_feed is not None:
+            return self.quote_provider.generate_chain(
+                self.underlying,
+                expiry=expiry,
+                option_type=option_type,
+            )
         return self.generator.generate_chain(
             self.underlying,
             expiry=expiry,
@@ -662,6 +689,11 @@ class OptionBacktestDriver:
             alerts=[alert.to_dict() for alert in self.expiry_manager.alerts],
             metrics=metrics,
             config=self.config,
+            pricing_feed=(
+                self.pricing_feed.source_tag
+                if self.pricing_feed is not None
+                else self.quote_provider.source_name
+            ),
         )
 
 
