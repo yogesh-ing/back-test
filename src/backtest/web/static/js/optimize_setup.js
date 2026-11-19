@@ -167,7 +167,9 @@
         const C = globalThis.OptCommon;
         const baselineLine = C && C.isNum(bm.sharpe)
             ? `<br><span class="small">Baseline performance: <strong>Sharpe ${C.fmtNum(bm.sharpe, 2)}</strong>`
-              + (C.isNum(bm.total_return_pct) ? ` · Return <strong>${C.fmtPct(bm.total_return_pct)}</strong>` : '')
+              // total_return_pct is already percent (adapter ×100); fmtPct's
+              // default fraction=true would multiply it by 100 a second time.
+              + (C.isNum(bm.total_return_pct) ? ` · Return <strong>${C.fmtPct(bm.total_return_pct, 1, { fraction: false })}</strong>` : '')
               + (C.isNum(bm.total_trades) ? ` · Trades <strong>${bm.total_trades}</strong>` : '')
               + `</span>`
             : '';

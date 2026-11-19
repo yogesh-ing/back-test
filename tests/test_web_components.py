@@ -450,6 +450,23 @@ def test_tune_this_prefill_behaviour():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_prefill_banner_quotes_return_once():
+    """The banner's baseline return arrives already-percent (total_return_pct);
+    fmtPct's fraction default must not multiply it by 100 a second time."""
+    result = subprocess.run(
+        ["node", str(_REPO_ROOT / "tests" / "js" / "test_prefill_banner.mjs")],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert (
+        result.returncode == 0
+    ), f"node harness failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "3 tests passed" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_risk_page_escapes_every_server_string():
     """F14: /risk renders from innerHTML, so a stored value must arrive as text.
 
