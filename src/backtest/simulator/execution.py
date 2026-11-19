@@ -269,6 +269,12 @@ class ExecutionConfig:
     allow_partial_fills: bool = True
     require_volume: bool = False
     """Reject when the snapshot has no volume, instead of assuming plenty."""
+    volume_is_liquidity: bool = True
+    """Whether the bar's volume is a liquidity signal. Set False for an
+    instrument that has no traded volume — an index is computed, not traded,
+    so its bars carry volume=0 by construction. With this False the
+    zero-volume rejection and the participation cap are both skipped, so a
+    benchmark backtest fills instead of silently producing zero trades."""
 
     # ---- queue and price improvement ----
     touch_fill_probability: Decimal = Decimal("0.5")
@@ -354,6 +360,7 @@ class ExecutionConfig:
             "max_latency_ms": str(self.max_latency_ms),
             "max_participation": str(self.max_participation),
             "allow_partial_fills": self.allow_partial_fills,
+            "volume_is_liquidity": self.volume_is_liquidity,
             "touch_fill_probability": str(self.touch_fill_probability),
             "price_improvement_probability": str(self.price_improvement_probability),
             "enforce_market_hours": self.enforce_market_hours,
@@ -366,6 +373,7 @@ def free_executor(
     portfolio: "Portfolio | None" = None,
     max_participation: Decimal | str | None = None,
     slippage: "SlippageCalculator | None" = None,
+    volume_is_liquidity: bool = True,
 ) -> "OrderExecutor":
     """Deterministic, zero-fee :class:`OrderExecutor`.
 
@@ -389,6 +397,7 @@ def free_executor(
         seed=42,
         price_improvement_probability=Decimal("0"),
         enforce_market_hours=False,
+        volume_is_liquidity=volume_is_liquidity,
     )
     if max_participation is not None:
         config.max_participation = Decimal(max_participation)
@@ -405,6 +414,7 @@ def costed_executor(
     broker: str | BrokerProfile | None = "mstock",
     max_participation: Decimal | str | None = "1",
     slippage: "SlippageCalculator | None" = None,
+    volume_is_liquidity: bool = True,
 ) -> "OrderExecutor":
     """Deterministic, FULL-COST :class:`OrderExecutor` (rule R-E1).
 
@@ -425,6 +435,7 @@ def costed_executor(
         seed=42,
         price_improvement_probability=Decimal("0"),
         enforce_market_hours=False,
+        volume_is_liquidity=volume_is_liquidity,
     )
     if max_participation is not None:
         config.max_participation = Decimal(max_participation)
@@ -681,10 +692,11 @@ class OrderExecutor:
     def available_liquidity(self, snapshot: MarketSnapshot) -> Decimal | None:
         """How much of the bar's volume one order may take.
 
-        ``None`` when the snapshot carries no volume — the caller then decides
-        whether to assume plenty or reject.
+        ``None`` when the snapshot carries no volume — or when volume is not a
+        liquidity signal for this instrument (``volume_is_liquidity=False``, an
+        index) — the caller then decides whether to assume plenty or reject.
         """
-        if snapshot.volume is None:
+        if not self.config.volume_is_liquidity or snapshot.volume is None:
             return None
         return quantize_price(abs(snapshot.volume) * self.config.max_participation)
 
@@ -712,14 +724,15 @@ class OrderExecutor:
         if not self.is_market_open(snapshot.timestamp):
             return False, RejectionCode.MARKET_CLOSED, "market is closed"
 
-        if self.config.require_volume and snapshot.volume is None:
-            return (
-                False,
-                RejectionCode.NO_LIQUIDITY,
-                "market data carries no volume",
-            )
-        if snapshot.volume is not None and snapshot.volume <= ZERO:
-            return False, RejectionCode.NO_LIQUIDITY, "no volume traded"
+        if self.config.volume_is_liquidity:
+            if self.config.require_volume and snapshot.volume is None:
+                return (
+                    False,
+                    RejectionCode.NO_LIQUIDITY,
+                    "market data carries no volume",
+                )
+            if snapshot.volume is not None and snapshot.volume <= ZERO:
+                return False, RejectionCode.NO_LIQUIDITY, "no volume traded"
 
         if not order.is_fillable(market_data):
             # Not an error: a limit away from the market simply rests.

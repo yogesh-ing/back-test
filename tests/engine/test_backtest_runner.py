@@ -132,3 +132,43 @@ def test_shared_helpers_have_one_canonical_home():
     assert _FrameSource is FrameSource
     assert _all_in_size is all_in_size
     assert paper_free_executor is free_executor
+
+
+def _oscillating_candles(volume: float):
+    """A deterministic price sine that forces repeated SMA crosses, with a
+    flat volume field — the shape an index bar has (volume=0 by construction)."""
+    import numpy as np
+    import pandas as pd
+
+    n = 240
+    close = 1000.0 + 80.0 * np.sin(2.0 * np.pi * np.arange(n) / 60.0)
+    open_ = np.concatenate([[close[0]], close[:-1]])
+    idx = pd.date_range("2024-01-01", periods=n, freq="D", name="ts")
+    return pd.DataFrame(
+        {
+            "open": open_,
+            "high": np.maximum(open_, close) + 1.0,
+            "low": np.minimum(open_, close) - 1.0,
+            "close": close,
+            "volume": np.full(n, volume),
+        },
+        index=idx,
+    )
+
+
+def test_index_backtest_trades_despite_zero_volume():
+    """An index's volume=0 bars must not reject every fill: the same bars
+    trade on NIFTY (index) but stay flat on ABB (equity), and adding real
+    volume makes the equity trade too — isolating the liquidity gate."""
+    params = {"fast": 5, "slow": 20}
+    zero_vol = _oscillating_candles(0.0)
+
+    index_run = canonical.run_backtest(zero_vol, "sma_crossover", params, "NIFTY", _CAPITAL)
+    equity_run = canonical.run_backtest(zero_vol, "sma_crossover", params, "ABB", _CAPITAL)
+    liquid_equity = canonical.run_backtest(
+        _oscillating_candles(100_000.0), "sma_crossover", params, "ABB", _CAPITAL
+    )
+
+    assert index_run.metrics["num_trades"] > 0
+    assert equity_run.metrics["num_trades"] == 0
+    assert liquid_equity.metrics["num_trades"] > 0

@@ -236,6 +236,24 @@ class TestLiquidity:
         result = ex.execute(buy(100), md)
         assert result.rejection_code == RejectionCode.NO_LIQUIDITY
 
+    def test_volume_is_liquidity_defaults_true(self):
+        assert ExecutionConfig().volume_is_liquidity is True
+
+    def test_zero_volume_fills_when_volume_not_liquidity(self):
+        """An index carries volume=0 by construction — it must still fill."""
+        ex = executor(config=ExecutionConfig(volume_is_liquidity=False, seed=7))
+        result = ex.execute(buy(100), {**MD, "volume": 0})
+        assert result.status == ExecutionStatus.FILLED
+        assert result.filled_quantity == D("100.00000000")
+        assert result.available_liquidity is None
+
+    def test_participation_cap_ignored_when_volume_not_liquidity(self):
+        """No volume signal means no participation cap — the whole order fills."""
+        ex = executor(config=ExecutionConfig(volume_is_liquidity=False, seed=7))
+        result = ex.execute(buy(50_000), {**MD, "volume": 0})
+        assert result.status == ExecutionStatus.FILLED
+        assert result.filled_quantity == D("50000.00000000")
+
 
 # ===========================================================================
 # Limit orders and queue position

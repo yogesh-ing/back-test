@@ -35,6 +35,7 @@ import pandas as pd
 
 from backtest.data.base import CANONICAL_TIMEFRAMES as SUPPORTED_TIMEFRAMES
 from backtest.data.base import normalize_timeframe, periods_per_year
+from backtest.data.coverage import classify_instrument
 from backtest.data.frame_source import FrameSource
 from backtest.engine.backtest_driver import BacktestDriver
 from backtest.engine.backtester import BacktestConfig, BacktestResult
@@ -249,10 +250,21 @@ def run_backtest(
         if slippage_bps is not None and float(slippage_bps) > 0
         else None
     )
+    # An index is computed, not traded: its bars carry volume=0 by construction.
+    # Treating that as "no liquidity" rejects every fill and silently yields a
+    # 0-trade backtest, so for an index volume is not a liquidity signal.
+    volume_is_liquidity = classify_instrument(symbol) != "index"
     if broker:
-        executor = costed_executor(portfolio, broker=broker, slippage=slippage)
+        executor = costed_executor(
+            portfolio, broker=broker, slippage=slippage, volume_is_liquidity=volume_is_liquidity
+        )
     else:
-        executor = free_executor(portfolio, max_participation="1", slippage=slippage)
+        executor = free_executor(
+            portfolio,
+            max_participation="1",
+            slippage=slippage,
+            volume_is_liquidity=volume_is_liquidity,
+        )
     driver = BacktestDriver(
         source=FrameSource(candles),
         strategy=strategy_instance,
