@@ -296,4 +296,50 @@ test("an unusable result renders nothing rather than a broken shell", () => {
     assert.equal(TuneThis.buildPrefill({ result: { config: {} } }), null);
 });
 
+// ------------------------------------------------- model-priced (plan V3 §4.2)
+test("a model-priced result DISABLES the button with the exact tooltip", () => {
+    /**
+     * The one exception to "never disable": a Black-Scholes simulation is
+     * research-only and the optimizer refuses it (403), so a live button would
+     * only walk the user into a rejection. The flag is the server-stamped
+     * readiness, not a client claim.
+     */
+    const run = RUN();
+    run.result.readiness = {
+        all_green: false, tune_this_available: false,
+        certifiable: false, certification_reason: "model_pricing",
+        red_flags: ["Pricing feed"], unproven: [],
+    };
+    const html = renderWith(run);
+    assert.match(html, /id="tuneThisBtn" disabled/);
+    assert.match(html, /Model-priced backtests cannot be certified or deployed\. Run on real data to enable\./);
+    assert.match(html, /research only/);
+});
+
+test("a model-priced result is not offered as tunable", () => {
+    const run = RUN();
+    run.result.readiness = {
+        certifiable: false, certification_reason: "model_pricing",
+        tune_this_available: false, red_flags: ["Pricing feed"],
+    };
+    const html = renderWith(run);
+    assert.doesNotMatch(html, /All eight readiness checks passed/);
+    assert.doesNotMatch(html, /Nothing is run until you press Start/);
+    assert.match(html, /cannot be certified/);
+});
+
+test("a weak REAL result is still clickable (model gate is reason-specific)", () => {
+    /** certifiable:false alone must NOT disable — only the model_pricing reason
+     *  does. An ordinary weak equity result keeps the clickable, demoted button. */
+    const run = RUN();
+    run.result.readiness = {
+        all_green: false, tune_this_available: false,
+        certifiable: false, certification_reason: null,
+        red_flags: ["Data source"], unproven: [],
+    };
+    const html = renderWith(run);
+    assert.match(html, /tuneThisBtn/);
+    assert.doesNotMatch(html, /disabled/);
+});
+
 console.log(`\n${passed} tests passed`);

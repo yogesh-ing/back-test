@@ -61,7 +61,7 @@ function applyParamOverrides(overrides) {
 }
 
 function collectConfig() {
-    return {
+    const cfg = {
         strategy: $("strategy").value,
         symbol: $("symbol").value,
         timeframe: timeframeValue(),
@@ -74,6 +74,8 @@ function collectConfig() {
         // result can never silently come from the approximate path.
         mode: engineMode(),
     };
+    if (optionsModeOn()) Object.assign(cfg, optionsConfigFields());
+    return cfg;
 }
 
 /**
@@ -97,6 +99,43 @@ function timeframeValue() {
 function engineMode() {
     const box = $("fastPreview");
     return box && box.checked ? "quick_screen" : "";
+}
+
+// ---------------------------------------------------------------------------
+// Options mode (plan V3 §4) — a model-priced research sandbox
+// ---------------------------------------------------------------------------
+
+/** True only when the toggle is on AND the deployment revealed the section. */
+function optionsModeOn() {
+    const box = $("optionsMode");
+    const section = $("optionsModelSection");
+    return !!(box && box.checked && section && !section.hidden);
+}
+
+/** Show/hide the feed + IV rows and the persistent mock-data banner. */
+function syncOptionsModeUI() {
+    const on = optionsModeOn();
+    if ($("pricingFeedRow")) $("pricingFeedRow").hidden = !on;
+    if ($("modelIvRow")) $("modelIvRow").hidden = !on;
+    const banner = $("optionsModelBanner");
+    if (!banner) return;
+    banner.hidden = !on;
+    banner.innerHTML = on
+        ? `<div class="card"><span class="badge bg-light-danger">⚠ MODEL-PRICED</span> `
+          + `<span class="muted small">Option premiums are Black-Scholes simulations off the `
+          + `underlying candles, not observed option-chain quotes. Research only — this run `
+          + `cannot be certified, optimized, or deployed to paper.</span></div>`
+        : "";
+}
+
+/** The model-feed fields added to a run config when options mode is on. */
+function optionsConfigFields() {
+    const iv = Number($("modelIv") && $("modelIv").value);
+    return {
+        pricing_feed: ($("pricingFeed") && $("pricingFeed").value) || "model_bs",
+        model_params: iv > 0 ? { iv_source: "constant", iv_constant: iv / 100 } : {},
+        exits: { stop_loss_pct: 0.3, take_profit_pct: 0.5, exit_on_signal_flip: true },
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +165,8 @@ async function runBacktest() {
     $("pagination").innerHTML = "";
 
     try {
-        const result = await fetchJSON("/api/backtest/run", {
+        const endpoint = optionsModeOn() ? "/api/backtest/options-model" : "/api/backtest/run";
+        const result = await fetchJSON(endpoint, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify(config),
         });
@@ -203,6 +243,7 @@ function renderResults(result) {
     // these two badges (PRD backTest-enhance §1.1/§1.2).
     if (typeof Provenance !== "undefined") Provenance.renderInto("resultProvenance", result.provenance);
     renderMetricsCards("metricsCards", result.metrics);
+    renderVolRegimeNote(result.vol_regime);
     // PRD §2.2: risk/tail, drawdown detail, trade quality and statistical
     // confidence, plus the insufficient-sample banner when it applies.
     if (typeof MetricSections !== "undefined") MetricSections.renderInto("metricSections", result.metrics);
@@ -222,6 +263,16 @@ function renderResults(result) {
 }
 
 const CHART_CANVASES = { equity: "equityChart", drawdown: "drawdownChart", signals: "signalsChart" };
+
+/** One-line vol-regime label below the metrics cards (plan V3 §4). Only model
+ *  runs carry it; an equity run leaves the note hidden. */
+function renderVolRegimeNote(regime) {
+    const el = $("volRegimeNote");
+    if (!el) return;
+    if (!regime || !regime.note) { el.hidden = true; el.textContent = ""; return; }
+    el.hidden = false;
+    el.textContent = regime.note;
+}
 
 function renderChartForPane(pane) {
     if (!lastRun) return;
@@ -250,6 +301,13 @@ function renderChartForPane(pane) {
 
 function saveToCompare() {
     if (!lastRun) { showToast("Run a backtest first", "warning"); return; }
+    // Plan V3 §4.3 decision (a): equity and option curves are never compared on
+    // one axis (₹ equity vs option-premium P&L are different instruments). A
+    // model-priced run stays out of the equity comparison entirely.
+    if (lastRun.result && lastRun.result.pricing_feed === "model_bs") {
+        showToast("Model-priced option runs can't be compared with equity curves — different instruments, different scales.", "warning");
+        return;
+    }
     if (lastRun.stored && lastRun.stored.series_status !== "present") {
         showToast("Chart data is not stored for this run — re-run it before saving to compare", "warning");
         return;
@@ -426,6 +484,14 @@ async function openStoredRun(runId) {
         if (cfg.capital) $("capital").value = cfg.capital;
         if ($("fastPreview")) $("fastPreview").checked = cfg.mode === "quick_screen";
     } catch { /* form nodes always present */ }
+    // A stored model run re-lights the options toggle so the banner and feed
+    // match the result being read back (the ledger row, not a client flag).
+    const isModel = payload.pricing_feed === "model_bs";
+    if ($("optionsMode")) {
+        $("optionsMode").checked = isModel;
+        if (isModel && $("optionsModelSection")) $("optionsModelSection").hidden = false;
+        syncOptionsModeUI();
+    }
     fetchJSON(`/api/strategies/${encodeURIComponent(cfg.strategy)}/params`)
         .then((p) => { renderParams(p); applyParamOverrides(cfg.params); })
         .catch(() => { /* stored result still shown */ });
@@ -452,6 +518,16 @@ async function init() {
     $("exportCsvBtn").addEventListener("click", exportCsv);
     $("promoteBtn").addEventListener("click", promoteToForward);
     loadRecentRuns();
+
+    // Options mode kill switch (plan V3 §5): the toggle stays hidden unless the
+    // deployment enables it. A disabled feature must not appear at all.
+    fetchJSON("/api/config").then((cfg) => {
+        if (cfg && cfg.options_model_backtest_enabled && $("optionsModelSection")) {
+            $("optionsModelSection").hidden = false;
+        }
+    }).catch(() => { /* config offline → options mode stays hidden */ });
+    const optionsBox = $("optionsMode");
+    if (optionsBox) optionsBox.addEventListener("change", syncOptionsModeUI);
 
     // §1.3/§1.4: the picker and the timeframe dropdown are driven by what the
     // server says the chosen symbol actually has, so neither can offer a

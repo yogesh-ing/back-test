@@ -177,6 +177,32 @@
 
         const rd = prefill.readiness;
         const { available, known } = buttonState(rd);
+
+        // Plan V3 §4.2: a model-priced run is the one case where the button IS
+        // disabled. The "never disable" rule above is about *weak* results you
+        // can still tune; a Black-Scholes simulation is research-only and the
+        // optimizer refuses it outright (403), so a live button would only walk
+        // the user into a rejection. The flag is read from the server-stamped
+        // readiness, never a client claim.
+        const modelPriced = rd && rd.certifiable === false
+            && rd.certification_reason === "model_pricing";
+        if (modelPriced) {
+            const tooltip = "Model-priced backtests cannot be certified or deployed. Run on real data to enable.";
+            el.innerHTML = `<div class="tune-this tune-this--caution">
+                <div class="tune-this-head">
+                    <span class="tune-this-title">⚙ Tune This <span class="tune-this-badge">research only</span></span>
+                    <span class="tune-this-sub muted small">Model-priced result — Optimize is locked.</span>
+                </div>
+                <div class="tune-this-body">
+                    <p class="tune-this-hint"><span class="neg">Option premiums here are Black-Scholes `
+                        + `simulations, not observed chain quotes. This result cannot be certified, `
+                        + `optimized, or deployed to paper. Re-run on real option-chain history to unlock Optimize.</span></p>
+                    <button class="btn btn-secondary" id="tuneThisBtn" disabled title="${esc(tooltip)}">⚙ Open in Optimize →</button>
+                </div>
+            </div>`;
+            return;
+        }
+
         const problems = ((rd && rd.red_flags) || []).concat((rd && rd.unproven) || []);
         let hint;
         if (available) {

@@ -61,6 +61,31 @@
             <label for="fastPreview"><input type="checkbox" id="fastPreview"> Fast preview</label>
             <small>Approximate engine. Leave off for the canonical, fill-exact backtest.</small>
         </div>
+        {# Options mode (plan V3 §4). Hidden entirely unless the deployment's
+           kill switch OPTIONS_MODEL_BACKTEST_ENABLED is on — backtest.js reveals
+           it from /api/config. A model-priced run is research-only: the banner,
+           the disabled Tune This button and the readiness check all say so. #}
+        <div class="form-section" id="optionsModelSection" hidden>
+            <h3 class="form-section-title">Options mode</h3>
+            <div class="engine-option">
+                <label for="optionsMode"><input type="checkbox" id="optionsMode"> Price this strategy as an option structure</label>
+                <small>Expresses the equity signal as an ATM option priced by a model feed. Research only — not certifiable or deployable.</small>
+            </div>
+            <div class="form-row" id="pricingFeedRow" hidden>
+                <label for="pricingFeed">Pricing feed</label>
+                <select id="pricingFeed" class="input">
+                    <option value="model_bs" selected>Black-Scholes feed (model)</option>
+                    <option value="chain_history" disabled>Real option-chain history (coming soon)</option>
+                </select>
+                <small class="text-muted">Model premiums are simulated from the underlying candles — not observed option quotes.</small>
+            </div>
+            <div class="form-row" id="modelIvRow" hidden>
+                <label for="modelIv">Model IV override (%)</label>
+                <input type="number" id="modelIv" class="input" min="1" max="200" step="0.5" placeholder="blank = realized vol">
+                <small class="text-muted">Leave blank to drive Black-Scholes with realized volatility from the candles.</small>
+            </div>
+            <div id="optionsModelBanner" role="note" hidden></div>
+        </div>
         <div class="config-actions">
             <button id="runBtn" class="btn btn-primary btn-block" type="button">{{ icon('play', 14) }} Run backtest</button>
             <p>Simulation only. No orders are placed.</p>
@@ -89,6 +114,7 @@
         <div id="persistBadge" class="prov-strip" hidden></div>
         <div id="resultProvenance" class="prov-strip"></div>
         <div id="metricsCards" class="metrics-grid"></div>
+        <div id="volRegimeNote" class="muted small" style="margin-top:8px;" hidden></div>
         <div id="backtestOutput">
             <div id="seriesNotice" hidden></div>
             <div class="card" id="chartCard">

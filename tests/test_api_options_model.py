@@ -198,3 +198,26 @@ def test_missing_dates_refused(client):
 def test_unknown_strategy_refused(client):
     resp = client.post("/api/backtest/options-model", json=dict(_VALID, strategy="no_such_strategy"))
     assert resp.status_code == 400
+
+
+# --- the Backtest tab ships the options-mode UI (plan V3 §4) ------------------
+
+
+def test_backtest_page_ships_options_mode_ui(client):
+    html = client.get("/backtest").get_data(as_text=True)
+    for element_id in (
+        "optionsModelSection", "optionsMode", "pricingFeed", "pricingFeedRow",
+        "modelIv", "optionsModelBanner", "volRegimeNote",
+    ):
+        assert f'id="{element_id}"' in html, f"missing {element_id}"
+    # The feed is preselected to the Black-Scholes model; chain history is locked.
+    assert 'value="model_bs" selected' in html
+    assert 'value="chain_history" disabled' in html
+    # The section starts hidden — the kill switch reveals it from /api/config.
+    assert 'id="optionsModelSection" hidden' in html
+
+
+def test_config_flag_drives_the_toggle(client, monkeypatch):
+    assert client.get("/api/config").get_json()["options_model_backtest_enabled"] is True
+    monkeypatch.setenv("OPTIONS_MODEL_BACKTEST_ENABLED", "false")
+    assert client.get("/api/config").get_json()["options_model_backtest_enabled"] is False
