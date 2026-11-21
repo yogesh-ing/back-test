@@ -304,6 +304,46 @@ def test_option_strategy_allowed(client):
     assert body["config"]["strategy"] == "directional_options"
 
 
+def test_index_trigger_long_ce(client):
+    """Index-triggered long CE runs through the model-priced sandbox."""
+    resp = client.post(
+        "/api/backtest/options-model",
+        json=dict(
+            _VALID,
+            strategy="nifty_trigger_long_ce",
+            params={"trigger_level": 0},
+            symbol="DEMO",
+        ),
+    )
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["pricing_feed"] == "model_bs"
+    assert body["certifiable"] is False
+    assert body["certification_reason"] == "model_pricing"
+    assert body["config"]["strategy"] == "nifty_trigger_long_ce"
+    assert body["metrics"]["total_trades"] >= 1
+
+
+def test_index_trigger_long_pe(client):
+    """Index-triggered long PE runs through the model-priced sandbox."""
+    resp = client.post(
+        "/api/backtest/options-model",
+        json=dict(
+            _VALID,
+            strategy="nifty_trigger_long_pe",
+            params={"trigger_level": 1000000},
+            symbol="DEMO",
+        ),
+    )
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["pricing_feed"] == "model_bs"
+    assert body["certifiable"] is False
+    assert body["certification_reason"] == "model_pricing"
+    assert body["config"]["strategy"] == "nifty_trigger_long_pe"
+    assert body["metrics"]["total_trades"] >= 1
+
+
 def test_unknown_model_param_refused(client):
     resp = client.post("/api/backtest/options-model", json=dict(_VALID, model_params={"bogus": 1}))
     assert resp.status_code == 400
