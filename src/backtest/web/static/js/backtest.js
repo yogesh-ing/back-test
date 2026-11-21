@@ -74,7 +74,11 @@ function collectConfig() {
         // result can never silently come from the approximate path.
         mode: engineMode(),
     };
-    if (optionsModeOn()) Object.assign(cfg, optionsConfigFields());
+    if (optionsModeOn()) {
+        const opts = optionsConfigFields();
+        Object.assign(cfg, opts);
+        if (opts.params) cfg.params = { ...cfg.params, ...opts.params };
+    }
     return cfg;
 }
 
@@ -120,6 +124,9 @@ function syncOptionsModeUI() {
     if ($("pricingFeedRow")) $("pricingFeedRow").hidden = !on;
     // The IV override is a Black-Scholes knob; recorded chains carry their own IV.
     if ($("modelIvRow")) $("modelIvRow").hidden = !on || !isModel;
+    // Trigger level + TP/SL apply to index-trigger option strategies.
+    if ($("optionsTriggerRow")) $("optionsTriggerRow").hidden = !on || !isModel;
+    if ($("optionsExitsRow")) $("optionsExitsRow").hidden = !on || !isModel;
     const banner = $("optionsModelBanner");
     if (!banner) return;
     banner.hidden = !on;
@@ -140,13 +147,34 @@ function optionsConfigFields() {
     const feed = ($("pricingFeed") && $("pricingFeed").value) || "model_bs";
     const fields = {
         pricing_feed: feed,
-        exits: { stop_loss_pct: 0.3, take_profit_pct: 0.5, exit_on_signal_flip: true },
+        exits: {
+            stop_loss_pct: slPct(),
+            take_profit_pct: tpPct(),
+            exit_on_signal_flip: true,
+        },
+        params: {},
     };
+    const trigger = ($("optionsTrigger") && $("optionsTrigger").value) || "";
+    if (trigger !== "") fields.params.trigger_level = Number(trigger);
     if (feed === "model_bs") {
         const iv = Number($("modelIv") && $("modelIv").value);
         fields.model_params = iv > 0 ? { iv_source: "constant", iv_constant: iv / 100 } : {};
     }
     return fields;
+}
+
+/** Stop-loss % of premium from the options exits row (default 30). */
+function slPct() {
+    const el = $("optionsSl");
+    if (!el || !el.value) return 0.3;
+    return Math.max(0, Math.min(100, Number(el.value))) / 100;
+}
+
+/** Take-profit % of premium from the options exits row (default 50). */
+function tpPct() {
+    const el = $("optionsTp");
+    if (!el || !el.value) return 0.5;
+    return Math.max(0, Math.min(1000, Number(el.value))) / 100;
 }
 
 // ---------------------------------------------------------------------------
