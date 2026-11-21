@@ -705,17 +705,31 @@ async function init() {
         // canonical engine.
         strategies = await fetchJSON("/api/strategies?venue=backtest");
         $("strategy").innerHTML = "";
-        strategies.forEach((strategy) => {
+
+        // Split into equity and option groups so the dropdown shows equity
+        // strategies first, then an "Options" separator, then option strategies.
+        const equityStrategies = strategies.filter((s) => s.signal_kind === "equity");
+        const optionStrategies = strategies.filter((s) => s.signal_kind === "option");
+
+        const equityGroup = document.createElement("optgroup");
+        equityGroup.label = "Equity";
+        const optionsGroup = document.createElement("optgroup");
+        optionsGroup.label = "Options";
+
+        const addStrategy = (group, strategy) => {
             strategyTypes[strategy.name] = strategy.signal_kind;
             const option = document.createElement("option");
             option.value = strategy.name;
             option.title = strategy.name;
-            const label = Labels.strategy(strategy.name);
-            option.textContent = strategy.signal_kind === "option"
-                ? `${label} (CE/PE)`
-                : label;
-            $("strategy").appendChild(option);
-        });
+            option.textContent = Labels.strategy(strategy.name);
+            group.appendChild(option);
+        };
+
+        equityStrategies.forEach((s) => addStrategy(equityGroup, s));
+        optionStrategies.forEach((s) => addStrategy(optionsGroup, s));
+
+        $("strategy").appendChild(equityGroup);
+        $("strategy").appendChild(optionsGroup);
     } catch (err) {
         $("strategy").innerHTML = `<option value="">failed to load</option>`;
         showToast("Could not load strategies", "error");
