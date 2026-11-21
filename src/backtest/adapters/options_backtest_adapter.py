@@ -18,13 +18,21 @@ from typing import Any
 
 from backtest.engine.option_backtest_driver import BacktestResult
 
-__all__ = ["OptionsBacktestAdapter", "MODEL_DISCLAIMER"]
+__all__ = ["OptionsBacktestAdapter", "MODEL_DISCLAIMER", "CHAIN_DISCLAIMER"]
 
 MODEL_DISCLAIMER = (
     "Model-priced sandbox: option premiums are Black-Scholes estimates off the "
     "underlying candles, not historical market quotes. Use this to compare "
     "structures, strikes and exits — not as a measurement of historical option "
     "P&L. It cannot be certified or deployed to paper/live."
+)
+
+CHAIN_DISCLAIMER = (
+    "Recorded-chain replay: option premiums are captured broker quotes, screened "
+    "for put-call parity and junk prints before storage. This is a measurement of "
+    "historical option P&L on the stored sessions, certifiable subject to the "
+    "readiness checks. Coverage is limited to what was captured — gaps are refused, "
+    "never filled by a model."
 )
 
 
@@ -119,6 +127,7 @@ class OptionsBacktestAdapter:
             "model_params": info.get("model_params") or {},
             "exits": info.get("exits") or {},
         }
+        is_model = str(self._result.pricing_feed or "").strip().lower() == "model_bs"
         return {
             "config": config,
             "metrics": self.to_metrics(),
@@ -128,7 +137,7 @@ class OptionsBacktestAdapter:
             "greeks_curve": self._result.greeks_curve,
             "pricing_feed": self._result.pricing_feed,
             "model_params": info.get("model_params") or {},
-            "disclaimer": MODEL_DISCLAIMER,
-            "certifiable": False,
-            "certification_reason": "model_pricing",
+            "disclaimer": MODEL_DISCLAIMER if is_model else CHAIN_DISCLAIMER,
+            "certifiable": not is_model,
+            "certification_reason": "model_pricing" if is_model else None,
         }

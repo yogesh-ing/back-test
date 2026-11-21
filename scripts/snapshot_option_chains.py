@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from backtest.logging_config import configure_logging  # noqa: E402
 from backtest.options.chain_snapshots import ChainSnapshotRecorder  # noqa: E402
+from backtest.options.chain_history import ChainHistoryWriter  # noqa: E402
 
 logger = logging.getLogger("backtest.scripts.chain_snapshots")
 
@@ -129,7 +130,11 @@ def main() -> int:
     underlyings = [u.strip().upper() for u in args.underlyings.split(",") if u.strip()]
     client = _build_client()
     manager = _build_manager()
-    recorder = ChainSnapshotRecorder(client=client, manager=manager)
+    history_writer = ChainHistoryWriter(manager)
+    history_writer.ensure_schema()
+    recorder = ChainSnapshotRecorder(
+        client=client, manager=manager, history_writer=history_writer
+    )
     recorder.ensure_schema()
 
     while True:

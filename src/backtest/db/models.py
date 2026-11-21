@@ -47,6 +47,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -1152,6 +1153,80 @@ class OptionChainSnapshot(Base):
         return (
             f"<OptionChainSnapshot {self.underlying} {self.expiry} "
             f"{self.strike}{self.option_type}>"
+        )
+
+
+class OptionChainHistory(Base):
+    """One contract's *bar-aligned* quote in the recorded chain history (V3 Phase 4).
+
+    Where :class:`OptionChainSnapshot` is the periodic L1 research lattice, this
+    table is the replay asset a ``ChainHistoryFeed`` prices option backtests from:
+    every row is a clean, parity-filtered observation pinned to one underlying bar
+    (``bar_ts``), carrying the observed premium, implied vol, Greeks and — when the
+    venue published it — five-level ``depth_json``. Only rows that passed the
+    parity/junk filter land here; rejects go to ``data/chain_rejected.log`` instead.
+
+    Append-only and idempotent: the unique key is one row per contract per bar per
+    source, so re-capturing a bar never duplicates a quote. ``data_source_real`` is
+    True for anything priced off these rows — they are observed market premiums,
+    never model output.
+    """
+
+    __tablename__ = "option_chain_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: The underlying bar this quote aligns to (replay lookup key, exchange clock
+    #: stored aware UTC).
+    bar_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: When the capture actually ran (provenance; may lag bar_ts for backfills).
+    snapshot_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: Broker provenance ("upstox", "mstock", …).
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    underlying: Mapped[str] = mapped_column(String(32), nullable=False)
+    expiry: Mapped[date] = mapped_column(Date, nullable=False)
+    strike: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    option_type: Mapped[str] = mapped_column(String(2), nullable=False)
+    instrument_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    trading_symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    lot_size: Mapped[Optional[int]] = mapped_column(Integer)
+
+    #: Observed L1 premium — nullable when a level was absent (never interpolated).
+    ltp: Mapped[Optional[Decimal]] = mapped_column(Money)
+    bid: Mapped[Optional[Decimal]] = mapped_column(Money)
+    ask: Mapped[Optional[Decimal]] = mapped_column(Money)
+    #: Implied vol (absolute, 0.18 = 18%) and per-unit Greeks as the venue reported
+    #: them; nullable for venues/rows that publish no Greeks.
+    iv: Mapped[Optional[float]] = mapped_column(Float)
+    delta: Mapped[Optional[float]] = mapped_column(Float)
+    gamma: Mapped[Optional[float]] = mapped_column(Float)
+    theta: Mapped[Optional[float]] = mapped_column(Float)
+    vega: Mapped[Optional[float]] = mapped_column(Float)
+    volume: Mapped[Optional[int]] = mapped_column(Integer)
+    oi: Mapped[Optional[int]] = mapped_column(Integer)
+    spot: Mapped[Optional[Decimal]] = mapped_column(Money)
+    #: Five-level depth per side as published: {"bid": [[price, qty], …], "ask": […]}.
+    depth_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONVariant)
+
+    __table_args__ = (
+        CheckConstraint(
+            option_type.in_(["CE", "PE"]), name="ck_option_chain_history_type"
+        ),
+        UniqueConstraint(
+            "underlying", "expiry", "option_type", "strike", "bar_ts", "source",
+            name="uq_option_chain_history_contract_bar",
+        ),
+        Index("ix_chain_history_bar", "bar_ts"),
+        Index("ix_chain_history_underlying", "underlying"),
+        Index(
+            "ix_chain_history_lookup",
+            "underlying", "expiry", "option_type", "strike", "bar_ts",
+        ),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"<OptionChainHistory {self.underlying} {self.expiry} "
+            f"{self.strike}{self.option_type} @ {self.bar_ts}>"
         )
 
 

@@ -75,9 +75,9 @@
                 <label for="pricingFeed">Pricing feed</label>
                 <select id="pricingFeed" class="input">
                     <option value="model_bs" selected>Black-Scholes feed (model)</option>
-                    <option value="chain_history" disabled>Real option-chain history (coming soon)</option>
+                    <option value="chain_history">Real option-chain history (recorded)</option>
                 </select>
-                <small class="text-muted">Model premiums are simulated from the underlying candles — not observed option quotes.</small>
+                <small class="text-muted">Model premiums are simulated from the underlying candles. Chain history replays captured broker quotes — certifiable when coverage exists.</small>
             </div>
             <div class="form-row" id="modelIvRow" hidden>
                 <label for="modelIv">Model IV override (%)</label>

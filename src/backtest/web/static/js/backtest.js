@@ -112,30 +112,41 @@ function optionsModeOn() {
     return !!(box && box.checked && section && !section.hidden);
 }
 
-/** Show/hide the feed + IV rows and the persistent mock-data banner. */
+/** Show/hide the feed + IV rows and the persistent feed banner. */
 function syncOptionsModeUI() {
     const on = optionsModeOn();
+    const feed = ($("pricingFeed") && $("pricingFeed").value) || "model_bs";
+    const isModel = feed === "model_bs";
     if ($("pricingFeedRow")) $("pricingFeedRow").hidden = !on;
-    if ($("modelIvRow")) $("modelIvRow").hidden = !on;
+    // The IV override is a Black-Scholes knob; recorded chains carry their own IV.
+    if ($("modelIvRow")) $("modelIvRow").hidden = !on || !isModel;
     const banner = $("optionsModelBanner");
     if (!banner) return;
     banner.hidden = !on;
-    banner.innerHTML = on
+    if (!on) { banner.innerHTML = ""; return; }
+    banner.innerHTML = isModel
         ? `<div class="card"><span class="badge bg-light-danger">⚠ MODEL-PRICED</span> `
           + `<span class="muted small">Option premiums are Black-Scholes simulations off the `
           + `underlying candles, not observed option-chain quotes. Research only — this run `
           + `cannot be certified, optimized, or deployed to paper.</span></div>`
-        : "";
+        : `<div class="card"><span class="badge bg-light-success">✓ RECORDED CHAIN</span> `
+          + `<span class="muted small">Option premiums are replayed from captured broker chains `
+          + `(parity-screened). Certifiable subject to the readiness checks. A range with no `
+          + `stored coverage is refused — it never falls back to the model.</span></div>`;
 }
 
 /** The model-feed fields added to a run config when options mode is on. */
 function optionsConfigFields() {
-    const iv = Number($("modelIv") && $("modelIv").value);
-    return {
-        pricing_feed: ($("pricingFeed") && $("pricingFeed").value) || "model_bs",
-        model_params: iv > 0 ? { iv_source: "constant", iv_constant: iv / 100 } : {},
+    const feed = ($("pricingFeed") && $("pricingFeed").value) || "model_bs";
+    const fields = {
+        pricing_feed: feed,
         exits: { stop_loss_pct: 0.3, take_profit_pct: 0.5, exit_on_signal_flip: true },
     };
+    if (feed === "model_bs") {
+        const iv = Number($("modelIv") && $("modelIv").value);
+        fields.model_params = iv > 0 ? { iv_source: "constant", iv_constant: iv / 100 } : {};
+    }
+    return fields;
 }
 
 // ---------------------------------------------------------------------------
@@ -528,6 +539,8 @@ async function init() {
     }).catch(() => { /* config offline → options mode stays hidden */ });
     const optionsBox = $("optionsMode");
     if (optionsBox) optionsBox.addEventListener("change", syncOptionsModeUI);
+    const feedSelect = $("pricingFeed");
+    if (feedSelect) feedSelect.addEventListener("change", syncOptionsModeUI);
 
     // §1.3/§1.4: the picker and the timeframe dropdown are driven by what the
     // server says the chosen symbol actually has, so neither can offer a

@@ -24,7 +24,7 @@ import pandas as pd
 from backtest.instruments.base import OptionType
 from backtest.instruments.option import OptionContract
 from backtest.options.pricing_feed import OptionPricingFeed
-from backtest.options.quote_providers import MIN_QUOTE_TICK
+from backtest.options.quote_providers import MIN_QUOTE_TICK, NoExecutableQuoteError
 from backtest.timekeeping import session_date
 
 __all__ = ["FeedQuoteAdapter"]
@@ -141,14 +141,32 @@ class FeedQuoteAdapter:
             if hasattr(contract.option_type, "value")
             else str(contract.option_type)
         )
-        quote = self.feed.quote(
-            underlying=contract.underlying,
-            strike=float(contract.strike),
-            expiry=contract.expiry,
-            option_type=option_type,
-            spot=self.get_spot(contract.underlying),
-            bar_time=self._reference,
-        )
+        try:
+            quote = self.feed.quote(
+                underlying=contract.underlying,
+                strike=float(contract.strike),
+                expiry=contract.expiry,
+                option_type=option_type,
+                spot=self.get_spot(contract.underlying),
+                bar_time=self._reference,
+            )
+        except NoExecutableQuoteError as exc:
+            # A recorded-chain feed refuses a missing/illiquid strike. Return a
+            # zero/error quote WITHOUT the tick floor below: flooring it to
+            # ₹0.05 would manufacture the phantom price the broker's
+            # fill_price<=0 guard exists to reject. The driver skips the entry;
+            # the MTM path freezes the mark (fail-closed), never marks at ₹0.05.
+            return {
+                "ltp": 0.0,
+                "bid": 0.0,
+                "ask": 0.0,
+                "volume": 0,
+                "oi": 0,
+                "error": "no_chain_data",
+                "detail": str(exc),
+                "pricing_feed": self.feed.source_tag,
+                "model": not self.feed.data_source_real,
+            }
         ltp = max(float(quote.mid), MIN_QUOTE_TICK)
         return {
             "ltp": ltp,

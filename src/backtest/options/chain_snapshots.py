@@ -107,11 +107,16 @@ class ChainSnapshotRecorder:
         (tests use a fake).
     manager:
         A connected :class:`~backtest.db.manager.DatabaseManager`.
+    history_writer:
+        Optional :class:`~backtest.options.chain_history.ChainHistoryWriter`.
+        When set, each capture also lands (screened) in ``option_chain_history``
+        as the replayable Phase-4 asset; the L1 snapshot write is unchanged.
     """
 
-    def __init__(self, client: Any, manager: Any) -> None:
+    def __init__(self, client: Any, manager: Any, history_writer: Any = None) -> None:
         self.client = client
         self.manager = manager
+        self.history_writer = history_writer
 
     def ensure_schema(self) -> None:
         """Create ``option_chain_snapshots`` if absent (idempotent).
@@ -214,6 +219,21 @@ class ChainSnapshotRecorder:
         ]
         with self.manager.session() as session:
             session.add_all(rows)
+        if self.history_writer is not None:
+            # Phase-4 replayable asset: the same capture, screened (§7.1) into
+            # option_chain_history. Best-effort — a history-write fault must
+            # never lose the L1 snapshot the rest of the app depends on.
+            try:
+                from backtest.options.chain_history import history_rows_from_snapshots
+
+                source = broker_label(self.client)
+                self.history_writer.write_rows(
+                    history_rows_from_snapshots(rows, ts, source),
+                    source=source,
+                    bar_ts=ts,
+                )
+            except Exception:  # noqa: BLE001 — history enriches, snapshots survive
+                logger.warning("[chain-snap] history write failed", exc_info=True)
         for listener in list(_SNAPSHOT_LISTENERS):
             try:
                 listener(underlying, listener_rows, ts)

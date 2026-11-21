@@ -14,11 +14,19 @@ tests inject an explicit in-memory sqlite ledger.
 
 from __future__ import annotations
 
+import math
+from datetime import datetime, time
+
 import pytest
 
+from backtest.api import options_model
+from backtest.api.backtest import _candles
 from backtest.api.backtest_run_store import BacktestRunLedger
 from backtest.db import DatabaseManager
-from backtest.db.models import BacktestRun, Base
+from backtest.db.models import BacktestRun, Base, OptionChainHistory
+from backtest.engine.option_backtest_driver import next_monthly_expiry
+from backtest.options.chain_history import ChainHistoryWriter
+from backtest.timekeeping import EXCHANGE_TZ
 from backtest.web.app import create_app
 
 
@@ -44,6 +52,55 @@ def ledger_client():
     application.config["BACKTEST_LEDGER"] = led
     yield application.test_client(), led, mgr
     mgr.disconnect()
+
+
+@pytest.fixture()
+def chain_client(tmp_path, monkeypatch):
+    """A synthetic app whose chain-history reads hit an isolated sqlite DB.
+
+    The API's ``DatabaseManager.from_env`` is pointed at this test manager so
+    the loader reads exactly the rows seeded here — no shared-state leakage
+    between the coverage-refusal and success cases.
+    """
+    mgr = DatabaseManager.from_env(url=f"sqlite:///{tmp_path / 'chain.db'}")
+    mgr.connect()
+    Base.metadata.create_all(mgr.engine, tables=[OptionChainHistory.__table__])
+    monkeypatch.setattr(options_model.DatabaseManager, "from_env", lambda *a, **k: mgr)
+    application = create_app(source="synthetic")
+    yield application.test_client(), mgr, application
+    mgr.disconnect()
+
+
+def _seed_chain(mgr, app, symbol, from_date, to_date):
+    """Record a clean ATM chain aligned to the synthetic candles the driver runs.
+
+    Built from the same candles the API loads, at the driver's own monthly
+    expiry and strike grid, with C − P = S − K (risk_free=0 screen) so every
+    row survives §7.1. This is a test fixture, not a trading path.
+    """
+    with app.app_context():
+        _source, candles = _candles(symbol, from_date, to_date, "1D")
+    rows = []
+    for ts, bar in candles.iterrows():
+        close = float(bar["close"])
+        expiry = next_monthly_expiry(ts.date())
+        atm = round(close / 50) * 50
+        for d in (-2, -1, 0, 1, 2):
+            strike = atm + d * 50
+            if strike <= 0:
+                continue
+            intrinsic = close - strike
+            for otype, mid in (("CE", 100 + intrinsic / 2), ("PE", 100 - intrinsic / 2)):
+                rows.append({
+                    "underlying": symbol, "expiry": expiry, "strike": strike,
+                    "option_type": otype, "bar_ts": ts, "bid": mid - 1, "ask": mid + 1,
+                    "ltp": mid, "iv": 0.18, "spot": close, "oi": 5000, "volume": 1000,
+                    "instrument_token": f"X-{strike}-{otype}",
+                    "trading_symbol": f"{symbol}{strike}{otype}", "lot_size": 50,
+                })
+    writer = ChainHistoryWriter(mgr, risk_free=0.0)
+    writer.ensure_schema()
+    return writer.write_rows(rows, source="test")
 
 
 _VALID = {
@@ -164,10 +221,72 @@ def test_kill_switch_falsey_values(client, monkeypatch, raw):
 # --- validation doors --------------------------------------------------------
 
 
-def test_chain_history_not_available_yet(client):
-    resp = client.post("/api/backtest/options-model", json=dict(_VALID, pricing_feed="chain_history"))
+def test_chain_history_no_coverage_refused(chain_client):
+    client, mgr, app = chain_client
+    req = dict(_VALID, pricing_feed="chain_history", from_date="2023-01-01", to_date="2024-01-01")
+    resp = client.post("/api/backtest/options-model", json=req)
     assert resp.status_code == 400
-    assert "chain_history" in resp.get_json()["error"]
+    body = resp.get_json()
+    assert "no recorded option chain" in body["error"]
+    assert body["pricing_feed"] == "chain_history"
+    assert body["coverage"]["count"] == 0
+    # Never a silent fallback to the model: the refusal names capture, not BS.
+    assert "model_bs" not in body["error"]
+
+
+def test_chain_history_partial_coverage_names_stored_range(chain_client):
+    client, mgr, app = chain_client
+    _seed_chain(mgr, app, "DEMO", "2023-01-01", "2023-06-01")
+    req = dict(_VALID, pricing_feed="chain_history", from_date="2024-01-01", to_date="2024-06-01")
+    resp = client.post("/api/backtest/options-model", json=req)
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["coverage"]["count"] > 0
+    assert "Stored coverage" in body["error"]
+    assert body["coverage"]["from"] <= body["coverage"]["to"]
+
+
+def test_chain_history_run_is_certifiable(chain_client):
+    client, mgr, app = chain_client
+    seeded = _seed_chain(mgr, app, "DEMO", "2023-01-01", "2024-01-01")
+    assert seeded["written"] > 0
+    req = dict(_VALID, pricing_feed="chain_history", from_date="2023-01-01", to_date="2024-01-01")
+    resp = client.post("/api/backtest/options-model", json=req)
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+
+    # Real premiums unlock the doors the model is quarantined from.
+    assert body["pricing_feed"] == "chain_history"
+    assert body["certifiable"] is True
+    assert body["certification_reason"] is None
+    assert body["config"]["pricing_feed"] == "chain_history"
+    readiness = body["readiness"]
+    assert readiness["certifiable"] is True
+    assert readiness["certification_reason"] is None
+    # No ninth model check; the eight equity checks stand on their own.
+    assert len(readiness["checks"]) == 8
+    assert all(c["id"] != "pricing_feed" for c in readiness["checks"])
+
+    # Recorded IV is a market observation, not a knob: no model sensitivity ladder.
+    assert body["iv_sensitivity"] == []
+    assert body["vol_regime"]["regime"] in ("low", "normal", "high", "unknown")
+    assert body["model_params"] == {}
+    # The replay actually traded against the recorded chain.
+    assert body["metrics"]["total_trades"] > 0
+
+
+def test_chain_history_rejects_model_params(chain_client):
+    client, mgr, app = chain_client
+    req = dict(_VALID, pricing_feed="chain_history", model_params={"iv_premium": 0.03})
+    resp = client.post("/api/backtest/options-model", json=req)
+    assert resp.status_code == 400
+    assert "model_params" in resp.get_json()["error"]
+
+
+def test_unknown_pricing_feed_refused(client):
+    resp = client.post("/api/backtest/options-model", json=dict(_VALID, pricing_feed="magic"))
+    assert resp.status_code == 400
+    assert "magic" in resp.get_json()["error"]
 
 
 def test_option_strategy_refused(client):
@@ -210,9 +329,10 @@ def test_backtest_page_ships_options_mode_ui(client):
         "modelIv", "optionsModelBanner", "volRegimeNote",
     ):
         assert f'id="{element_id}"' in html, f"missing {element_id}"
-    # The feed is preselected to the Black-Scholes model; chain history is locked.
+    # The feed defaults to the Black-Scholes model; chain history is selectable.
     assert 'value="model_bs" selected' in html
-    assert 'value="chain_history" disabled' in html
+    assert 'value="chain_history"' in html
+    assert 'value="chain_history" disabled' not in html
     # The section starts hidden — the kill switch reveals it from /api/config.
     assert 'id="optionsModelSection" hidden' in html
 
