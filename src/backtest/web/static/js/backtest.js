@@ -218,12 +218,12 @@ async function runBacktest() {
     try {
         // Option-native strategies run through the Black-Scholes model sandbox;
         // equity strategies run the canonical engine.
-        const endpoint = isOptionStrategy(cfg.strategy)
+        const endpoint = isOptionStrategy(config.strategy)
             ? "/api/backtest/options-model"
             : "/api/backtest/run";
         const result = await fetchJSON(endpoint, {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(cfg),
+            body: JSON.stringify(config),
         });
         // §6: a handle for this rendered result, so the Optimize hand-off and
         // its audit chain have something to name. The ledger row (if the
