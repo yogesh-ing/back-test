@@ -289,10 +289,19 @@ def test_unknown_pricing_feed_refused(client):
     assert "magic" in resp.get_json()["error"]
 
 
-def test_option_strategy_refused(client):
-    resp = client.post("/api/backtest/options-model", json=dict(_VALID, strategy="straddle_short_atm"))
-    assert resp.status_code == 400
-    assert "EQUITY" in resp.get_json()["error"]
+def test_option_strategy_allowed(client):
+    """Option strategies are no longer refused at the gate; the sandbox
+    expresses the strategy's own view as an option structure priced by BS."""
+    resp = client.post(
+        "/api/backtest/options-model",
+        json=dict(_VALID, strategy="directional_options", params={}),
+    )
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["pricing_feed"] == "model_bs"
+    assert body["certifiable"] is False
+    assert body["certification_reason"] == "model_pricing"
+    assert body["config"]["strategy"] == "directional_options"
 
 
 def test_unknown_model_param_refused(client):

@@ -47,7 +47,7 @@ from backtest.options.model_pricing import (
 from backtest.options.paper_trading import OptionPaperBroker
 from backtest.options.signal_view import SignalViewStrategy
 from backtest.simulator.fees import CommissionCalculator
-from backtest.strategy.registry import get_strategy, signal_kind
+from backtest.strategy.registry import get_strategy
 
 options_model_bp = Blueprint("options_model_api", __name__)
 log = get_logger(__name__)
@@ -198,11 +198,6 @@ def run_options_model() -> tuple:
         strategy_cls = get_strategy(strategy)
     except KeyError as exc:
         return jsonify({"error": str(exc)}), 400
-    if signal_kind(strategy_cls) == "option":
-        return jsonify({
-            "error": f"'{strategy}' is an options strategy; the model sandbox expresses "
-                     "an EQUITY strategy's signal as an option structure. Pick an equity strategy."
-        }), 400
 
     symbol = str(data.get("symbol") or "NIFTY").upper()
     from_date = data.get("from_date") or data.get("from")

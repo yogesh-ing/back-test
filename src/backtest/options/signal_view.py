@@ -30,6 +30,11 @@ class SignalViewStrategy:
     ``+1`` → BULLISH, ``-1`` → BEARISH, ``0`` → no view (no trade, and not a
     signal flip). ``confidence`` sets outright-vs-spread via the driver's
     decider threshold (≥0.7 buys the outright option).
+
+    Option-native strategies (those that override ``generate_market_view``,
+    e.g. ``CE_instant_buy`` / ``PE_instant_buy``) are priced straight from
+    their own view so a put strategy is never fed bullish signals. Equity
+    strategies keep the existing ``generate_signals`` → view bridge.
     """
 
     def __init__(
@@ -41,9 +46,16 @@ class SignalViewStrategy:
         underlying: str = "NIFTY",
     ) -> None:
         self._strategy = strategy
-        self._signals = strategy.generate_signals(candles)
         self._confidence = float(confidence)
         self._underlying = underlying
+        # Lazy import keeps backtest.options at the bottom of the import stack.
+        from backtest.strategy.base import Strategy
+
+        self._option_native = (
+            type(strategy).generate_market_view is not Strategy.generate_market_view
+        )
+        if not self._option_native:
+            self._signals = strategy.generate_signals(candles)
 
     @property
     def name(self) -> str:
@@ -52,6 +64,30 @@ class SignalViewStrategy:
     def generate_market_view(self, candles: pd.DataFrame) -> MarketView | None:
         if candles.empty:
             return None
+        if self._option_native:
+            # Option-native strategies emit their own MarketView (e.g. BULLISH
+            # for CE_instant_buy, BEARISH for PE_instant_buy). Use it directly,
+            # normalizing price fields to Decimal so the Decimal-strike selector
+            # never sees a float spot/target/stop price.
+            view = self._strategy.generate_market_view(candles)
+            if view is None:
+                return None
+
+            def _dec(value):
+                if value is None:
+                    return None
+                return value if isinstance(value, Decimal) else Decimal(str(value))
+
+            return MarketView(
+                direction=view.direction,
+                confidence=view.confidence,
+                underlying=view.underlying,
+                spot_price=_dec(view.spot_price),
+                target_price=_dec(view.target_price),
+                stop_price=_dec(view.stop_price),
+                bar_timestamp=view.bar_timestamp,
+                metadata=dict(view.metadata or {}),
+            )
         idx = candles.index[-1]
         try:
             signal = float(self._signals.loc[idx])
