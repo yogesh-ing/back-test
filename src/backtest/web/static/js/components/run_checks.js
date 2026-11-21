@@ -238,13 +238,13 @@
         container.innerHTML = trustBanner
             + panel("benchmark", "Benchmark — vs Buy & Hold",
                 "Same symbol, same bars, same capital. Did the strategy add anything?",
-                renderBenchmark(payload.benchmark, m))
+                renderBenchmark(payload.benchmark, m), true)
             + panel("cost-shock", "Cost Shock",
                 "Does the edge survive fills worse than the ones you modelled?",
-                renderCostShock(payload.cost_shock))
+                renderCostShock(payload.cost_shock), true)
             + panel("monte-carlo", `Monte Carlo — Trade Sequence Resampling`,
                 "Was this result lucky, or typical?",
-                renderMonteCarlo(payload.monte_carlo));
+                renderMonteCarlo(payload.monte_carlo), true);
     }
 
     const RunChecks = {

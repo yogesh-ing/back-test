@@ -37,6 +37,8 @@ small, .small { font-size: 11px; }
 .card { background: var(--surface); border: 1px solid var(--border-soft); border-radius: var(--radius); padding: 22px; box-shadow: var(--shadow); min-width: 0; }
 .card + .card { margin-top: 20px; }
 .page-grid > .card + .card { margin-top: 0; }
+#strategyCard + #results { margin-top: 12px; }
+.results-overview-head h2 { margin-top: 0; }
 .card-title { font-size: 15px; font-weight: 600; margin-bottom: 16px; letter-spacing: -.02em; }
 .card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .card-head .card-title { margin-bottom: 0; }

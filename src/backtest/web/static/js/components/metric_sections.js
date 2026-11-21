@@ -181,7 +181,7 @@
             .filter(Boolean)
             .join("");
         if (!rows) return "";
-        return `<details class="metric-section" data-section="${esc(section.id)}">`
+        return `<details class="metric-section" data-section="${esc(section.id)}" open>`
             + `<summary class="metric-section-head">${esc(section.title)}</summary>`
             + (section.note ? `<p class="metric-section-note">${esc(section.note)}</p>` : "")
             + `<div class="metric-section-body">${rows}</div>`
