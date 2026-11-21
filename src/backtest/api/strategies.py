@@ -13,19 +13,15 @@ log = get_logger(__name__)
 
 @strategies_bp.get("/api/strategies")
 def list_strategies() -> tuple:
-    """Return ``[{name, description, version, author}]``, sorted alphabetically.
+    """Return ``[{name, description, version, author, signal_kind, ...}]``, sorted alphabetically.
 
-    ``?venue=backtest`` (also ``compare``) drops option strategies from the
-    catalogue. This is a presentation rule with an engine behind it, not a
-    filter to be worked around: the DB data source holds candles and no
-    historical chains, so a backtested option P&L could only be Black-Scholes
-    off a generated chain. The same refusal is enforced where the run is
-    executed (:mod:`backtest.api.backtest`), so a hand-crafted request cannot
-    get one through either. ``?venue=forward`` (or no venue) returns everything
-    — options belong there, priced from the broker.
+    ``?venue=backtest`` (also ``compare``) returns ALL strategies — equity and
+    option — each tagged with ``signal_kind``. The frontend decides which engine
+    to run: equity strategies go to ``/api/backtest/run``, option strategies go
+    to ``/api/backtest/options-model``. ``?venue=forward`` (or no venue)
+    returns everything as well; options belong there, priced from the broker.
     """
     venue = str(request.args.get("venue", "")).strip().lower()
-    backtest_venue = venue in {"backtest", "compare"}
     catalogue = [
         {
             "name": s["name"],
@@ -41,13 +37,8 @@ def list_strategies() -> tuple:
             "execution": s.get("execution"),
         }
         for s in get_all()
-        if not (backtest_venue and s["signal_kind"] == "option")
     ]
-    log.debug(
-        "/api/strategies → %d entries%s",
-        len(catalogue),
-        f" (venue={venue}, options excluded)" if backtest_venue else "",
-    )
+    log.debug("/api/strategies → %d entries (venue=%s)", len(catalogue), venue)
     if not catalogue:
         log.warning(
             "/api/strategies returned an empty catalogue — check that "

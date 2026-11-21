@@ -20,6 +20,8 @@ def register(cls: type["Strategy"]) -> type["Strategy"]:
     if not getattr(cls, "name", ""):
         raise ValueError("strategy name required")
     if cls.name in _REGISTRY:
+        if _REGISTRY[cls.name] is cls:
+            return cls  # same class re-registered (plugin re-discovery)
         raise ValueError(f"duplicate strategy name: {cls.name}")
     _REGISTRY[cls.name] = cls
     logger.info("registered strategy %r (%s)", cls.name, cls.__name__)

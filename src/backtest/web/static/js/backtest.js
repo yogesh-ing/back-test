@@ -7,6 +7,14 @@ let lastRun = null;          // {config, result, resultId, stored?}
 let currentParams = {};      // schema for the selected strategy
 let symbolPicker = null;     // components/symbol_picker.js handle
 let recentRuns = [];         // flat ledger rows from GET /api/backtest/runs
+let strategyTypes = {};      // strategy name -> "equity" | "option", from /api/strategies
+
+/** True when the named strategy is an option-native strategy (emits its own
+ *  MarketView via generate_market_view). Option strategies are priced through
+ *  the Black-Scholes model sandbox; equity strategies run the canonical engine. */
+function isOptionStrategy(name) {
+    return strategyTypes[name] === "option";
+}
 
 // --- Recent-run history (server ledger) --------------------------------------
 // The run-persistence PRD R4 retires the localStorage cache: the server's
@@ -74,10 +82,10 @@ function collectConfig() {
         // result can never silently come from the approximate path.
         mode: engineMode(),
     };
-    if (optionsModeOn()) {
-        const opts = optionsConfigFields();
-        Object.assign(cfg, opts);
-        if (opts.params) cfg.params = { ...cfg.params, ...opts.params };
+    // Options mode (model-priced BS sandbox) applies only to option-native
+    // strategies. Equity strategies run the canonical engine untouched.
+    if (optionsModeOn() && isOptionStrategy(cfg.strategy)) {
+        Object.assign(cfg, optionsConfigFields());
     }
     return cfg;
 }
@@ -121,16 +129,17 @@ function syncOptionsModeUI() {
     const on = optionsModeOn();
     const feed = ($("pricingFeed") && $("pricingFeed").value) || "model_bs";
     const isModel = feed === "model_bs";
-    if ($("pricingFeedRow")) $("pricingFeedRow").hidden = !on;
-    // The IV override is a Black-Scholes knob; recorded chains carry their own IV.
-    if ($("modelIvRow")) $("modelIvRow").hidden = !on || !isModel;
-    // Trigger level + TP/SL apply to index-trigger option strategies.
-    if ($("optionsTriggerRow")) $("optionsTriggerRow").hidden = !on || !isModel;
-    if ($("optionsExitsRow")) $("optionsExitsRow").hidden = !on || !isModel;
+    // Options mode UI (feed, IV, trigger, TP/SL) only matters for option
+    // strategies. Equity strategies never see these rows.
+    const showOptions = on && isOptionStrategy($("strategy") && $("strategy").value);
+    if ($("pricingFeedRow")) $("pricingFeedRow").hidden = !showOptions;
+    if ($("modelIvRow")) $("modelIvRow").hidden = !showOptions || !isModel;
+    if ($("optionsTriggerRow")) $("optionsTriggerRow").hidden = !showOptions;
+    if ($("optionsExitsRow")) $("optionsExitsRow").hidden = !showOptions;
     const banner = $("optionsModelBanner");
     if (!banner) return;
-    banner.hidden = !on;
-    if (!on) { banner.innerHTML = ""; return; }
+    banner.hidden = !showOptions;
+    if (!showOptions) { banner.innerHTML = ""; return; }
     banner.innerHTML = isModel
         ? `<div class="card"><span class="badge bg-light-danger">⚠ MODEL-PRICED</span> `
           + `<span class="muted small">Option premiums are Black-Scholes simulations off the `
@@ -154,8 +163,11 @@ function optionsConfigFields() {
         },
         params: {},
     };
-    const trigger = ($("optionsTrigger") && $("optionsTrigger").value) || "";
-    if (trigger !== "") fields.params.trigger_level = Number(trigger);
+    // Trigger level only matters for index-trigger option strategies.
+    if (isOptionStrategy($("strategy") && $("strategy").value)) {
+        const trigger = ($("optionsTrigger") && $("optionsTrigger").value) || "";
+        if (trigger !== "") fields.params.trigger_level = Number(trigger);
+    }
     if (feed === "model_bs") {
         const iv = Number($("modelIv") && $("modelIv").value);
         fields.model_params = iv > 0 ? { iv_source: "constant", iv_constant: iv / 100 } : {};
@@ -204,10 +216,14 @@ async function runBacktest() {
     $("pagination").innerHTML = "";
 
     try {
-        const endpoint = optionsModeOn() ? "/api/backtest/options-model" : "/api/backtest/run";
+        // Option-native strategies run through the Black-Scholes model sandbox;
+        // equity strategies run the canonical engine.
+        const endpoint = isOptionStrategy(cfg.strategy)
+            ? "/api/backtest/options-model"
+            : "/api/backtest/run";
         const result = await fetchJSON(endpoint, {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(config),
+            body: JSON.stringify(cfg),
         });
         // §6: a handle for this rendered result, so the Optimize hand-off and
         // its audit chain have something to name. The ledger row (if the
@@ -525,12 +541,18 @@ async function openStoredRun(runId) {
     } catch { /* form nodes always present */ }
     // A stored model run re-lights the options toggle so the banner and feed
     // match the result being read back (the ledger row, not a client flag).
+    // Options mode only applies to option-native strategies.
+    const isOption = isOptionStrategy(cfg.strategy);
     const isModel = payload.pricing_feed === "model_bs";
-    if ($("optionsMode")) {
-        $("optionsMode").checked = isModel;
-        if (isModel && $("optionsModelSection")) $("optionsModelSection").hidden = false;
-        syncOptionsModeUI();
+    const optionsBox = $("optionsMode");
+    const optionsSection = $("optionsModelSection");
+    if (optionsBox) {
+        optionsBox.checked = isOption && isModel;
     }
+    if (optionsSection) {
+        optionsSection.hidden = !isOption;
+    }
+    syncOptionsModeUI();
     fetchJSON(`/api/strategies/${encodeURIComponent(cfg.strategy)}/params`)
         .then((p) => { renderParams(p); applyParamOverrides(cfg.params); })
         .catch(() => { /* stored result still shown */ });
@@ -677,15 +699,21 @@ async function init() {
     }
 
     try {
-        // venue=backtest: the server omits option strategies, because a
-        // backtest runs on DB candles and the DB holds no historical chains.
+        // venue=backtest: returns all strategies (equity + option), each
+        // tagged with signal_kind. The frontend routes option strategies to
+        // the Black-Scholes model sandbox and equity strategies to the
+        // canonical engine.
         strategies = await fetchJSON("/api/strategies?venue=backtest");
         $("strategy").innerHTML = "";
         strategies.forEach((strategy) => {
+            strategyTypes[strategy.name] = strategy.signal_kind;
             const option = document.createElement("option");
             option.value = strategy.name;
             option.title = strategy.name;
-            option.textContent = Labels.strategy(strategy.name);
+            const label = Labels.strategy(strategy.name);
+            option.textContent = strategy.signal_kind === "option"
+                ? `${label} (CE/PE)`
+                : label;
             $("strategy").appendChild(option);
         });
     } catch (err) {
@@ -693,12 +721,24 @@ async function init() {
         showToast("Could not load strategies", "error");
     }
 
-    // strategy change → dynamic params & segment info
+    // strategy change → dynamic params & segment info; gate options mode to
+    // option-native strategies only.
     $("strategy").addEventListener("change", async () => {
-        updateStrategySegmentInfo($("strategy").value);
-        renderStrategyCard($("strategy").value);
+        const name = $("strategy").value;
+        updateStrategySegmentInfo(name);
+        renderStrategyCard(name);
+        // Show options mode only for option-native strategies; hide for equity.
+        const optionsSection = $("optionsModelSection");
+        const optionsBox = $("optionsMode");
+        if (optionsSection) {
+            optionsSection.hidden = !isOptionStrategy(name);
+        }
+        if (optionsBox) {
+            optionsBox.checked = isOptionStrategy(name);
+        }
+        syncOptionsModeUI();
         try {
-            renderParams(await fetchJSON(`/api/strategies/${encodeURIComponent($("strategy").value)}/params`));
+            renderParams(await fetchJSON(`/api/strategies/${encodeURIComponent(name)}/params`));
         } catch (err) { showToast(err.message, "error"); }
     });
 
@@ -734,6 +774,15 @@ async function init() {
         try {
             renderParams(await fetchJSON(`/api/strategies/${encodeURIComponent($("strategy").value)}/params`));
         } catch { /* ignore */ }
+    }
+    // Gate options mode on the (default or pre-filled) strategy type.
+    const initialName = $("strategy").value;
+    if (initialName) {
+        const optionsSection = $("optionsModelSection");
+        const optionsBox = $("optionsMode");
+        if (optionsSection) optionsSection.hidden = !isOptionStrategy(initialName);
+        if (optionsBox) optionsBox.checked = isOptionStrategy(initialName);
+        syncOptionsModeUI();
     }
 }
 
