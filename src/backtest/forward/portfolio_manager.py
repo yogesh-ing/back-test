@@ -3051,6 +3051,66 @@ class PortfolioManager:
             self._persist_state()
             return count
 
+    def flatten_all(
+        self, reason: str = "manual_close", mode: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Close every open position at current price without halting.
+
+        De-risks the book by flattening every open equity position and option
+        structure at the latest mark, booking realised P&L per position.
+        Unlike :meth:`emergency_flatten_all`, this does NOT set any halt
+        latch — runners keep running (or stay paused) so the strategy session
+        stays alive after the close.
+
+        Returns a dict with the total positions closed and per-runner detail.
+        """
+        with self._lock:
+            now_ts = datetime.now(timezone.utc).isoformat()
+            if mode is not None:
+                mode = str(mode).strip().lower()
+                if mode not in VALID_INSTANCE_MODES:
+                    raise ValueError(
+                        f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}"
+                    )
+            targets = self._bucket_runners(mode) if mode else list(self._runners.values())
+            detail: List[Dict[str, Any]] = []
+            count = 0
+            for runner in targets:
+                n = runner.flatten_all(reason=reason)
+                count += n
+                detail.append(
+                    {
+                        "instance_id": runner.instance_id,
+                        "name": runner.config.name,
+                        "closed": n,
+                        "realized_pnl": round(float(runner.realized_pnl), 2),
+                    }
+                )
+            # Also flatten the dashboard book (option structures etc.).
+            try:
+                dashboard_closed = self.flatten_dashboard_book(reason=reason)
+                count += dashboard_closed
+                detail.append({"kind": "dashboard", "closed": dashboard_closed})
+            except Exception:  # noqa: BLE001 — dashboard flatten is best-effort
+                dashboard_closed = 0
+            self._persist_state()
+            logger.info(
+                "FLATTEN ALL%s: %d positions closed across %d runner(s)",
+                f" [{mode}]" if mode else "",
+                count,
+                len(targets),
+            )
+            return {
+                "success": True,
+                "action": "flatten_all",
+                "reason": reason,
+                "scope": mode or "all",
+                "closed": count,
+                "runners": len(targets),
+                "detail": detail,
+                "at": now_ts,
+            }
+
     def reset_daily_anchors(self) -> None:
         """Re-baseline daily PnL for the whole portfolio (session open/tests)."""
         with self._lock:

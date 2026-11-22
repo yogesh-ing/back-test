@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...alerts.types import AlertType
 from ..base import Strategy
 from ..execution import DirectionRule, ExecutionSpecError
 from ..intent import Direction, MarketView
@@ -166,6 +167,20 @@ class StructureStrategy(TemplateBase):
             "strategy": {"name": self.name, "version": self.version},
             **dict(self.opening_structure),
         }
+
+    # -- portfolio alert hooks (no-op defaults; subclasses override) --------
+
+    def on_alert(self, alert_type: str, alert_data: dict) -> str | None:
+        """Handle a portfolio-level alert (e.g. gamma critical, VIX regime).
+
+        Return a status string ("paused", "resumed", "exit_requested", "ignored")
+        or None when the alert is not subscribed to / not acted on.
+        """
+        return None
+
+    def on_alert_resolved(self, alert_type: str, alert_data: dict) -> None:
+        """Called when a previously-raised alert clears. No-op by default."""
+        return None
 
 
 class EquityStrategy(Strategy):

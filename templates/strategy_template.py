@@ -82,6 +82,99 @@ class MyNewStrategy(Strategy):
         },
         # Legacy flat form still works (auto-expanded to schema)
         # "threshold": 0.5,
+        # ---- Exit / risk params (short-option selling conventions) -------
+        # Option-buying strategies use percent exits (stop_loss_pct /
+        # take_profit_pct). Option-selling strategies (strangle/straddle)
+        # should use points or rupee: percent of a negative credit is
+        # meaningless, and the credit is calculable upfront at entry.
+        "exit_unit": {
+            "default": "points",
+            "type": "str",
+            "label": "Exit Unit",
+            "tooltip": "'points' = points of premium (engine prices as points × Σ(lot size × lots)); 'rupee' = absolute ₹ per structure.",
+        },
+        "stop_loss_points": {
+            "default": 13.0,
+            "type": "float",
+            "min": 1.0,
+            "max": 500.0,
+            "label": "Stop Loss (points of premium)",
+            "tooltip": "Adverse move in points of premium that closes the structure (used when exit_unit='points').",
+        },
+        "take_profit_points": {
+            "default": 7.0,
+            "type": "float",
+            "min": 1.0,
+            "max": 500.0,
+            "label": "Take Profit (points of premium)",
+            "tooltip": "Favourable move in points of premium that closes the structure (used when exit_unit='points').",
+        },
+        "stop_loss_rupee": {
+            "default": 0.0,
+            "type": "float",
+            "min": 0.0,
+            "max": 100000.0,
+            "label": "Stop Loss (rupees)",
+            "tooltip": "Absolute ₹ stop per structure (used when exit_unit='rupee'). 0 = disabled.",
+        },
+        "take_profit_rupee": {
+            "default": 0.0,
+            "type": "float",
+            "min": 0.0,
+            "max": 100000.0,
+            "label": "Take Profit (rupees)",
+            "tooltip": "Absolute ₹ target per structure (used when exit_unit='rupee'). 0 = disabled.",
+        },
+        "trailing_stop_points": {
+            "default": 5.0,
+            "type": "float",
+            "min": 0.0,
+            "max": 200.0,
+            "label": "Trailing Stop (points)",
+            "tooltip": "0 disables. Tightens the stop as premium decays.",
+        },
+        "trailing_activation_points": {
+            "default": 3.0,
+            "type": "float",
+            "min": 0.0,
+            "max": 200.0,
+            "label": "Trailing Activation (points)",
+            "tooltip": "Start trailing after this much profit in points.",
+        },
+        "squareoff_minutes_before_close": {
+            "default": 30,
+            "type": "int",
+            "min": 0,
+            "max": 240,
+            "label": "EOD Squareoff (min before close)",
+            "tooltip": "0 disables; 30 squares off 30 min before market close to avoid expiry-day last-hour trouble.",
+        },
+        "min_iv_percentile": {
+            "default": 0.0,
+            "type": "float",
+            "min": 0.0,
+            "max": 100.0,
+            "label": "Min IV Percentile",
+            "tooltip": "0 disables. Don't open if IV is below this percentile.",
+        },
+        "max_iv_percentile": {
+            "default": 100.0,
+            "type": "float",
+            "min": 0.0,
+            "max": 100.0,
+            "label": "Max IV Percentile",
+            "tooltip": "100 disables. Don't open if IV is above this percentile.",
+        },
+        "alert_response": {
+            "default": "pause",
+            "type": "str",
+            "label": "Gamma alert response",
+            "tooltip": (
+                "What this strategy does on a portfolio_gamma_critical alert: "
+                "pause (stop new entries until it clears), exit (also close if "
+                "this runner is ≥50% of short gamma) or ignore."
+            ),
+        },
     }
 
     # ------------------------------------------------------------------

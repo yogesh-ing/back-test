@@ -17,6 +17,7 @@ from backtest.engine.plotting import plot_comparison, plot_result
 from backtest.logging_config import configure_logging
 from backtest.runner import RunSpec, build_source, compare_strategies, run_on_source
 from backtest.strategy.registry import get_strategy, list_strategies
+from backtest.forward.portfolio_manager import get_portfolio_manager
 
 
 def _print_metrics(result):
@@ -303,6 +304,31 @@ def papertrade_command(args):
         raise ValueError(f"Unknown mode: {args.mode}")
 
 
+def flatten_command(args):
+    from backtest.forward.portfolio_manager import VALID_INSTANCE_MODES
+
+    mode = args.mode
+    if mode is not None:
+        mode = str(mode).strip().lower()
+        if mode not in VALID_INSTANCE_MODES:
+            raise ValueError(f"mode must be one of {VALID_INSTANCE_MODES}, got {mode!r}")
+    result = get_portfolio_manager().flatten_all(reason="manual_close", mode=mode)
+    print(
+        f"flatten_all: closed={result['closed']} across {result['runners']} runner(s) "
+        f"(scope={result['scope']}, reason={result['reason']})"
+    )
+    for d in result.get("detail", []):
+        if d.get("kind") == "dashboard":
+            print(f"  dashboard: closed={d['closed']}")
+        else:
+            print(
+                f"  {d['instance_id'][:8]} {d['name']}: closed={d['closed']} "
+                f"realized_pnl={d['realized_pnl']:+,.2f}"
+            )
+    if result["closed"] == 0:
+        print("  (no open positions to close)")
+
+
 def build_parser():
     # Diagnostics live on a parent parser so they work after the subcommand
     # (`backtest run … --log-level DEBUG`), which is where people type them.
@@ -464,6 +490,19 @@ def build_parser():
         help="drop option quotes in START_TIMESTAMP..END_TIMESTAMP",
     )
     replay_parser.set_defaults(func=replay_command)
+
+    flatten_parser = sub.add_parser(
+        "flatten",
+        parents=[common],
+        help="Close all open positions at current price and book profit (no halt).",
+    )
+    flatten_parser.add_argument(
+        "--mode",
+        choices=["paper", "live"],
+        default=None,
+        help="Only flatten runners in this bucket (paper | live). Default: all.",
+    )
+    flatten_parser.set_defaults(func=flatten_command)
 
     return parser
 
