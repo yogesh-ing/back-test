@@ -224,7 +224,7 @@ def test_directional_tail_declares_spec(name):
 
 @pytest.mark.parametrize(
     "name",
-    ["hf_equity_scalp", "one_min_scalp"],
+    ["old_hf_equity_scalp", "old_one_min_scalp"],
 )
 def test_equity_plugins_ported(name):
     from backtest.strategy.templates import EquityStrategy

@@ -185,7 +185,7 @@ def test_declared_intraday_overrides_a_swing_timeframe():
 
 
 @pytest.mark.parametrize(
-    "strategy_name", ["strangle_wing_points", "straddle_short_atm"]
+    "strategy_name", ["old_strangle_wing_points", "old_straddle_short_atm"]
 )
 def test_a_strategy_declaration_reaches_the_bridge_as_positional_carry(
     strategy_name,

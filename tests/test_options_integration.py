@@ -302,6 +302,14 @@ class TestFiveStrategySession:
             assert entry["delta"] * expected_sign >= 0.0
 
         # ---- Close everything (end of day) ----------------------------------
+        # FakeQuoteProvider quotes bid=price-0.5, ask=price+0.5. Every exit
+        # crosses the spread (sell at bid, buy at ask), losing 0.5 × quantity
+        # per leg. Compute expected spread cost before closing.
+        spread_cost = sum(
+            Decimal("0.5") * Decimal(str(pos.total_quantity))
+            for pos in all_positions
+        )
+
         for structure in list(broker.get_open_structures()):
             broker.close_structure(structure.structure_id, quotes)
 
@@ -309,10 +317,11 @@ class TestFiveStrategySession:
         assert broker.get_open_structures() == []
 
         # ---- P&L reconciliation: capital + realized - fees == cash ---------
-        # (All positions closed at the same prices the MTM saw, so realized
-        # P&L must equal the unrealized snapshot.)
+        # Realized P&L = unrealized P&L − spread cost (crossing bid/ask on
+        # exit: sell at bid = ltp − 0.5, buy at ask = ltp + 0.5).
         realized = broker.total_realized_pnl
-        assert realized == pytest.approx(float(unrealized), rel=1e-9)
+        expected_realized = unrealized - spread_cost
+        assert float(realized) == pytest.approx(float(expected_realized), rel=1e-9)
         assert broker.total_equity == broker.available_cash  # flat book
         assert broker.total_equity == (
             broker.capital + realized - broker.total_commission_paid

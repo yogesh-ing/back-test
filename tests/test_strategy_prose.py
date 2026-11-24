@@ -96,7 +96,7 @@ def _registered_prose() -> list[tuple[str, str]]:
 def test_every_registered_strategy_carries_prose():
     prose = _registered_prose()
     assert len(prose) >= 12, f"expected one description per strategy module, got {len(prose)}"
-    assert any(where.startswith("strangle_wing_points.") for where, _ in prose), (
+    assert any(where.startswith("old_strangle_wing_points.") for where, _ in prose), (
         "the plugin pack did not register — the About panel would be the only "
         "thing left covering its prose"
     )

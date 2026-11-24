@@ -169,6 +169,8 @@ def test_get_all_returns_valid_catalogue():
         assert set(entry) == {
             "name", "description", "version", "author", "params", "signal_kind",
             "eligible_instruments",
+            # 2026-11-23: instrument type — "options" or "equity".
+            "instrument_type",
             # issues.txt S2: the strategy→segment link (spawn-form preselect).
             "default_segment",
             # issues.txt S1 follow-up: readable criteria recorded at save.

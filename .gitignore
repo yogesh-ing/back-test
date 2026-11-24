@@ -82,6 +82,22 @@ src/data/feed_quality.log
 src/data/portfolio_state.json.bak_*
 data/portfolio_state.json.bak_*
 
+# Runtime state — never commit (per AGENTS.md)
+src/data/portfolio_state.json
+src/data/portfolio_state.json.boot_*
+
+# Runtime logs
+mticker.log
+server_5000.log
+server_5000.out
+server_5000.err.log
+
+# Accidental / scratch files
+docs/New Text Document.txt
+
+# Kilo local agent configs (user-managed)
+.kilo/agent/*.original.md
+
 # Test artifacts
 test-results/
 tradeData/

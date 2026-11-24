@@ -19,7 +19,7 @@ from backtest.strategy.templates import InstantLongOptionStrategy
 class PeInstantBuy(InstantLongOptionStrategy):
     """Buy the ATM put instantly on deploy and hold it for the day."""
 
-    name = "PE_instant_buy"
+    name = "old_PE_instant_buy"
     side = "PE"
     eligible_instruments = ["NIFTY", "BANKNIFTY"]
     description = (

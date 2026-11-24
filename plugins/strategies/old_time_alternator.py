@@ -34,7 +34,7 @@ from backtest.strategy.intent import Direction, MarketView
 class TimeAlternator(DirectionalOptionStrategy):
     """Alternate ATM call/put every N bars (draft #3, deterministic form)."""
 
-    name = "time_alternator"
+    name = "old_time_alternator"
     # 2026-09-22: instrument eligibility (spawn-form dropdown + create-API
     # enforcement). Index strategies trade the FNO index set.
     eligible_instruments = ["NIFTY", "BANKNIFTY"]

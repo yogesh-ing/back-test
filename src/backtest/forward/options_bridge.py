@@ -2861,6 +2861,10 @@ class OptionsBridge:
             ],
         )
         self._validate_entry_contracts(strikes, chain, option_type, structure_type)
+        # Subscribe entry tokens on the broker feed BEFORE filling — so the
+        # exit path never prices a leg off an ltp=0 quote with no error key.
+        # No-op for paper/synthetic feeds that lack subscribe_tokens_ws.
+        self._subscribe_entry_tokens(strikes, chain, option_type)
         # A declared fixed distance (strict mode: the DirectionRule the
         # strategy/spec stated) reaches builders that select their own
         # strikes (ShortStrangle); the rest ignore it. Legacy v1 passes
@@ -3613,6 +3617,74 @@ class OptionsBridge:
         if self.trade_health == "BLOCKED_BY_RISK":
             self.trade_health = "OK"
             self.block_reason = None
+
+    def _subscribe_entry_tokens(
+        self,
+        strikes: list[Any],
+        chain: Any,
+        option_type: str,
+    ) -> None:
+        """Subscribe entry-leg instrument tokens on the broker feed before fill.
+
+        Extracted from ``chain`` contracts for the selected strikes. For two-sided
+        (``option_type == "BOTH"``) chains both CE and PE tokens are subscribed.
+
+        Safe to call on any broker: looks up ``subscribe_tokens_ws`` on the
+        quote provider's backing broker first, then on ``self.option_broker``.
+        Silently returns when neither exposes it (paper / synthetic feeds).
+        """
+        tokens: list[str] = []
+        try:
+            if option_type == "BOTH":
+                for s in strikes:
+                    side_map = chain.get(s, {}) if isinstance(chain, dict) else {}
+                    for side in ("CE", "PE"):
+                        contract = side_map.get(side) if isinstance(side_map, dict) else None
+                        tok = getattr(contract, "instrument_token", None) if contract is not None else None
+                        if tok is not None:
+                            tokens.append(str(tok))
+            else:
+                for s in strikes:
+                    contract = chain.get(s) if isinstance(chain, dict) else None
+                    tok = getattr(contract, "instrument_token", None) if contract is not None else None
+                    if tok is not None:
+                        tokens.append(str(tok))
+        except Exception:  # noqa: BLE001 — token extraction must never block entry
+            logger.debug("[options-bridge] failed to extract entry tokens", exc_info=True)
+            return
+
+        # De-duplicate while preserving order
+        seen: set[str] = set()
+        tokens = [t for t in tokens if not (t in seen or seen.add(t))]
+        if not tokens:
+            return
+
+        broker = None
+        qp = getattr(self, "quote_provider", None)
+        if qp is not None:
+            candidate = getattr(qp, "broker", None)
+            if candidate is not None and getattr(candidate, "subscribe_tokens_ws", None) is not None:
+                broker = candidate
+        if broker is None:
+            candidate = getattr(self, "option_broker", None)
+            if getattr(candidate, "subscribe_tokens_ws", None) is not None:
+                broker = candidate
+        if broker is None:
+            logger.debug(
+                "[options-bridge] no subscribe_tokens_ws on quote provider broker "
+                "or option broker — skipping feed subscription for %d token(s)",
+                len(tokens),
+            )
+            return
+
+        try:
+            broker.subscribe_tokens_ws(tokens, mode="full", wait_timeout=5.0)
+        except Exception:  # noqa: BLE001 — subscription failure must not block entry
+            logger.debug(
+                "[options-bridge] subscribe_tokens_ws failed for %d entry token(s)",
+                len(tokens),
+                exc_info=True,
+            )
 
     def _pin_structure_legs(self, structure: Any) -> None:
         sid = getattr(structure, "structure_id", None)

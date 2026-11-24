@@ -492,12 +492,14 @@ class TestIntegrationSpreadLifecycle:
         positions = broker.execute_structure(intent, quotes)
         structure_id = positions[0].structure_id
 
-        # Price goes from 100 → 150
+        # Price goes from 100 → 150. FakeQuoteProvider quotes bid=price-0.5,
+        # ask=price+0.5. Exit crosses the spread: long call closes by hitting
+        # the bid (149.5), not the ltp (150.0).
         quotes.set_price("T24800", 150.0)
         pnl = broker.close_structure(structure_id, quotes)
 
-        # Expected: (150 - 100) × 25 = 1250
-        assert pnl == Decimal("1250")
+        # Expected: (149.5 bid - 100.0 ltp entry) × 25 = 1237.50
+        assert pnl == Decimal("1237.50")
 
 
 # ---------------------------------------------------------------------------

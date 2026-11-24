@@ -1649,12 +1649,100 @@ class PortfolioManager:
                 ),
             )
             self._persist_state()
+
+        # Re-subscribe open-leg instrument tokens on the freshly-authenticated
+        # broker feed before any bar arrives. Restored structures MTM to 0
+        # until their tokens are back on the WS; this closes the gap.
+        try:
+            self._rehydrate_feed_subscriptions(key)
+        except Exception:  # noqa: BLE001 — re-subscription must not fail login
+            logger.exception("[login-wake] feed re-subscription failed for %s", key)
+
         logger.info(
             "[login-wake] %s authenticated: %d book(s) pricing again, %d parked "
             "snapshot(s) re-created, %d still waiting",
             key, len(out["woken"]), len(out["unparked"]), len(out["still_waiting"]),
         )
         return out
+
+    def _rehydrate_feed_subscriptions(self, broker_key: str) -> None:
+        """Re-subscribe open-leg instrument tokens on a freshly-authenticated broker.
+
+        Queries ``option_open_legs`` + ``option_open_structures`` for every open
+        position routed to ``broker_key`` and calls ``subscribe_tokens_ws`` on
+        the broker so restored legs have live quotes immediately — instead of
+        MTM-ing to 0 until the next refresh.
+
+        Grouped by portfolio's execution_broker/source so each broker only
+        receives its own tokens.
+        """
+        key = str(broker_key or "").strip().lower()
+        if not key:
+            return
+        db = getattr(self._trade_persister, "db", None)
+        if db is None:
+            logger.debug("[rehydrate] no DB — skipping feed re-subscription for %s", key)
+            return
+        try:
+            from backtest.db.models import (
+                OptionOpenLegRecord as LegRow,
+                OptionOpenStructureRecord as StructRow,
+                Portfolio as PortfolioRow,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("[rehydrate] cannot import DB models — skipping for %s", key)
+            return
+
+        with db.session() as session:
+            rows = (
+                session.query(LegRow.instrument_token, LegRow.trading_symbol)
+                .join(StructRow, LegRow.structure_id == StructRow.structure_id)
+                .join(PortfolioRow, StructRow.portfolio_id == PortfolioRow.portfolio_id)
+                .filter(LegRow.status == "open")
+                .filter(StructRow.status == "open")
+                .filter(
+                    (
+                        PortfolioRow.execution_broker == key
+                    )
+                    | (
+                        PortfolioRow.source == key
+                    )
+                )
+                .all()
+            )
+
+        tokens = sorted({str(r[0]) for r in rows if r[0]})
+        if not tokens:
+            logger.debug("[rehydrate] no open leg tokens for broker %s", key)
+            return
+
+        try:
+            from backtest.brokers.session_manager import get_session_manager
+
+            mgr = get_session_manager()
+            broker = mgr.get_broker(key)
+        except Exception:  # noqa: BLE001
+            logger.debug("[rehydrate] cannot resolve broker %s for re-subscription", key)
+            return
+
+        subscribe_fn = getattr(broker, "subscribe_tokens_ws", None)
+        if not callable(subscribe_fn):
+            logger.debug(
+                "[rehydrate] broker %s lacks subscribe_tokens_ws — skipping", key
+            )
+            return
+
+        try:
+            subscribe_fn(tokens, mode="full", wait_timeout=5.0)
+            logger.info(
+                "[rehydrate] re-subscribed %d open-leg token(s) on %s feed",
+                len(tokens), key,
+            )
+        except Exception:  # noqa: BLE001 — must not fail login
+            logger.exception(
+                "[rehydrate] subscribe_tokens_ws failed for %d token(s) on %s",
+                len(tokens), key,
+            )
 
     def _reconcile_live_broker_positions(self, broker_key: str) -> Dict[str, Any]:
         """Event 2 (Sprint D / Ticket D1): reconcile live positions on broker login.

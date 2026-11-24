@@ -40,7 +40,7 @@ from backtest.strategy.intent import Direction, MarketView
 class DeltaMomentum(DirectionalOptionStrategy):
     """EMA trend gate whose runner rides delta-targeted strikes."""
 
-    name = "delta_momentum"
+    name = "old_delta_momentum"
     eligible_instruments = ["NIFTY", "BANKNIFTY"]
     # The bridge picks strikes by delta when spawned with this expression —
     # the Greek lever of this strategy lives here, not in direction detection.

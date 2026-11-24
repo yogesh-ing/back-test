@@ -72,7 +72,7 @@ EXIT_SHARE_MIN = 0.5
 class ImmediateStrangle(StructureStrategy):
     """Sell the 2%-OTM strangle the moment the runner is deployed."""
 
-    name = "immediate_strangle"
+    name = "old_immediate_strangle"
     # 2026-09-22: instrument eligibility (spawn-form dropdown + create-API
     # enforcement). Index strategies trade the FNO index set.
     eligible_instruments = ["NIFTY", "BANKNIFTY"]

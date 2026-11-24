@@ -22,7 +22,7 @@ from backtest.strategy.templates import EquityStrategy
 class HF_EquityScalp(EquityStrategy):
     """High-frequency momentum scalp on equities."""
     
-    name = "hf_equity_scalp"
+    name = "old_hf_equity_scalp"
     timeframe = "1min"
     description = (
         "Aggressive equity scalper: buys on positive momentum, exits at "

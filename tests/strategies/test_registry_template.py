@@ -44,18 +44,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 #: Strategies documented as failing specific template rules (guidelines §8).
 #: strategy name → {template test id → "rule — reason"}
 KNOWN_FAILS: dict[str, dict[str, str]] = {
-    "time_alternator": {
+    "old_time_alternator": {
         "test_backtest_equals_forward_window": (
             "R-D2 — direction freezes in the forward window (bar-parity "
             "anchored to frame start)"
         ),
     },
-    "vwap_ema_rsi": {
+    "old_vwap_ema_rsi": {
         "test_backtest_equals_forward_window": (
             "R-D2 — frame-anchored VWAP; rare disagreements on 1-min"
         ),
     },
-    "ema_reversion_pob": {
+    "old_ema_reversion_pob": {
         "test_positional_index_fallback": (
             "R-T2 — raises on a RangeIndex feed (no parseable timestamps)"
         ),
@@ -78,9 +78,11 @@ KNOWN_FAILS: dict[str, dict[str, str]] = {
 #: ``straddle_short_atm`` (2026-11-02) are the same shape: a NEUTRAL view
 #: plus a named ``build_opening_intent``.
 DELIBERATE_NEUTRAL = {
-    "immediate_strangle",
-    "strangle_wing_points",
-    "straddle_short_atm",
+    "old_immediate_strangle",
+    "old_strangle_wing_points",
+    "old_straddle_short_atm",
+    "immediate_short_straddle",
+    "zero_dte_short_straddle",
 }
 
 #: Strategies whose docstrings declare a constant/holding contract — the
@@ -90,15 +92,17 @@ DELIBERATE_NEUTRAL = {
 #: ``vwap_ema_rsi`` only emits a view on crossover bars.)
 CONSTANT_DECISION = {
     "buy_and_hold",
-    "time_alternator",
-    "vwap_ema_rsi",
+    "old_time_alternator",
+    "old_vwap_ema_rsi",
     # Instant-entry instruments: unconditional view on EVERY bar by design
     # ("book the structure at once, hold per the strategy's exit contract").
-    "CE_instant_buy",
-    "PE_instant_buy",
-    "immediate_strangle",
-    "strangle_wing_points",
-    "straddle_short_atm",
+    "old_CE_instant_buy",
+    "old_PE_instant_buy",
+    "old_immediate_strangle",
+    "old_strangle_wing_points",
+    "old_straddle_short_atm",
+    "immediate_short_straddle",
+    "zero_dte_short_straddle",
 }
 
 _TEMPLATE_PATH = PROJECT_ROOT / "templates" / "strategy_test_template.py"

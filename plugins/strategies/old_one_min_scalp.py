@@ -22,7 +22,7 @@ from backtest.strategy.templates import EquityStrategy
 class OneMinScalp(EquityStrategy):
     """Simple 1-min momentum scalp: buy green candles, TP=5pts, SL=3pts."""
     
-    name = "one_min_scalp"
+    name = "old_one_min_scalp"
     timeframe = "1min"
     description = (
         "Buys on next bar after a green candle (close > open), exits at "

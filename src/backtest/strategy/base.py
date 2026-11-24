@@ -181,6 +181,10 @@ class Strategy(ABC):
     # ``(low, high)`` India VIX range the strategy is designed for; drives the
     # Risk Board "strategy regime fit" column. ``None`` = any regime.
     regime_vix_range: tuple[float, float] | None = None
+    # Instrument type: "options" or "equity". Drives the spawn form's
+    # target-type lock and future chain-source wiring. None = unset (legacy
+    # strategies); new strategies must declare one.
+    instrument_type: str | None = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

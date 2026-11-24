@@ -29,7 +29,7 @@ from backtest.strategy.intent import Direction, MarketView
 class MomentumBurst(DirectionalOptionStrategy):
     """Buy ATM call/put when the last bar moves ±threshold% (draft #1)."""
 
-    name = "momentum_burst"
+    name = "old_momentum_burst"
     # 2026-09-22: instrument eligibility (spawn-form dropdown + create-API
     # enforcement). Index strategies trade the FNO index set.
     eligible_instruments = ["NIFTY", "BANKNIFTY"]

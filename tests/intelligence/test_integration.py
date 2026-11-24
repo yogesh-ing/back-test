@@ -57,11 +57,11 @@ def strangle_config(name="Strangle A", **params):
     from backtest.strategy.registry import get_strategy
 
     expression, _provenance = resolve_expression(
-        spec=get_strategy("immediate_strangle").execution_spec()
+        spec=get_strategy("old_immediate_strangle").execution_spec()
     )
     return RunnerConfig(
         name=name,
-        strategy_name="immediate_strangle",
+        strategy_name="old_immediate_strangle",
         allocated_capital=500000,
         symbols=["NIFTY"],
         target_type="SINGLE_SYMBOL",
@@ -139,7 +139,7 @@ def test_greeks_aggregate_real_option_book(mgr):
     assert g["positions"] == 1 and g["legs_priced"] == 2
     assert g["net_gamma"] < 0 and g["net_theta"] > 0
     row = g["breakdown_by_strategy"][0]
-    assert row["strategy"] == "immediate_strangle" and row["positions"] == 1
+    assert row["strategy"] == "old_immediate_strangle" and row["positions"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +351,7 @@ def test_stream_summary_is_compact(mgr):
     feed(mgr, n=3)
     s = mgr.intelligence.stream_summary()
     assert set(s) >= {"net_delta", "net_gamma", "net_vega", "net_theta", "by_strategy", "alerts"}
-    assert s["by_strategy"][0]["strategy"] == "immediate_strangle"
+    assert s["by_strategy"][0]["strategy"] == "old_immediate_strangle"
 
 
 # ---------------------------------------------------------------------------

@@ -53,7 +53,7 @@ DEFAULT_WING_POINTS = 300.0
 class StrangleWingPoints(StructureStrategy):
     """Sell a strangle ``wing_points`` away from ATM on the nearest expiry."""
 
-    name = "strangle_wing_points"
+    name = "old_strangle_wing_points"
     eligible_instruments = ["NIFTY", "BANKNIFTY"]
     template = "structure"
     version = "1.1"

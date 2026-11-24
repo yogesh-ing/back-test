@@ -1375,6 +1375,13 @@ class OptionPaperBroker:
             not isinstance(quote, dict)
             or not quote
             or bool(quote.get("error"))
+            or (
+                # A quote with bid/ask is executable on either side — ltp may be 0
+                # but the spread still gives us a real price. Only fail when we
+                # have neither bid/ask nor a positive ltp.
+                not (quote.get("bid") and quote.get("ask"))
+                and float(quote.get("ltp", 0) or 0) <= 0
+            )
         )
         if is_failed_quote and mode != "off":
             # This used to settle the leg at ``current_price`` (or entry) when
@@ -1404,7 +1411,14 @@ class OptionPaperBroker:
                 else position.entry_price
             )
         else:
-            quoted_price = Decimal(str(quote.get("ltp", 0) or 0))
+            # Cross-the-spread exit pricing: buy at ask, sell at bid.
+            # Fall back to ltp only for providers without the execution_quote seam.
+            if quote.get("bid") and quote.get("ask"):
+                quoted_price = Decimal(
+                    str(quote["ask"] if exit_side == "BUY" else quote["bid"])
+                )
+            else:
+                quoted_price = Decimal(str(quote.get("ltp", 0) or 0))
 
         exit_tick = _resolve_tick_size(
             quote_provider, position.instrument_token, position.metadata, position

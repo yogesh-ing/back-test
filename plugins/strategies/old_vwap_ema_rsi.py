@@ -37,7 +37,7 @@ from backtest.strategy.intent import Direction, MarketView
 class VwapEmaRsi(DirectionalOptionStrategy):
     """VWAP bias + EMA(9/15) cross trigger + RSI pullback band."""
 
-    name = "vwap_ema_rsi"
+    name = "old_vwap_ema_rsi"
     # 2026-09-22: instrument eligibility (spawn-form dropdown + create-API
     # enforcement). Index strategies trade the FNO index set.
     eligible_instruments = ["NIFTY", "BANKNIFTY"]

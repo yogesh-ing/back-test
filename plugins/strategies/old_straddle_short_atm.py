@@ -39,7 +39,7 @@ from backtest.strategy.templates import StructureStrategy
 class ShortStraddleAtm(StructureStrategy):
     """Sell the ATM call and ATM put on the nearest expiry at deploy."""
 
-    name = "straddle_short_atm"
+    name = "old_straddle_short_atm"
     eligible_instruments = ["NIFTY", "BANKNIFTY"]
     template = "structure"
     version = "1.1"

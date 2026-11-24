@@ -39,7 +39,7 @@ from backtest.strategy.intent import Direction, MarketView
 class VolumeOISurge(DirectionalOptionStrategy):
     """Volume-surge gate whose runner picks the busiest strike."""
 
-    name = "volume_oi_surge"
+    name = "old_volume_oi_surge"
     eligible_instruments = ["NIFTY", "BANKNIFTY"]
     # Phase 2 rewrite (plan §9.2): the strategy's own execution declaration.
     # Signal logic below is unchanged from the snapshot; what changed is

@@ -27,7 +27,7 @@ from backtest.strategy.templates import InstantLongOptionStrategy
 class CeInstantBuy(InstantLongOptionStrategy):
     """Buy the ATM call instantly on deploy and hold it for the day."""
 
-    name = "CE_instant_buy"
+    name = "old_CE_instant_buy"
     side = "CE"
     eligible_instruments = ["NIFTY", "BANKNIFTY"]
     description = (
