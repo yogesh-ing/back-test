@@ -141,6 +141,10 @@ def market_regime():
 @_guard
 def market_vix():
     data = request.get_json(silent=True) or {}
+    if data.get("clear"):
+        _intel().regime.clear_vix()
+        log.info("VIX override cleared — feed will repopulate on next INDIAVIX bar")
+        return jsonify({"success": True, "cleared": True, **_intel().regime_snapshot(_mode())})
     try:
         value = float(data.get("value"))
     except (TypeError, ValueError):
@@ -151,6 +155,27 @@ def market_vix():
     snap = _intel().ingest_vix(value, source=source)
     log.info("VIX reading %.2f ingested (source=%s)", value, source)
     return jsonify({"success": True, **snap})
+
+
+@intelligence_bp.post("/api/intelligence/factor-override")
+@_guard
+def factor_override():
+    """Dev-gated: manually override a factor's fields for testing regime impact.
+
+    Body: {"key": "trend|session|iv_rv|...", "override": {"status": "...", "tone": "...", ...}}
+    To clear: {"key": "trend", "override": null} or {"key": null} to clear all.
+    """
+    data = request.get_json(silent=True) or {}
+    key = data.get("key")
+    override = data.get("override")
+    if key is None:
+        _intel().clear_factor_override()
+        return jsonify({"success": True, "cleared": "all"})
+    if override is None:
+        _intel().clear_factor_override(key)
+        return jsonify({"success": True, "cleared": key})
+    _intel().set_factor_override(key, override)
+    return jsonify({"success": True, "key": key, "override": override})
 
 
 @intelligence_bp.get("/api/market/oi-activity")

@@ -19,11 +19,14 @@
   const LS_PREFIX = "pi.section.";
   const $ = (id) => document.getElementById(id);
   const state = { greeks: null, concentration: null, correlation: null, regime: null,
-                  activity: null, lastSlow: 0, busyFast: false, busySlow: false,
+                  regimeHistory: [], activity: null, lastSlow: 0, busyFast: false, busySlow: false,
                   timer: null, chart: null, groupBy: "runner" };
 
   const REGIME_BADGE = { low_vol: "pi-regime-low", moderate_vol: "pi-regime-moderate",
-                         high_vol: "pi-regime-high", unknown: "pi-regime-unknown" };
+                          high_vol: "pi-regime-high", unknown: "pi-regime-unknown" };
+
+  const REGIME_ALERT_TYPES = new Set(["vix_regime_change", "session_phase", "iv_rv_dislocation", "portfolio_gamma_critical", "trend_regime_change"]);
+  const ALERT_SEVERITY_CLASS = { warning: "warn", critical: "critical", info: "info" };
 
   function esc(v) {
     return String(v == null ? "" : v)
@@ -254,36 +257,155 @@
     if (fit) {
       const rows = r.strategy_fit || [];
       const icon = { favorable: "✅", unfavorable: "⚠️", any: "➖", unknown: "❔" };
-      fit.innerHTML = rows.length ? rows.map((f) => `
-        <tr class="${f.status === "unfavorable" ? "pi-row-flag" : ""}">
+      fit.innerHTML = rows.length ? `<thead><tr><th>Runner</th><th>Strategy</th><th>Designed for</th><th>Fit</th><th>Pause</th></tr></thead><tbody>` +
+      rows.map((f) => {
+        const ps = f.pause_status || {};
+        const paused = ps.active;
+        const chip = paused
+          ? `<span class="pi-pause-chip pi-pause-on" title="${esc(ps.reason || "")}">paused · ${esc(ps.reason || "")}</span>`
+          : `<span class="pi-pause-chip pi-pause-off">active</span>`;
+        return `<tr class="${f.status === "unfavorable" ? "pi-row-flag" : ""}">
           <td>${esc(f.runner)}</td><td title="${esc(f.strategy)}">${esc(Labels.strategy(f.strategy))}</td>
           <td>${f.range ? "VIX " + num(f.range[0], 0) + "–" + num(f.range[1], 0) : "any"}</td>
-          <td>${icon[f.status] || ""} ${esc(f.status)}</td></tr>`).join("")
-        : `<tr><td colspan="4" class="muted">No runners.</td></tr>`;
+          <td>${icon[f.status] || ""} ${esc(f.status)}</td>
+          <td>${chip}</td></tr>`;
+      }).join("") + "</tbody>"
+        : `<tr><td colspan="5" class="muted">No runners.</td></tr>`;
     }
     const summary = $("pi-regime-summary");
     if (summary) summary.textContent = `${r.label || r.regime}${r.vix != null && r.regime !== "unknown" ? " · " + num(r.vix, 1) : ""}${r.is_proxy ? " (proxy)" : ""}`;
     const foot = $("pi-regime-foot");
     if (foot) foot.textContent = `${(r.history || []).length} samples (every 5 min) · strategies declare their range via regime_vix_range`;
+    const banner = $("pi-override-banner");
+    const ovVal = $("pi-override-value");
+    if (banner && ovVal) {
+      const isManual = (r.source || "manual") === "manual" && !r.is_proxy;
+      banner.style.display = isManual ? "block" : "none";
+      if (isManual && r.vix != null) ovVal.textContent = num(r.vix, 2);
+    }
+    renderFactors(r);
+    drawSparklines();
     renderRegimeChart(r);
+    fetchAndRenderRegimeAlerts();
+  }
+
+  async function fetchAndRenderRegimeAlerts() {
+    try {
+      const data = await api("/api/alerts/active");
+      const alerts = (data.alerts || []).filter((a) => REGIME_ALERT_TYPES.has(a.alert_type));
+      const list = $("pi-regime-alert-list");
+      const banner = $("pi-regime-alerts");
+      if (!list || !banner) return;
+      if (!alerts.length) { banner.style.display = "none"; return; }
+      banner.style.display = "block";
+      list.innerHTML = alerts.map((a) => {
+        const cls = ALERT_SEVERITY_CLASS[a.severity] || "info";
+        const ts = a.created_at ? new Date(a.created_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "";
+        return `<div class="pi-alert-item ${cls}">
+          <span class="pi-alert-dot ${cls}"></span>
+          <span class="pi-alert-text">${esc(a.message || "")}</span>
+          <span class="pi-alert-time">${esc(ts)}</span>
+        </div>`;
+      }).join("");
+    } catch (e) {
+      // alerts endpoint may not be ready yet — silent
+    }
+  }
+
+  const TONE_CLASS = { positive: "pnl-pos", negative: "pnl-neg", neutral: "", unknown: "muted" };
+  const TONE_ICON = { positive: "▲", negative: "▼", neutral: "▬", unknown: "·" };
+
+  function renderFactors(r) {
+    const grid = $("pi-factors");
+    if (!grid) return;
+    const block = r.factors || {};
+    const list = block.factors || [];
+    const comp = $("pi-factors-composite");
+    if (comp) {
+      const c = block.composite || {};
+      if (c.label) {
+        const gauge = { risk_off: "pi-gauge-off", risk_on: "pi-gauge-on", neutral: "pi-gauge-neutral" }[c.label] || "pi-gauge-neutral";
+        comp.innerHTML = ` — <span class="pi-gauge-pill ${gauge}"><span class="pi-gauge-dot"></span>${c.label.replace(/_/g, " ")}</span> <span class="muted" style="font-size:.72rem;">(${c.risk_off || 0} off / ${c.risk_on || 0} on)</span></span>`;
+      } else {
+        comp.textContent = "";
+      }
+    }
+    if (!list.length) {
+      grid.innerHTML = `<div class="muted">No factor data.</div>`;
+      return;
+    }
+    grid.innerHTML = list.map((f) => {
+      const cls = TONE_CLASS[f.tone] || "muted";
+      const icon = TONE_ICON[f.tone] || "·";
+      const hist = state.regimeHistory.map((h) => {
+        const f2 = (h.factors && h.factors.factors) || [];
+        const match = f2.find((x) => x.key === f.key);
+        return match != null && match.value != null ? match.value : null;
+      }).filter((v) => v != null);
+      const spark = hist.length ? `<canvas class="pi-spark" width="120" height="24" data-values="${hist.join(",")}"></canvas>` : `<div class="muted" style="font-size:.68rem;">—</div>`;
+      return `<div class="pi-factor" title="${esc(f.detail || "")}">
+          <span class="pi-factor-name">${esc(f.label)}</span>
+          <span class="pi-factor-val ${cls}">${icon} ${esc(f.display)}</span>
+          <span class="pi-factor-src muted">${esc(f.source || "")}</span>
+          ${spark}
+        </div>`;
+    }).join("");
+  }
+
+  function drawSparklines() {
+    document.querySelectorAll("canvas.pi-spark").forEach((cv) => {
+      const vals = cv.dataset.values ? cv.dataset.values.split(",").map(Number) : [];
+      if (vals.length < 2) return;
+      const ctx = cv.getContext("2d");
+      const w = cv.width, h = cv.height;
+      const min = Math.min(...vals), max = Math.max(...vals);
+      const range = max - min || 1;
+      ctx.clearRect(0, 0, w, h);
+      ctx.beginPath();
+      const step = w / (vals.length - 1);
+      vals.forEach((v, i) => {
+        const x = i * step;
+        const y = h - ((v - min) / range) * (h - 4);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.strokeStyle = "var(--accent-text)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    });
   }
 
   function renderRegimeChart(r) {
     const canvas = $("pi-regime-chart");
     if (!canvas || typeof Chart === "undefined") return;
     const hist = (r.history || []).slice(-288);
-    const labels = hist.map((h) => (h.ts || "").slice(11, 16));
+    const bands = r.bands || {};
+    const lowMax = bands.low_max != null ? Number(bands.low_max) : 15;
+    const highMin = bands.high_min != null ? Number(bands.high_min) : 22;
+    // UTC → IST (+5h30m) for readable Indian market time labels.
+    const toIST = (ts) => {
+      try {
+        const d = new Date(ts);
+        d.setMinutes(d.getMinutes() + 330);
+        return d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false });
+      } catch (_) { return ""; }
+    };
+    const labels = hist.map((h) => toIST(h.ts));
     const data = hist.map((h) => h.value);
+    const thresholdLow = { data: hist.map(() => lowMax), borderColor: "rgba(46, 204, 113, 0.5)", borderWidth: 1, borderDash: [4, 4], pointRadius: 0, fill: false, label: "low ≤ 15", showLine: true, pointHoverRadius: 0, order: 2 };
+    const thresholdHigh = { data: hist.map(() => highMin), borderColor: "rgba(231, 76, 60, 0.5)", borderWidth: 1, borderDash: [4, 4], pointRadius: 0, fill: false, label: "high ≥ 22", showLine: true, pointHoverRadius: 0, order: 2 };
     if (state.chart) {
       state.chart.data.labels = labels;
-      state.chart.data.datasets[0].data = data;
+      state.chart.data.datasets = [
+        { label: "India VIX", data, borderColor: "#8b5cf6", pointRadius: 0, borderWidth: 1.5, tension: 0.2, order: 1 },
+        thresholdLow, thresholdHigh,
+      ];
       state.chart.update("none");
       return;
     }
     try {
       state.chart = new Chart(canvas.getContext("2d"), {
         type: "line",
-        data: { labels, datasets: [{ label: "VIX / vol", data, borderColor: "#8b5cf6", pointRadius: 0, borderWidth: 1.5, tension: 0.2 }] },
+        data: { labels, datasets: [{ label: "India VIX", data, borderColor: "#8b5cf6", pointRadius: 0, borderWidth: 1.5, tension: 0.2, order: 1 }, thresholdLow, thresholdHigh] },
         options: { animation: false, responsive: true, plugins: { legend: { display: false } },
                    scales: { x: { ticks: { color: "#94a3b8", maxTicksLimit: 6 } }, y: { ticks: { color: "#94a3b8" } } } },
       });
@@ -352,6 +474,10 @@
       ]);
       state.thresholds = overview.thresholds;
       state.regime = overview.regime;
+      if (overview.regime) {
+        state.regimeHistory.push(overview.regime);
+        if (state.regimeHistory.length > 288) state.regimeHistory = state.regimeHistory.slice(-288);
+      }
       state.activity = overview.market_activity;
       state.correlation = corr;
       renderRegime(overview.regime);
@@ -435,6 +561,49 @@
     }
   }
 
+  async function clearOverride() {
+    try {
+      const snap = await api("/api/market/vix", "POST", { clear: true });
+      renderRegime(Object.assign({}, state.regime || {}, snap));
+      toast("VIX override cleared — feed will repopulate on next INDIAVIX bar", "success");
+      refreshSlow(false);
+    } catch (e) {
+      toast("Failed to clear override: " + e.message, "error");
+    }
+  }
+
+  async function applyFactorOverrides() {
+    const trend = $("pi-ov-trend");
+    const session = $("pi-ov-session");
+    const ivrv = $("pi-ov-ivrv");
+    const overrides = {};
+    if (trend && trend.value) overrides.trend = { status: trend.value, tone: { up: "positive", down: "negative", sideways: "neutral", unknown: "unknown" }[trend.value] || "unknown" };
+    if (session && session.value) overrides.session = { status: session.value, tone: { opening_drive: "positive", morning_trend: "positive", midday_chop: "neutral", closing_squareoff: "negative", off_hours: "unknown" }[session.value] || "neutral", display: session.value.replace(/_/g, " ") };
+    if (ivrv && ivrv.value) overrides.iv_rv = { status: ivrv.value, tone: { sell_vol: "positive", buy_vol: "negative", fair: "neutral", unknown: "unknown" }[ivrv.value] || "unknown" };
+    try {
+      for (const [key, ov] of Object.entries(overrides)) {
+        await api("/api/intelligence/factor-override", "POST", { key, override: ov });
+      }
+      toast("Factor overrides applied (dev)", "success");
+      refreshSlow(false);
+    } catch (e) {
+      toast("Override failed: " + e.message, "error");
+    }
+  }
+
+  async function clearAllFactorOverrides() {
+    try {
+      await api("/api/intelligence/factor-override", "POST", { key: null });
+      $("pi-ov-trend").value = "";
+      $("pi-ov-session").value = "";
+      $("pi-ov-ivrv").value = "";
+      toast("Factor overrides cleared (dev)", "success");
+      refreshSlow(false);
+    } catch (e) {
+      toast("Clear failed: " + e.message, "error");
+    }
+  }
+
   function bind() {
     if (document.querySelectorAll) {
       document.querySelectorAll("[data-pi-toggle]").forEach((btn) =>
@@ -453,6 +622,12 @@
     if (corrBtn) corrBtn.addEventListener("click", () => refreshSlow(true));
     const vixBtn = $("pi-vix-submit");
     if (vixBtn) vixBtn.addEventListener("click", submitVix);
+    const clearBtn = $("pi-override-clear");
+    if (clearBtn) clearBtn.addEventListener("click", clearOverride);
+    const ovApply = $("pi-ov-apply");
+    if (ovApply) ovApply.addEventListener("click", applyFactorOverrides);
+    const ovClear = $("pi-ov-clear");
+    if (ovClear) ovClear.addEventListener("click", clearAllFactorOverrides);
     const modeSel = $("risk-mode");
     if (modeSel) modeSel.addEventListener("change", refreshAll);
     const refreshBtn = $("btn-risk-refresh");

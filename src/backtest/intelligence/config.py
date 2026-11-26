@@ -50,6 +50,11 @@ class IntelligenceConfig:
     realized_vol_window: int = 60
     vix_symbols: List[str] = field(default_factory=lambda: ["INDIAVIX", "INDIA VIX", "VIX"])
     vix_stale_s: float = 900.0
+    # Regime factors (multi-factor engine)
+    factor_cache_s: float = 300.0
+    factor_lookback_days: int = 400
+    factor_sma_window: int = 200
+    iv_rv_buffer: float = 5.0
     # Market activity
     oi_spike_multiplier: float = 3.0
     oi_min_history: int = 3

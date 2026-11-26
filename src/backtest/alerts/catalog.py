@@ -92,6 +92,53 @@ CATALOG: Dict[str, Dict[str, Any]] = {
             "Wait for confirmation — the detector uses hysteresis, but regimes can revert.",
         ],
     },
+    AlertType.TREND_REGIME_CHANGE.value: {
+        "title": "Trend regime change",
+        "section": "pi-regime",
+        "what_it_means": [
+            "The benchmark has crossed its long moving average and the slope "
+            "confirms the direction — the market has shifted between trending "
+            "and ranging behaviour.",
+            "Short-premium and mean-reversion books are most exposed when a "
+            "range breaks into a trend; directional books see the reverse.",
+        ],
+        "typical_responses": [
+            "Review strategies flagged unfavourable for the new trend regime.",
+            "Subscribed strategies decide for themselves (pause, resize or ignore).",
+            "Wait for confirmation — the detector uses a long SMA, but trends can fail.",
+        ],
+    },
+    AlertType.SESSION_PHASE.value: {
+        "title": "Session phase change",
+        "section": "pi-regime",
+        "what_it_means": [
+            "The NSE intraday session has moved into a new window (opening "
+            "drive, morning trend, midday chop, afternoon/gamma, square-off).",
+            "Liquidity and directional behaviour differ sharply by window: "
+            "trending windows punish mean-reversion entries, while the midday "
+            "lull and the closing square-off are thin and whippy.",
+        ],
+        "typical_responses": [
+            "Review strategies that pause entries in the new phase.",
+            "Subscribed strategies decide for themselves (pause, resize or ignore).",
+            "Treat as context — the phase is a clock, not a directional signal.",
+        ],
+    },
+    AlertType.IV_RV_DISLOCATION.value: {
+        "title": "IV/RV dislocation",
+        "section": "pi-regime",
+        "what_it_means": [
+            "Implied volatility (the IV of the book's option legs) has moved "
+            "away from realised volatility by more than the configured buffer.",
+            "IV above RV means optionality is expensive — sellers are paid more; "
+            "IV below RV means it is cheap and short-premium carries more risk.",
+        ],
+        "typical_responses": [
+            "Review short-vol strategies when IV drops below realised vol.",
+            "Subscribed strategies decide for themselves (pause, resize or ignore).",
+            "Treat as context — the proxy uses the book's own legs, not the ATM chain.",
+        ],
+    },
     AlertType.OI_ANOMALY.value: {
         "title": "Open-interest anomaly",
         "section": "pi-regime",

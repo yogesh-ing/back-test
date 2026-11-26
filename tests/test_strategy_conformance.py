@@ -126,7 +126,6 @@ class TestBuiltIns:
     BUILTINS = (
         "buy_and_hold",
         "donchian_breakout",
-        "price_move",
         "rsi_reversion",
         "sma_crossover",
         "directional_options",
@@ -146,7 +145,7 @@ class TestBuiltIns:
     def test_builtin_signal_kinds(self):
         assert signal_kind(get_strategy("directional_options")) == "option"
         equity = (
-            "buy_and_hold", "donchian_breakout", "price_move", "rsi_reversion", "sma_crossover",
+            "buy_and_hold", "donchian_breakout", "rsi_reversion", "sma_crossover",
             "momentum_roc", "bollinger_reversion", "macd_trend", "ema_pullback",
         )
         for name in equity:

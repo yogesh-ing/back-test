@@ -36,6 +36,13 @@ from backtest.intelligence.collectors import collect_legs
 from backtest.intelligence.concentration import ConcentrationMonitor
 from backtest.intelligence.config import IntelligenceConfig, load_config
 from backtest.intelligence.correlation import CorrelationCalculator
+from backtest.intelligence.factors import (
+    FACTOR_ORDER,
+    build_factors,
+    iv_rv_factor,
+    session_factor,
+    trend_factor,
+)
 from backtest.intelligence.greeks import PortfolioGreeksAggregator
 from backtest.intelligence.market_activity import MarketActivityMonitor
 from backtest.intelligence.regime import LABELS, MarketRegimeDetector, regime_fit
@@ -105,6 +112,19 @@ class PortfolioIntelligence:
 
         self._cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         self._cache_lock = threading.Lock()
+        #: cached daily-bar inputs for the multi-factor engine (value, fetched_at).
+        self._factor_cache: Optional[Tuple[float, Dict[str, Any]]] = None
+        #: latest trend-factor status, refreshed with the factor inputs.
+        self._trend_status: Optional[str] = None
+        #: last trend status we raised an alert for (None = no baseline yet).
+        self._last_trend_status: Optional[str] = None
+        #: last NSE session phase we raised an alert for.
+        self._last_session_phase: Optional[str] = None
+        #: last IV/RV dislocation status we raised an alert for.
+        self._last_iv_rv_status: Optional[str] = None
+        #: dev-gated manual factor overrides: {factor_key: override_value}.
+        #: Used only for testing regime impact without waiting for live flips.
+        self._factor_overrides: Dict[str, Any] = {}
         self._eval_guard = threading.Lock()
         self._last_eval = 0.0
         self._last_greeks_persist = 0.0
@@ -313,9 +333,102 @@ class PortfolioIntelligence:
         result = self.correlation.matrix(self._groups(roster, group_by), use_cache=use_cache)
         return {**result, "group_by": group_by, "mode": mode or "all"}
 
+    def _factor_inputs(self) -> Dict[str, Any]:
+        """Daily bars + net gamma for the factor engine, cached for ``factor_cache_s``.
+
+        Any failure (no DB, empty cache) degrades to empty inputs rather than
+        raising — the VIX / session / gamma factors still render.
+        """
+        now = time.time()
+        with self._cache_lock:
+            cached = self._factor_cache
+            if cached is not None and now - cached[0] < self.config.factor_cache_s:
+                return cached[1]
+
+        inputs: Dict[str, Any] = {
+            "benchmark_closes": [],
+            "breadth_closes": {},
+            "net_gamma": None,
+        }
+        try:
+            from datetime import timedelta
+
+            from backtest.data.coverage import load_equity_universe
+            from backtest.data.db_source import DbSource
+            from backtest.timekeeping import now_utc
+
+            end_dt = now_utc()
+            start = (
+                end_dt - timedelta(days=int(self.config.factor_lookback_days))
+            ).date().isoformat()
+            end = end_dt.date().isoformat()
+            benchmark = self.config.regime_benchmark
+            symbols = [benchmark] + [
+                r["symbol"]
+                for r in load_equity_universe()
+                if r.get("symbol") and r["symbol"] != benchmark
+            ]
+            frames = DbSource().get_candles_bulk(symbols, start, end, "1day")
+            for sym, df in frames.items():
+                closes = [
+                    float(x)
+                    for x in df["close"].tolist()
+                    if x is not None and x == x  # drop NaN
+                ]
+                if not closes:
+                    continue
+                if sym == benchmark:
+                    inputs["benchmark_closes"] = closes
+                else:
+                    inputs["breadth_closes"][sym] = closes
+        except Exception:  # noqa: BLE001 — a data hiccup must not break the snapshot
+            logger.debug("[intelligence] factor bar inputs unavailable", exc_info=True)
+
+        try:
+            inputs["net_gamma"] = self.greeks().get("net_gamma")
+        except Exception:  # noqa: BLE001
+            logger.debug("[intelligence] factor gamma input unavailable", exc_info=True)
+
+        try:
+            trend = trend_factor(
+                inputs.get("benchmark_closes") or [], self.config.factor_sma_window
+            )
+            with self._cache_lock:
+                self._trend_status = trend.status
+        except Exception:  # noqa: BLE001
+            logger.debug("[intelligence] trend status update failed", exc_info=True)
+
+        with self._cache_lock:
+            self._factor_cache = (now, inputs)
+        return inputs
+
+    @staticmethod
+    def _runner_pause_status(runner: Any) -> Dict[str, Any]:
+        """Return pause status for a runner: {active: bool, reason: str|None, sources: list[str]}.
+
+        Reads pause_reason/block_reason from the runner object when available,
+        otherwise returns inactive. Used by the regime card to show inline
+        pause-status chips next to each strategy fit row.
+        """
+        if runner is None:
+            return {"active": False, "reason": None, "sources": []}
+        pause_reason = getattr(runner, "pause_reason", None) or ""
+        block_reason = getattr(runner, "block_reason", None) or ""
+        sources: List[str] = []
+        if pause_reason:
+            sources.append(pause_reason)
+        if block_reason:
+            sources.append(block_reason)
+        return {
+            "active": bool(sources),
+            "reason": sources[0] if sources else None,
+            "sources": sources,
+        }
+
     def regime_snapshot(self, mode: Optional[str] = None) -> Dict[str, Any]:
         snap = self.regime.snapshot()
-        roster = self.snapshot(mode)["roster"]
+        book = self.snapshot(mode)
+        roster = book["roster"]
         fits = []
         seen = set()
         for iid, r in roster.items():
@@ -333,12 +446,42 @@ class PortfolioIntelligence:
                     "strategy": r["strategy"],
                     "runner_status": r["status"],
                     "mode": r["mode"],
+                    "pause_status": self._runner_pause_status(runner),
                     **fit,
                 }
             )
         snap["strategy_fit"] = fits
         snap["feed_synthetic"] = any(r.get("source") == "synthetic" for r in roster.values())
+        try:
+            inputs = self._factor_inputs()
+            snap["factors"] = build_factors(
+                regime_snap=snap,
+                benchmark_closes=inputs.get("benchmark_closes"),
+                breadth_closes=inputs.get("breadth_closes"),
+                net_gamma=inputs.get("net_gamma"),
+                atm_iv=self._atm_iv_proxy(book.get("legs")),
+                sma_window=self.config.factor_sma_window,
+                gamma_critical=self.config.gamma_critical,
+                iv_rv_buffer=self.config.iv_rv_buffer,
+                overrides=self._factor_overrides or None,
+            )
+        except Exception:  # noqa: BLE001 — factors are additive, never fatal
+            logger.debug("[intelligence] factor build failed", exc_info=True)
         return snap
+
+    def set_factor_override(self, key: str, override: Dict[str, Any]) -> None:
+        """Dev-gated: manually override a factor's fields for testing."""
+        valid_keys = set(FACTOR_ORDER)
+        if key not in valid_keys:
+            raise ValueError(f"unknown factor key: {key}")
+        self._factor_overrides[key] = override
+
+    def clear_factor_override(self, key: Optional[str] = None) -> None:
+        """Dev-gated: clear a specific factor override, or all if key is None."""
+        if key is None:
+            self._factor_overrides.clear()
+        else:
+            self._factor_overrides.pop(key, None)
 
     def oi_activity(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         return self.activity.activity(symbol)
@@ -509,6 +652,9 @@ class PortfolioIntelligence:
         self._rule_delta(greeks)
         self._rule_concentration(conc)
         self._rule_regime(roster)
+        self._rule_trend()
+        self._rule_session()
+        self._rule_iv_rv(snap["legs"])
         self._rule_correlation()
         self._rule_feed_stale(roster)
         self.broker.sweep()
@@ -684,6 +830,115 @@ class PortfolioIntelligence:
             },
         )
 
+    def _rule_trend(self) -> None:
+        """Raise TREND_REGIME_CHANGE when the trend factor flips.
+
+        The status is refreshed by :meth:`_factor_inputs` (the 30 s
+        intelligence poll / background evaluator), so this rule never blocks
+        the tick on a database read. The first observation only sets the
+        baseline — no alert storm at startup.
+        """
+        with self._cache_lock:
+            status = self._trend_status
+        if status is None or status == "unknown":
+            return
+        previous = self._last_trend_status
+        self._last_trend_status = status
+        if previous is None or previous == status:
+            return
+        t = AlertType.TREND_REGIME_CHANGE.value
+        self.broker.resolve_missing(t, [], reason="superseded")
+        window = int(self.config.factor_sma_window)
+        self.broker.raise_alert(
+            t,
+            Severity.WARNING.value,
+            f"Trend regime change: {previous} → {status} (vs {window}-day average)",
+            data={
+                "regime": status,
+                "previous": previous,
+                "sma_window": window,
+                "summary": f"Benchmark {status} its {window}-day moving average",
+            },
+        )
+
+    def _rule_session(self) -> None:
+        """Raise SESSION_PHASE when the NSE intraday window changes.
+
+        The phase is a pure clock read (no DB), so it is evaluated every tick;
+        the first observation only sets the baseline.
+        """
+        phase = session_factor().status
+        previous = self._last_session_phase
+        self._last_session_phase = phase
+        if previous is None or previous == phase:
+            return
+        t = AlertType.SESSION_PHASE.value
+        self.broker.resolve_missing(t, [], reason="superseded")
+        self.broker.raise_alert(
+            t,
+            Severity.INFO.value,
+            f"Session phase: {previous} → {phase}",
+            data={
+                "phase": phase,
+                "previous": previous,
+                "summary": f"NSE session entered {phase}",
+            },
+        )
+
+    @staticmethod
+    def _atm_iv_proxy(legs: List[Any]) -> Optional[float]:
+        """Volume-weighted IV of the book's option legs (an ATM-IV proxy).
+
+        Uses the legs the aggregator already collected — no chain feed or new
+        storage. Returns ``None`` when no leg carries a usable IV.
+        """
+        num = 0.0
+        den = 0.0
+        for leg in legs or []:
+            iv = getattr(leg, "iv", None)
+            qty = getattr(leg, "units", 0) or 0
+            try:
+                iv = float(iv)
+                qty = abs(float(qty))
+            except (TypeError, ValueError):
+                continue
+            if iv > 0 and qty > 0:
+                num += iv * qty
+                den += qty
+        return round(num / den, 4) if den > 0 else None
+
+    def _rule_iv_rv(self, legs: List[Any]) -> None:
+        """Raise IV_RV_DISLOCATION when the IV/RV edge flips state.
+
+        The first observation only sets the baseline; ``unknown`` (no legs /
+        no realised vol) never alerts.
+        """
+        iv = self._atm_iv_proxy(legs)
+        realized = self.regime.realized_vol()
+        status = iv_rv_factor(iv, realized, self.config.iv_rv_buffer).status
+        if status == "unknown":
+            return
+        previous = self._last_iv_rv_status
+        self._last_iv_rv_status = status
+        if previous is None or previous == status:
+            return
+        t = AlertType.IV_RV_DISLOCATION.value
+        self.broker.resolve_missing(t, [], reason="superseded")
+        severity = Severity.WARNING.value if status == "buy_vol" else Severity.INFO.value
+        self.broker.raise_alert(
+            t,
+            severity,
+            f"IV/RV dislocation: {previous} → {status} (IV {iv:.1f} vs RV {realized:.1f})",
+            data={
+                "state": status,
+                "previous": previous,
+                "iv": iv,
+                "realized_vol": realized,
+                "buffer": float(self.config.iv_rv_buffer),
+                "summary": f"Implied vol is {status.replace('_', ' ')} versus realised",
+            },
+        )
+
     def _rule_correlation(self) -> None:
         t = AlertType.CORRELATION_SPIKE.value
         result = self.correlation_matrix(None)
@@ -838,6 +1093,9 @@ class PortfolioIntelligence:
                 "[intelligence] evaluator started (every %.1fs)", self.config.evaluate_interval_s
             )
             while not self._stop.wait(self.config.evaluate_interval_s):
+                # Refresh the (cached) factor inputs so the trend rule sees a
+                # fresh status without the tick path ever touching the DB.
+                self._factor_inputs()
                 self.maybe_evaluate()
 
         self._thread = threading.Thread(target=loop, daemon=True, name="portfolio-intelligence")

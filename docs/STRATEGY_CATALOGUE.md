@@ -1,6 +1,6 @@
 # Strategy Catalogue — Built-ins + Plugins
 
-Analysis snapshot (2026-11-21). Every registered strategy, its signal kind, behaviour,
+Analysis snapshot (2026-11-24). Every registered strategy, its signal kind, behaviour,
 known defects, and where it lives. Source of truth for each entry is the strategy file
 itself; `__all__` in `src/backtest/strategies/__init__.py` is **stale** (missing 5 names)
 and does not affect discovery — discovery uses `pkgutil.iter_modules` for built-ins and
@@ -65,27 +65,32 @@ plugins are booted first. Sandboxed: forbidden imports (`backtest.brokers`, `bac
 
 | File | Class | Name | Signal Kind | Instruments | Version | Known Issues |
 |------|-------|------|-------------|-------------|---------|--------------|
-| `ce_instant_buy.py` | CeInstantBuy | `CE_instant_buy` | option | NIFTY, BANKNIFTY | 2.0 | Mechanics validator, not an edge; unconditional BULLISH ATM long call |
-| `pe_instant_buy.py` | PeInstantBuy | `PE_instant_buy` | option | NIFTY, BANKNIFTY | 2.0 | Mechanics validator, not an edge; unconditional BEARISH ATM long put |
-| `immediate_strangle.py` | ImmediateStrangle | `immediate_strangle` | option (neutral) | NIFTY, BANKNIFTY | 1.1 | Short strangle — uncapped loss; paper-only entitlement; fee-aware bracket (BUG-02 fix) |
-| `strangle_wing_points.py` | StrangleWingPoints | `strangle_wing_points` | option (neutral) | NIFTY, BANKNIFTY | 1.0 | Short strangle — uncapped loss; paper-only; wing in points vs live spot |
-| `straddle_short_atm.py` | ShortStraddleAtm | `straddle_short_atm` | option (neutral) | NIFTY, BANKNIFTY | 1.0 | Short straddle — uncapped loss; paper-only; positional carry |
-| `vwap_ema_rsi.py` | VwapEmaRsi | `vwap_ema_rsi` | option | NIFTY, BANKNIFTY | 1.0 | None |
-| `volume_oi_surge.py` | VolumeOISurge | `volume_oi_surge` | option | NIFTY, BANKNIFTY | 1.0 | Declared `strike_selection: volume` not implemented; trades ATM in practice |
-| `time_alternator.py` | TimeAlternator | `time_alternator` | option | NIFTY, BANKNIFTY | 1.0 | Deterministic coin-flip mechanics validator; no edge by design |
-| `momentum_burst.py` | MomentumBurst | `momentum_burst` | option | NIFTY, BANKNIFTY | 1.0 | None |
-| `delta_momentum.py` | DeltaMomentum | `delta_momentum` | option | NIFTY, BANKNIFTY | 1.0 | None |
-| `ema_reversion_pob.py` | EmaReversionPob | `ema_reversion_pob` | option | NIFTY, BANKNIFTY | 1.0 | None |
-| `one_min_scalp.py` | OneMinScalp | `one_min_scalp` | equity | RELIANCE (default) | 1.0 | 1-min scalper for paper-trading validation; TP/SL/fixed-hold |
-| `hf_equity_scalp.py` | HF_EquityScalp | `hf_equity_scalp` | equity | any | 1.0 | HF scalper for paper-trading validation; high turnover |
+| `immediate_short_straddle.py` | ImmediateShortStraddle | `immediate_short_straddle` | option (neutral) | NIFTY, BANKNIFTY | 2.0 | Short straddle, uncapped loss; paper-only entitlement; fee-aware bracket |
+| `zero_dte_short_straddle.py` | ZeroDTEShortStraddle | `zero_dte_short_straddle` | option (neutral) | NIFTY, BANKNIFTY | 2.0 | 0-DTE short straddle; forced squareoff 15:00 IST; paper-only |
+| `ce_instant_buy.py` | CeInstantBuy | `ce_instant_buy` | option | NIFTY, BANKNIFTY | 2.1 | ATM long call mechanics validator; not an edge |
+| `pe_instant_buy.py` | PeInstantBuy | `pe_instant_buy` | option | NIFTY, BANKNIFTY | 2.1 | ATM long put mechanics validator; not an edge |
+| `delta_momentum.py` | DeltaMomentum | `delta_momentum` | option | NIFTY, BANKNIFTY | 1.1 | EMA slope-gated trend; delta-targeted strikes |
+| `old_immediate_strangle.py` | ImmediateStrangle | `old_immediate_strangle` | option (neutral) | NIFTY, BANKNIFTY | 1.2 | Short strangle ~2% OTM; uncapped loss; paper-only; fee-aware bracket |
+| `old_strangle_wing_points.py` | StrangleWingPoints | `old_strangle_wing_points` | option (neutral) | NIFTY, BANKNIFTY | 1.1 | Short strangle wing in points; uncapped loss; paper-only |
+| `old_straddle_short_atm.py` | ShortStraddleAtm | `old_straddle_short_atm` | option (neutral) | NIFTY, BANKNIFTY | 1.1 | Short straddle ATM; uncapped loss; paper-only |
+| `old_vwap_ema_rsi.py` | VwapEmaRsi | `old_vwap_ema_rsi` | option | NIFTY, BANKNIFTY | 1.0 | VWAP + EMA9/15 cross + RSI(14) 45–60 filter |
+| `old_volume_oi_surge.py` | VolumeOISurge | `old_volume_oi_surge` | option | NIFTY, BANKNIFTY | 1.0 | Declared `strike_selection: volume` not implemented; trades ATM in practice |
+| `old_momentum_burst.py` | MomentumBurst | `old_momentum_burst` | option | NIFTY, BANKNIFTY | 1.0 | Last-bar ±threshold% move → directional view |
+| `old_delta_momentum.py` | DeltaMomentum | `old_delta_momentum` | option | NIFTY, BANKNIFTY | 1.0 | EMA slope-gated trend; superseded by `delta_momentum` |
+| `old_ema_reversion_pob.py` | EmaReversionPob | `old_ema_reversion_pob` | option | NIFTY, BANKNIFTY | 1.0 | Daily 5-EMA reversion bias + first-30-min-candle Fib band |
+| `old_hf_equity_scalp.py` | HF_EquityScalp | `old_hf_equity_scalp` | equity | any | 1.0 | HF scalper for paper-trading validation; high turnover |
+| `old_one_min_scalp.py` | OneMinScalp | `old_one_min_scalp` | equity | RELIANCE (default) | 1.0 | 1-min scalper for paper-trading validation; TP/SL/fixed-hold |
+| `old_time_alternator.py` | TimeAlternator | `old_time_alternator` | option | NIFTY, BANKNIFTY | 1.0 | Deterministic coin-flip mechanics validator; no edge by design |
 
 ### Analysis — Plugins
 
 **Two categories:**
 
 1. **Mechanics / validation instruments** (not return strategies — trade to test plumbing):
-   - `CE_instant_buy`, `PE_instant_buy` — instant ATM long call/put on first bar, hold to day close. Replaced
+   - `ce_instant_buy`, `pe_instant_buy` — instant ATM long call/put on first bar, hold to day close. Replaced
      the old `atm_instant_buy` (which emitted unconditional NEUTRAL — "intent is a lie by construction").
+   - `immediate_short_straddle`, `zero_dte_short_straddle` — short straddle volatility-selling structures,
+     uncapped loss, paper-only entitlement. `zero_dte_short_straddle` forces squareoff at 15:00 IST.
    - `immediate_strangle`, `strangle_wing_points`, `straddle_short_atm` — short premium-selling structures,
      uncapped loss, paper-only entitlement.
    - `time_alternator` — deterministic bar-parity flip every N bars; high-turnover chain validator.
@@ -93,16 +98,18 @@ plugins are booted first. Sandboxed: forbidden imports (`backtest.brokers`, `bac
      test validation (Bug #1–#4).
 
 2. **Return-seeking option strategies**:
+   - `delta_momentum` — EMA slope-gated trend; spawn with delta-targeted strikes (0.40 delta). Supersedes
+     `old_delta_momentum`.
    - `vwap_ema_rsi` — VWAP bias + EMA9/15 cross + RSI 45–60 filter; intraday trend.
    - `volume_oi_surge` — volume-burst gate; declared volume strike selection not implemented (trades ATM).
    - `momentum_burst` — last-bar ±threshold% move → directional view.
-   - `delta_momentum` — EMA slope-gated trend; runner can spawn with delta-targeted strikes.
    - `ema_reversion_pob` — daily-5-EMA reversion bias + first-30-min-candle Fib band; aggressive OTM buying.
 
-**Important behaviour note:** Short structures (`immediate_strangle`, `strangle_wing_points`, `straddle_short_atm`)
-emit `Direction.NEUTRAL` with full confidence — NEVER to open a directional trade, but because their
-`opening_structure` explicitly names the structure, the bridge opens the short legs. This is the Phase 2
-refactor contract: NEUTRAL means "no directional view," not "no trade," when `opening_structure` is declared.
+**Important behaviour note:** Short structures (`immediate_short_straddle`, `zero_dte_short_straddle`,
+`immediate_strangle`, `strangle_wing_points`, `straddle_short_atm`) emit `Direction.NEUTRAL` with full
+confidence — NEVER to open a directional trade, but because their `opening_structure` explicitly names the
+structure, the bridge opens the short legs. This is the Phase 2 refactor contract: NEUTRAL means "no directional
+view," not "no trade," when `opening_structure` is declared.
 
 ---
 
@@ -118,6 +125,7 @@ refactor contract: NEUTRAL means "no directional view," not "no trade," when `op
 - Use for experimental, imported, or mechanics-validator strategies.
 - Sandboxed imports + mandatory conformance battery; broken files are skipped, never crash boot.
 - Visible only after `discover_plugins()` runs (Flask app boot); restart required once per new file.
+- New replacement plugins should **not** use the `old_` prefix; that prefix marks the legacy strategy set.
 
 **Contract either way** (enforced by `Strategy.validate` / conformance suite):
 - Unique lowercase `name`, no spaces
@@ -142,4 +150,6 @@ python -m pytest tests/strategies/test_registry_template.py -q
 2. Vectorize `ema_pullback`, `bollinger_reversion`, `donchian_breakout` to clear R-P1 perf xfails.
 3. Add turnover dampener to `price_move` (or document intraday-only) to clear R-E1 cost-collapse xfail.
 4. Evaluate unifying `option_directional` + `banknifty_ema_momentum` into one parameterized option strategy (deduplicate shared `execution` block).
-5. Keep `buy_and_hold` as-is (benchmark, intentionally simple).
+5. Migrate `old_*` plugin strategies to their non-`old_` replacements (`ce_instant_buy`, `pe_instant_buy`,
+   `delta_momentum`, …), then retire the `old_*` files once all references point at the new names.
+6. Keep `buy_and_hold` as-is (benchmark, intentionally simple).

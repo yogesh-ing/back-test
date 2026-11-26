@@ -400,6 +400,12 @@
                                     <button id="pi-vix-submit" class="btn btn-ghost btn-small" type="button">Apply</button>
                                 </div>
                                 <div class="pi-chart-wrap"><canvas id="pi-regime-chart" height="90"></canvas></div>
+                                <div class="pi-regime-chart-legend">
+                                    <span class="pi-zone-dot pi-zone-low"></span><span class="pi-zone-label">Low &lt; 15</span>
+                                    <span class="pi-zone-dot pi-zone-moderate"></span><span class="pi-zone-label">Moderate 15–22</span>
+                                    <span class="pi-zone-dot pi-zone-high"></span><span class="pi-zone-label">High ≥ 22</span>
+                                    <span class="pi-time-note muted">Times in IST (market hours)</span>
+                                </div>
                             </div>
                             <div>
                                 <h5 class="pi-subhead">Strategy regime fit</h5>
@@ -408,6 +414,60 @@
                                     <tbody id="pi-regime-fit"></tbody>
                                 </table>
                             </div>
+                        </div>
+                        <div class="pi-factors">
+                            <h5 class="pi-subhead">Regime factors <span class="muted" id="pi-factors-composite"></span></h5>
+                            <div class="pi-factor-grid" id="pi-factors"><div class="muted">Loading…</div></div>
+                        </div>
+                        <div class="pi-regime-alerts" id="pi-regime-alerts" style="display:none;">
+                            <h5 class="pi-subhead">Regime alerts</h5>
+                            <div class="pi-alert-list" id="pi-regime-alert-list"></div>
+                        </div>
+                        <div class="pi-dev-overrides" id="pi-dev-overrides" style="display:none;">
+                            <h5 class="pi-subhead" style="color:var(--warning);">Dev: factor overrides</h5>
+                            <div class="pi-override-grid">
+                                <div class="pi-override-row">
+                                    <label>Trend status</label>
+                                    <select id="pi-ov-trend">
+                                        <option value="">compute</option>
+                                        <option value="up">up</option>
+                                        <option value="down">down</option>
+                                        <option value="sideways">sideways</option>
+                                        <option value="unknown">unknown</option>
+                                    </select>
+                                </div>
+                                <div class="pi-override-row">
+                                    <label>Session phase</label>
+                                    <select id="pi-ov-session">
+                                        <option value="">compute</option>
+                                        <option value="opening_drive">opening_drive</option>
+                                        <option value="morning_trend">morning_trend</option>
+                                        <option value="midday_chop">midday_chop</option>
+                                        <option value="closing_squareoff">closing_squareoff</option>
+                                        <option value="off_hours">off_hours</option>
+                                    </select>
+                                </div>
+                                <div class="pi-override-row">
+                                    <label>IV/RV state</label>
+                                    <select id="pi-ov-ivrv">
+                                        <option value="">compute</option>
+                                        <option value="sell_vol">sell_vol</option>
+                                        <option value="buy_vol">buy_vol</option>
+                                        <option value="fair">fair</option>
+                                        <option value="unknown">unknown</option>
+                                    </select>
+                                </div>
+                                <div class="pi-override-row">
+                                    <button id="pi-ov-apply" class="btn btn-small" type="button">Apply overrides</button>
+                                    <button id="pi-ov-clear" class="btn btn-ghost btn-small" type="button">Clear all</button>
+                                </div>
+                            </div>
+                            <div class="muted" style="font-size:.72rem;">Dev only — overrides persist until cleared or page reload.</div>
+                        </div>
+                        <div class="pi-override-banner" id="pi-override-banner" style="display:none;">
+                            <span class="pi-override-dot"></span>
+                            <span class="pi-override-text">OVERRIDE ACTIVE — India VIX manually set to <span id="pi-override-value"></span> (source: manual). Not live feed.</span>
+                            <button id="pi-override-clear" class="btn btn-ghost btn-small" type="button">Clear override</button>
                         </div>
                         <div class="muted pi-foot" id="pi-regime-foot"></div>
                     </div>

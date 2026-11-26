@@ -23,6 +23,9 @@ class AlertType(str, Enum):
     CONCENTRATION_HIGH = "concentration_high"
     STRIKE_CLUSTERING = "strike_clustering"
     VIX_REGIME_CHANGE = "vix_regime_change"
+    TREND_REGIME_CHANGE = "trend_regime_change"
+    SESSION_PHASE = "session_phase"
+    IV_RV_DISLOCATION = "iv_rv_dislocation"
     OI_ANOMALY = "oi_anomaly"
     CORRELATION_SPIKE = "correlation_spike"
     LIQUIDITY_DRY_UP = "liquidity_dry_up"
@@ -60,6 +63,9 @@ SEVERITY_RANK: Dict[str, int] = {"info": 0, "warning": 1, "critical": 2}
 EVENT_ALERT_TYPES = frozenset(
     {
         AlertType.VIX_REGIME_CHANGE.value,
+        AlertType.TREND_REGIME_CHANGE.value,
+        AlertType.SESSION_PHASE.value,
+        AlertType.IV_RV_DISLOCATION.value,
         AlertType.OI_ANOMALY.value,
         AlertType.LIQUIDITY_DRY_UP.value,
     }
@@ -75,6 +81,9 @@ AUDIENCE: Dict[str, tuple] = {
     AlertType.CONCENTRATION_HIGH.value: ("trader",),
     AlertType.STRIKE_CLUSTERING.value: ("trader",),
     AlertType.VIX_REGIME_CHANGE.value: ("trader", "strategies"),
+    AlertType.TREND_REGIME_CHANGE.value: ("trader", "strategies"),
+    AlertType.SESSION_PHASE.value: ("trader", "strategies"),
+    AlertType.IV_RV_DISLOCATION.value: ("trader", "strategies"),
     AlertType.OI_ANOMALY.value: ("strategies",),
     AlertType.CORRELATION_SPIKE.value: ("trader",),
     AlertType.LIQUIDITY_DRY_UP.value: ("strategies",),

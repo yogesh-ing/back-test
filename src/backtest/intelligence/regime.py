@@ -98,6 +98,11 @@ class MarketRegimeDetector:
             # long ago WE heard it, not the print's own (possibly replayed) ts.
             self._vix = (v, datetime.now(timezone.utc), source)
 
+    def clear_vix(self) -> None:
+        """Clear the manually-set VIX so the live feed can repopulate it."""
+        with self._lock:
+            self._vix = None
+
     def observe_bar(self, symbol: str, bar: Dict[str, Any]) -> None:
         sym = str(symbol).upper()
         try:

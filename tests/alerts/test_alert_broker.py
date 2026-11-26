@@ -228,12 +228,20 @@ def test_renotify_cooldown_guards_against_flapping(broker):
     calls = []
     broker.subscribe(DELTA, lambda t, d: calls.append(1))
     broker.raise_alert(DELTA, "warning", "x")
+    broker.raise_alert(DELTA, "warning", "x again")  # inside 60s cooldown, no resolve
+    assert calls == [1]  # repeat without resolve is suppressed
     broker.resolve_key(DELTA)
-    broker.raise_alert(DELTA, "warning", "x again")  # inside 60s cooldown
-    assert calls == [1]
-    broker.renotify_cooldown_s = 0
-    broker.resolve_key(DELTA)
-    broker.raise_alert(DELTA, "warning", "x third")
+    broker.raise_alert(DELTA, "warning", "x after resolve")  # cooldown cleared on resolve
+    assert calls == [1, 1]  # successor after resolve is delivered
+
+
+def test_resolved_alert_successor_notifies_inside_cooldown(broker):
+    calls = []
+    broker.subscribe(DELTA, lambda t, d: calls.append(1))
+    broker.raise_alert(DELTA, "warning", "regime high")
+    broker.resolve_key(DELTA, reason="superseded")
+    # Flip back inside the 60s cooldown window — must still notify.
+    broker.raise_alert(DELTA, "warning", "regime moderate")
     assert calls == [1, 1]
 
 

@@ -485,12 +485,17 @@ class MStockBroker(BrokerAuthBase, BrokerOrderBase):
             logger.error(traceback.format_exc())
             self._ws_feed = None
 
-    DEFAULT_INDEX_TOKENS: frozenset[int] = frozenset({26000, 26009, 26013, 26037})
+    # 26017 is India VIX (verified 2026-10-02, see data/mstock_live_feed.py):
+    # subscribing it streams a continuous VIX print so the regime engine reads
+    # the real index instead of the NIFTY realized-vol proxy.
+    DEFAULT_INDEX_TOKENS: frozenset[int] = frozenset({26000, 26009, 26013, 26037, 26017})
     UNDERLYING_INDEX_TOKENS: dict[str, int] = {
         "NIFTY": 26000,
         "BANKNIFTY": 26009,
         "MIDCPNIFTY": 26013,
         "FINNIFTY": 26037,
+        "INDIAVIX": 26017,
+        "INDIA VIX": 26017,
     }
 
     def ws_subscribed_tokens(self) -> set[int]:

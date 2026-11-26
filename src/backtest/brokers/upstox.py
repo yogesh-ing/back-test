@@ -112,9 +112,27 @@ _INDEX_INSTRUMENT_KEYS: dict[str, str] = {
     "BANKNIFTY": "NSE_INDEX|Nifty Bank",
     "NIFTY BANK": "NSE_INDEX|Nifty Bank",
     "NIFTYBANK": "NSE_INDEX|Nifty Bank",
+    # India VIX — instrument key verified against the Upstox master
+    # (trading_symbol "INDIA VIX", segment NSE_INDEX) on 2026-11-24. Streams a
+    # continuous VIX print so the regime engine reads the real index.
+    "INDIAVIX": "NSE_INDEX|India VIX",
+    "INDIA VIX": "NSE_INDEX|India VIX",
+    "NIFTY VIX": "NSE_INDEX|India VIX",
     "SENSEX": "BSE_INDEX|Sensex",
     "BANKSENSEX": "BSE_INDEX|BSE Bank",
 }
+
+#: Index spot/VIX keys auto-subscribed on the depth socket, mirroring
+#: ``MStockBroker.DEFAULT_INDEX_TOKENS``. Kept as venue-native strings — the
+#: wrapper owns the wire envelope. India VIX is included so the regime engine
+#: gets a live print without a runner having to trade the symbol.
+DEFAULT_INDEX_KEYS: frozenset[str] = frozenset(
+    {
+        "NSE_INDEX|Nifty 50",
+        "NSE_INDEX|Nifty Bank",
+        "NSE_INDEX|India VIX",
+    }
+)
 
 #: Upstox order statuses that mean "no more fills will come".
 _UPSTOX_TERMINAL_STATUSES = {"complete", "cancelled", "rejected", "expired"}
@@ -984,9 +1002,29 @@ class UpstoxBroker(BrokerAuthBase, BrokerOrderBase):
                 except Exception:  # noqa: BLE001
                     logger.debug("WS reinit listener failed", exc_info=True)
 
+            # A fresh socket holds no server-side subscriptions (the 2026-10-26
+            # lesson): seed the index/VIX keys on every (re)connect so spot and
+            # the regime engine are never blind. No-op without a token (tests
+            # attach a fake feed directly).
+            if self._access_token:
+                self._subscribe_default_indices()
+
         except Exception as exc:  # noqa: BLE001 — HTTP LTP fallback stays
             logger.error("Failed to attach Upstox WebSocket feed: %s", exc)
             self._ws_feed = None
+
+    def _subscribe_default_indices(self) -> None:
+        """Auto-subscribe the index spot + India VIX keys on the depth socket.
+
+        The Upstox twin of ``MStockBroker._subscribe_default_indices``. Idempotent:
+        ``subscribe_tokens_ws`` sends only keys the socket generation does not
+        already hold, so a re-login re-seeds without duplicating.
+        """
+        keys = sorted(DEFAULT_INDEX_KEYS)
+        try:
+            self.subscribe_tokens_ws(keys, mode="full", wait_timeout=3.0)
+        except Exception as exc:  # noqa: BLE001 — HTTP LTP fallback stays
+            logger.debug("Failed to auto-subscribe Upstox default indices: %s", exc)
 
     def ws_subscribed_tokens(self) -> set[str]:
         """Snapshot copy of the instrument keys the socket believes it holds."""

@@ -249,7 +249,21 @@ class PortfolioManager:
             "26009": "BANKNIFTY",
             "26013": "MIDCPNIFTY",
             "26037": "FINNIFTY",
+            # 26017 = India VIX: a continuous print for the regime engine.
+            "26017": "INDIAVIX",
         }
+        # Upstox shadow WS: instrument-key → canonical symbol (the string-venue
+        # twin of _ws_token_symbols). Attached independently of the mStock
+        # primary so the shadow feed never disturbs the live book.
+        self._attached_upstox_ws_broker: Optional[Any] = None
+        self._upstox_ws_key_symbols: Dict[str, str] = {
+            "NSE_INDEX|Nifty 50": "NIFTY",
+            "NSE_INDEX|Nifty Bank": "BANKNIFTY",
+            "NSE_INDEX|India VIX": "INDIAVIX",
+        }
+        #: Symbols every broker bar feed must hold so a WS tick is accepted by
+        #: ``ingest_ws_tick`` even when no runner trades the symbol (VIX).
+        self._index_feed_symbols: tuple[str, ...] = ("INDIAVIX",)
 
         # Gap #3 / V2 (P2.4): optional JSON state persistence. No path →
         # byte-for-byte the old in-memory behaviour. With a path, every
@@ -1405,6 +1419,8 @@ class PortfolioManager:
                     should_warmup = True
                 if str(runner.config.source or "").lower() == "mstock":
                     self._ensure_ws_tick_subscription()
+                if str(runner.config.source or "").lower() == "upstox":
+                    self._ensure_upstox_ws_tick_subscription()
                 if self._auto_start_feed:
                     feed.start(warmup=True)
                     # Gap #1: keep the live poll thread in step with the
@@ -3318,6 +3334,14 @@ class PortfolioManager:
                     self._ensure_ws_tick_subscription()
                 else:
                     self.detach_ws_broker()
+            elif source == "upstox":
+                # Shadow depth socket: attach while an Upstox book is live so
+                # the regime engine gets a continuous India VIX print. Read-only
+                # — it never drives a runner.
+                if has_live:
+                    self._ensure_upstox_ws_tick_subscription()
+                else:
+                    self.detach_upstox_ws_broker()
 
     def register_ws_symbol_token(self, symbol: str, token: int | str) -> None:
         """Map a numeric MTicker instrument token to its canonical symbol."""
@@ -3357,9 +3381,19 @@ class PortfolioManager:
             except Exception:  # noqa: BLE001
                 logger.debug("Could not detach WS tick listener", exc_info=True)
 
+    def _ensure_index_feed_symbols(self, feed: Any) -> None:
+        """Make sure ``feed`` accepts index/VIX WS ticks (no runner trades them)."""
+        add = getattr(feed, "add_symbols", None)
+        if callable(add):
+            try:
+                add(list(self._index_feed_symbols))
+            except Exception:  # noqa: BLE001 — analytics never break the feed
+                logger.debug("could not add index feed symbols", exc_info=True)
+
     def _ensure_ws_tick_subscription(self) -> bool:
         if self._attached_ws_broker is not None:
             return True
+        self._ensure_index_feed_symbols(self.mstock_feed)
         candidate = self._injected_live_broker
         if candidate is not None and getattr(candidate, "broker_name", "mstock") == "mstock":
             if self.attach_ws_broker(candidate):
@@ -3456,6 +3490,103 @@ class PortfolioManager:
                         logger.exception(
                             "tick trade flush failed for %s", runner.instance_id
                         )
+
+    # ------------------------------------------------------------------ #
+    # Upstox shadow WS (string-venue twin of the mStock tick path)
+    #
+    # The shadow broker's depth socket feeds the SAME bar fan-out as the
+    # primary: Upstox instrument keys are mapped to canonical symbols and
+    # pushed through ``UpstoxBarFeed.ingest_ws_tick`` so the regime engine and
+    # analytics see a continuous India VIX print. It never drives a runner —
+    # the shadow is read-only — so the live book is untouched.
+    # ------------------------------------------------------------------ #
+
+    def attach_upstox_ws_broker(self, broker: Any) -> bool:
+        """Subscribe ``_on_upstox_ws_tick_batch`` to an Upstox coalesced bus."""
+        if broker is None or type(broker).__module__ == "unittest.mock":
+            return False
+        add_fn = getattr(broker, "add_tick_listener", None)
+        if not callable(add_fn):
+            return False
+        if self._attached_upstox_ws_broker is broker:
+            return True
+        self.detach_upstox_ws_broker()
+        try:
+            add_fn(self._on_upstox_ws_tick_batch)
+            self._attached_upstox_ws_broker = broker
+            self._ensure_index_feed_symbols(self.upstox_feed)
+            return True
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not attach Upstox WS tick listener", exc_info=True)
+            return False
+
+    def detach_upstox_ws_broker(self) -> None:
+        """Remove ``_on_upstox_ws_tick_batch`` from the attached Upstox broker."""
+        broker = self._attached_upstox_ws_broker
+        self._attached_upstox_ws_broker = None
+        if broker is None:
+            return
+        rem_fn = getattr(broker, "remove_tick_listener", None)
+        if callable(rem_fn):
+            try:
+                rem_fn(self._on_upstox_ws_tick_batch)
+            except Exception:  # noqa: BLE001
+                logger.debug("Could not detach Upstox WS tick listener", exc_info=True)
+
+    def _subscribe_upstox_default_indices(self, broker: Any) -> None:
+        """Ask the broker to (re)seed its index/VIX keys — idempotent."""
+        sub = getattr(broker, "subscribe_tokens_ws", None)
+        keys = sorted(getattr(broker, "DEFAULT_INDEX_KEYS", ()) or ())
+        if callable(sub) and keys:
+            try:
+                sub(keys, mode="full", wait_timeout=1.0)
+            except Exception:  # noqa: BLE001
+                logger.debug("Upstox default index subscribe failed", exc_info=True)
+
+    def _ensure_upstox_ws_tick_subscription(self) -> bool:
+        if self._attached_upstox_ws_broker is not None:
+            return True
+        self._ensure_index_feed_symbols(self.upstox_feed)
+        candidate = self._injected_live_broker
+        if (
+            candidate is not None
+            and getattr(candidate, "broker_name", "") == "upstox"
+            and self.attach_upstox_ws_broker(candidate)
+        ):
+            self._subscribe_upstox_default_indices(candidate)
+            return True
+        try:
+            from backtest.brokers.session_manager import get_session_manager
+
+            broker = get_session_manager().get_authenticated_broker("upstox")
+            if broker is not None and self.attach_upstox_ws_broker(broker):
+                self._subscribe_upstox_default_indices(broker)
+                return True
+        except Exception:  # noqa: BLE001
+            logger.debug("Upstox WS broker auto-discovery skipped", exc_info=True)
+        return False
+
+    def _on_upstox_ws_tick_batch(self, quotes_by_key: Dict[str, dict]) -> None:
+        """Route coalesced Upstox key batches into the Upstox bar feed.
+
+        Read-only (shadow): the tick updates the 1-minute bar builder and the
+        ``on_bar`` fan-out (regime/analytics), never a runner's book.
+        """
+        if not quotes_by_key:
+            return
+        for key, quote in quotes_by_key.items():
+            if not isinstance(quote, dict):
+                continue
+            sym = self._upstox_ws_key_symbols.get(str(key))
+            if not sym:
+                continue
+            ltp = float(quote.get("ltp") or quote.get("last_price") or 0.0)
+            if ltp <= 0.0:
+                continue
+            try:
+                self.upstox_feed.ingest_ws_tick(sym, quote)
+            except Exception:  # noqa: BLE001 — analytics never break the feed
+                logger.debug("upstox ws tick ingest failed", exc_info=True)
 
     # ------------------------------------------------------------------ #
     # State persistence (Gap #3 / V2 — P2.4). No-op unless a state path is

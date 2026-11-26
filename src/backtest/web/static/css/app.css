@@ -1392,6 +1392,53 @@ body.has-alert-widget .app-workspace { padding-bottom: 56px; }
 .pi-vix-input { display: flex; gap: 6px; align-items: center; margin: 10px 0; }
 .pi-vix-input .input { width: 110px; padding: 5px 8px; }
 .pi-chart-wrap { max-width: 520px; }
+.pi-factors { margin-top: 12px; border-top: 1px solid var(--bg); padding-top: 8px; }
+.pi-factor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 6px; }
+.pi-factor { display: flex; flex-direction: column; gap: 1px; padding: 6px 8px; background: var(--surface-2); border-radius: 6px; font-size: .78rem; }
+.pi-factor-name { color: var(--muted); font-weight: 600; }
+.pi-factor-val { font-weight: 700; font-variant-numeric: tabular-nums; }
+.pi-factor-src { font-size: .68rem; }
+.pi-pause-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: .72rem; font-weight: 600; white-space: nowrap; }
+.pi-pause-on { background: rgba(234,57,67,.16); color: var(--down); border: 1px solid rgba(234,57,67,.35); }
+.pi-pause-off { background: rgba(22,199,132,.16); color: var(--up); border: 1px solid rgba(22,199,132,.35); }
+.pi-override-banner { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: rgba(245,165,36,.14); border: 1px solid rgba(245,165,36,.4); border-radius: 6px; margin: 8px 0; font-size: .82rem; color: var(--warning); }
+.pi-override-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warning); animation: pi-blink 1.5s infinite; }
+@keyframes pi-blink { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+.pi-override-text { flex: 1; }
+.pi-spark { margin-top: 4px; }
+.pi-regime-chart-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; font-size: .72rem; }
+.pi-zone-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; flex-shrink: 0; }
+.pi-zone-low { background: #2ecc71; }
+.pi-zone-moderate { background: #f1c40f; }
+.pi-zone-high { background: #e74c3c; }
+.pi-zone-label { color: var(--text-muted); }
+.pi-gauge-pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-size: .82rem; font-weight: 600; white-space: nowrap; border: 1px solid transparent; }
+.pi-gauge-off { background: rgba(234,57,67,.16); color: var(--down); border-color: rgba(234,57,67,.35); }
+.pi-gauge-on { background: rgba(22,199,132,.16); color: var(--up); border-color: rgba(22,199,132,.35); }
+.pi-gauge-neutral { background: rgba(139,145,158,.16); color: var(--text-muted); border-color: rgba(139,145,158,.35); }
+.pi-gauge-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.pi-gauge-off .pi-gauge-dot { background: var(--down); box-shadow: 0 0 0 2px rgba(234,57,67,.25); }
+.pi-gauge-on .pi-gauge-dot { background: var(--up); box-shadow: 0 0 0 2px rgba(22,199,132,.25); }
+.pi-gauge-neutral .pi-gauge-dot { background: var(--text-muted); box-shadow: 0 0 0 2px rgba(139,145,158,.25); }
+.pi-regime-alerts { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+.pi-regime-alerts h5 { font-size: .82rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin: 0 0 6px 0; }
+.pi-alert-list { display: flex; flex-direction: column; gap: 4px; }
+.pi-alert-item { display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: var(--surface-2); border-radius: 6px; font-size: .82rem; border-left: 3px solid var(--accent); }
+.pi-alert-item.warn { border-left-color: var(--warning); }
+.pi-alert-item.critical { border-left-color: var(--down); }
+.pi-alert-item.info { border-left-color: var(--accent-text); }
+.pi-alert-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.pi-alert-dot.warn { background: var(--warning); }
+.pi-alert-dot.critical { background: var(--down); }
+.pi-alert-dot.info { background: var(--accent-text); }
+.pi-alert-text { flex: 1; }
+.pi-alert-time { font-size: .68rem; color: var(--text-muted); }
+.pi-dev-overrides { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; background: rgba(245,165,36,.06); border-radius: 6px; }
+.pi-dev-overrides h5 { font-size: .82rem; margin: 0 0 6px 0; }
+.pi-override-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px; }
+.pi-override-row { display: flex; flex-direction: column; gap: 4px; }
+.pi-override-row label { font-size: .72rem; color: var(--text-muted); }
+.pi-override-row select, .pi-override-row button { font-size: .78rem; padding: 4px 8px; }
 
 /* ---------------------------------------------------------------------------
    Multi-broker PRD Phase A — header status strip + Broker Board

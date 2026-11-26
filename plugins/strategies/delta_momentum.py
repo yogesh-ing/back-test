@@ -1,5 +1,7 @@
 """Delta-momentum — directional views honed by delta-targeted strikes.
 
+Replaces ``plugins/strategies/old_delta_momentum.py`` (name ``old_delta_momentum``).
+
 Trades the classic trend break while letting the option layer control the
 Greeks profile: the runner is meant to spawn with an expression that pins
 strikes by delta, e.g.::
@@ -40,7 +42,7 @@ from backtest.strategy.intent import Direction, MarketView
 class DeltaMomentum(DirectionalOptionStrategy):
     """EMA trend gate whose runner rides delta-targeted strikes."""
 
-    name = "old_delta_momentum"
+    name = "delta_momentum"
     eligible_instruments = ["NIFTY", "BANKNIFTY"]
     # The bridge picks strikes by delta when spawned with this expression —
     # the Greek lever of this strategy lives here, not in direction detection.
@@ -54,7 +56,7 @@ class DeltaMomentum(DirectionalOptionStrategy):
         "Delta-honed directional options: EMA fast/slow trend with slope "
         "confirmation; spawn with instrument.expression "
         "{'strike_selection': 'delta', 'delta_target': 0.40} to buy "
-        "delta-targeted legs instead of ATM."
+        "delta-targeted legs instead of ATM. Supersedes old_delta_momentum."
     )
     description_sections = {
         'overview': (
@@ -89,7 +91,7 @@ class DeltaMomentum(DirectionalOptionStrategy):
             'declared menu.'
         ),
     }
-    version = "1.0"
+    version = "1.1"
     author = "Trading Bot"
 
     # Phase 2 rewrite (plan §9.2): the strategy's own execution declaration.

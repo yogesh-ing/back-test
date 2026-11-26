@@ -3,7 +3,7 @@
 Owns:
   * Exit contract (SL / TP / trailing / DTE square-off / time stop)
   * Feed-subscription ordering (entry tokens subscribed before fill)
-  * Portfolio alert hooks (gamma critical, VIX regime change)
+  * Portfolio alert hooks (gamma critical, VIX regime change, trend regime change, session phase, IV/RV dislocation)
   * instrument_type = "options"
 
 Subclasses declare ONLY:
@@ -139,6 +139,9 @@ class ShortStrategyBase(StructureStrategy):
     subscribed_alerts = (
         AlertType.PORTFOLIO_GAMMA_CRITICAL.value,
         AlertType.VIX_REGIME_CHANGE.value,
+        AlertType.TREND_REGIME_CHANGE.value,
+        AlertType.SESSION_PHASE.value,
+        AlertType.IV_RV_DISLOCATION.value,
     )
 
     # --- build_opening_intent (shared) -------------------------------------
@@ -219,6 +222,18 @@ class ShortStrategyBase(StructureStrategy):
             high = alert_data.get("new_regime") == "high_vol"
             self._set_pause("regime", high)
             return "paused" if high else "resumed"
+        if alert_type == AlertType.TREND_REGIME_CHANGE:
+            trending = alert_data.get("regime") in ("up", "down")
+            self._set_pause("trend", trending)
+            return "paused" if trending else "resumed"
+        if alert_type == AlertType.SESSION_PHASE:
+            pause = alert_data.get("phase") in ("midday_chop", "closing_squareoff")
+            self._set_pause("session", pause)
+            return "paused" if pause else "resumed"
+        if alert_type == AlertType.IV_RV_DISLOCATION:
+            cheap = alert_data.get("state") == "buy_vol"
+            self._set_pause("iv_rv", cheap)
+            return "paused" if cheap else "resumed"
         return None
 
     def on_alert_resolved(self, alert_type: str, alert_data: dict) -> None:

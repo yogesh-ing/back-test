@@ -19,7 +19,8 @@ import pytest
 
 from backtest.brokers.mstock import MStockBroker
 
-INDEX_TOKENS = [26000, 26009, 26013, 26037]
+# 26017 = India VIX: auto-subscribed so the regime engine gets a live print.
+INDEX_TOKENS = [26000, 26009, 26013, 26017, 26037]
 OPTION_TOKEN = 51338
 
 

@@ -98,6 +98,8 @@ CONSTANT_DECISION = {
     # ("book the structure at once, hold per the strategy's exit contract").
     "old_CE_instant_buy",
     "old_PE_instant_buy",
+    "ce_instant_buy",
+    "pe_instant_buy",
     "old_immediate_strangle",
     "old_strangle_wing_points",
     "old_straddle_short_atm",
@@ -299,6 +301,16 @@ COST_KNOWN_FAILS: dict[str, str] = {
         "fees on ₹1M). The threshold flip-flops too often for delivery-cost "
         "equity; needs a turnover dampener or intraday segment before it is "
         "deployment-worthy"
+    ),
+    "old_hf_equity_scalp": (
+        "R-E1 — HF equity scalper mechanics validator; high turnover (~3pt "
+        "TP / 2pt SL on 1-min bars) cannot survive mstock statutory costs; "
+        "paper-only plumbing instrument, not a return strategy"
+    ),
+    "old_one_min_scalp": (
+        "R-E1 — 1-min equity scalper mechanics validator; +5pt / -3pt fixed "
+        "bracket on 1-min RELIANCE bars cannot survive mstock statutory "
+        "costs; paper-only plumbing instrument, not a return strategy"
     ),
 }
 

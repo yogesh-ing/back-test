@@ -342,6 +342,10 @@ class AlertBroker:
         alert.updated_at = alert.resolved_at
         alert.data = {**alert.data, "resolution": reason}
         self._by_key.pop(alert.key, None)
+        # Clear the re-notify cooldown so a successor alert of the same type
+        # (e.g. a regime flipping back inside the cooldown window) is delivered
+        # to subscribers immediately instead of being silently suppressed.
+        self._last_notified.pop(alert.key, None)
         self.version += 1
         notified = {n.get("subscriber_id") for n in alert.notified_strategies}
         subs = [

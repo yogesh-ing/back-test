@@ -307,6 +307,12 @@ class TestSpotLookup:
         assert UpstoxBroker.underlying_index_key("NIFTY") == "NSE_INDEX|Nifty 50"
         assert UpstoxBroker.underlying_index_key("banknifty") == "NSE_INDEX|Nifty Bank"
 
+    def test_india_vix_key_resolves_to_the_verified_master_spelling(self) -> None:
+        # instrument_key/trading_symbol verified against the Upstox master
+        # (segment NSE_INDEX, symbol "INDIA VIX") on 2026-11-24.
+        assert UpstoxBroker.underlying_index_key("INDIAVIX") == "NSE_INDEX|India VIX"
+        assert UpstoxBroker.underlying_index_key("INDIA VIX") == "NSE_INDEX|India VIX"
+
     def test_unmapped_underlying_returns_none_not_a_guess(self, monkeypatch) -> None:
         monkeypatch.setattr(
             "backtest.brokers.upstox._load_instrument_keys", lambda timeout: {}
@@ -356,3 +362,46 @@ class TestSpotLookup:
         provider = LiveChainProvider(_BlindBroker())
         assert provider._infer_spot_from_ws("NIFTY") is None
         assert calls == []  # no invented number, no lookup at all
+
+
+# ---------------------------------------------------------------------------
+# default index/VIX auto-subscribe — the Upstox twin of mStock's
+# DEFAULT_INDEX_TOKENS seeding (continuous India VIX for the regime engine)
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultIndexSubscription:
+    def test_default_index_keys_include_india_vix(self) -> None:
+        from backtest.brokers.upstox import DEFAULT_INDEX_KEYS
+
+        assert "NSE_INDEX|India VIX" in DEFAULT_INDEX_KEYS
+        assert "NSE_INDEX|Nifty 50" in DEFAULT_INDEX_KEYS
+        assert "NSE_INDEX|Nifty Bank" in DEFAULT_INDEX_KEYS
+
+    def test_subscribe_default_indices_opens_the_socket_with_vix(self) -> None:
+        broker, feed = _broker_with_feed()
+        broker._subscribe_default_indices()
+
+        assert len(feed.started) == 1
+        started_keys, mode = feed.started[0]
+        assert mode == "full"
+        assert "NSE_INDEX|India VIX" in started_keys
+        assert broker.ws_subscribed_tokens() >= {
+            "NSE_INDEX|Nifty 50",
+            "NSE_INDEX|Nifty Bank",
+            "NSE_INDEX|India VIX",
+        }
+
+    def test_default_subscribe_is_idempotent(self) -> None:
+        broker, feed = _broker_with_feed()
+        broker._subscribe_default_indices()
+        broker._subscribe_default_indices()
+        assert len(feed.started) == 1
+        assert feed.subscribed == [] and feed.changed == []
+
+    def test_index_and_vix_keys_are_never_unsubscribed(self) -> None:
+        broker, feed = _broker_with_feed()
+        broker._subscribe_default_indices()
+        removed = broker.unsubscribe_tokens_ws(["NSE_INDEX|India VIX"])
+        assert removed == []
+        assert "NSE_INDEX|India VIX" in broker.ws_subscribed_tokens()
