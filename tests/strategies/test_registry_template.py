@@ -79,6 +79,7 @@ KNOWN_FAILS: dict[str, dict[str, str]] = {
 #: plus a named ``build_opening_intent``.
 DELIBERATE_NEUTRAL = {
     "old_immediate_strangle",
+    "immediate_strangle",
     "old_strangle_wing_points",
     "old_straddle_short_atm",
     "immediate_short_straddle",
@@ -101,6 +102,7 @@ CONSTANT_DECISION = {
     "ce_instant_buy",
     "pe_instant_buy",
     "old_immediate_strangle",
+    "immediate_strangle",
     "old_strangle_wing_points",
     "old_straddle_short_atm",
     "immediate_short_straddle",

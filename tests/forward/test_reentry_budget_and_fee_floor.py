@@ -76,11 +76,11 @@ def _bridge(exit_cfg: dict | None = None, structure: str = "long_call") -> Optio
 def _strangle_runner(name: str, *, max_reentries_per_day: int) -> StrategyRunner:
     """A live-shape 1-hour short-strangle runner: ticks drive both entry and exits."""
     expr = {
-        **get_strategy("immediate_strangle").execution_spec().to_expression(),
+        **get_strategy("immediate_short_straddle").execution_spec().to_expression(),
         "reentry_cooldown_seconds": 0.0,
         "stale_after_seconds": 3600.0,
         "exit": {
-            **get_strategy("immediate_strangle").execution_spec().to_expression().get(
+            **get_strategy("immediate_short_straddle").execution_spec().to_expression().get(
                 "exit", {}
             ),
             "max_reentries_per_day": max_reentries_per_day,
@@ -89,7 +89,7 @@ def _strangle_runner(name: str, *, max_reentries_per_day: int) -> StrategyRunner
     runner = StrategyRunner(
         RunnerConfig(
             name=name,
-            strategy_name="immediate_strangle",
+            strategy_name="immediate_short_straddle",
             allocated_capital=500_000,
             symbols=["NIFTY"],
             timeframe="1hour",
@@ -348,7 +348,7 @@ class TestTakeProfitFeeFloor:
     def test_the_strangle_default_bracket_clears_the_floor(self):
         """The shipped intent must not be refused by the gate it helped write."""
         plan = parse_exit_plan_strict(
-            get_strategy("immediate_strangle").execution_spec().to_expression()["exit"]
+            get_strategy("immediate_short_straddle").execution_spec().to_expression()["exit"]
         )
         assert plan.take_profit_points == 7
         assert plan.stop_loss_points == 13

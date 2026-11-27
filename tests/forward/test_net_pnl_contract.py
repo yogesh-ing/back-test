@@ -449,7 +449,7 @@ class TestAnchorsAcrossARestart:
                 instrument={
                     "type": "option",
                     "expression": get_strategy(
-                        "immediate_strangle"
+                        "immediate_short_straddle"
                     ).execution_spec().to_expression(),
                 },
             ),

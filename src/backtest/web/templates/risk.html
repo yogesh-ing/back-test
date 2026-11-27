@@ -56,9 +56,15 @@
         </div>
       </div>
 
+      <p class="muted small" style="margin:0 0 12px;">
+        Limits source: <code id="risk-limit-source">loading…</code>.
+        These operational limits are editable and saved to state; the read-only
+        rulebook above and per-trade ceilings are separate authorities.
+      </p>
+
       <div class="risk-config-columns" style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:20px;">
         <div>
-          <h4 style="margin-bottom:8px;">Global Limits (Supervisor)</h4>
+          <h4 style="margin-bottom:8px;">Operational Limits (editable)</h4>
           <div id="risk-global-config-form"></div>
           <div style="margin-top:12px;">
             <button id="btn-save-global" class="btn btn-primary btn-small" type="button">{{ icon('save', 14) }} Save Global Config</button>

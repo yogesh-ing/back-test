@@ -11,6 +11,9 @@
   let lastPortfolio = null;
   let riskHistory = []; // last 6 hours of daily_loss_pct for mini chart
   let chart = null;
+  //: Which capital partition this page owns. Scopes the flatten strip so a
+  //  paper-page flatten cannot touch live positions and vice versa (BUG-07).
+  const pageMode = ($("portfolio-page") && $("portfolio-page").dataset.mode) || "";
 
   const fmtMoney = (n) => {
     if (typeof Money !== "undefined" && Money.format) return Money.format(n);
@@ -402,7 +405,7 @@
           const res = await fetch("/api/portfolio/emergency_stop", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ reason: "sticky_strip_emergency" })
+            body: JSON.stringify({ reason: "sticky_strip_emergency", mode: pageMode || undefined })
           });
           const data = await res.json();
           if (window.showToast) window.showToast(`Flattened ${data.flattened_positions || 0} positions`, "success");

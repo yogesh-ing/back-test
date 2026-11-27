@@ -190,6 +190,8 @@
     try {
       const data = await fetchJSON("/api/portfolio/risk/config");
       currentConfig = data;
+      const srcEl = $("risk-limit-source");
+      if (srcEl) srcEl.textContent = data.limit_source || "unknown";
       renderConfig(data);
     } catch (e) {
       const el = $("risk-global-config-form");

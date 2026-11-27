@@ -24,6 +24,9 @@
 | **BUG-37** | Retire orphan portfolio rows — ledger keeps 'active' rows for books no runner owns (capital booked against them). One-shot reap script exists. | `src/backtest/forward/portfolio_reaper.py:1`; `scripts/reap_orphan_portfolios.py:1`; `src/backtest/forward/portfolio_manager.py:343`; `src/backtest/db/config.py:271`; `tests/forward/test_portfolio_ledger_reaper.py:1`; `tests/forward/test_signal_portfolio_placeholder.py:1` | Open |
 | **BUG-38** | Alembic migration chain fork — revision 020 duplicated (026 head vs 023). Unforked; guardrail enforces single linear head. | `db/alembic/versions/20261013_1200_021_add_upstox_source_to_portfolios.py:12`; `db/alembic/versions/20261008_1200_020_option_intent_journal.py:16`; `tests/db/test_migration_022_trades_dedupe.py:12`; `tests/db/test_migrations_009_013.py:225`; `tests/db/test_migrations_020.py:9,331` | Open |
 | **BUG-39** | Intraday option book must square off on session clock — three monthly legs rode into next session. Carry policy must be declared/visible. Wall-clock square-off, no tick required. | `tests/invariants/test_trading_system_invariants.py:13`; `tests/forward/test_carry_policy_and_eod_sweep.py:6`; `src/backtest/forward/options_bridge.py:143,267,426,1045,1740`; `src/backtest/forward/paper_runner.py:673,3785`; `src/backtest/forward/portfolio_manager.py:357,2190,2218`; `src/backtest/timekeeping.py:416` | Open |
+| **BUG-40** | Pair parity band on straddle/strangle legs — CE/PE put-call parity check at fill time to reject dislocated quotes (one leg mark off by ₹200+ while other is honest). Prevents fabricated profit/loss from single bad offer. | `docs/OPTION-DEPTH-GARBAGE-ROOT-CAUSE-2026-11-03.md:171` (§8c); `docs/OPTION-JUNK-ASK-INCIDENT-2026-11-08.md:179` (Option B); `src/backtest/options/quote_providers.py:1068` (stub `_check_pair_parity` exists but not wired) | Open |
+| **BUG-41** | Cross-broker corroboration at fill seam — require two independent witnesses (mStock + Upstox) before an offer may be traded. Single-broker garbage offers still fill today. | `docs/OPTION-JUNK-ASK-INCIDENT-2026-11-08.md:178` (Option B); `src/backtest/options/quote_providers.py:1198` (`_corroboration_mode` defaults to single-broker) | Open |
+| **BUG-42** | Protective exits as priced orders (limit-with-collar) — no feed value can fill worse than the collar. Only option that also protects live trading (Option D). | `docs/OPTION-JUNK-ASK-INCIDENT-2026-11-08.md:194` (Option D); requires live order lifecycle + re-price/reject path | Open |
 
 > **Bug docs**: `docs/BUG-FIX-PLAN-2026-10-28.md` (plan), `docs/QA-LIVE-PAPER-BUG-REPORT-2026-10-28.md` (QA report, BUG-02 / BUG-15).
 
@@ -34,7 +37,7 @@
 | ID | Observation | Evidence / Context | Open Questions |
 |----|-------------|-------------------|----------------|
 | **OBS-01** | Segment paper-mode blocks live trades | `config/segments.yaml:29` `options_index` mode: `paper`; `:39` `equity_intraday` mode: `paper`. Error message: `"segment 'options_index' is configured as paper — a live runner cannot be created into it"` (and same for `equity_intraday`). Both segments have comment: `"start paper, flip to live when ready"`. | Flip `mode: paper` → `mode: live` in `config/segments.yaml` for the segment(s) intended for live trading, then restart. Short-premium structures (strangle/short_straddle) are still withheld from `live` entitlement in `config/risk_limits.yaml:54-56` regardless of segment mode. |
-| **OBS-02** | Strangle instance shows P&L of ₹4,240 with zero open positions | User opened one strangle instance. Runner took **no open position** (no legs booked), yet still shows a P&L of ₹4,240. Entry is unconditional (fires on first bar after deploy), so a trade was expected after warmup. | (a) Where is ₹4,240 coming from if no legs were ever booked? Possible causes: fees/commission charged without a trade, mark-to-market on a phantom position, carried-over P&L from restored state (`portfolio_state.json`), or a P&L calculation bug (BUG-04 NET contract mismatch). (b) Why did the unconditional strangle not enter after warmup? Possible causes: segment is paper-mode (OBS-01), broker not authenticated, IV filter suppressed entry, gamma/regime alert paused entries, or `min_days_to_expiry` / carry policy blocked it. Needs runner logs and `/api/portfolio/runners/<id>` state inspection. |
+| **OBS-02** | Strangle instance shows P&L of ₹4,240 with zero open positions | User opened one strangle instance. Runner took **no open position** (no legs booked), yet still shows a P&L of ₹4,240. Entry is unconditional (fires on first bar after deploy), so a trade was expected after warmup. | **RESOLVED 2026-11-26 — not a defect (flat book + realized P&L).** `portfolio_state.json` shows the legs *were* booked and closed: `bridge.executed_count=2`, `closed_count=2`, two NIFTY strangle structures both `exit_reason=take_profit` (`last_mark_net_pnl` 830.10 + 775.68), `available_cash 501483.32` vs `capital 500000`. Option P&L flows through the bridge (`paper_runner.py:1824/4485`), and the card shows `runner.realized_pnl` (net, `portfolio_manager.py:3213`) — no phantom, no fees-without-trade, no NET mismatch. "Zero open positions" is expected after both take-profit exits; the unconditional entry did fire. Exact ₹4,240 not tie-out-able: OBS recorded 2026-11-23, state file is 2026-11-26 (3 days newer); no 2026-11-23 P&L log and no DB entry exists (searched docs/logs + all 3 SQLite DBs). |
 
 ---
 
@@ -67,3 +70,17 @@
 | Short structures on live | withheld by `config/risk_limits.yaml` (strangle, short_straddle not in `live` entitlement) |
 
 **Feed integrity tool**: `tools/feed_reconcile.py` (read-only — `probe` / `bars` / `chain` subcommands). See `docs/FEED-SOURCE-UPSTOX-RECONCILIATION-2026-11-06.md`.
+
+---
+
+## Resolved / Validated (2026-11-26 scan)
+
+| Doc | Bugs Covered | Status | Notes |
+|-----|--------------|--------|-------|
+| `docs/SCHEMA_DRIFT_BUG_REPORT.md` | Missing `segment`/`execution_broker` cols (migrations 006-020) | **Fixed** | Migration 008 adds both columns; alembic chain linear 001→026 |
+| `docs/CLOCK-UTC-FLATTEN-LEAK-AUDIT-2026-11-04.md` | Naive-UTC strftime at live guard seam (`feed_registry.py`, `simulate_crash`) | **Fixed** | Implemented 2026-11-04: sealed bar stamp, epoch→IST conversion, 5th AST ratchet rule |
+| `docs/MSTOCK-WS-FEED-ROOT-CAUSE-2026-10-23.md` | 6 stacked WS causes (login, resubscribe order, thread-safe send, OI tuples) | **Fixed** | All 6 causes fixed; `tests/test_mticker_ws_fixes.py` pins them |
+| `docs/OPTION-DEPTH-GARBAGE-ROOT-CAUSE-2026-11-03.md` | Blank ladder cache, stale-row serve, intrinsic floor, per-token TTL, parity band | **Partial** | Intrinsic floor ✓, ladder sanitize ✓, per-token TTL ✓, cache purge ✓; **parity band (BUG-40) open** |
+| `docs/OPTION-JUNK-ASK-INCIDENT-2026-11-08.md` | Uncorroborated offer fills, points/rupee confusion, opening quiet window, cross-broker corroboration, priced exits | **Partial** | Feed recorder ✓, points fix ✓, opening quiet window ✓; **cross-broker corroboration (BUG-41) open**, **priced exits (BUG-42) open** |
+
+Archived (duplicates of MASTER log): `docs/BUG-FIX-PLAN-2026-10-28.md`, `docs/QA-LIVE-PAPER-BUG-REPORT-2026-10-28.md` → `docs/archive/`

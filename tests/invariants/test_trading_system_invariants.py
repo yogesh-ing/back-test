@@ -145,11 +145,11 @@ def test_tick_churn_cannot_take_more_than_one_entry_per_timeframe_bucket():
     """
     from backtest.strategy.registry import get_strategy
 
-    expression = get_strategy("immediate_strangle").execution_spec().to_expression()
+    expression = get_strategy("immediate_short_straddle").execution_spec().to_expression()
     runner = StrategyRunner(
         RunnerConfig(
             name="LATCH",
-            strategy_name="immediate_strangle",
+            strategy_name="immediate_short_straddle",
             allocated_capital=500_000,
             symbols=["NIFTY"],
             timeframe="15min",

@@ -379,6 +379,8 @@ def risk_board() -> Tuple[Response, int]:
         "timestamp": summ.get("timestamp"),
         "mode": mode or "all",
         "global_config": global_config,
+        # BUG-27: provenance of the global breakers shown on this board.
+        "limit_source": getattr(mgr, "limit_source", "unknown"),
         "bucket_limits": bucket_limits,
         "buckets": buckets_data,
         "current": {
@@ -661,6 +663,10 @@ def risk_config_view() -> Tuple[Response, int]:
             "modes": all_configs,  # NEW: per-mode configs
             "buckets": limits,
             "correlation_groups": corr_safe,
+            # BUG-27: where the global breakers actually came from, so the
+            # page can state it instead of implying the numbers are policy.
+            "limit_source": getattr(mgr, "limit_source", "unknown"),
+            "source": getattr(mgr, "limit_config_source", "unknown"),
         }
     ), 200
 
@@ -1300,21 +1306,25 @@ def emergency_stop() -> Tuple[Response, int]:
 @portfolio_bp.post("/api/portfolio/test/breach")
 def test_breach() -> Tuple[Response, int]:
     data = request.get_json(silent=True) or {}
+    mode = str(data.get("mode", "paper") or "paper").strip().lower()
+    if mode == "live":
+        return _error("stress test is paper-only", 403)
     try:
         crash_pct = float(data.get("crash_pct", 0.25))
     except (TypeError, ValueError):
         return _error("crash_pct must be a number")
-
-    tighten = data.get("tighten_limits", True)
+    tighten = data.get("tighten_limits", False)
+    dry_run = data.get("dry_run", True)
     summary = _manager().stress_test(
         crash_pct=crash_pct,
-        daily_loss_limit=1_000.0 if tighten else None,
-        max_drawdown_pct=0.05 if tighten else None,
+        tighten_limits=tighten,
+        dry_run=dry_run,
     )
     return (
         jsonify(
             {
                 "success": True,
+                "dry_run": dry_run,
                 "portfolio": summary,
             }
         ),

@@ -74,6 +74,10 @@ from backtest.forward.paper_runner import (
     RunnerConfig,
     StrategyRunner,
 )
+from backtest.forward.risk_config_loader import (
+    LIMIT_SOURCE_EXPLICIT,
+    load_risk_config_from_yaml,
+)
 from backtest.forward.risk_supervisor import (
     HALT_FLATTEN,
     HALT_PAUSE,
@@ -109,18 +113,37 @@ class PortfolioManager:
     ) -> None:
         self.ledger = OrderLedger()
         self.broker = PaperBroker(self.ledger)
-        self.supervisor = RiskSupervisor(risk_config or GlobalRiskConfig())
 
-        # Separate risk configs for paper and live modes (per-mode independent limits)
-        self._risk_configs: Dict[str, GlobalRiskConfig] = {
-            "paper": risk_config or GlobalRiskConfig(max_drawdown_pct=0.80),  # 80% for paper
-            "live": GlobalRiskConfig(
+        # BUG-27: one source of truth for the global breakers. An explicit
+        # config (tests, engine wiring) wins; otherwise BOTH mode configs are
+        # loaded from config/forward_testing.yaml so the /risk page, the API
+        # and the supervisor all quote the same numbers. ``limit_source`` is
+        # surfaced on the API/page so the displayed value is never a lie.
+        if risk_config is not None:
+            paper_cfg = risk_config
+            live_cfg = GlobalRiskConfig(
                 daily_loss_limit=50_000.0,
                 max_drawdown_pct=0.25,
                 max_leverage=1.0,
                 breach_mode=HALT_PAUSE,
-                correlation_warning_threshold=3
-            ),
+                correlation_warning_threshold=3,
+            )
+            self.limit_source = LIMIT_SOURCE_EXPLICIT
+            self.limit_config_source = LIMIT_SOURCE_EXPLICIT
+        else:
+            loaded = load_risk_config_from_yaml()
+            paper_cfg = loaded.paper
+            live_cfg = loaded.live
+            self.limit_source = loaded.limit_source
+            self.limit_config_source = loaded.source
+
+        self.supervisor = RiskSupervisor(paper_cfg)
+
+        # Separate risk configs for paper and live modes (per-mode independent
+        # limits; both default to the YAML, an explicit config overrides paper).
+        self._risk_configs: Dict[str, GlobalRiskConfig] = {
+            "paper": paper_cfg,
+            "live": live_cfg,
         }
 
         self._runners: Dict[str, StrategyRunner] = {}
@@ -5095,23 +5118,47 @@ class PortfolioManager:
     def stress_test(
         self,
         crash_pct: float = 0.25,
-        daily_loss_limit: Optional[float] = 1_000.0,
-        max_drawdown_pct: Optional[float] = 0.05,
+        tighten_limits: bool = False,
+        dry_run: bool = True,
     ) -> Dict[str, Any]:
         """Deterministic circuit-breaker demonstration (PRD acceptance step 5).
 
-        Re-baselines the daily PnL anchors so the loss is measured from the
-        pre-crash equity, optionally tightens the limits so the breach fires,
-        then applies the crash and returns the resulting summary.
+        Applies a crash markdown in a shadow pass: the last bar per symbol is
+        snapshotted before and restored after, so indicator buffers
+        (``runner._bars[symbol][-1]``) are byte-identical before/after
+        (BUG-28). Optionally tightens risk limits inside a snapshot/restore
+        context so the original config is always restored. Never resets daily
+        anchors or persists state unless ``dry_run`` is False.
         """
         with self._lock:
-            self.reset_daily_anchors()
-            if daily_loss_limit is not None:
-                self.supervisor.config.daily_loss_limit = abs(daily_loss_limit)
-            if max_drawdown_pct is not None:
-                self.supervisor.config.max_drawdown_pct = max_drawdown_pct
-            self.simulate_crash(crash_pct=crash_pct)
-            return self.get_portfolio_summary()
+            # Snapshot the last bar per symbol so the crash markdown can be
+            # undone — the crash must never leave indicator buffers corrupted.
+            bar_snapshot: dict[str, dict[str, list]] = {}
+            for runner in self._runners.values():
+                bar_snapshot[runner.instance_id] = {
+                    sym: list(bars) for sym, bars in runner._bars.items()
+                }
+            # Snapshot risk limits for restore (BUG-28).
+            cfg = self.supervisor.config
+            saved_limits = (cfg.daily_loss_limit, cfg.max_drawdown_pct)
+            try:
+                if tighten_limits:
+                    cfg.daily_loss_limit = 1_000.0
+                    cfg.max_drawdown_pct = 0.05
+                self.simulate_crash(crash_pct=crash_pct)
+                self._evaluate_risk()
+                return self.get_portfolio_summary()
+            finally:
+                # Restore bars so indicator buffers are byte-identical after.
+                for runner in self._runners.values():
+                    snap = bar_snapshot.get(runner.instance_id)
+                    if snap is not None:
+                        for sym, bars in snap.items():
+                            runner._bars[sym] = list(bars)
+                # Restore risk limits.
+                cfg.daily_loss_limit, cfg.max_drawdown_pct = saved_limits
+                if not dry_run:
+                    self._persist_state()
 
     def tick(self, **bar_kwargs: Any) -> None:
         """Advance one synthetic feed tick synchronously (used in tests)."""
