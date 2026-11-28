@@ -62,7 +62,7 @@ POB_UPPER = 0.50  # above → buyers in control
 class EmaReversionPob(DirectionalOptionStrategy):
     """Daily-5-EMA reversion bias + first-30-min-candle 50% breakout trigger."""
 
-    name = "old_ema_reversion_pob"
+    name = "ema_reversion_pob"
     eligible_instruments = ["NIFTY", "BANKNIFTY"]
     description = (
         "EMA Reversion + Point of Balance: bias from the daily 5-EMA "

@@ -84,3 +84,24 @@
 | `docs/OPTION-JUNK-ASK-INCIDENT-2026-11-08.md` | Uncorroborated offer fills, points/rupee confusion, opening quiet window, cross-broker corroboration, priced exits | **Partial** | Feed recorder ✓, points fix ✓, opening quiet window ✓; **cross-broker corroboration (BUG-41) open**, **priced exits (BUG-42) open** |
 
 Archived (duplicates of MASTER log): `docs/BUG-FIX-PLAN-2026-10-28.md`, `docs/QA-LIVE-PAPER-BUG-REPORT-2026-10-28.md` → `docs/archive/`
+
+---
+
+## Closed — Not Reproducible (2026-11-27)
+
+Reviewed in a full-repo scan (source, tests, docs): the following IDs have **zero
+references** anywhere — no code comment, no test, no doc. There is no defect to
+reproduce or fix, so they are marked **NOT REPRODUCIBLE** and closed. Reopen only
+if a concrete repro (file:line, log, or failing test) is supplied.
+
+| ID | Disposition | Evidence |
+|----|-------------|----------|
+| **BUG-05** | Not reproducible — closed | 0 refs in `src/`, `tests/`, `docs/` |
+| **BUG-17** | Not reproducible — closed | 0 refs |
+| **BUG-21** | Not reproducible — closed | 0 refs |
+| **BUG-22** | Not reproducible — closed | 0 refs |
+| **BUG-25** | Not reproducible — closed | 0 refs |
+| **BUG-29** | Not reproducible — closed | 0 refs |
+| **BUG-30** | Not reproducible — closed | 0 refs |
+| **BUG-34** | Not reproducible — closed | 0 refs |
+| **BUG-35** | Not reproducible — closed | 0 refs |
